@@ -1321,13 +1321,19 @@ impl<'a> Pager<'a> {
 
     /// The space a paragraph adds above itself at the cursor.
     ///
-    /// Nothing at the top of a page. Word otherwise keeps the larger of the
+    /// Nothing at the top of a page other than the first. Word otherwise keeps the larger of the
     /// previous paragraph's space after and this space before, so only the
     /// part of `before` that exceeds the space after already below the cursor
     /// is added, unless the document asks for the two to be summed.
     fn space_before(&self, before: f64) -> f64 {
         if self.cursor_y == 0.0 {
-            0.0
+            // Word keeps the space before at the top of the document's first
+            // page and drops it at the top of any later page.
+            if self.is_first_page && !self.has_content() {
+                before
+            } else {
+                0.0
+            }
         } else if self.geometry.do_not_use_html_paragraph_auto_spacing {
             before
         } else {

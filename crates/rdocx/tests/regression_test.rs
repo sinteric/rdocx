@@ -38512,7 +38512,9 @@ mod paragraph_spacing_collapse_regressions {
         // Word 16 separates these five paragraphs by 20, 30, 5 and 12 points.
         assert_eq!(gaps(&boundary_probe()), vec![20.0, 30.0, 5.0, 12.0]);
         // 31 lines of 14 points and 30 gaps of 7 fill 644 of the 648 points.
-        assert_eq!(items_per_page(&toc_probe()), vec![31, 31, 18]);
+        // The first page also keeps the first entry's 6 points before, as
+        // Word does at the top of the document, so it holds one entry fewer.
+        assert_eq!(items_per_page(&toc_probe()), vec![30, 31, 19]);
 
         // The compatibility option is the one case where Word adds them.
         let mut document = boundary_probe();
