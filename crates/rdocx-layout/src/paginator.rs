@@ -748,8 +748,35 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             stopped_at: None,
         };
     }
+    let mut geometry = context.geometry.clone();
+    // Word moves the body down (or up from the bottom) when the header or
+    // footer reaches past the margin: the body starts below the header.
+    if let Some(hf) = context.header_footer {
+        let story_height = |blocks: &[ParagraphBlock]| -> f64 {
+            let n = blocks.len();
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    (if i > 0 { b.space_before } else { 0.0 })
+                        + b.content_height()
+                        + if i + 1 < n { b.space_after } else { 0.0 }
+                })
+                .sum()
+        };
+        let header = story_height(&hf.header_blocks);
+        let footer = story_height(&hf.footer_blocks);
+        if header > 0.0 {
+            geometry.margin_top = geometry.margin_top.max(geometry.header_distance + header);
+        }
+        if footer > 0.0 {
+            geometry.margin_bottom = geometry
+                .margin_bottom
+                .max(geometry.footer_distance + footer);
+        }
+    }
     let mut pager = Pager::new(
-        context.geometry.clone(),
+        geometry,
         context.header_footer,
         context.header_footer_semantics,
         context.title_pg,
