@@ -416,7 +416,60 @@ pub fn break_into_lines(
 
                 // Add segment items to current line
                 for item in &seg_items {
-                    let (w, a, d, natural_height, font_size) = item_metrics(item);
+                    let (mut w, a, d, natural_height, font_size) = item_metrics(item);
+                    // A tab is resolved where it starts, in the same frame as
+                    // the stops (from the paragraph's left edge, not the line's
+                    // indent), and the line advances by the resolved width.
+                    let tab_item = matches!(item, InlineItem::Tab).then(|| {
+                        let origin = line_indent_at(params, line_index, is_first_line);
+                        let x = origin + current_width;
+                        // Right and centred stops align the text that follows
+                        // (up to the next tab or break), so measure it.
+                        let following = || -> f64 {
+                            let mut sum = 0.0;
+                            for seg in segments.iter() {
+                                match seg {
+                                    BreakableSegment::Items(items) => {
+                                        for it in items {
+                                            if matches!(it, InlineItem::Tab) {
+                                                return sum;
+                                            }
+                                            sum += inline_item_width(it);
+                                        }
+                                    }
+                                    BreakableSegment::Hyphenated(h) => sum += h.segment.width,
+                                    BreakableSegment::ForcedBreak(_) => return sum,
+                                }
+                            }
+                            sum
+                        };
+                        let mut line_item =
+                            inline_to_line_item(item, x, &params.tab_stops, fm, font_ctx);
+                        if let Some(stop) = params.tab_stops.iter().find(|stop| stop.pos_pt > x)
+                            && matches!(stop.align, TabAlign::Right | TabAlign::Center)
+                        {
+                            let shift = match stop.align {
+                                TabAlign::Right => following(),
+                                _ => following() / 2.0,
+                            };
+                            let width = (stop.pos_pt - x - shift).max(0.0);
+                            let leader = stop.leader.and_then(|l| match l {
+                                TabLeader::Dot => Some('.'),
+                                TabLeader::Hyphen => Some('-'),
+                                TabLeader::Underscore | TabLeader::Heavy => Some('_'),
+                                TabLeader::MiddleDot => Some('\u{00B7}'),
+                                TabLeader::None => None,
+                            });
+                            line_item = LineItem::Tab {
+                                width,
+                                leader: leader.and_then(|ch| shape_leader(fm, font_ctx, ch, width)),
+                            };
+                        }
+                        line_item
+                    });
+                    if let Some(LineItem::Tab { width, .. }) = &tab_item {
+                        w = *width;
+                    }
                     current_width += w;
                     if a > current_ascent {
                         current_ascent = a;
@@ -432,13 +485,9 @@ pub fn break_into_lines(
                     } else if let InlineItem::MultilingualText(seg) = item {
                         font_ctx = Some((seg.font_id(), seg.base().font_size));
                     }
-                    current_items.push(inline_to_line_item(
-                        item,
-                        current_width,
-                        &params.tab_stops,
-                        fm,
-                        font_ctx,
-                    ));
+                    current_items.push(tab_item.unwrap_or_else(|| {
+                        inline_to_line_item(item, current_width, &params.tab_stops, fm, font_ctx)
+                    }));
                 }
             }
             BreakableSegment::Hyphenated(boxed) => {
