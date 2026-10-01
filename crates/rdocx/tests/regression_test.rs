@@ -36971,9 +36971,9 @@ mod advanced_table_geometry_regressions {
     fn a_corpus_shaped_auto_width_table_without_explicit_autofit_keeps_its_grid() {
         // Word writes `<w:tblW w:w="0" w:type="auto"/>` with no `w:tblLayout`
         // for an ordinary table, and 131 of the 141 tables in the Word corpus
-        // have exactly that shape. Engagement requires the `w:tblLayout`
-        // element, so this shape keeps its declared grid. Admitting it moves
-        // the reference page count that
+        // have exactly that shape. Word also writes a `w:tcW` on every cell,
+        // and with cell widths an absent `w:tblLayout` keeps the declared
+        // grid. Admitting it moves the reference page count that
         // `scripts/docx_authoring_conformance.py --private-required` pins.
         let mut table = shaded_table(
             &[1440, 7200],
@@ -36983,6 +36983,15 @@ mod advanced_table_geometry_regressions {
         properties.layout = None;
         properties.width = Some(CT_TblWidth::auto());
 
+        // Without any cell width, nothing but the saved grid states a width,
+        // and Word re-fits the table to its content.
+        let refitted = lay_out(&table, 468.0);
+        assert_ne!(refitted.col_widths, vec![72.0, 360.0]);
+
+        for (cell, width) in table.rows[0].cells.iter_mut().zip([1440, 7200]) {
+            cell.properties.get_or_insert_with(Default::default).width =
+                Some(CT_TblWidth::dxa(width));
+        }
         let untouched = lay_out(&table, 468.0);
         assert_eq!(untouched.col_widths, vec![72.0, 360.0]);
 

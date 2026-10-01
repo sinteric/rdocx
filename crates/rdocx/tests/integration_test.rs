@@ -19188,12 +19188,20 @@ mod advanced_table_authoring_and_geometry {
             &[&["Region", "Quarterly revenue for the northern region"]],
         );
 
-        // Absent width and absent layout mode keeps the declared grid. ECMA
-        // makes autofit the default here, but engagement deliberately requires
-        // the element, because an absent layout is the shape almost every
-        // producer writes and treating it as autofit moves the pinned private
-        // corpus reference page count.
-        assert_eq!(grid_points(&table), declared_points);
+        // Absent width and absent layout mode with no cell widths engages, as
+        // in Word: nothing but the saved grid states a width.
+        assert_ne!(grid_points(&table), declared_points);
+
+        // Once a cell carries a preferred width, which is what Word itself
+        // writes, an absent layout keeps the declared grid. ECMA makes autofit
+        // the default here, but treating that common shape as autofit moves
+        // the pinned private corpus reference page count.
+        let mut with_cell_widths = table.clone();
+        for (cell, width) in with_cell_widths.rows[0].cells.iter_mut().zip(declared) {
+            cell.properties.get_or_insert_with(Default::default).width =
+                Some(CT_TblWidth::dxa(width.0));
+        }
+        assert_eq!(grid_points(&with_cell_widths), declared_points);
 
         // An explicit fixed layout keeps the declared grid.
         table.properties = Some(CT_TblPr {

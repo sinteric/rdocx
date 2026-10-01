@@ -1344,10 +1344,28 @@ fn autofit_column_widths(
     // page count that `scripts/docx_authoring_conformance.py --private-required`
     // pins. Adopting the literal default is its own story with its own
     // reviewed geometry delta.
-    let autofit_layout = matches!(
-        properties.and_then(|properties| properties.layout.as_deref()),
-        Some("autofit")
-    );
+    //
+    // Word does re-fit a table with no `w:tblLayout` when nothing else states
+    // a width: an auto or absent `w:tblW` and no cell with a positive
+    // `w:tcW`. The saved grid is then only a cache of the last layout, so
+    // that shape engages too. Tables that carry cell widths, which is what
+    // Word itself writes, keep the narrow rule above.
+    let no_cell_widths = || {
+        layout_table_rows(tbl, path).iter().all(|(row, row_path)| {
+            layout_row_cells(row, row_path).iter().all(|(cell, _)| {
+                !cell
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.width.as_ref())
+                    .is_some_and(|width| width.w > 0 && width.width_type != "auto")
+            })
+        })
+    };
+    let autofit_layout = match properties.and_then(|properties| properties.layout.as_deref()) {
+        Some("autofit") => true,
+        None => no_cell_widths(),
+        Some(_) => false,
+    };
     let auto_width = !matches!(authored_width_type, Some(kind) if kind != "auto");
     if !autofit_layout || !auto_width || available_width <= 0.0 {
         return Ok(None);
