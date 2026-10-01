@@ -530,7 +530,33 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             stopped_at: None,
         };
     }
-    let geometry = context.geometry;
+    let mut geometry = context.geometry;
+    // Word moves the body down (or up from the bottom) when the header or
+    // footer reaches past the margin: the body starts below the header.
+    if let Some(hf) = context.header_footer {
+        let story_height = |blocks: &[ParagraphBlock]| -> f64 {
+            let n = blocks.len();
+            blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    (if i > 0 { b.space_before } else { 0.0 })
+                        + b.content_height()
+                        + if i + 1 < n { b.space_after } else { 0.0 }
+                })
+                .sum()
+        };
+        let header = story_height(&hf.header_blocks);
+        let footer = story_height(&hf.footer_blocks);
+        if header > 0.0 {
+            geometry.margin_top = geometry.margin_top.max(geometry.header_distance + header);
+        }
+        if footer > 0.0 {
+            geometry.margin_bottom = geometry
+                .margin_bottom
+                .max(geometry.footer_distance + footer);
+        }
+    }
     let mut pager = Pager::new(
         geometry,
         context.header_footer,
@@ -708,6 +734,10 @@ struct Pager<'a> {
     /// would let it eat into the height that was reserved, which is enough to
     /// push a note off the page its own reference sits on.
     ink_bottom: f64,
+    /// The previous paragraph's space after, with the cursor position it left.
+    /// Word does not add a paragraph's space before to the previous one's space
+    /// after: the larger of the two separates them.
+    last_space_after: Option<(f64, f64)>,
     /// Where the previous pass placed each paragraph-relative wrapping drawing.
     /// Empty on the first pass, which is what makes that pass identical to a
     /// single-pass run.
@@ -757,6 +787,7 @@ impl<'a> Pager<'a> {
             fm,
             page_wraps: Vec::new(),
             ink_bottom: 0.0,
+            last_space_after: None,
             resolved_in,
             resolved_out: ResolvedWraps::new(),
             body_fragments: Vec::new(),
@@ -2090,11 +2121,7 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     blocks: &[B],
     pager: &mut Pager,
 ) {
-    let space_before = if pager.cursor_y == 0.0 {
-        0.0
-    } else {
-        para.space_before
-    };
+    let space_before = paragraph_space_before(pager, para.space_before);
 
     // Flow the paragraph around anything floating in its band of the page,
     // before anything is measured. A reflow changes the paragraph's height, so
@@ -2237,11 +2264,7 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     }
 
     // Render the paragraph
-    let space = if pager.cursor_y == 0.0 {
-        0.0
-    } else {
-        para.space_before
-    };
+    let space = paragraph_space_before(pager, para.space_before);
     pager.cursor_y += space;
 
     if let Some(body_index) = body_index {
@@ -2306,7 +2329,26 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     pager.cursor_y += para.content_height();
     pager.ink_bottom = pager.cursor_y;
     pager.cursor_y += para.space_after;
+    pager.last_space_after = Some((pager.cursor_y, para.space_after));
     pager.mark_content();
+}
+
+/// Space a paragraph gets above it. Word keeps it at the top of the document's
+/// first page and drops it at the top of any later page. Between two
+/// paragraphs the larger of the previous space after and this space before
+/// applies, not their sum.
+fn paragraph_space_before(pager: &Pager, space_before: f64) -> f64 {
+    if pager.cursor_y == 0.0 {
+        return if pager.is_first_page && !pager.has_content() {
+            space_before
+        } else {
+            0.0
+        };
+    }
+    match pager.last_space_after {
+        Some((at, after)) if (at - pager.cursor_y).abs() < 1e-6 => (space_before - after).max(0.0),
+        _ => space_before,
+    }
 }
 
 /// Return the line boundary immediately after the first page break that has a
