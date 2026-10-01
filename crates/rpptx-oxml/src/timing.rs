@@ -3376,16 +3376,20 @@ fn parse_attribute_name(xml: &[u8], inherited: &NamespaceBindings) -> Result<Opt
                 let is_attribute_name = scope.element_uri(child.name().as_ref()) == Some(P_NS)
                     && local_name(child.name().as_ref()) == b"attrName";
                 let raw = capture_element(&mut reader, &child)?;
-                if is_attribute_name {
-                    set_once(&mut value, direct_text(&raw)?, "attrName")?;
+                // CT_TLBehaviorAttributeNameList allows any number of
+                // attrName children (a motion animates ppt_x and ppt_y). Keep
+                // the first; the rest are accepted, not rejected.
+                if is_attribute_name && value.is_none() {
+                    value = Some(direct_text(&raw)?);
                 }
             }
             Event::Empty(child) => {
                 let scope = root.as_ref().expect("root").with_start(&child)?;
                 if scope.element_uri(child.name().as_ref()) == Some(P_NS)
                     && local_name(child.name().as_ref()) == b"attrName"
+                    && value.is_none()
                 {
-                    set_once(&mut value, None, "attrName")?;
+                    value = Some(None);
                 }
             }
             Event::End(_) | Event::Eof => return Ok(value.flatten()),
