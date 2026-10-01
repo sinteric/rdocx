@@ -301,7 +301,86 @@ fn layout_table_inner(
     let tbl = &resolved_table;
     let source_rows = layout_table_rows(tbl, path);
     // 1. Compute column widths
-    let col_widths = compute_column_widths(tbl.grid.as_ref(), available_width, tbl, path);
+    let mut col_widths = compute_column_widths(tbl.grid.as_ref(), available_width, tbl, path);
+    // Word re-fits an autofit table (no fixed layout, no table width, no cell
+    // widths) to its contents instead of keeping the saved grid: each column
+    // gets its widest unwrapped single-span cell plus the cell margins.
+    let autofit = {
+        let props = tbl.properties.as_ref();
+        let fixed = props.and_then(|p| p.layout.as_deref()) == Some("fixed");
+        let table_width = props
+            .and_then(|p| p.width.as_ref())
+            .is_some_and(|w| w.w > 0 && w.width_type != "auto");
+        let cell_width = source_rows.iter().any(|(row, row_path)| {
+            layout_row_cells(row, row_path).iter().any(|(cell, _)| {
+                cell.properties
+                    .as_ref()
+                    .and_then(|p| p.width.as_ref())
+                    .is_some_and(|w| w.w > 0 && w.width_type != "auto")
+            })
+        });
+        !fixed && !table_width && !cell_width
+    };
+    if autofit && !col_widths.is_empty() {
+        let margins = tbl
+            .properties
+            .as_ref()
+            .and_then(|p| p.cell_margin.as_ref())
+            .map_or(10.8, |m| {
+                m.left.map_or(5.4, |t| t.to_pt()) + m.right.map_or(5.4, |t| t.to_pt())
+            });
+        let mut preferred = vec![0.0f64; col_widths.len()];
+        let mut scratch_state = num_state.clone();
+        let mut scratch_diags = Vec::new();
+        let mut measured = true;
+        for (row, row_path) in &source_rows {
+            let mut col = 0usize;
+            for (cell, cell_path) in layout_row_cells(row, row_path) {
+                let span = cell
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.grid_span)
+                    .unwrap_or(1) as usize;
+                if span == 1 && col < preferred.len() {
+                    let Ok((blocks, _)) = layout_cell_content(
+                        &cell.content,
+                        10_000.0,
+                        styles,
+                        input,
+                        media,
+                        fm,
+                        &mut scratch_state,
+                        &mut scratch_diags,
+                        sources,
+                        story,
+                        &cell_path,
+                        None,
+                    ) else {
+                        measured = false;
+                        break;
+                    };
+                    let mut widest = 0.0f64;
+                    for block in &blocks {
+                        match block {
+                            CellBlock::Paragraph(p) => {
+                                for line in &p.lines {
+                                    widest =
+                                        widest.max(line.width + p.indent_left + p.indent_right);
+                                }
+                            }
+                            CellBlock::Table(_) => measured = false,
+                        }
+                    }
+                    preferred[col] = preferred[col].max(widest + margins);
+                }
+                col += span;
+            }
+        }
+        let total: f64 = preferred.iter().sum();
+        if measured && preferred.iter().all(|w| *w > margins) && total <= available_width {
+            col_widths = preferred;
+        }
+    }
     let table_width: f64 = col_widths.iter().sum();
 
     // Table indent
