@@ -6890,6 +6890,30 @@ fn layout_paragraph_with_source_and_table(
     line_params.ind_left = ind_left;
     line_params.ind_right = ind_right;
     line_params.jc = jc;
+    // Word treats a hanging indent as a tab stop: the tab after a list number
+    // (or any tab on a hanging first line) goes to the text indent.
+    let hanging = effective_ppr.ind_hanging.map_or(0.0, |t| t.to_pt());
+    if hanging > 0.0
+        && !line_params
+            .tab_stops
+            .iter()
+            .any(|stop| stop.pos_pt > ind_left - hanging && stop.pos_pt < ind_left)
+        && !line_params
+            .tab_stops
+            .iter()
+            .any(|stop| (stop.pos_pt - ind_left).abs() < 0.01)
+    {
+        line_params.tab_stops.push(oxml_layout::TabStop {
+            pos_pt: ind_left,
+            align: oxml_layout::TabAlign::Left,
+            leader: None,
+        });
+        line_params.tab_stops.sort_by(|a, b| {
+            a.pos_pt
+                .partial_cmp(&b.pos_pt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
 
     let legacy_empty_line = if attributed_empty_paragraph
         && direct_ppr
