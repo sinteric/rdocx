@@ -16369,9 +16369,10 @@ mod settings_and_web_settings_authoring_tests {
             "{word_default}"
         );
 
-        // A two-inch interval moves the implicit stop onto the wider grid.
+        // A two-inch interval moves the implicit stop onto the wider grid: the
+        // first implicit stop is two inches from the margin, as in Word.
         let two_inch = run_start(Some(Twips(2880)), "B");
-        assert!((two_inch - 180.0).abs() < 0.01, "{two_inch}");
+        assert!((two_inch - 216.0).abs() < 0.01, "{two_inch}");
     }
 }
 
