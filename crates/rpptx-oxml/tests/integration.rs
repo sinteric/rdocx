@@ -1184,6 +1184,31 @@ fn direct_attribute_name_resolves_numeric_references_without_descending() {
 }
 
 #[test]
+fn animation_attribute_lists_accept_multiple_names_and_preserve_all_xml() {
+    for names in [
+        "<q:attrName>ppt_x</q:attrName><q:attrName>ppt_y</q:attrName>",
+        "<q:attrName/><q:attrName>ppt_y</q:attrName>",
+        "<q:attrName>ppt_x</q:attrName><q:attrName/>",
+    ] {
+        let xml = format!(
+            r#"<q:timing xmlns:q="{P_NS}" xmlns:x="urn:producer"><q:tnLst><q:set><q:cBhvr><q:cTn id="1"/><q:attrNameLst><x:attrName>foreign</x:attrName>{names}<x:unknown a='keep'/></q:attrNameLst></q:cBhvr></q:set></q:tnLst></q:timing>"#
+        );
+        let timing = CT_Timing::from_xml(xml.as_bytes()).unwrap();
+        let TimingNode::Set(set) = &timing.nodes()[0] else {
+            panic!("expected set node");
+        };
+        let first = if names.starts_with("<q:attrName/>") {
+            None
+        } else {
+            Some("ppt_x")
+        };
+        assert_eq!(set.attribute_name.as_deref(), first);
+        assert_eq!(timing.to_xml(), xml.as_bytes());
+        assert!(CT_Timing::from_xml(&timing.to_xml()).is_ok());
+    }
+}
+
+#[test]
 fn compatibility_transition_selects_supported_choice_or_fallback_only() {
     use rpptx_oxml::timing::TransitionSpeed;
 
