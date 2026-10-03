@@ -1234,6 +1234,19 @@ impl<'a> Pager<'a> {
     fn begin_page(&mut self) {
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
+        if let Some(hf) = self.header_footer {
+            let (header, footer) = self.selected_header_footer(hf);
+            if !header.is_empty() {
+                page.margin_top = page
+                    .margin_top
+                    .max(page.header_distance + header_footer_height(header, &page));
+            }
+            if !footer.is_empty() {
+                page.margin_bottom = page
+                    .margin_bottom
+                    .max(page.footer_distance + header_footer_height(footer, &page));
+            }
+        }
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
         }
@@ -1247,6 +1260,7 @@ impl<'a> Pager<'a> {
                 width: track.width,
             })
             .collect();
+        self.content_height = page.content_height().max(0.0);
         self.page_geometry = page;
         if let Some(numbering) = self.section_geometry.line_numbers.as_ref()
             && numbering.restart == ST_LineNumberRestart::NewPage
@@ -1254,6 +1268,19 @@ impl<'a> Pager<'a> {
             self.next_line_number = numbering.start;
         }
         self.apply_active_track();
+    }
+
+    fn selected_header_footer<'b>(
+        &self,
+        hf: &'b HeaderFooterContent,
+    ) -> (&'b [ParagraphBlock], &'b [ParagraphBlock]) {
+        if self.is_first_page && self.title_pg {
+            (&hf.first_header_blocks, &hf.first_footer_blocks)
+        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
+            (&hf.even_header_blocks, &hf.even_footer_blocks)
+        } else {
+            (&hf.header_blocks, &hf.footer_blocks)
+        }
     }
 
     /// Narrow the body geometry to the active column track.
@@ -2164,13 +2191,7 @@ impl<'a> Pager<'a> {
 
         if let Some(hf) = self.header_footer {
             // Choose header blocks: first-page or default
-            let header_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_header_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_header_blocks
-            } else {
-                &hf.header_blocks
-            };
+            let (header_blocks, _) = self.selected_header_footer(hf);
             let header_directions = self.header_footer_semantics.map(|semantics| {
                 if self.is_first_page && self.title_pg {
                     semantics.first_header_directions.as_slice()
@@ -2199,13 +2220,7 @@ impl<'a> Pager<'a> {
 
         if let Some(hf) = self.header_footer {
             // Choose footer blocks: first-page or default
-            let footer_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_footer_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_footer_blocks
-            } else {
-                &hf.footer_blocks
-            };
+            let (_, footer_blocks) = self.selected_header_footer(hf);
             let footer_directions = self.header_footer_semantics.map(|semantics| {
                 if self.is_first_page && self.title_pg {
                     semantics.first_footer_directions.as_slice()
@@ -2216,7 +2231,7 @@ impl<'a> Pager<'a> {
                 }
             });
             if !footer_blocks.is_empty() {
-                let footer_height: f64 = footer_blocks.iter().map(|b| b.content_height()).sum();
+                let footer_height = header_footer_height(footer_blocks, &self.page_geometry);
                 let footer_y = self.page_geometry.page_height
                     - self.page_geometry.footer_distance
                     - footer_height;
@@ -4560,6 +4575,22 @@ fn render_change_bar_at(
     });
 }
 
+/// Height of the painted story, including collapsed inter-paragraph spacing.
+fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f64 {
+    let content: f64 = blocks.iter().map(ParagraphBlock::content_height).sum();
+    content
+        + blocks
+            .windows(2)
+            .map(|pair| {
+                if geometry.do_not_use_html_paragraph_auto_spacing {
+                    pair[0].space_after + pair[1].space_before
+                } else {
+                    pair[0].space_after.max(pair[1].space_before)
+                }
+            })
+            .sum::<f64>()
+}
+
 /// Render header/footer blocks.
 fn render_hf_blocks(
     blocks: &[ParagraphBlock],
@@ -4572,6 +4603,13 @@ fn render_hf_blocks(
 ) {
     let mut y = start_y - geometry.margin_top; // Convert to relative
     for (index, para) in blocks.iter().enumerate() {
+        if let Some(previous) = index.checked_sub(1).and_then(|i| blocks.get(i)) {
+            y += if geometry.do_not_use_html_paragraph_auto_spacing {
+                previous.space_after + para.space_before
+            } else {
+                previous.space_after.max(para.space_before)
+            };
+        }
         render_paragraph_lines(
             &para.lines,
             ParagraphView {
@@ -6268,6 +6306,88 @@ mod tests {
         );
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].page_number, 1);
+    }
+
+    #[test]
+    fn page_top_spacing_and_upstream_paragraph_collapse_remain_unchanged() {
+        let fm = FontManager::new();
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let wraps = ResolvedWraps::new();
+        let mut pager = Pager::new(
+            PageGeometry::default(),
+            None,
+            None,
+            false,
+            &media,
+            &notes,
+            &fm,
+            &wraps,
+            1,
+            1,
+            true,
+            None,
+        );
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.track_index = 1;
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.track_index = 0;
+        pager.page_number = 2;
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.cursor_y = 40.0;
+        pager.previous_space_after = 12.0;
+        assert_eq!(pager.space_before(24.0), 12.0);
+    }
+
+    #[test]
+    fn body_room_tracks_selected_header_and_footer_on_each_page() {
+        let fm = FontManager::new();
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let wraps = ResolvedWraps::new();
+        let mut header = make_para(1, 60.0);
+        header.space_after = 12.0;
+        let mut next = make_para(1, 60.0);
+        next.space_before = 24.0;
+        let hf = HeaderFooterContent {
+            header_blocks: vec![header, next],
+            footer_blocks: vec![make_para(1, 90.0)],
+            first_header_blocks: vec![make_para(1, 10.0)],
+            first_footer_blocks: vec![],
+            even_header_blocks: vec![make_para(1, 80.0)],
+            even_footer_blocks: vec![make_para(1, 100.0)],
+            even_headers_active: true,
+            watermark: None,
+            first_watermark: None,
+            even_watermark: None,
+        };
+        let mut pager = Pager::new(
+            PageGeometry::default(),
+            Some(&hf),
+            None,
+            true,
+            &media,
+            &notes,
+            &fm,
+            &wraps,
+            1,
+            1,
+            true,
+            None,
+        );
+        assert_eq!(pager.geometry.margin_top, 72.0);
+        assert_eq!(pager.geometry.margin_bottom, 72.0);
+        pager.is_first_page = false;
+        pager.header_page_number = 2;
+        pager.begin_page();
+        assert_eq!(pager.geometry.margin_top, 116.0);
+        assert_eq!(pager.geometry.margin_bottom, 136.0);
+        assert_eq!(pager.available_height(), 540.0);
+        pager.header_page_number = 3;
+        pager.begin_page();
+        assert_eq!(pager.geometry.margin_top, 180.0);
+        assert_eq!(pager.geometry.margin_bottom, 126.0);
+        assert_eq!(pager.available_height(), 486.0);
     }
 
     #[test]

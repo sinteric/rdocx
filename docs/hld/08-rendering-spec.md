@@ -1608,6 +1608,12 @@ that displayed parity for a section. Missing later variants inherit only the
 same type from the preceding section. No selected first or even variant borrows
 default header, footer, or watermark content.
 
+The selected header and footer reserve body room on each page when their
+painted height reaches beyond the authored margins. Measurement and painting
+use the same inter-paragraph spacing, collapsed by default and summed under
+`doNotUseHTMLParagraphAutoSpacing`. Capacity is recomputed for each selected
+variant, so a tall default story does not displace a blank first-page story.
+
 The native authoring facade preserves that selection contract. Creating a
 first-page story enables the section title-page state. Creating an even-page
 story does not change the document-wide even-page setting, which has its own
