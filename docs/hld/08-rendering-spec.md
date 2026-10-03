@@ -1611,8 +1611,18 @@ default header, footer, or watermark content.
 The selected header and footer reserve body room on each page when their
 painted height reaches beyond the authored margins. Measurement and painting
 use the same inter-paragraph spacing, collapsed by default and summed under
-`doNotUseHTMLParagraphAutoSpacing`. Capacity is recomputed for each selected
-variant, so a tall default story does not displace a blank first-page story.
+`doNotUseHTMLParagraphAutoSpacing`. Horizontal sections recompute capacity for
+each selected variant, so a tall default story does not displace a blank
+first-page story.
+
+Vertical sections shape paragraphs and size tables against the page height
+before rotating the body. Their active header and footer variants are measured
+before body layout, and the largest active band is reserved on every page.
+Line breaking, paragraph alignment, table widths and the transposed pagination
+band therefore use the same measure. Story selection and painting still follow
+the page variant. The reservation is conservative on pages with shorter or
+blank stories, and a diagnostic records that limit. Per-page variable vertical
+measures require a separate body reflow path.
 
 The native authoring facade preserves that selection contract. Creating a
 first-page story enables the section title-page state. Creating an even-page

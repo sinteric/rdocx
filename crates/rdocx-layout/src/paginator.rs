@@ -183,6 +183,19 @@ impl PageGeometry {
         }
     }
 
+    fn reserve_header_footer_room(&mut self, header: &[ParagraphBlock], footer: &[ParagraphBlock]) {
+        if !header.is_empty() {
+            self.margin_top = self
+                .margin_top
+                .max(self.header_distance + header_footer_height(header, self));
+        }
+        if !footer.is_empty() {
+            self.margin_bottom = self
+                .margin_bottom
+                .max(self.footer_distance + header_footer_height(footer, self));
+        }
+    }
+
     /// The same page with its column tracks removed.
     fn without_columns(&self) -> PageGeometry {
         PageGeometry {
@@ -1236,16 +1249,7 @@ impl<'a> Pager<'a> {
         let mut page = self.section_geometry.without_columns();
         if let Some(hf) = self.header_footer {
             let (header, footer) = self.selected_header_footer(hf);
-            if !header.is_empty() {
-                page.margin_top = page
-                    .margin_top
-                    .max(page.header_distance + header_footer_height(header, &page));
-            }
-            if !footer.is_empty() {
-                page.margin_bottom = page
-                    .margin_bottom
-                    .max(page.footer_distance + header_footer_height(footer, &page));
-            }
+            page.reserve_header_footer_room(header, footer);
         }
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
@@ -4589,6 +4593,28 @@ fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f
                 }
             })
             .sum::<f64>()
+}
+
+/// Vertical body blocks are shaped once per section, before pagination chooses
+/// a page's story. Reserve every active variant so that shaping, table sizing
+/// and the transposed page band all use one stable measure.
+pub(crate) fn reserve_vertical_header_footer_room(
+    mut geometry: PageGeometry,
+    content: Option<&HeaderFooterContent>,
+    title_pg: bool,
+) -> PageGeometry {
+    if geometry.body_rotation.is_some()
+        && let Some(hf) = content
+    {
+        geometry.reserve_header_footer_room(&hf.header_blocks, &hf.footer_blocks);
+        if title_pg {
+            geometry.reserve_header_footer_room(&hf.first_header_blocks, &hf.first_footer_blocks);
+        }
+        if hf.even_headers_active {
+            geometry.reserve_header_footer_room(&hf.even_header_blocks, &hf.even_footer_blocks);
+        }
+    }
+    geometry
 }
 
 /// Render header/footer blocks.

@@ -1986,17 +1986,89 @@ impl Engine {
         let mut current_blocks: Vec<SharedLayoutBlock> = Vec::new();
         let mut current_sect_pr: Option<CT_SectPr> = None; // Will be set from paragraph sect_pr
 
-        for content in main_story_layout_items(&input.document) {
+        let items = main_story_layout_items(&input.document);
+        let mut vertical_sections = Vec::new();
+        for sect_pr in std::iter::once(&final_sect_pr).chain(items.iter().filter_map(|item| {
+            match item {
+                MainStoryLayoutItem::Paragraph(paragraph, _) => paragraph
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.sect_pr.as_ref()),
+                MainStoryLayoutItem::Table(_, _) => None,
+            }
+        })) {
+            if sect_pr_to_geometry(sect_pr).body_rotation.is_none()
+                || (sect_pr.header_refs.is_empty() && sect_pr.footer_refs.is_empty())
+            {
+                continue;
+            }
+            let geometry =
+                section_page_geometry(sect_pr, input, &mut self.font_manager, &mut diagnostics);
+            let content = layout_header_footer(
+                self,
+                sect_pr,
+                input,
+                styles,
+                &media,
+                &mut diagnostics,
+                sources,
+                &mut num_state,
+            )?;
+            let reserved = paginator::reserve_vertical_header_footer_room(
+                geometry.clone(),
+                content.as_ref().map(|(content, _)| content),
+                sect_pr.title_pg.unwrap_or(false),
+            );
+            if reserved.margin_top != geometry.margin_top
+                || reserved.margin_bottom != geometry.margin_bottom
+            {
+                push_unique_diagnostic(
+                    &mut diagnostics,
+                    "vertical section uses the largest active header/footer band on every page"
+                        .to_owned(),
+                );
+            }
+            vertical_sections.push((sect_pr.clone(), reserved, content));
+        }
+
+        // A paragraph sectPr owns the blocks preceding it. Resolve those
+        // boundaries before a vertical story changes a section's measure, so
+        // the reservation cannot leak into a neighbouring horizontal section.
+        let mut item_sections = Vec::new();
+        if !vertical_sections.is_empty() {
+            item_sections.resize(items.len(), &final_sect_pr);
+            let mut start = 0;
+            for (index, item) in items.iter().enumerate() {
+                if let MainStoryLayoutItem::Paragraph(paragraph, _) = item
+                    && let Some(section) = paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|properties| properties.sect_pr.as_ref())
+                {
+                    item_sections[start..=index].fill(section);
+                    start = index + 1;
+                }
+            }
+        }
+
+        for (index, content) in items.into_iter().enumerate() {
+            let owning_section = item_sections.get(index).copied();
             match content {
                 MainStoryLayoutItem::Paragraph(para, path) => {
                     // Check if this paragraph ends a section (has sect_pr)
                     let para_sect_pr = para.properties.as_ref().and_then(|p| p.sect_pr.clone());
 
-                    let sect_pr_for_layout = para_sect_pr
-                        .as_ref()
+                    let sect_pr_for_layout = owning_section
+                        .or(para_sect_pr.as_ref())
                         .or(current_sect_pr.as_ref())
                         .unwrap_or(&final_sect_pr);
-                    let geometry = sect_pr_to_geometry(sect_pr_for_layout);
+                    let geometry = vertical_sections
+                        .iter()
+                        .find(|(section, _, _)| section == sect_pr_for_layout)
+                        .map_or_else(
+                            || sect_pr_to_geometry(sect_pr_for_layout),
+                            |(_, geometry, _)| geometry.clone(),
+                        );
 
                     let source = sources.and_then(|sources| {
                         if path.len() == 1 {
@@ -2059,22 +2131,30 @@ impl Engine {
 
                     // If this paragraph has sect_pr, it ends a section
                     if let Some(sect_pr) = para_sect_pr {
-                        let geometry = section_page_geometry(
-                            &sect_pr,
-                            input,
-                            &mut self.font_manager,
-                            &mut diagnostics,
-                        );
-                        let header_footer = layout_header_footer(
-                            self,
-                            &sect_pr,
-                            input,
-                            styles,
-                            &media,
-                            &mut diagnostics,
-                            sources,
-                            &mut num_state,
-                        )?;
+                        let (geometry, header_footer) = if let Some((_, geometry, content)) =
+                            vertical_sections.iter_mut().find(|(section, _, content)| {
+                                section == &sect_pr && content.is_some()
+                            }) {
+                            (geometry.clone(), content.take())
+                        } else {
+                            let geometry = section_page_geometry(
+                                &sect_pr,
+                                input,
+                                &mut self.font_manager,
+                                &mut diagnostics,
+                            );
+                            let content = layout_header_footer(
+                                self,
+                                &sect_pr,
+                                input,
+                                styles,
+                                &media,
+                                &mut diagnostics,
+                                sources,
+                                &mut num_state,
+                            )?;
+                            (geometry, content)
+                        };
                         let title_pg = sect_pr.title_pg.unwrap_or(false);
                         let (header_footer, header_footer_semantics) = header_footer
                             .map_or((None, None), |(content, semantics)| {
@@ -2095,8 +2175,16 @@ impl Engine {
                     }
                 }
                 MainStoryLayoutItem::Table(tbl, path) => {
-                    let sect_pr_for_layout = current_sect_pr.as_ref().unwrap_or(&final_sect_pr);
-                    let geometry = sect_pr_to_geometry(sect_pr_for_layout);
+                    let sect_pr_for_layout = owning_section
+                        .or(current_sect_pr.as_ref())
+                        .unwrap_or(&final_sect_pr);
+                    let geometry = vertical_sections
+                        .iter()
+                        .find(|(section, _, _)| section == sect_pr_for_layout)
+                        .map_or_else(
+                            || sect_pr_to_geometry(sect_pr_for_layout),
+                            |(_, geometry, _)| geometry.clone(),
+                        );
 
                     let mut table_block = self.layout_body_table(
                         tbl,
@@ -2120,22 +2208,30 @@ impl Engine {
         }
 
         // Remaining blocks belong to the final section
-        let final_geometry = section_page_geometry(
-            &final_sect_pr,
-            input,
-            &mut self.font_manager,
-            &mut diagnostics,
-        );
-        let final_hf = layout_header_footer(
-            self,
-            &final_sect_pr,
-            input,
-            styles,
-            &media,
-            &mut diagnostics,
-            sources,
-            &mut num_state,
-        )?;
+        let (final_geometry, final_hf) = if let Some((_, geometry, content)) = vertical_sections
+            .iter_mut()
+            .find(|(section, _, content)| section == &final_sect_pr && content.is_some())
+        {
+            (geometry.clone(), content.take())
+        } else {
+            let geometry = section_page_geometry(
+                &final_sect_pr,
+                input,
+                &mut self.font_manager,
+                &mut diagnostics,
+            );
+            let content = layout_header_footer(
+                self,
+                &final_sect_pr,
+                input,
+                styles,
+                &media,
+                &mut diagnostics,
+                sources,
+                &mut num_state,
+            )?;
+            (geometry, content)
+        };
         let final_title_pg = final_sect_pr.title_pg.unwrap_or(false);
         let (final_hf, final_hf_semantics) = final_hf
             .map_or((None, None), |(content, semantics)| {
@@ -12024,6 +12120,190 @@ mod tests {
         );
         input.document.body.sect_pr = Some(section);
         input
+    }
+
+    #[test]
+    fn vertical_body_paragraphs_and_tables_fit_between_tall_stories() {
+        use rdocx_oxml::header_footer::CT_HdrFtr;
+
+        for alignment in ["left", "center", "right"] {
+            for vertical_alignment in ["top", "center", "bottom"] {
+                let mut input = make_input_with_text("");
+                input.document = CT_Document::from_xml(format!(
+                    r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr><w:r><w:t>Body paragraph aligned against the reserved vertical measure</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t>Body table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/><w:textDirection w:val="tbRl"/><w:vAlign w:val="{vertical_alignment}"/></w:sectPr></w:body></w:document>"#,
+                    rdocx_oxml::namespace::W_NS,
+                ).as_bytes()).expect("vertical document parses");
+                for (parts, id, line, text) in [
+                    (&mut input.headers, "header", 2400, "Tall header"),
+                    (&mut input.footers, "footer", 1920, "Tall footer"),
+                ] {
+                    parts.insert(id.to_owned(), CT_HdrFtr::from_xml(format!(
+                        r#"<w:hdr xmlns:w="{}"><w:p><w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p></w:hdr>"#,
+                        rdocx_oxml::namespace::W_NS,
+                    ).as_bytes()).expect("story parses"));
+                }
+                let result = deterministic_layout(&input);
+                let mut body_runs = 0;
+                let mut table_backgrounds = 0;
+                for page in &result.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, transform| {
+                        if transform.b.abs() < 0.9 {
+                            return;
+                        }
+                        let points = match element {
+                            PositionedElement::Text(run) => {
+                                body_runs += 1;
+                                vec![
+                                    run.origin,
+                                    Point {
+                                        x: run.origin.x + run.advances.iter().sum::<f64>(),
+                                        y: run.origin.y,
+                                    },
+                                ]
+                            }
+                            PositionedElement::FilledRect { rect, .. } => {
+                                table_backgrounds += 1;
+                                vec![
+                                    Point {
+                                        x: rect.x,
+                                        y: rect.y,
+                                    },
+                                    Point {
+                                        x: rect.x + rect.width,
+                                        y: rect.y + rect.height,
+                                    },
+                                ]
+                            }
+                            _ => return,
+                        };
+                        for point in points {
+                            let point = transform.apply(point);
+                            assert!(
+                                (156.0 - 0.01..=660.0 + 0.01).contains(&point.y),
+                                "{alignment}/{vertical_alignment}: body reaches {point:?} outside header/footer band"
+                            );
+                        }
+                    });
+                }
+                assert!(
+                    body_runs >= 2 && table_backgrounds > 0,
+                    "paragraph and table both paint"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_first_even_and_default_stories_keep_one_body_measure() {
+        use rdocx_oxml::units::Twips;
+
+        let mut input = cacheable_header_footer_input(&"Body words ".repeat(1600));
+        input.images.clear();
+        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
+        for (suffix, header_height, footer_height) in
+            [("default", 120, 96), ("first", 12, 12), ("even", 168, 144)]
+        {
+            for (parts, kind, height) in [
+                (&mut input.headers, "header", header_height),
+                (&mut input.footers, "footer", footer_height),
+            ] {
+                let mut part = header_footer_part(&format!("{suffix} {kind}"));
+                part.paragraphs[0].properties = Some(CT_PPr {
+                    line_spacing: Some(Twips(height * 20)),
+                    line_rule: Some("exact".to_owned()),
+                    ..Default::default()
+                });
+                parts.insert(format!("rId-{suffix}-{kind}"), part);
+            }
+        }
+        let mut engine = Engine::new_deterministic().expect("bundled fonts");
+        let result = engine.layout(&input).expect("vertical variant layout");
+        assert!(result.pages.len() >= 3, "every story variant is selected");
+        for (page, expected) in result.pages.iter().zip(["first", "even", "default"]) {
+            assert!(header_footer_page_text(page).contains(&format!("{expected} header")));
+        }
+        for page in &result.pages {
+            let mut body_runs = 0;
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element
+                    && transform.b.abs() > 0.9
+                {
+                    body_runs += 1;
+                    for x in [
+                        run.origin.x,
+                        run.origin.x + run.advances.iter().sum::<f64>(),
+                    ] {
+                        let point = transform.apply(Point { x, y: run.origin.y });
+                        assert!(
+                            (204.0 - 0.01..=612.0 + 0.01).contains(&point.y),
+                            "page {}: {point:?}",
+                            page.page_number
+                        );
+                    }
+                }
+            });
+            assert!(body_runs > 0);
+        }
+        let warm = engine.layout(&input).expect("retained vertical layout");
+        assert_eq!(format!("{:?}", result.pages), format!("{:?}", warm.pages));
+        input.headers.get_mut("rId-even-header").unwrap().paragraphs[0]
+            .properties
+            .as_mut()
+            .unwrap()
+            .line_spacing = Some(Twips(3600));
+        let changed = engine.layout(&input).expect("changed story geometry");
+        let fresh = deterministic_layout(&input);
+        assert_eq!(format!("{:?}", changed.pages), format!("{:?}", fresh.pages));
+    }
+
+    #[test]
+    fn vertical_story_room_does_not_leak_across_section_boundaries() {
+        let mut input = cacheable_header_footer_input("Vertical body");
+        input.images.clear();
+        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
+        let mut horizontal = CT_P::new();
+        horizontal.add_run("Horizontal body");
+        horizontal.properties = Some(CT_PPr {
+            jc: Some(rdocx_oxml::shared::ST_Jc::Right),
+            ..Default::default()
+        });
+        let mut section_end = CT_P::new();
+        section_end.properties = Some(CT_PPr {
+            sect_pr: Some(CT_SectPr::default_letter()),
+            ..Default::default()
+        });
+        input
+            .document
+            .body
+            .content
+            .insert(0, BodyContent::Paragraph(horizontal));
+        input
+            .document
+            .body
+            .content
+            .insert(1, BodyContent::Paragraph(section_end));
+        for part in input.headers.values_mut() {
+            part.paragraphs[0].properties = Some(CT_PPr {
+                line_spacing: Some(rdocx_oxml::units::Twips(2400)),
+                line_rule: Some("exact".to_owned()),
+                ..Default::default()
+            });
+        }
+        let result = deterministic_layout(&input);
+        let mut text = String::new();
+        let mut line_end: f64 = 0.0;
+        oxml_layout::walk(&result.pages[0].elements, &mut |element, transform| {
+            if let PositionedElement::Text(run) = element {
+                assert!(transform.is_identity());
+                text.push_str(&run.text);
+                line_end = line_end.max(run.origin.x + run.advances.iter().sum::<f64>());
+            }
+        });
+        assert!(text.contains("Horizontal body"), "{text}");
+        assert!(
+            (line_end - 540.0).abs() < 0.01,
+            "horizontal line ends at {line_end}"
+        );
     }
 
     fn header_footer_page_text(page: &PageFrame) -> String {
