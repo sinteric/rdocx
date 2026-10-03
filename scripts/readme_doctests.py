@@ -375,17 +375,21 @@ ARCHIVE_REMEASUREMENT_DATES = {
     "oxml-pdf": "2026-10-01",
     "rdocx": "2026-10-02",
     "rdocx-cli": "2026-10-02",
-    "rdocx-layout": "2026-10-01",
+    "rdocx-layout": "2026-10-03",
     "rdocx-oxml": "2026-10-02",
     "rpptx": "2026-10-02",
     "rpptx-cli": "2026-09-30",
     "rpptx-layout": "2026-10-01",
-    "rpptx-oxml": "2026-10-01",
+    "rpptx-oxml": "2026-10-03",
     "oxml-chart": "2026-10-01",
     "oxml-layout": "2026-10-01",
     "rpptx-render": "2026-10-01",
 }
 MEASUREMENT_PLATFORM = "macOS 26.6.2, Apple M5 Max, arm64"
+ARCHIVE_REMEASUREMENT_PLATFORMS = {
+    "rdocx-layout": "macOS 27.0.1, Apple M1 Max, arm64",
+    "rpptx-oxml": "macOS 27.0.1, Apple M1 Max, arm64",
+}
 ARCHIVE_COMPRESSION_TOLERANCE_BYTES = 64
 ARCHIVE_MEASUREMENTS = {
     "oxml-chart": (102_041, 659_394, 6),
@@ -400,7 +404,7 @@ ARCHIVE_MEASUREMENTS = {
     "rdocx": (1_240_655, 7_192_556, 36),
     "rdocx-cli": (68_052, 299_776, 8),
     "rdocx-html": (18_116, 70_742, 11),
-    "rdocx-layout": (267_163, 1_429_838, 15),
+    "rdocx-layout": (268_082, 1_434_076, 15),
     "rdocx-opc": (3_655, 9_668, 6),
     "rdocx-oxml": (413_033, 2_586_412, 32),
     "rdocx-pdf": (8_111, 26_758, 6),
@@ -408,7 +412,7 @@ ARCHIVE_MEASUREMENTS = {
     "rpptx-chart": (6_648, 21_136, 6),
     "rpptx-cli": (40_733, 178_874, 8),
     "rpptx-layout": (82_646, 479_917, 11),
-    "rpptx-oxml": (159_620, 1_072_208, 20),
+    "rpptx-oxml": (159_951, 1_073_512, 20),
     "rpptx-render": (64_144, 347_275, 8),
 }
 PACKAGE_VERSIONS = {
@@ -434,7 +438,7 @@ def archive_row(package: str) -> MeasurementRow:
         f"Crates.io archive: {package}",
         f"{compressed:,} compressed bytes, {members:,} member bytes, {count} members",
         PACKAGE_VERSIONS[package],
-        MEASUREMENT_PLATFORM,
+        ARCHIVE_REMEASUREMENT_PLATFORMS.get(package, MEASUREMENT_PLATFORM),
         "`cargo package --locked --no-verify`",
         f"Tracked `{package}` package inventory",
         "`python3 scripts/readme_doctests.py --record-measurements`",
