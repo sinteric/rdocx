@@ -17,7 +17,7 @@ notes, comments, diagrams, and timing data.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-oxml | 159,620 compressed bytes, 1,072,208 member bytes, 20 members | 0.12.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-01 |
+| Crates.io archive: rpptx-oxml | 159,951 compressed bytes, 1,073,512 member bytes, 20 members | 0.12.1 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-03 |
 
 ## Use it when
 
