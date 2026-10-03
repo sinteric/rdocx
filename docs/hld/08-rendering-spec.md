@@ -2096,6 +2096,14 @@ The corpus renderer and integration tests call the same crate-local package
 rendering function. Relationship assembly, media admission, chart parsing,
 resolution and ordinary renderer lowering therefore have one production path.
 
+Pie and doughnut rendering projects preserved `c:varyColors` and `c:dPt`
+markup without rewriting those payloads. Explicit point fill takes precedence
+over explicit series fill, then varied theme accents use logical cache indices.
+Absent or false `c:varyColors` retains the series palette. Category legend
+swatches use the same resolved point colors as the slices. Unsupported point
+paint and malformed color options return contextual chart errors through the
+existing visible fallback path.
+
 An OLE payload remains raw for serialization. Its optional standard fallback
 `p:pic` is an upstream projection only. When that picture has an embedded PNG
 relationship in the producing part scope, it crosses the renderer boundary as

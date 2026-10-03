@@ -381,19 +381,20 @@ ARCHIVE_REMEASUREMENT_DATES = {
     "rpptx-cli": "2026-09-30",
     "rpptx-layout": "2026-10-01",
     "rpptx-oxml": "2026-10-03",
-    "oxml-chart": "2026-10-01",
+    "oxml-chart": "2026-10-03",
     "oxml-layout": "2026-10-03",
     "rpptx-render": "2026-10-01",
 }
 MEASUREMENT_PLATFORM = "macOS 26.6.2, Apple M5 Max, arm64"
 ARCHIVE_REMEASUREMENT_PLATFORMS = {
+    "oxml-chart": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-layout": "macOS 27.0.1, Apple M1 Max, arm64",
     "rdocx-layout": "macOS 27.0.1, Apple M1 Max, arm64",
     "rpptx-oxml": "macOS 27.0.1, Apple M1 Max, arm64",
 }
 ARCHIVE_COMPRESSION_TOLERANCE_BYTES = 64
 ARCHIVE_MEASUREMENTS = {
-    "oxml-chart": (102_041, 659_394, 6),
+    "oxml-chart": (105_070, 678_897, 6),
     "oxml-cli-support": (8_614, 30_840, 6),
     "oxml-core": (21_794, 104_404, 15),
     "oxml-drawing": (182_039, 1_226_103, 24),
