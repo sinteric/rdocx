@@ -2028,18 +2028,19 @@ fn font_data_for_face(
 ) -> Option<(Arc<[u8]>, u32)> {
     let face = db.face(id)?;
     let face_index = face.index;
-    match &face.source {
-        fontdb::Source::Binary(data) => match memory_face_data.get(&id) {
-            Some(data) => Some((Arc::clone(data), face_index)),
-            None => {
-                let data: Arc<[u8]> = Arc::from(data.as_ref().as_ref().to_vec());
-                memory_face_data.insert(id, Arc::clone(&data));
-                Some((data, face_index))
-            }
-        },
-        #[cfg(feature = "system-fonts")]
-        fontdb::Source::File(path) => shared_file_font_bytes(path).map(|data| (data, face_index)),
+    #[cfg(feature = "system-fonts")]
+    if let fontdb::Source::File(path) = &face.source {
+        return shared_file_font_bytes(path).map(|data| (data, face_index));
     }
+    if let Some(data) = memory_face_data.get(&id) {
+        return Some((Arc::clone(data), face_index));
+    }
+    // A consumer can unify fontdb's fs/memmap features without enabling our
+    // system-fonts feature. Its Source enum then includes File/SharedFile.
+    let (data, face_index) =
+        db.with_face_data(id, |bytes, index| (Arc::<[u8]>::from(bytes), index))?;
+    memory_face_data.insert(id, Arc::clone(&data));
+    Some((data, face_index))
 }
 
 #[cfg(feature = "system-fonts")]

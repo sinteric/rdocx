@@ -1151,6 +1151,11 @@ of failing the timing parse. Timing IDs are allocated from namespace-aware
 PresentationML nodes in schema-owned supported and unsupported positions while
 foreign elements and raw wrappers are ignored.
 
+An animation behavior may carry several direct PresentationML `attrName`
+children in `attrNameLst`. The typed single-name projection retains its first
+child, including an empty first child, and the captured XML retains every
+attribute name and foreign sibling unchanged.
+
 Two narrow queries support the timeline resolver without adding a parallel XML
 model. `ShapeTreeChild::non_visual_name` returns the selected child's cached
 `p:cNvPr/@name`, including a selected chart graphic frame inside

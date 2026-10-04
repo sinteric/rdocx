@@ -1667,6 +1667,22 @@ that displayed parity for a section. Missing later variants inherit only the
 same type from the preceding section. No selected first or even variant borrows
 default header, footer, or watermark content.
 
+The selected header and footer reserve body room on each page when their
+painted height reaches beyond the authored margins. Measurement and painting
+use the same inter-paragraph spacing, collapsed by default and summed under
+`doNotUseHTMLParagraphAutoSpacing`. Horizontal sections recompute capacity for
+each selected variant, so a tall default story does not displace a blank
+first-page story.
+
+Vertical sections shape paragraphs and size tables against the page height
+before rotating the body. Their active header and footer variants are measured
+before body layout, and the largest active band is reserved on every page.
+Line breaking, paragraph alignment, table widths and the transposed pagination
+band therefore use the same measure. Story selection and painting still follow
+the page variant. The reservation is conservative on pages with shorter or
+blank stories, and a diagnostic records that limit. Per-page variable vertical
+measures require a separate body reflow path.
+
 The native authoring facade preserves that selection contract. Creating a
 first-page story enables the section title-page state. Creating an even-page
 story does not change the document-wide even-page setting, which has its own
@@ -2138,6 +2154,14 @@ a labelled bounds fallback.
 The corpus renderer and integration tests call the same crate-local package
 rendering function. Relationship assembly, media admission, chart parsing,
 resolution and ordinary renderer lowering therefore have one production path.
+
+Pie and doughnut rendering projects preserved `c:varyColors` and `c:dPt`
+markup without rewriting those payloads. Explicit point fill takes precedence
+over explicit series fill, then varied theme accents use logical cache indices.
+Absent or false `c:varyColors` retains the series palette. Category legend
+swatches use the same resolved point colors as the slices. Unsupported point
+paint and malformed color options return contextual chart errors through the
+existing visible fallback path.
 
 An OLE payload remains raw for serialization. Its optional standard fallback
 `p:pic` is an upstream projection only. When that picture has an embedded PNG
