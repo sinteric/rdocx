@@ -9031,8 +9031,17 @@ fn vml_color(value: &str) -> Option<Color> {
         "aqua" | "cyan" => "00ffff",
         _ => normalized.trim_start_matches('#'),
     };
-    (hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then(|| Color::from_hex(hex))
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        3 => {
+            let expanded: String = hex.chars().flat_map(|digit| [digit, digit]).collect();
+            Some(Color::from_hex(&expanded))
+        }
+        6 => Some(Color::from_hex(hex)),
+        _ => None,
+    }
 }
 
 /// One of the four `w:rFonts` script slots, as this engine resolves them.
@@ -18951,6 +18960,99 @@ mod tests {
         assert_eq!(*media_id, expected);
         assert_eq!(data, &[2]);
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn short_hex_vml_watermarks_match_expanded_rgb_layout() {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef};
+
+        fn watermark_input(color: &str) -> LayoutInput {
+            let mut input = make_input_with_text("Body unchanged");
+            let mut section = CT_SectPr::default_letter();
+            section.header_refs.push(HdrFtrRef {
+                hdr_ftr_type: HdrFtrType::Default,
+                rel_id: "header".to_owned(),
+            });
+            input.document.body.sect_pr = Some(section);
+            input.headers.insert(
+                "header".to_owned(),
+                CT_HdrFtr::from_xml(
+                    format!(
+                        r#"<w:hdr xmlns:w="{}" xmlns:v="urn:schemas-microsoft-com:vml"><w:p><w:r><w:pict><v:shape style="width:144pt;height:36pt;rotation:315" fillcolor="{color}"><v:fill opacity=".5"/><v:textpath string="SAMPLE" style="font-family:Calibri"/></v:shape></w:pict></w:r></w:p></w:hdr>"#,
+                        rdocx_oxml::namespace::W_NS,
+                    )
+                    .as_bytes(),
+                )
+                .unwrap(),
+            );
+            input
+        }
+
+        for (short, expanded) in [
+            ("#e00", "#ee0000"),
+            ("#1aF", "#11aaff"),
+            ("#000", "#000000"),
+            ("#fff", "#ffffff"),
+        ] {
+            let input = watermark_input(short);
+            let mut engine = Engine::new_deterministic().unwrap();
+            let cold = engine.layout(&input).unwrap();
+            let warm = engine.layout(&input).unwrap();
+            let control = deterministic_layout(&watermark_input(expanded));
+            for reference in [&control, &warm] {
+                assert_eq!(cold.pages.len(), reference.pages.len());
+                for (actual, expected) in cold.pages.iter().zip(&reference.pages) {
+                    assert_eq!(actual.page_number, expected.page_number);
+                    assert_eq!(actual.displayed_page_number, expected.displayed_page_number);
+                    assert_eq!(actual.width, expected.width);
+                    assert_eq!(actual.height, expected.height);
+                    assert_eq!(actual.background, expected.background);
+                    assert_eq!(actual.elements, expected.elements, "{short}");
+                }
+            }
+            assert_eq!(cold.diagnostics, control.diagnostics);
+            assert_eq!(cold.diagnostics, warm.diagnostics);
+            assert_eq!(cold.pages.len(), 1);
+            let mut watermark_count = 0;
+            let mut body = String::new();
+            oxml_layout::walk(&cold.pages[0].elements, &mut |element, _| {
+                if let PositionedElement::Text(run) = element {
+                    if run.text == "SAMPLE" {
+                        watermark_count += 1;
+                        assert_eq!(run.color, Color::from_hex(&expanded[1..]));
+                        assert!(!run.glyph_ids.contains(&0));
+                    } else {
+                        body.push_str(&run.text);
+                    }
+                }
+            });
+            assert_eq!(watermark_count, 1);
+            assert_eq!(body, "Body unchanged");
+            assert!(cold.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn unsupported_vml_colour_forms_are_not_guessed() {
+        for color in [
+            "",
+            "#",
+            "#1",
+            "#12",
+            "#1234",
+            "#12345",
+            "#1234567",
+            "#12345678",
+            "#ggg",
+            "#12z",
+            "#é00",
+            "transparent",
+            "rgb(1,2,3)",
+        ] {
+            assert!(vml_color(color).is_none(), "{color}");
+        }
+        assert_eq!(vml_color(" ReD "), Some(Color::from_hex("ff0000")));
+        assert_eq!(vml_color(" #12aBcF "), Some(Color::from_hex("12abcf")));
     }
 
     #[test]

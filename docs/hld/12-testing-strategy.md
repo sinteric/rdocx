@@ -1000,6 +1000,12 @@ entity-decoded settings, unsupported colour and media diagnostics, atomic
 rejection, and margin-relative centering. No sample authors a watermark, so the
 49-entry hash harness remains unchanged.
 
+The shorthand-watermark regression compares complete owned page output and
+diagnostics against equivalent six-digit RGB, including mixed, black and white
+values. It requires a visible watermark, exact colour, unchanged body text and
+identical warm output. Unsupported lengths and non-hexadecimal forms remain
+rejected. The existing watermark golden and selection assertions stay intact.
+
 The advanced table geometry golden gate is
 `fixed_autofit_and_nested_table_geometry_matches_reviewed_word_pages`. It
 builds one document in code holding a fixed-grid table, an auto-width autofit

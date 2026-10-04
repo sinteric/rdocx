@@ -1646,7 +1646,10 @@ VML shape with finite positive point bounds becomes a watermark only when it
 contains one VML text path string or one relationship-namespaced image id.
 Namespace aliases and shadows are resolved by expanded name. Unsupported,
 ambiguous, malformed, or unrelated VML remains preserved but does not enter
-layout. Named VML colours and six-digit RGB values lower to shared colour.
+layout. Named VML colours and three-digit or six-digit RGB values lower to shared
+colour. Shorthand RGB duplicates each hexadecimal digit, so `#e00` lowers to
+the same colour as `#ee0000`. Other lengths and non-hexadecimal values remain
+unsupported.
 Unsupported colours and unresolved image relationships suppress that watermark
 and add a stable diagnostic.
 
