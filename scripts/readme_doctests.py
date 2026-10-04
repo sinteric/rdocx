@@ -372,7 +372,7 @@ ARCHIVE_REMEASUREMENT_DATES = {
     "rdocx-html": "2026-10-03",
     "oxml-cli-support": "2026-10-03",
     "oxml-core": "2026-10-03",
-    "oxml-drawing": "2026-10-03",
+    "oxml-drawing": "2026-10-04",
     "oxml-opc": "2026-10-03",
     "oxml-pdf": "2026-10-03",
     "rdocx": "2026-10-04",
@@ -381,7 +381,7 @@ ARCHIVE_REMEASUREMENT_DATES = {
     "rdocx-oxml": "2026-10-03",
     "rpptx": "2026-10-03",
     "rpptx-cli": "2026-10-04",
-    "rpptx-layout": "2026-10-03",
+    "rpptx-layout": "2026-10-04",
     "rpptx-oxml": "2026-10-04",
     "oxml-chart": "2026-10-04",
     "oxml-layout": "2026-10-04",
@@ -392,6 +392,8 @@ ARCHIVE_REMEASUREMENT_DATES = {
 }
 MEASUREMENT_PLATFORM = "macOS 26.6.2, Apple M5 Max, arm64"
 ARCHIVE_REMEASUREMENT_PLATFORMS = {
+    "oxml-drawing": "macOS 27.0.1, Apple M1 Max, arm64",
+    "rpptx-layout": "macOS 27.0.1, Apple M1 Max, arm64",
     "rdocx": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-chart": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-layout": "macOS 27.0.1, Apple M1 Max, arm64",
@@ -405,7 +407,7 @@ ARCHIVE_MEASUREMENTS = {
     "oxml-chart": (105_070, 678_897, 6),
     "oxml-cli-support": (8_613, 30_840, 6),
     "oxml-core": (21_796, 104_404, 15),
-    "oxml-drawing": (182_039, 1_226_103, 24),
+    "oxml-drawing": (182_758, 1_230_174, 24),
     "oxml-layout": (4_635_982, 9_281_539, 51),
     "oxml-media": (12_249, 50_992, 6),
     "oxml-opc": (99_467, 385_350, 12),
@@ -421,7 +423,7 @@ ARCHIVE_MEASUREMENTS = {
     "rpptx": (463_722, 2_402_432, 16),
     "rpptx-chart": (6_646, 21_136, 6),
     "rpptx-cli": (40_881, 179_264, 8),
-    "rpptx-layout": (83_281, 483_107, 11),
+    "rpptx-layout": (83_782, 486_090, 11),
     "rpptx-oxml": (160_863, 1_077_081, 20),
     "rpptx-render": (64_970, 351_711, 8),
 }
