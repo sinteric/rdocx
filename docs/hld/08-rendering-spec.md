@@ -1691,6 +1691,9 @@ active story measures. Alternative measurements clone the numbering state from
 before the primary table, so counters advance once. Shared source and structure
 identities remain the same. Pagination selects unconsumed rows at the current
 measure, and rebreaks only the remaining plain cell content after a row split.
+Selected-template side and remaining bottom margins carry percentage cell
+spacing to the new measure. Removed fragment-top and completed-cell bottom
+gaps stay removed.
 Repeated header rows use the selected measure. Notes are registered at every
 selected vertical measure, preserving the registry's single numbering advance
 and the raw width used by endnote pages. Existing whole-row guards for

@@ -26,7 +26,8 @@ Word render fidelity and the hash harness.
   layout and width-aware cache keys, with cloned numbering state so alternative
   measurements do not advance the document twice.
 - [x] Select width-specific rows and rebreak only remaining cell content at a
-  page transition. Preserve structure/source identities and header repetition.
+  page transition. Preserve structure/source identities and header repetition,
+  including percentage cell spacing in selected-template continuation margins.
 - [x] Use authored page geometry plus selected-story room while preserving the
   largest-band preparation as a safe input bound.
 - [x] Validate source conservation, cold/warm equality, existing custom fixes

@@ -1554,6 +1554,8 @@ alignment cases, accepted paragraph joins and section isolation remain gates.
 A split percentage-table row conserves indexed Unicode cell text, source ranges,
 short-cell content and list markers across changes in measure. Cold and warm
 layouts, source maps and numbering results must match, including a changed story.
+A split cell with percentage spacing derives its half-gap from each selected
+story width while preserving every indexed Unicode source range exactly once.
 Footnote references on three distinct story measures each retain their note on
 the reference page. Keep-next lookahead prices the selected measure.
 Shared cursor tests cover rich bidi order, empty text, generated hyphens, markers,

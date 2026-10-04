@@ -1108,7 +1108,17 @@ fn refit_table_row_fragment(
     adjusted.offset_left = template.offset_left;
     let mut height = pending.min_height;
     for (cell_index, cell) in adjusted.cells.iter_mut().enumerate() {
-        cell.width = template.cells.get(cell_index)?.width;
+        let selected = template.cells.get(cell_index)?;
+        cell.width = selected.width;
+        cell.margin_left = selected.margin_left;
+        cell.margin_right = selected.margin_right;
+        // Percentage cell spacing changes these margins with the measure.
+        // The split already removed the top gap and completed cells' bottom.
+        cell.margin_bottom = if cell.blocks.is_empty() {
+            0.0
+        } else {
+            selected.margin_bottom
+        };
         let width = (cell.width - cell.margin_left - cell.margin_right).max(0.0);
         for (block_index, block) in cell.blocks.iter_mut().enumerate() {
             let CellBlock::Paragraph(paragraph) = block else {

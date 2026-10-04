@@ -12652,6 +12652,75 @@ mod tests {
     }
 
     #[test]
+    fn vertical_split_table_cells_update_percentage_spacing_with_story_widths() {
+        use rdocx_oxml::units::Twips;
+        let text = (0..1800)
+            .map(|n| format!("W{n:04} café "))
+            .collect::<String>();
+        let mut input = cacheable_header_footer_input("");
+        input.images.clear();
+        input.footers.clear();
+        let section = input.document.body.sect_pr.as_mut().unwrap();
+        section.text_direction = Some("tbRl".to_owned());
+        section.footer_refs.clear();
+        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
+            let mut part = header_footer_part(&format!("{suffix} header"));
+            part.paragraphs[0].properties = Some(CT_PPr {
+                line_spacing: Some(Twips(height * 20)),
+                line_rule: Some("exact".to_owned()),
+                ..Default::default()
+            });
+            input.headers.insert(format!("rId-{suffix}-header"), part);
+        }
+        let parsed = CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="{}"><w:body><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblCellSpacing w:w="500" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:tcMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar></w:tcPr><w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS,
+        ).as_bytes()).unwrap();
+        input.document.body.content = parsed.body.content;
+        let mut engine = Engine::new_deterministic().unwrap();
+        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
+        assert!(cold.pages.len() >= 3);
+        let mut painted = String::new();
+        for page in &cold.pages {
+            let top = if page.page_number == 1 {
+                156.0
+            } else if page.page_number.is_multiple_of(2) {
+                204.0
+            } else {
+                72.0
+            };
+            let mut first_origin = f64::INFINITY;
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element
+                    && let Some(span) = run.source
+                    && sources[span.node.get() as usize - 1].story == WordStory::Document
+                {
+                    assert_eq!(span.char_start, painted.chars().count() as u32);
+                    assert_eq!(
+                        span.char_end - span.char_start,
+                        run.text.chars().count() as u32
+                    );
+                    painted.push_str(&run.text);
+                    let origin = transform.apply(run.origin);
+                    assert!((top - 0.01..=720.01).contains(&origin.y));
+                    first_origin = first_origin.min(origin.y);
+                }
+            });
+            let half_gap = (720.0 - top) * 0.10 / 2.0;
+            assert!(
+                (first_origin - top - half_gap).abs() < 0.01,
+                "page {}: origin {first_origin}, active top {top}, half-gap {half_gap}",
+                page.page_number
+            );
+        }
+        assert_eq!(painted, text);
+        assert_eq!(engine.table_cache_counts(), (0, 3));
+        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
+        assert_eq!(sources, warm_sources);
+        assert_layout_results_equal(&cold, &warm);
+    }
+
+    #[test]
     fn vertical_notes_follow_references_at_distinct_selected_story_measures() {
         use rdocx_oxml::{
             footnotes::{CT_Footnote, CT_Footnotes, NoteType},
