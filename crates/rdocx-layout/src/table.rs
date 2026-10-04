@@ -484,10 +484,6 @@ fn layout_table_inner(
         .properties
         .as_ref()
         .is_some_and(|properties| properties.width.is_some());
-    let direct_alignment = tbl
-        .properties
-        .as_ref()
-        .is_some_and(|properties| properties.jc.is_some());
     let mut resolved_table = tbl.clone();
     let mut resolved_properties = resolve_base_table_properties(tbl, styles);
     // The authored width type, captured before the direct width is dropped
@@ -501,9 +497,8 @@ fn layout_table_inner(
     if direct_width {
         resolved_properties.width = None;
     }
-    if direct_alignment {
-        resolved_properties.jc = None;
-    }
+    // Preserve direct w:jc after style resolution. Center/right alignment
+    // takes precedence over tblInd when the final table width is known.
     resolved_table.properties = Some(resolved_properties);
     let tbl = &resolved_table;
     let source_rows = accepted_table_rows(tbl, path, input);
@@ -549,10 +544,18 @@ fn layout_table_inner(
             }
         })
         .unwrap_or(0.0);
-    let table_indent = match tbl.properties.as_ref().and_then(|properties| properties.jc) {
-        Some(ST_Jc::Center) => ((available_width - table_width) / 2.0).max(0.0),
-        Some(ST_Jc::Right | ST_Jc::End) => (available_width - table_width).max(0.0),
+    let remaining_width = (available_width - table_width).max(0.0);
+    let leading_indent = match tbl.properties.as_ref().and_then(|properties| properties.jc) {
+        Some(ST_Jc::Center) => remaining_width / 2.0,
+        Some(ST_Jc::Right | ST_Jc::End) => remaining_width,
         _ => authored_indent,
+    };
+    // Table justification and indentation are relative to the leading
+    // margin. The paginator needs an offset from the physical left margin.
+    let table_indent = if bidi_visual {
+        remaining_width - leading_indent
+    } else {
+        leading_indent
     };
 
     // Direct table borders win. Table-style borders are the fallback.
@@ -2240,6 +2243,113 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    fn aligned_table(width: i32, alignment: Option<ST_Jc>, indent: i32) -> CT_Tbl {
+        let mut table = CT_Tbl::new();
+        table.properties = Some(CT_TblPr {
+            width: Some(CT_TblWidth::dxa(width)),
+            jc: alignment,
+            indent: Some(CT_TblWidth::dxa(indent)),
+            layout: Some("fixed".into()),
+            ..CT_TblPr::default()
+        });
+        table.grid = Some(CT_TblGrid {
+            columns: vec![CT_TblGridCol {
+                width: Twips(width),
+            }],
+            ..CT_TblGrid::default()
+        });
+        let mut row = CT_Row::new();
+        row.cells.push(CT_Tc::new());
+        table.rows.push(row);
+        table
+    }
+
+    #[test]
+    fn direct_table_alignment_uses_the_laid_out_width_instead_of_indent() {
+        // (grid twips, available points, alignment, indent twips,
+        //  expected laid-out width, expected offset from the text margin).
+        for (width, available, alignment, indent, expected_width, expected_indent) in [
+            (2400, 360.0, Some(ST_Jc::Left), 240, 120.0, 12.0),
+            (2400, 360.0, Some(ST_Jc::Left), -240, 120.0, -12.0),
+            (2400, 360.0, None, 240, 120.0, 12.0),
+            (2400, 360.0, Some(ST_Jc::Center), 240, 120.0, 120.0),
+            (2400, 360.0, Some(ST_Jc::Right), 240, 120.0, 240.0),
+            (2400, 360.0, Some(ST_Jc::Center), -240, 120.0, 120.0),
+            (2400, 360.0, Some(ST_Jc::Right), -240, 120.0, 240.0),
+            (2400, 360.0, Some(ST_Jc::Start), 240, 120.0, 12.0),
+            (2400, 360.0, Some(ST_Jc::End), 240, 120.0, 240.0),
+            (1200, 240.0, Some(ST_Jc::Center), 0, 60.0, 90.0),
+            (1200, 240.0, Some(ST_Jc::Right), 0, 60.0, 180.0),
+            (7200, 360.0, Some(ST_Jc::Center), 240, 360.0, 0.0),
+            (9600, 360.0, Some(ST_Jc::Right), 240, 360.0, 0.0),
+        ] {
+            let table = aligned_table(width, alignment, indent);
+            let block = layout_with_defaults(&table, available);
+            assert!((block.table_width - expected_width).abs() < 0.01);
+            assert!(
+                (block.table_indent - expected_indent).abs() < 0.01,
+                "{alignment:?}, grid {width}, available {available}, indent {indent}: got {} instead of {expected_indent}",
+                block.table_indent,
+            );
+        }
+    }
+
+    #[test]
+    fn direct_table_alignment_overrides_inherited_style_alignment() {
+        let styles = CT_Styles::from_xml(
+            format!(
+                r#"<w:styles xmlns:w="{}"><w:style w:type="table" w:styleId="Base"><w:tblPr><w:jc w:val="center"/></w:tblPr></w:style><w:style w:type="table" w:styleId="Derived" w:default="1"><w:basedOn w:val="Base"/></w:style></w:styles>"#,
+                rdocx_oxml::namespace::W_NS
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        for (bidi_visual, alignment, expected_indent) in [
+            (false, None, 120.0),
+            (false, Some(ST_Jc::Left), 12.0),
+            (false, Some(ST_Jc::Center), 120.0),
+            (false, Some(ST_Jc::Right), 240.0),
+            (true, None, 120.0),
+            (true, Some(ST_Jc::Left), 228.0),
+            (true, Some(ST_Jc::Center), 120.0),
+            (true, Some(ST_Jc::Right), 0.0),
+        ] {
+            let mut table = aligned_table(2400, alignment, 240);
+            table.properties.as_mut().unwrap().bidi_visual = Some(bidi_visual);
+            let block = layout_with_styles(&table, 360.0, &styles);
+            assert_eq!(block.table_width, 120.0);
+            assert_eq!(
+                block.table_indent, expected_indent,
+                "{alignment:?}, RTL {bidi_visual}"
+            );
+        }
+    }
+
+    #[test]
+    fn rtl_table_alignment_and_signed_indent_use_the_leading_margin() {
+        for (alignment, indent, expected_indent) in [
+            (None, 240, 228.0),
+            (Some(ST_Jc::Left), 240, 228.0),
+            (Some(ST_Jc::Left), -240, 252.0),
+            (Some(ST_Jc::Center), 240, 120.0),
+            (Some(ST_Jc::Center), -240, 120.0),
+            (Some(ST_Jc::Right), 0, 0.0),
+            (Some(ST_Jc::Right), 240, 0.0),
+            (Some(ST_Jc::Right), -240, 0.0),
+            (Some(ST_Jc::Start), 240, 228.0),
+            (Some(ST_Jc::End), 240, 0.0),
+        ] {
+            let mut table = aligned_table(2400, alignment, indent);
+            table.properties.as_mut().unwrap().bidi_visual = Some(true);
+            let block = layout_with_defaults(&table, 360.0);
+            assert_eq!(block.table_width, 120.0);
+            assert_eq!(
+                block.table_indent, expected_indent,
+                "{alignment:?}, indent {indent}"
+            );
+        }
     }
 
     #[test]

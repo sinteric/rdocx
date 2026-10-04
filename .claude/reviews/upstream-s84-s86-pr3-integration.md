@@ -1,0 +1,21 @@
+# Full upstream and PR 3 integration verification
+
+The integration retains fixed upstream `0bc51a07bf1baa85aee9b63f6078dfba9e782671`, fork main `fce69db01804b45598103e6363bd515b1405d66d` and PR 3 head `529f26d37cd0596c2c1043b89072b868bebc87e3` as complete ancestors. The contributor's production and baseline commits remain intact. Original upstream CI and deployment workflow bytes are preserved with the explicitly approved producer OIDC and attestation permissions. No tag, release, dispatch, credential or trust configuration operation is part of this integration.
+
+The upstream conflict resolution is the previously validated tree at local candidate `01cd60bc3e9e28ce80c29a27c77a9635f7e2cb4f`. The PR 3 table source merges without conflict. Its SHA-256 is `e0796be22424d383c86cf21dea153fa25565d423e6a85526313e99b2132bf9cb`, identical to the independently tested combined source. It retains upstream accepted-row handling, direct justification precedence, signed leading indentation and direction-aware physical placement. The three alignment tests fail on the original candidate and pass with this source. The complete combined layout library suite passes 312 tests, and scoped all-target/all-feature Clippy and formatting pass.
+
+The old PR baseline belongs to the 0.14.0 family and cannot replace the 0.15.0 upstream baseline. The combined sample run retains all 49 keys and changes only the five entries below relative to the fixed upstream candidate. All other 44 entries remain unchanged, including all recorded XML parts and PDF resources. The baseline update accepts these measured values and preserves the upstream values for the other entries.
+
+| Entry | Accepted combined SHA-256 |
+|---|---|
+| `invoice:page1.png` | `1a765f625f54d084b21f958b84071eb37a1e22eab620bec54decb81947f591e6` |
+| `invoice:pdf/bytes` | `eda63c61b40a27609519c2421303fb05ca5753b2b28cd9270d521c53faa006e0` |
+| `invoice:pdf/pages` | `36e3ec3a9b845ac601bab6f48b02780e2eb021841dff39d589b29aaea4a22a29` |
+| `quote:pdf/bytes` | `6affff6a90f4145d03529d2e34b43a910bfee379947b5a418ffb878360a87664` |
+| `quote:pdf/pages` | `200f174f2578eef6a6da477c506f7bb80a80f06a2865d5392341d60e00f4e903` |
+
+Independent PDF word-coordinate comparisons preserve all words in both samples. Exactly eleven totals words in each sample move 36 pt right, with unchanged y coordinates and text-box sizes. Both page-one PNG dimensions remain 1275 by 1651. The invoice totals table now reaches the intended right text margin. The quote totals are on page two, so its page-one PNG stays unchanged. The sample generator, hash scanner and source XML are not modified by the alignment fix.
+
+The combined `rdocx-layout` archive and the two stale upstream CLI archive rows are measured again from actual local locked package archives on Rust 1.97.1, macOS 27.0.1, Apple M1 Max, arm64. Corresponding README rows, dates, platform overrides and script constants are updated together. Normalized member byte checks and the existing 64 byte compression tolerance remain unchanged. The complete package/README inventory passes after these corrections.
+
+Sample regeneration runs the existing example directly, followed by the harness's read-only collection and comparison functions. It does not use the cleanup path or delete samples. Final regenerated entries match the combined accepted baseline. Earlier full-upstream native, fontdb/memmap, timing, chart, WASM and preview evidence remains applicable to unchanged sources. The complete Word/workspace/Python suites are not represented as newly rerun local checks for this table patch. Native Word/Hancom RTL fidelity and unavailable LibreOffice viewer checks remain independent acceptance limits.
