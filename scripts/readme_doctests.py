@@ -375,7 +375,7 @@ ARCHIVE_REMEASUREMENT_DATES = {
     "oxml-drawing": "2026-10-03",
     "oxml-opc": "2026-10-03",
     "oxml-pdf": "2026-10-03",
-    "rdocx": "2026-10-03",
+    "rdocx": "2026-10-04",
     "rdocx-cli": "2026-10-04",
     "rdocx-layout": "2026-10-04",
     "rdocx-oxml": "2026-10-03",
@@ -392,6 +392,7 @@ ARCHIVE_REMEASUREMENT_DATES = {
 }
 MEASUREMENT_PLATFORM = "macOS 26.6.2, Apple M5 Max, arm64"
 ARCHIVE_REMEASUREMENT_PLATFORMS = {
+    "rdocx": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-chart": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-layout": "macOS 27.0.1, Apple M1 Max, arm64",
     "rdocx-layout": "macOS 27.0.1, Apple M1 Max, arm64",
@@ -410,7 +411,7 @@ ARCHIVE_MEASUREMENTS = {
     "oxml-opc": (99_467, 385_350, 12),
     "oxml-pdf": (73_907, 339_219, 14),
     "oxml-sml": (12_507, 49_803, 6),
-    "rdocx": (1_267_323, 7_351_519, 36),
+    "rdocx": (1_267_396, 7_351_730, 36),
     "rdocx-cli": (70_183, 311_470, 8),
     "rdocx-html": (18_554, 72_244, 11),
     "rdocx-layout": (275_783, 1_470_080, 15),

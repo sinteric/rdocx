@@ -40101,16 +40101,17 @@ mod advanced_table_geometry_regressions {
             .expect("table")
             .set_bidi_visual(Some(true));
 
-        // The painted cells reverse. A left-to-right row paints the narrow
-        // first column at the table origin, and a bidirectional row paints it
-        // last, at the table's trailing edge.
+        // The painted cells reverse. With no authored justification, the
+        // 432 point table starts at its leading margin: x = 72 for LTR and
+        // x = 108 for RTL in the 468 point body band. The narrow first column
+        // paints last in RTL, ending at the right text margin at x = 540.
         assert_eq!(
             painted_cells(&forward),
             vec![(72.0, 72.0), (144.0, 144.0), (288.0, 216.0)]
         );
         assert_eq!(
             painted_cells(&reversed),
-            vec![(72.0, 216.0), (288.0, 144.0), (432.0, 72.0)]
+            vec![(108.0, 216.0), (324.0, 144.0), (468.0, 72.0)]
         );
 
         // Logical cell ownership does not reverse. Every cell keeps its source
@@ -40134,6 +40135,8 @@ mod advanced_table_geometry_regressions {
         let reversed_block = lay_out(&table, 468.0);
         assert!(!forward_block.bidi_visual);
         assert!(reversed_block.bidi_visual);
+        assert_eq!(forward_block.table_indent, 0.0);
+        assert_eq!(reversed_block.table_indent, 36.0);
         let logical_geometry = |block: &rdocx_layout::table::TableBlock| {
             block.rows[0]
                 .cells

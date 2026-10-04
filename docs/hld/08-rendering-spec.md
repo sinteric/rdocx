@@ -885,7 +885,10 @@ carries the fact on the lowered table block, and the row painter places the
 logically last cell first. The lowered column widths, every cell's grid column,
 the retained semantics and the structure tree stay in reading order, so cell
 ownership, the body fragments and the accessibility contract are unchanged. A
-left-to-right table takes the same placement arithmetic it always did.
+left-to-right table takes the same placement arithmetic it always did. Table
+justification and signed indentation resolve from the leading margin, which
+is the right margin for `w:bidiVisual`. Without authored or inherited
+justification, the table has zero indentation from that leading margin.
 
 A row's omitted leading grid columns move that row alone. The resolved offset
 is `w:wBefore` when present and otherwise the width of the `w:gridBefore`
