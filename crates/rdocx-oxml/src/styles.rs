@@ -754,7 +754,7 @@ impl CT_Styles {
 
     /// Serialize to XML bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
-        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",

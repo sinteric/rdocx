@@ -175,7 +175,7 @@ impl<'a> HyperlinkRef<'a> {
 }
 
 impl Alignment {
-    fn to_st_jc(self) -> ST_Jc {
+    pub(crate) fn to_st_jc(self) -> ST_Jc {
         match self {
             Alignment::Left => ST_Jc::Left,
             Alignment::Center => ST_Jc::Center,

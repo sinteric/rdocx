@@ -991,14 +991,17 @@ fn emit_line_items(
 ) -> (f64, f64) {
     let element_start = elements.len();
     let (hanging_left, _) = hanging_widths(line);
+    let (hang_start, hang_end) = line.hanging_space_counts();
+    // Spaces hanging past the line end are not gaps to widen.
+    let ink = hang_start..line.items.len() - hang_end;
     let remaining = line.available_width - ink_width(line);
     let distribute = match alignment {
         ParagraphAlignment::Justified if !line.is_last => {
-            let gaps = word_gap_count(&line.items);
+            let gaps = word_gap_count(&line.items[ink.clone()]);
             (gaps > 0).then_some((remaining.max(0.0) / gaps as f64, false))
         }
         ParagraphAlignment::Distributed => {
-            let gaps = glyph_gap_count(&line.items);
+            let gaps = glyph_gap_count(&line.items[ink.clone()]);
             (gaps > 0).then_some((remaining.max(0.0) / gaps as f64, true))
         }
         _ => None,
@@ -1013,13 +1016,16 @@ fn emit_line_items(
     let start_x = x;
     let mut distributed_gaps = distribute
         .filter(|(_, every_glyph)| *every_glyph)
-        .map_or(0, |_| glyph_gap_count(&line.items));
+        .map_or(0, |_| glyph_gap_count(&line.items[ink.clone()]));
 
-    for item in &line.items {
+    for (index, item) in line.items.iter().enumerate() {
         match item {
             LineItem::Text(segment) => {
-                let (advances, effective_width) =
-                    distributed_advances(segment, distribute, &mut distributed_gaps);
+                let (advances, effective_width) = distributed_advances(
+                    segment,
+                    distribute.filter(|_| ink.contains(&index)),
+                    &mut distributed_gaps,
+                );
                 emit_segment(
                     segment,
                     advances,
@@ -2006,7 +2012,11 @@ mod tests {
         };
 
         let stacked = stack_text(&mut fonts, content, &body).expect("stack text");
-        let runs = glyph_runs(&stacked.elements);
+        // The space hanging past the first line is a run of its own.
+        let runs = glyph_runs(&stacked.elements)
+            .into_iter()
+            .filter(|run| !run.text.trim().is_empty())
+            .collect::<Vec<_>>();
 
         assert_eq!(runs.len(), 3);
         assert_close(runs[1].origin.y - runs[0].origin.y, 20.0);
@@ -2437,6 +2447,84 @@ mod tests {
                             "{width}: {line_right}"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plain_aligned_lines_end_flush_past_their_spaces() {
+        let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+        let text = "Repainted in 3 weeks while still in service, or re-coated next spring";
+        for alignment in [
+            ParagraphAlignment::Right,
+            ParagraphAlignment::Justified,
+            ParagraphAlignment::Distributed,
+        ] {
+            for width in (100..240).step_by(2) {
+                let body = ResolvedTextBody {
+                    paragraphs: vec![ResolvedParagraph {
+                        alignment,
+                        runs: vec![ResolvedTextRun::Text {
+                            text: text.to_owned(),
+                            style: ResolvedRunStyle {
+                                font_size: Some(14.0),
+                                latin_typeface: Some("Arial".to_owned()),
+                                ..ResolvedRunStyle::default()
+                            },
+                        }],
+                        ..ResolvedParagraph::default()
+                    }],
+                    ..text_body(TextInsets::default())
+                };
+                let content = test_content_box(f64::from(width));
+                // No direction keeps the paragraph on the plain path.
+                let stacked = stack_text_for_page_with_directions(
+                    &mut fonts,
+                    content,
+                    &body,
+                    1,
+                    &[oxml_layout::TextDirection::Auto],
+                )
+                .expect("stack plain paragraph");
+                let mut line_ends = Vec::<(f64, f64)>::new();
+                for element in &stacked.elements {
+                    let PositionedElement::Text(run) = element else {
+                        panic!("a plain paragraph paints plain runs");
+                    };
+                    if run.text.trim().is_empty() {
+                        continue;
+                    }
+                    let right = run.origin.x + run.advances.iter().sum::<f64>();
+                    match line_ends.last_mut() {
+                        Some((baseline, end)) if *baseline == run.origin.y => *end = right,
+                        _ => line_ends.push((run.origin.y, right)),
+                    }
+                }
+                assert!(line_ends.len() > 1, "{width}: the text wraps");
+                // The space that ends each wrapped line hangs past the edge,
+                // as in PowerPoint, so the ink ends flush with it, and it is
+                // not widened.
+                for element in &stacked.elements {
+                    if let PositionedElement::Text(run) = element
+                        && run.text.trim().is_empty()
+                    {
+                        let natural = fonts
+                            .shape_text(run.font_id, &run.text, run.font_size)
+                            .expect("shape the hanging space")
+                            .width;
+                        let painted = run.advances.iter().sum::<f64>();
+                        assert!(
+                            (painted - natural).abs() < 0.001,
+                            "{alignment:?} {width}: a hanging space is {painted} wide"
+                        );
+                    }
+                }
+                for (_, end) in &line_ends[..line_ends.len() - 1] {
+                    assert!(
+                        (end - content.width).abs() < 0.01,
+                        "{alignment:?} {width}: a wrapped line ends at {end}"
+                    );
                 }
             }
         }
@@ -3173,7 +3261,11 @@ mod tests {
             .expect("marker")
             .origin
             .x;
-        let text_runs: Vec<_> = runs.into_iter().filter(|run| run.text != "*").collect();
+        // Spaces hanging past the wrapped lines are runs of their own.
+        let text_runs: Vec<_> = runs
+            .into_iter()
+            .filter(|run| run.text != "*" && !run.text.trim().is_empty())
+            .collect();
 
         assert_close(marker_x, 10.0);
         assert_close(text_runs[0].origin.x, 20.0);
@@ -3243,7 +3335,11 @@ mod tests {
             .iter()
             .find(|run| run.text == "12345.")
             .expect("automatic marker");
-        let text_runs: Vec<_> = runs.iter().filter(|run| run.text != "12345.").collect();
+        // Spaces hanging past the wrapped lines are runs of their own.
+        let text_runs: Vec<_> = runs
+            .iter()
+            .filter(|run| run.text != "12345." && !run.text.trim().is_empty())
+            .collect();
 
         assert!(marker.advances.iter().sum::<f64>() > 10.0);
         assert_close(marker.origin.x, 10.0);

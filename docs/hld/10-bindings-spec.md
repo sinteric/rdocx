@@ -874,6 +874,14 @@ properties including a table style's own row and cell properties, and
 conditional table regions carrying all five property layers. `add_style` is
 fallible in the pre-1.0 API. `set_style`, `remove_style`,
 `set_default_style`, and `validate_style_graph` use the same `Result` boundary.
+For common formatting, the existing builder also offers fluent `alignment`,
+`space_before`, `space_after`, `indent_left`, `font`, `size`, `bold`, and `color`
+methods. Lengths use the paragraph facade's twip conversion and font sizes use
+`HalfPoint::from_pt`. An explicit font fills all four script slots and clears
+their theme references. An explicit colour clears the theme colour, tint, and
+shade. Callers can mix these methods with `paragraph_properties(CT_PPr)` and
+`run_properties(CT_RPr)`, with later calls taking precedence on overlapping
+builder fields. This is an additive native Rust API in unreleased 0.14.0.
 Builder clear operations remove optional links, UI metadata, base properties,
 and conditional regions during a staged update, and
 `remove_conditional_table_style` removes exactly one region while its siblings
@@ -1100,6 +1108,28 @@ a successful call advances the revision once, even when the variant already
 had its own story. Rich story content is authored with the typed body
 API and moved with `pop_content` and `insert_content`, which accept story
 coordinates. WASM and CLI gain no corresponding binding surface.
+
+Native Rust `Document::create_footnote(&ContentLocation, &str)` appends a normal
+footnote and its reference to one direct body paragraph in a staged operation.
+It returns the stable internal note ID. `footnote_story(i32)` resolves that ID
+to its current checked `StoryId`. `move_footnote_before(i32, i32)` reorders the
+note elements without changing IDs, and `remove_footnote(i32)` removes the note
+and all matching body references together. All four methods are fallible.
+Rich paragraphs, tables, fields, links, pictures, content controls, and
+comments use the common story APIs on the resolved footnote story. This is an
+additive pre-1.0 native API. Python, WASM, and CLI gain no matching authoring
+entry point.
+
+Native Rust `Document::create_endnote(&ContentLocation, &str)` stages a normal
+endnote with its reference in a direct body paragraph and returns its stable
+internal ID. `endnote_story(i32)` resolves a current checked story identity.
+`move_endnote_before(i32, i32)` reorders exact note elements without changing
+IDs. `remove_endnote(i32)` removes a normal endnote and every matching body
+reference together. All four methods are fallible. Endnotes allocate IDs
+independently from footnotes and use the common rich story operations,
+including part-scoped pictures, links, and comment anchors. This is additive
+pre-1.0 native API. Python, WASM, and CLI gain no corresponding authoring
+entry point.
 
 `CT_SectPr` adds typed page-number start and raw child-position state, while
 `PageFrame` adds `displayed_page_number` beside its physical `page_number`.
@@ -1975,9 +2005,15 @@ Native Word rendering exposes `rdocx::RevisionView` and the concrete
 `rdocx::RenderOptions`, whose default selects the accepted view. Additive
 option-taking counterparts cover PDF bytes and files, single-page and all-page
 raster output, page layout, deterministic rendering, and caller-supplied font
-paths. The existing methods keep their accepted default. Python, WASM, and CLI
-surfaces do not implicitly expose the selector and retain their existing
-rendering behavior.
+paths. The existing methods keep their accepted default. Python `to_pdf`,
+`render_page_to_png`, `render_all_pages`, and `render_pages` take a keyword-only
+`revision_view` of `"accepted"` or `"tracked"`, with `"accepted"` as the
+default. Any other value raises `ValueError`. CLI `convert` for PDF and image
+formats and `render` take `--revision-view accepted` or
+`--revision-view tracked`, with `accepted` as the default. An unknown value is
+a usage error.
+HTML and Markdown conversion refuse tracked view before creating output. WASM
+retains its existing rendering behavior.
 Native selected-image rendering adds zero-based page-list entry points that
 share `rdocx::RasterFormat`, `rdocx::RasterOptions` and
 `rdocx::RasterOutput` with `oxml-pdf`. The existing PNG methods remain
@@ -1986,11 +2022,12 @@ keyword-only `render_pages` arguments, keeps zero-based page indices, releases
 the GIL for rendering, returns `list[bytes]` for PNG or JPEG, and returns one
 `bytes` value for TIFF.
 
-Python `Document.to_pdf(*, fonts=None, font_dir=None)` keeps the plain call on
-`Document::to_pdf`. With `fonts`, a sequence of `(family, bytes)` pairs, or
-`font_dir`, a directory whose `.ttf`, `.otf`, and `.ttc` files
+Python `Document.to_pdf(*, fonts=None, font_dir=None, revision_view="accepted")`
+uses `Document::to_pdf_with_options` when no fonts are supplied. With `fonts`,
+a sequence of `(family, bytes)` pairs, or `font_dir`, a directory whose `.ttf`,
+`.otf`, and `.ttc` files
 `Document::load_fonts_from_dir` labels by file name, it calls
-`Document::to_pdf_with_fonts` with the given fonts first, as
+`Document::to_pdf_with_fonts_and_options` with the given fonts first, as
 `rdocx convert --font-dir` does. That call lays out with the caller fonts only,
 so a family they do not provide, even through the automatic label aliases and
 metric-compatible names, raises `LayoutError`. The native loader reads a

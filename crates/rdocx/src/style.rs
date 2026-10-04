@@ -9,6 +9,8 @@ use rdocx_oxml::styles::{CT_Style, CT_Styles, CT_TblStylePr, StyleType, TableSty
 use rdocx_oxml::table::{CT_TblBorders, CT_TblCellMar, CT_TblPr, CT_TcPr, CT_TrPr};
 use rdocx_oxml::units::{HalfPoint, Twips};
 
+use crate::Length;
+use crate::paragraph::Alignment;
 use crate::{Error, Result};
 
 /// An immutable reference to a style definition.
@@ -168,26 +170,28 @@ impl<'a> ConditionalTableStyle<'a> {
 /// Builder for creating a new paragraph style.
 pub struct StyleBuilder {
     style: CT_Style,
-    cleared: u16,
+    cleared: u32,
     removed_regions: Vec<TableStyleRegion>,
 }
 
-pub(crate) const CLEAR_BASED_ON: u16 = 1 << 0;
-pub(crate) const CLEAR_NEXT_STYLE: u16 = 1 << 1;
-pub(crate) const CLEAR_LINKED_STYLE: u16 = 1 << 2;
-pub(crate) const CLEAR_PRIORITY: u16 = 1 << 3;
-pub(crate) const CLEAR_AUTO_REDEFINE: u16 = 1 << 4;
-pub(crate) const CLEAR_HIDDEN: u16 = 1 << 5;
-pub(crate) const CLEAR_SEMI_HIDDEN: u16 = 1 << 6;
-pub(crate) const CLEAR_UNHIDE_WHEN_USED: u16 = 1 << 7;
-pub(crate) const CLEAR_QUICK_FORMAT: u16 = 1 << 8;
-pub(crate) const CLEAR_LOCKED: u16 = 1 << 9;
-pub(crate) const CLEAR_PARAGRAPH_PROPERTIES: u16 = 1 << 10;
-pub(crate) const CLEAR_RUN_PROPERTIES: u16 = 1 << 11;
-pub(crate) const CLEAR_TABLE_PROPERTIES: u16 = 1 << 12;
-pub(crate) const CLEAR_CONDITIONAL_TABLE_STYLES: u16 = 1 << 13;
-pub(crate) const CLEAR_TABLE_ROW_PROPERTIES: u16 = 1 << 14;
-pub(crate) const CLEAR_TABLE_CELL_PROPERTIES: u16 = 1 << 15;
+pub(crate) const CLEAR_BASED_ON: u32 = 1 << 0;
+pub(crate) const CLEAR_NEXT_STYLE: u32 = 1 << 1;
+pub(crate) const CLEAR_LINKED_STYLE: u32 = 1 << 2;
+pub(crate) const CLEAR_PRIORITY: u32 = 1 << 3;
+pub(crate) const CLEAR_AUTO_REDEFINE: u32 = 1 << 4;
+pub(crate) const CLEAR_HIDDEN: u32 = 1 << 5;
+pub(crate) const CLEAR_SEMI_HIDDEN: u32 = 1 << 6;
+pub(crate) const CLEAR_UNHIDE_WHEN_USED: u32 = 1 << 7;
+pub(crate) const CLEAR_QUICK_FORMAT: u32 = 1 << 8;
+pub(crate) const CLEAR_LOCKED: u32 = 1 << 9;
+pub(crate) const CLEAR_PARAGRAPH_PROPERTIES: u32 = 1 << 10;
+pub(crate) const CLEAR_RUN_PROPERTIES: u32 = 1 << 11;
+pub(crate) const CLEAR_TABLE_PROPERTIES: u32 = 1 << 12;
+pub(crate) const CLEAR_CONDITIONAL_TABLE_STYLES: u32 = 1 << 13;
+pub(crate) const CLEAR_TABLE_ROW_PROPERTIES: u32 = 1 << 14;
+pub(crate) const CLEAR_TABLE_CELL_PROPERTIES: u32 = 1 << 15;
+pub(crate) const CLEAR_FONT_THEME: u32 = 1 << 16;
+pub(crate) const CLEAR_COLOR_THEME: u32 = 1 << 17;
 
 impl StyleBuilder {
     /// Create a new paragraph style builder.
@@ -414,6 +418,40 @@ impl StyleBuilder {
         self
     }
 
+    /// Set paragraph alignment, retaining other paragraph properties.
+    pub fn alignment(mut self, value: Alignment) -> Self {
+        self.style.ppr.get_or_insert_with(CT_PPr::default).jc = Some(value.to_st_jc());
+        self.cleared &= !CLEAR_PARAGRAPH_PROPERTIES;
+        self
+    }
+
+    /// Set paragraph space before using the same twip conversion as `Paragraph`.
+    pub fn space_before(mut self, value: Length) -> Self {
+        self.style
+            .ppr
+            .get_or_insert_with(CT_PPr::default)
+            .space_before = Some(value.as_twips());
+        self.cleared &= !CLEAR_PARAGRAPH_PROPERTIES;
+        self
+    }
+
+    /// Set paragraph space after using the same twip conversion as `Paragraph`.
+    pub fn space_after(mut self, value: Length) -> Self {
+        self.style
+            .ppr
+            .get_or_insert_with(CT_PPr::default)
+            .space_after = Some(value.as_twips());
+        self.cleared &= !CLEAR_PARAGRAPH_PROPERTIES;
+        self
+    }
+
+    /// Set left paragraph indentation.
+    pub fn indent_left(mut self, value: Length) -> Self {
+        self.style.ppr.get_or_insert_with(CT_PPr::default).ind_left = Some(value.as_twips());
+        self.cleared &= !CLEAR_PARAGRAPH_PROPERTIES;
+        self
+    }
+
     /// Remove all paragraph properties during an update.
     pub fn clear_paragraph_properties(mut self) -> Self {
         self.style.ppr = None;
@@ -424,14 +462,62 @@ impl StyleBuilder {
     /// Set run properties for this style.
     pub fn run_properties(mut self, rpr: CT_RPr) -> Self {
         self.style.rpr = Some(rpr);
+        self.cleared &= !(CLEAR_RUN_PROPERTIES | CLEAR_FONT_THEME | CLEAR_COLOR_THEME);
+        self
+    }
+
+    /// Set the explicit font in all four script slots and clear theme fonts.
+    pub fn font(mut self, name: &str) -> Self {
+        let rpr = self.style.rpr.get_or_insert_with(CT_RPr::default);
+        rpr.font_ascii = Some(name.to_owned());
+        rpr.font_hansi = Some(name.to_owned());
+        rpr.font_east_asia = Some(name.to_owned());
+        rpr.font_cs = Some(name.to_owned());
+        rpr.font_ascii_theme = None;
+        rpr.font_hansi_theme = None;
+        rpr.font_east_asia_theme = None;
+        rpr.font_cs_theme = None;
         self.cleared &= !CLEAR_RUN_PROPERTIES;
+        self.cleared |= CLEAR_FONT_THEME;
+        self
+    }
+
+    /// Set font size in points for normal and complex-script text.
+    pub fn size(mut self, pt: f64) -> Self {
+        let size = HalfPoint::from_pt(pt);
+        let rpr = self.style.rpr.get_or_insert_with(CT_RPr::default);
+        rpr.sz = Some(size);
+        rpr.sz_cs = Some(size);
+        self.cleared &= !CLEAR_RUN_PROPERTIES;
+        self
+    }
+
+    /// Set bold formatting for normal and complex-script text.
+    pub fn bold(mut self, value: bool) -> Self {
+        let rpr = self.style.rpr.get_or_insert_with(CT_RPr::default);
+        rpr.bold = Some(value);
+        rpr.bold_cs = Some(value);
+        self.cleared &= !CLEAR_RUN_PROPERTIES;
+        self
+    }
+
+    /// Set a literal hex colour and clear its theme colour reference.
+    pub fn color(mut self, hex: &str) -> Self {
+        let rpr = self.style.rpr.get_or_insert_with(CT_RPr::default);
+        rpr.color = Some(hex.to_owned());
+        rpr.color_theme = None;
+        rpr.color_theme_tint = None;
+        rpr.color_theme_shade = None;
+        self.cleared &= !CLEAR_RUN_PROPERTIES;
+        self.cleared |= CLEAR_COLOR_THEME;
         self
     }
 
     /// Remove all run properties during an update.
     pub fn clear_run_properties(mut self) -> Self {
         self.style.rpr = None;
-        self.cleared |= CLEAR_RUN_PROPERTIES;
+        self.cleared =
+            (self.cleared | CLEAR_RUN_PROPERTIES) & !(CLEAR_FONT_THEME | CLEAR_COLOR_THEME);
         self
     }
 
@@ -526,7 +612,7 @@ impl StyleBuilder {
     }
 
     /// Build the style (consumed by Document::add_style).
-    pub(crate) fn build(self) -> (CT_Style, u16, Vec<TableStyleRegion>) {
+    pub(crate) fn build(self) -> (CT_Style, u32, Vec<TableStyleRegion>) {
         (self.style, self.cleared, self.removed_regions)
     }
 }

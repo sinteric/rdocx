@@ -15,12 +15,13 @@ use crate::properties::{
     get_word_val_attr, is_word_attribute, is_word_element, parse_integer_measurement,
 };
 use crate::raw_xml::{capture_element, capture_empty_element};
-use crate::revision::CT_Revision;
+use crate::revision::{CT_Revision, RevisionKind};
 use crate::shared::{ST_PageOrientation, ST_SectionType};
 use crate::table::{CT_Tbl, ST_VerticalJc};
 use crate::text::{
-    CT_P, capture_root_attribute_record, declare_w14_on_part_root, is_root_attribute_record,
-    push_root_attribute_record,
+    CT_P, ROOT_MC_BINDING, ROOT_R_BINDING, ROOT_WP_BINDING, capture_root_attribute_record,
+    declare_w14_on_part_root, is_root_attribute_record, push_root_attribute_record,
+    root_binding_scope,
 };
 use crate::units::Twips;
 
@@ -2487,6 +2488,55 @@ impl CT_Body {
         paragraphs.into_iter()
     }
 
+    /// Whether accepting every tracked change joins the body paragraph at
+    /// `index` to the next body paragraph, as Word does when a paragraph mark
+    /// is deleted or moved away (`w:del` or `w:moveFrom` in the mark `w:rPr`).
+    ///
+    /// The joined paragraph keeps the properties of the next paragraph, so a
+    /// joining paragraph with no accepted content leaves nothing. The next
+    /// body item must be a paragraph, the adjacency `Document::accept_all`
+    /// requires before it merges a paragraph. `accept_all` refuses a removed
+    /// mark before a table, a content control, preserved XML or the end of
+    /// the body, and those paragraphs keep their marks here. A paragraph that
+    /// ends a section also keeps its mark here, although `accept_all` merges
+    /// its section break away.
+    #[doc(hidden)]
+    pub fn accepted_paragraph_joins_next(&self, index: usize) -> bool {
+        let Some(BodyContent::Paragraph(paragraph)) = self.content.get(index) else {
+            return false;
+        };
+        let Some(properties) = paragraph.properties.as_ref() else {
+            return false;
+        };
+        let Some(mark) = properties.rpr.as_ref() else {
+            return false;
+        };
+        // The model keeps a moved-away mark as preserved XML, read with the
+        // fixed `w` prefix and any binding the XML declares itself. A mark
+        // whose Word prefix is bound only outside it is not recognized, so
+        // that paragraph keeps its mark.
+        let moved_away = || {
+            mark.revision_xml.iter().any(|raw| {
+                let mut reader = Reader::from_reader(raw.as_slice());
+                matches!(
+                    reader.read_event(),
+                    Ok(Event::Start(start) | Event::Empty(start))
+                        if word_prefixes_at(&start, &["w".to_owned()]).is_ok_and(|prefixes| {
+                            is_word_element(start.name().as_ref(), b"moveFrom", &prefixes)
+                        })
+                )
+            })
+        };
+        let removed = mark
+            .revision_markers
+            .iter()
+            .any(|marker| marker.kind() == RevisionKind::Deletion)
+            || moved_away();
+        removed
+            && properties.sect_pr.is_none()
+            && matches!(self.content.get(index + 1), Some(BodyContent::Paragraph(_)))
+    }
+
     /// Get a mutable iterator over only the paragraphs.
     pub fn paragraphs_mut(&mut self) -> impl Iterator<Item = &mut CT_P> {
         self.content.iter_mut().filter_map(|c| match c {
@@ -2927,7 +2977,22 @@ impl CT_Document {
 
     /// Serialize to XML bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
-        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        let wp_root_is_canonical = self
+            .extra_namespaces
+            .iter()
+            .find(|(name, _)| name == "xmlns:wp")
+            .is_none_or(|(_, namespace)| namespace == wp_ns);
+        let _binding_scope = root_binding_scope(
+            ROOT_R_BINDING
+                | ROOT_MC_BINDING
+                | if wp_root_is_canonical {
+                    ROOT_WP_BINDING
+                } else {
+                    0
+                },
+        );
+        let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",
@@ -2947,7 +3012,6 @@ impl CT_Document {
         ));
 
         // Always emit xmlns:wp for drawing elements
-        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
         let mut has_wp = false;
         for (key, _) in &self.extra_namespaces {
             if key == "xmlns:wp" {

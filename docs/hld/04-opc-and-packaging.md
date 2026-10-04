@@ -103,6 +103,22 @@ source part, owner kind, source-order ordinal, and a structural fingerprint.
 Any changed owner makes a retained identity stale before indexed content can be
 resolved.
 
+Rich footnote authoring reserves the relationship-resolved footnotes part,
+adds one normal note with an available internal ID, and inserts its body
+reference in one staged package. Reorder moves only the selected note element
+within the part. Removal deletes that element and every matching body
+reference before the candidate is reopened. Common story edits preserve
+untouched note children, separator records, producer prefixes, and unrelated
+part relationships. Pictures and hyperlinks use the footnotes part relationship
+set, and comment anchors in note paragraphs use the comments part.
+
+Endnote authoring uses the relationship-resolved endnotes part and its own
+normal ID namespace. Creation inserts the note and body reference together.
+Reorder moves an exact endnote element, while removal deletes that element and
+its body references. The staged package reopens before publication. Endnote
+story edits preserve separator records, unknown children, and unrelated
+relationships. Pictures and hyperlinks are owned by the endnotes part.
+
 Revision inventory uses these same supported story owners and reports their
 `StoryId` with each record. A revision reachable by resolution without a
 discoverable owner is an error. CLI text extraction retains readable body text
@@ -462,7 +478,7 @@ in their original namespace and schema positions. Typed `w:ilvl` and `w:numId`
 updates remain before retained `w:numberingChange` and insertion properties.
 Self-closing `w:numPr` carriers copy any inherited namespace binding required
 by a retained root attribute onto the serialized carrier.
-An unchanged plain numeric leaf may use the typed serializer's indentation,
+An unchanged plain numeric leaf may use the typed serializer's layout,
 while malformed or extended source leaves remain byte-exact.
 
 Every standard `w:numFmt` token has a typed representation. Producer-defined
@@ -481,8 +497,10 @@ safely, leaving the opened package bytes authoritative.
 The main document, header, footer, comments, footnotes, endnotes, and styles
 roots retain their other attributes, such as `mc:Ignorable`, in source order.
 A rewrite keeps each compatibility attribute with declarations for every
-prefix it lists. An unchanged part keeps its exact producer bytes, including
-an empty self-closed comments root.
+prefix it lists. The typed Word part serializers write without indentation, so
+rewritten document, story, comment, style and numbering parts retain compact
+layout and gain no whitespace-only text between elements. An unchanged part
+keeps its exact producer bytes, including an empty self-closed comments root.
 Story insertion reads the retained main-part XML while it matches the typed
 model. Picture insertion adds one paragraph at its body boundary. Canonical
 relationship and drawing identifiers are patched into that retained XML, so
@@ -509,15 +527,25 @@ only when a retained attribute uses its prefix, because the alias machinery
 already materializes a binding onto every element that needs one, and recording
 a declaration a child carries for itself would emit it twice. A root carrying
 nothing but declarations retains no record at all. On the way back out, the
-canonical `w14` binding is not copied onto the written element, since the part
-root that owns the element declares it in what Word and python-docx write, and
-the authored identity write makes the same assumption. Together these keep a
+canonical `w` and `w14` bindings are not copied onto the written element, since
+the part root that owns the element declares them in what Word and python-docx
+write, and the element's own `w:` name and the authored identity write make the
+same assumption. A binding of either prefix to another URI is still copied. Together these keep a
 reopened save byte identical to the save it was read from. A part root that
 does not declare `w14`, such as one rdocx wrote or one under an element that
 declared the prefix itself, gains the canonical declaration when the written
 content uses the prefix. The serializers of the document, header, footer,
 note and comment parts and the comparison output of every story add it, so the
-written part stays namespace well formed.
+written part stays namespace well formed. During complete part serialization,
+a retained attribute also omits same-URI bindings already guaranteed by that
+part root: `r` and `mc` for the main document, canonical `wp` when that root
+actually writes it, `r` and conditionally canonical `wp` for headers and
+footers, and `r` for footnotes and endnotes. Standalone paragraphs and
+comments keep their own bindings. A scoped serializer context restores its
+previous guarantees after nested calls and errors. The retained-attribute
+regression checks one declaration of each canonical prefix at the document
+root, alongside producer attributes, a new binding, and an unchanged
+unmodelled child.
 
 A paragraph cut out of its part and parsed on its own carries none of the
 declarations of its part. The table-of-contents rebuild adds the bindings the
@@ -1364,8 +1392,14 @@ package's main-document bytes are authoritative. Exact source spans flow through
 body items, paragraphs, tables, rows, cells, controls, and runs, including when
 another child of the same owner changes. An unchanged drawing-bearing run keeps
 its complete wrapper, local namespace declarations, extended drawing children,
-and relationship identifier. Policy
-projection removes only the selected comparison facts. Ignored formatting,
+and relationship identifier. Compared pictures align by the bytes of their
+relationship targets. A changed picture keeps the original media for rejection
+and carries the edited media only when tracked content references it. A
+repeated image may use a new relationship to an existing media part, so the
+redline keeps one part per distinct payload. Imported media retains the edited
+content type, and the complete package is reopened before either resolution is
+checked. Policy projection removes only the selected comparison facts. Ignored
+formatting,
 textual whitespace, fields, comments, and story categories retain the original
 bytes. Character and word alignment carries source ownership and raw-child
 boundaries, keeps non-text content atomic, and emits each preserved child once.

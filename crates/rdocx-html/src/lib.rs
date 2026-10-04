@@ -5,10 +5,11 @@ mod emitter;
 mod markdown;
 mod sanitize;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
-use rdocx_oxml::document::{BodyContent, CT_Document};
+use rdocx_oxml::document::{BodyContent, CT_Body, CT_Document};
 use rdocx_oxml::numbering::CT_Numbering;
 use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::table::{CT_Tbl, CT_Tc, CellContent};
@@ -79,7 +80,7 @@ pub fn to_markdown(input: &HtmlInput) -> String {
 
 /// A paragraph or a table that the emitters write as one block.
 enum Block<'a> {
-    Paragraph(&'a CT_P),
+    Paragraph(Box<Cow<'a, CT_P>>),
     Table(&'a CT_Tbl),
 }
 
@@ -87,11 +88,22 @@ enum Block<'a> {
 /// control is transparent: what it wraps, nested controls included, is
 /// written as if the control were not there, which is what `Paragraph.text`
 /// and `Document::text` read.
-fn body_blocks(content: &[BodyContent]) -> Vec<Block<'_>> {
+fn body_blocks(body: &CT_Body) -> Vec<Block<'_>> {
     let mut blocks = Vec::new();
-    for item in content {
+    let mut carried: Option<CT_P> = None;
+    for (index, item) in body.content.iter().enumerate() {
         match item {
-            BodyContent::Paragraph(paragraph) => blocks.push(Block::Paragraph(paragraph)),
+            BodyContent::Paragraph(paragraph) => {
+                let paragraph = match carried.take() {
+                    Some(prefix) => Cow::Owned(join_accepted_paragraphs(prefix, paragraph)),
+                    None => Cow::Borrowed(paragraph),
+                };
+                if body.accepted_paragraph_joins_next(index) {
+                    carried = Some(paragraph.accepted_view().into_owned());
+                } else {
+                    blocks.push(Block::Paragraph(Box::new(paragraph)));
+                }
+            }
             BodyContent::Table(table) => blocks.push(Block::Table(table)),
             BodyContent::ContentControl(control) => push_control_blocks(control, &mut blocks),
             BodyContent::RawXml(_) => {}
@@ -100,13 +112,31 @@ fn body_blocks(content: &[BodyContent]) -> Vec<Block<'_>> {
     blocks
 }
 
+fn join_accepted_paragraphs(prefix: CT_P, paragraph: &CT_P) -> CT_P {
+    let mut result = paragraph.accepted_view().into_owned();
+    let offset = prefix.runs.len();
+    for hyperlink in &mut result.hyperlinks {
+        hyperlink.run_start += offset;
+        hyperlink.run_end += offset;
+    }
+    let mut hyperlinks = prefix.hyperlinks;
+    hyperlinks.extend(result.hyperlinks);
+    result.hyperlinks = hyperlinks;
+    let mut runs = prefix.runs;
+    runs.extend(result.runs);
+    result.runs = runs;
+    result
+}
+
 /// The paragraphs and nested tables of a table cell, as [`body_blocks`]
 /// reads a body.
 fn cell_blocks(cell: &CT_Tc) -> Vec<Block<'_>> {
     let mut blocks = Vec::new();
     for item in &cell.content {
         match item {
-            CellContent::Paragraph(paragraph) => blocks.push(Block::Paragraph(paragraph)),
+            CellContent::Paragraph(paragraph) => {
+                blocks.push(Block::Paragraph(Box::new(Cow::Borrowed(paragraph))))
+            }
             CellContent::Table(table) => blocks.push(Block::Table(table)),
             CellContent::ContentControl(control) => push_control_blocks(control, &mut blocks),
         }
@@ -117,7 +147,9 @@ fn cell_blocks(cell: &CT_Tc) -> Vec<Block<'_>> {
 fn push_control_blocks<'a>(control: &'a CT_Sdt, blocks: &mut Vec<Block<'a>>) {
     for item in &control.content {
         match item {
-            SdtContent::Paragraph(paragraph) => blocks.push(Block::Paragraph(paragraph)),
+            SdtContent::Paragraph(paragraph) => {
+                blocks.push(Block::Paragraph(Box::new(Cow::Borrowed(paragraph))))
+            }
             SdtContent::Table(table) => blocks.push(Block::Table(table)),
             SdtContent::ContentControl(nested) => push_control_blocks(nested, blocks),
             // A control around a paragraph or a table holds no rows, cells or

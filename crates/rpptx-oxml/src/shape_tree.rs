@@ -31,6 +31,9 @@ use crate::placeholder::{ApplicationProperties, CT_Placeholder, parse_applicatio
 pub type Result<T> = std::result::Result<T, OxmlError>;
 type RawAttributes = Vec<(String, String)>;
 
+/// The theme references python-pptx writes for a new autoshape.
+const DEFAULT_STYLE: &str = r#"<p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="2"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style>"#;
+
 /// One shape-tree child in document and z-order.
 // The public PresentationML model intentionally stores CT_Picture directly.
 #[allow(clippy::large_enum_variant)]
@@ -1110,6 +1113,23 @@ impl CT_Shape {
         };
         style.effect_reference.index = index;
         true
+    }
+
+    /// Sets `p:style` to the theme references python-pptx writes for a new
+    /// autoshape: the first theme line, the third theme fill, and the second
+    /// theme effect in `accent1`, and the minor font in `lt1`.
+    ///
+    /// A shape with neither a style nor a direct fill or line draws nothing.
+    pub fn set_default_style(&mut self) -> Result<()> {
+        let namespaces = NamespaceBindings::from_entries(&[
+            ("p".to_owned(), P_NS.to_owned()),
+            ("a".to_owned(), A_NS.to_owned()),
+        ]);
+        self.raw.style = Some(CT_ShapeStyle::from_fragment(
+            DEFAULT_STYLE.as_bytes(),
+            &namespaces,
+        )?);
+        Ok(())
     }
 
     /// Returns whether `p:cNvSpPr/@txBox` marks this shape as a text box.
@@ -2400,6 +2420,27 @@ mod style_tests {
         assert!(textbox_xml.contains("<a:noFill/>"));
         assert!(textbox_xml.contains("<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>"));
         assert_eq!(CT_Shape::from_xml(textbox_xml.as_bytes()).unwrap(), textbox);
+        assert!(shape.style().is_none());
+        assert!(textbox.style().is_none());
+    }
+
+    #[test]
+    fn default_style_follows_shape_properties_and_has_a_typed_view() {
+        let mut shape =
+            CT_Shape::new_preset(2, "Shape 2", "rect", CT_Transform2D::default()).unwrap();
+        shape.set_default_style().unwrap();
+
+        let style = shape.style().expect("typed default style");
+        assert_eq!(style.line_reference.index, 1);
+        assert_eq!(style.fill_reference.index, 3);
+        assert_eq!(style.effect_reference.index, 2);
+        assert_eq!(style.font_reference.index, FontCollectionIndex::Minor);
+        let xml = shape.to_xml().unwrap();
+        let text = String::from_utf8(xml.clone()).unwrap();
+        assert!(text.contains(
+            r#"</p:spPr><p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="2"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody>"#
+        ));
+        assert_eq!(CT_Shape::from_xml(&xml).unwrap(), shape);
     }
 
     #[test]

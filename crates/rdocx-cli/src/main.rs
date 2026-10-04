@@ -62,6 +62,9 @@ enum Command {
         /// Directory containing font files (.ttf/.otf) to use for PDF rendering
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Revision view for PDF and image output
+        #[arg(long, default_value = "accepted", value_parser = commands::parse_revision_view)]
+        revision_view: rdocx::RevisionView,
         /// One-based page range for image output, such as 1,3-5
         #[arg(long)]
         pages: Option<String>,
@@ -137,6 +140,9 @@ enum Command {
         /// Output format: png, jpeg, tiff
         #[arg(long, default_value = "png")]
         format: String,
+        /// Revision view to render
+        #[arg(long, default_value = "accepted", value_parser = commands::parse_revision_view)]
+        revision_view: rdocx::RevisionView,
         /// JPEG quality from 1 through 100
         #[arg(long, default_value = "90")]
         quality: u8,
@@ -400,6 +406,21 @@ enum TocCommand {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        // Full document comparison can exceed the one MiB Windows main-thread stack.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(run_cli)
+            .expect("start rdocx CLI thread")
+            .join()
+            .expect("rdocx CLI thread panicked");
+    }
+    #[cfg(not(windows))]
+    run_cli();
+}
+
+fn run_cli() {
     let cli = Cli::parse();
 
     // `validate` always carries a verdict in its exit status, so it is
@@ -437,6 +458,7 @@ fn main() {
             force,
             dpi,
             font_dir,
+            revision_view,
             pages,
             quality,
             transparent,
@@ -447,6 +469,7 @@ fn main() {
             force,
             dpi,
             font_dir.as_deref(),
+            revision_view,
             commands::ImageOptions {
                 pages: pages.as_deref(),
                 quality,
@@ -476,6 +499,7 @@ fn main() {
             page,
             pages,
             format,
+            revision_view,
             quality,
             transparent,
         } => commands::render(
@@ -487,6 +511,7 @@ fn main() {
                 page,
                 pages: pages.as_deref(),
                 format: &format,
+                revision_view,
                 quality,
                 transparent,
             },

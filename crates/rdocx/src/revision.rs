@@ -231,6 +231,9 @@ struct RenderState<'a> {
     resolution: Resolution,
     scope: RevisionScope<'a>,
     resolved: HashSet<usize>,
+    /// True while rendering content that the resolution removes, such as a
+    /// removed row. Its paragraph marks need no merge partner.
+    discarded: bool,
 }
 
 impl Document {
@@ -298,6 +301,7 @@ impl Document {
             resolution,
             scope: scope.clone(),
             resolved: HashSet::new(),
+            discarded: false,
         };
         let mut output = Vec::with_capacity(source.len());
         output.extend_from_slice(&source[..tree.elements[tree.root].start]);
@@ -380,6 +384,7 @@ fn resolve_story_xml(
         resolution,
         scope,
         resolved: HashSet::new(),
+        discarded: false,
     };
     let mut output = Vec::with_capacity(source.len());
     output.extend_from_slice(&source[..tree.elements[tree.root].start]);
@@ -732,29 +737,44 @@ impl<'a> XmlTree<'a> {
             output.extend_from_slice(&self.source[cursor..child_element.start]);
             if child_element.word
                 && child_element.local == "p"
+                && !state.discarded
                 && self.paragraph_mark_removes(child, state)
             {
                 let mut paragraphs = vec![child];
+                // A table whose every row is removed is crossed, so the
+                // paragraphs on either side of it merge. Rendering it resolves
+                // its row markers and yields no bytes.
+                let mut siblings = vec![child];
                 let mut next_index = child_index + 1;
                 loop {
                     let next = element.children.get(next_index).copied().ok_or_else(|| {
                         Error::Other("cannot remove the final paragraph mark".to_owned())
                     })?;
+                    siblings.push(next);
+                    next_index += 1;
+                    if self.elements[next].word
+                        && self.elements[next].local == "tbl"
+                        && self.owned_rows_all_remove(next, state)
+                    {
+                        continue;
+                    }
                     if !self.elements[next].word || self.elements[next].local != "p" {
                         return Err(Error::Other(
                             "paragraph mark removal requires an adjacent paragraph".to_owned(),
                         ));
                     }
                     paragraphs.push(next);
-                    next_index += 1;
                     if !self.paragraph_mark_removes(next, state) {
                         break;
                     }
                 }
-                for pair in paragraphs.windows(2) {
+                for pair in siblings.windows(2) {
                     output.extend_from_slice(
                         &self.source[self.elements[pair[0]].end..self.elements[pair[1]].start],
                     );
+                    if self.elements[pair[1]].local == "tbl" {
+                        self.render(pair[1], state, false)?;
+                    }
                 }
                 output.extend_from_slice(&self.render_merged_paragraphs(&paragraphs, state)?);
                 cursor = self.elements[*paragraphs.last().expect("paragraph chain exists")].end;
@@ -809,13 +829,26 @@ impl<'a> XmlTree<'a> {
         state: &mut RenderState<'_>,
         promoted_namespaces: &[(String, String)],
     ) -> Result<Vec<u8>> {
-        let prior_xml = self.render_with_namespaces(prior, state, false, promoted_namespaces)?;
+        let mut prior_xml =
+            self.render_with_namespaces(prior, state, false, promoted_namespaces)?;
+        if let Some((prior_mark, markers)) =
+            self.legacy_mark_markers(owner, prior, state, promoted_namespaces)?
+            && !markers.is_empty()
+        {
+            prior_xml =
+                insert_first_children(&prior_xml, &self.elements[prior_mark].name, &markers)?;
+        }
         let selected = selected
             .iter()
             .map(|(change, _)| *change)
             .collect::<HashSet<_>>();
-        let retained =
-            self.render_retained_owner_children(owner, &selected, state, promoted_namespaces)?;
+        let retained = self.render_retained_owner_children(
+            owner,
+            Some(prior),
+            &selected,
+            state,
+            promoted_namespaces,
+        )?;
         let prior_element = &self.elements[prior];
         if prior_element.word
             && matches!(prior_element.local.as_str(), "pPr" | "tblPr")
@@ -855,8 +888,13 @@ impl<'a> XmlTree<'a> {
             state.resolved.insert(*marker);
             self.validate_selected_descendants(*marker, state)?;
         }
-        let retained =
-            self.render_retained_owner_children(owner, &selected, state, promoted_namespaces)?;
+        let retained = self.render_retained_owner_children(
+            owner,
+            None,
+            &selected,
+            state,
+            promoted_namespaces,
+        )?;
         if retained.is_empty() {
             return Ok(Vec::new());
         }
@@ -867,9 +905,81 @@ impl<'a> XmlTree<'a> {
         Ok(output)
     }
 
+    /// The prior mark `w:rPr` of an older rdocx `w:pPrChange`, and the
+    /// paragraph-mark markers of the current mark that the rejection leaves
+    /// in place, which go first in the prior mark.
+    ///
+    /// Those redlines put the prior mark formatting in the prior properties,
+    /// where it replaces the current mark formatting. A mark formatting change
+    /// left in place has no owner then, so it is refused.
+    fn legacy_mark_markers(
+        &self,
+        owner: usize,
+        prior: usize,
+        state: &mut RenderState<'_>,
+        promoted_namespaces: &[(String, String)],
+    ) -> Result<Option<(usize, Vec<u8>)>> {
+        let mark = |properties: usize| {
+            self.elements[properties]
+                .children
+                .iter()
+                .copied()
+                .find(|child| self.elements[*child].word && self.elements[*child].local == "rPr")
+        };
+        let owner_element = &self.elements[owner];
+        if !owner_element.word || owner_element.local != "pPr" {
+            return Ok(None);
+        }
+        let (Some(current), Some(prior_mark)) = (mark(owner), mark(prior)) else {
+            return Ok(None);
+        };
+        let namespaces = merged_namespaces(
+            &merged_namespaces(promoted_namespaces, &owner_element.namespace_declarations),
+            &self.elements[current].namespace_declarations,
+        );
+        let mut markers = Vec::new();
+        for child in &self.elements[current].children {
+            let rendered = self.render_with_namespaces(*child, state, false, &namespaces)?;
+            match &self.elements[*child].revision {
+                Some(metadata)
+                    if matches!(
+                        metadata.kind,
+                        RevisionKind::Insertion
+                            | RevisionKind::Deletion
+                            | RevisionKind::MoveFrom
+                            | RevisionKind::MoveTo
+                    ) =>
+                {
+                    markers.extend_from_slice(&rendered);
+                }
+                Some(metadata)
+                    if metadata.kind == RevisionKind::RunPropertyChange
+                        && !state.scope.matches(metadata) =>
+                {
+                    return Err(Error::Other(
+                        "rejecting a paragraph property change whose prior properties hold the \
+                         mark formatting cannot keep a mark formatting change"
+                            .to_owned(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(Some((prior_mark, markers)))
+    }
+
+    /// Render the children of a property owner that its rejected prior value
+    /// does not replace.
+    ///
+    /// A `w:pPrChange` holds only the prior base paragraph properties, so the
+    /// paragraph mark `w:rPr` and the `w:sectPr` stay and resolve their own
+    /// revisions. Older rdocx redlines put the prior mark formatting in the
+    /// prior properties, and that `w:rPr` replaces the current one, see
+    /// [`Self::legacy_mark_markers`].
     fn render_retained_owner_children(
         &self,
         owner: usize,
+        prior: Option<usize>,
         selected: &HashSet<usize>,
         state: &mut RenderState<'_>,
         promoted_namespaces: &[(String, String)],
@@ -877,9 +987,41 @@ impl<'a> XmlTree<'a> {
         let element = &self.elements[owner];
         let child_namespaces =
             merged_namespaces(promoted_namespaces, &element.namespace_declarations);
+        // A rejected paragraph mark `w:rPrChange` replaces the whole mark
+        // formatting, unmodelled children included, and keeps only its markers.
+        let replaces_mark = prior.is_some()
+            && element.word
+            && element.local == "rPr"
+            && element.parent.is_some_and(|parent| {
+                self.elements[parent].word && self.elements[parent].local == "pPr"
+            });
         let mut output = Vec::new();
         for child in &element.children {
             let child_element = &self.elements[*child];
+            if replaces_mark && child_element.revision.is_none() {
+                continue;
+            }
+            if let Some(prior) = prior
+                && element.word
+                && element.local == "pPr"
+                && child_element.word
+                && matches!(child_element.local.as_str(), "rPr" | "sectPr")
+            {
+                let replaced = child_element.local == "rPr"
+                    && self.elements[prior].children.iter().any(|replacement| {
+                        self.elements[*replacement].word
+                            && self.elements[*replacement].local == "rPr"
+                    });
+                if !replaced {
+                    output.extend_from_slice(&self.render_with_namespaces(
+                        *child,
+                        state,
+                        false,
+                        &child_namespaces,
+                    )?);
+                }
+                continue;
+            }
             if !selected.contains(child)
                 && (child_element.revision.is_some()
                     || !child_element.word
@@ -1037,10 +1179,13 @@ impl<'a> XmlTree<'a> {
         index: usize,
         state: &mut RenderState<'_>,
     ) -> Result<()> {
-        for child in &self.elements[index].children {
-            self.render(*child, state, false)?;
-        }
-        Ok(())
+        let discarded = std::mem::replace(&mut state.discarded, true);
+        let validated = self.elements[index]
+            .children
+            .iter()
+            .try_for_each(|child| self.render(*child, state, false).map(drop));
+        state.discarded = discarded;
+        validated
     }
 
     fn paragraph_mark_removes(&self, index: usize, state: &RenderState<'_>) -> bool {
@@ -1266,6 +1411,38 @@ fn merged_namespaces(
         }
     }
     merged
+}
+
+/// Insert `children` first in the first element named `name`.
+fn insert_first_children(xml: &[u8], name: &str, children: &[u8]) -> Result<Vec<u8>> {
+    let tag = format!("<{name}");
+    let start = xml
+        .windows(tag.len() + 1)
+        .position(|window| {
+            window.starts_with(tag.as_bytes())
+                && matches!(
+                    window[tag.len()],
+                    b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r'
+                )
+        })
+        .ok_or_else(|| Error::Other(format!("prior properties have no {name}")))?;
+    let open_end = start
+        + xml[start..]
+            .iter()
+            .position(|byte| *byte == b'>')
+            .ok_or_else(|| Error::Other(format!("prior {name} has no end")))?;
+    let mut output = Vec::with_capacity(xml.len() + children.len() + name.len() + 3);
+    if xml[open_end - 1] == b'/' {
+        output.extend_from_slice(&xml[..open_end - 1]);
+        output.push(b'>');
+        output.extend_from_slice(children);
+        output.extend_from_slice(format!("</{name}>").as_bytes());
+    } else {
+        output.extend_from_slice(&xml[..=open_end]);
+        output.extend_from_slice(children);
+    }
+    output.extend_from_slice(&xml[open_end + 1..]);
+    Ok(output)
 }
 
 fn append_children_to_element(element_xml: &[u8], children: &[u8]) -> Result<Vec<u8>> {

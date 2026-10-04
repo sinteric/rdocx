@@ -8,6 +8,7 @@ from .enum import table as _table
 from .enum import text as _text
 
 _Path = str | _os.PathLike[str]
+_RevisionView = _Literal["accepted", "tracked"]
 _BorderStyle = _Literal[
     "none", "single", "thick", "double", "dotted", "dashed", "dotDash", "wave"
 ]
@@ -599,6 +600,7 @@ class Document:
         *,
         fonts: _Sequence[tuple[str, bytes]] | None = None,
         font_dir: _Path | None = None,
+        revision_view: _RevisionView = "accepted",
     ) -> bytes:
         """Render the document to PDF bytes.
 
@@ -612,9 +614,9 @@ class Document:
     def to_pdfa_deterministic(
         self, profile: _Literal["pdfa-2b", "pdfa-3b"] = "pdfa-2b"
     ) -> bytes: ...
-    def render_page_to_png(self, page_index: int, dpi: float = 150.0) -> bytes | None: ...
+    def render_page_to_png(self, page_index: int, dpi: float = 150.0, *, revision_view: _RevisionView = "accepted") -> bytes | None: ...
     def render_page_to_svg(self, page_index: int) -> SvgRenderResult | None: ...
-    def render_all_pages(self, dpi: float = 150.0) -> list[bytes]: ...
+    def render_all_pages(self, dpi: float = 150.0, *, revision_view: _RevisionView = "accepted") -> list[bytes]: ...
     def render_pages(
         self,
         *,
@@ -623,6 +625,7 @@ class Document:
         quality: int = 90,
         transparent: bool = False,
         pages: list[int] | None = None,
+        revision_view: _RevisionView = "accepted",
     ) -> list[bytes] | bytes: ...
     def compare(
         self,

@@ -1799,7 +1799,7 @@ impl ResolveCtx<'_> {
         })
     }
 
-    fn concrete_color(&self, choice: &ColorChoice) -> Result<Color, ResolveError> {
+    pub(crate) fn concrete_color(&self, choice: &ColorChoice) -> Result<Color, ResolveError> {
         let owned_lookup = self.theme_lookup();
         let lookup = owned_lookup
             .iter()

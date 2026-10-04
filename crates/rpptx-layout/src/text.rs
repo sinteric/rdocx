@@ -3,6 +3,7 @@
 use rpptx_oxml::placeholder::PhType;
 use rpptx_oxml::shape_tree::CT_Shape;
 
+use oxml_drawing::fill::{Fill, SolidFill};
 use oxml_drawing::text::{
     CT_TextCharacterProperties, CT_TextListStyle, CT_TextParagraphProperties,
 };
@@ -30,7 +31,7 @@ impl EffectiveListStyle {
 }
 
 impl ResolveCtx<'_> {
-    /// Resolves sources one through five for every list level of one shape.
+    /// Resolves sources one through six for every list level of one shape.
     pub fn effective_list_style(&self, shape: &CT_Shape) -> EffectiveListStyle {
         let key = shape
             .placeholder
@@ -45,6 +46,20 @@ impl ResolveCtx<'_> {
                 .insert(key, resolved.clone());
             resolved
         };
+        // The colour of the style's font reference overrides the inherited
+        // text styles, and the shape's own list style overrides it in turn.
+        // A colour that does not resolve leaves the inherited colour.
+        if let Some(color) = shape
+            .style()
+            .and_then(|style| style.font_reference.color.as_ref())
+            .filter(|color| self.concrete_color(color).is_ok())
+        {
+            let mut solid = SolidFill::default();
+            solid.color = Some(color.clone());
+            for level in &mut effective.levels {
+                level.run.fill = Some(Fill::Solid(solid.clone()));
+            }
+        }
         if let Some(list_style) = shape.text_body.as_ref().and_then(|body| body.list_style()) {
             merge_list_style(&mut effective, list_style);
         }
@@ -455,6 +470,64 @@ mod tests {
             second_shape.level(0).unwrap().paragraph.left_margin,
             Some(800)
         );
+    }
+
+    #[test]
+    fn style_font_colour_overrides_inherited_styles_under_the_shape_list_style() {
+        let colour = |value: &str| {
+            format!("<a:defRPr><a:solidFill><a:srgbClr val=\"{value}\"/></a:solidFill></a:defRPr>")
+        };
+        let mut fixture = Fixture::new(
+            "",
+            &format!("<a:lvl1pPr>{}</a:lvl1pPr>", colour("111111")),
+            "",
+            "",
+            &[],
+        );
+        let style = r#"<p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="2"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:srgbClr val="222222"/></a:fontRef></p:style>"#;
+        let styled = |list_style: &str| {
+            shape(7, list_style).replace(
+                "<p:spPr/>",
+                &format!(r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></p:spPr>{style}"#),
+            )
+        };
+        let shapes = [
+            shape(7, ""),
+            styled(""),
+            styled(&format!("<a:lvl1pPr>{}</a:lvl1pPr>", colour("333333"))),
+            styled("").replace(
+                r#"<a:srgbClr val="222222"/></a:fontRef>"#,
+                r#"<a:schemeClr val="phClr"/></a:fontRef>"#,
+            ),
+            styled("").replace(
+                r#"<a:srgbClr val="222222"/></a:fontRef>"#,
+                r#"<a:prstClr val="red"/></a:fontRef>"#,
+            ),
+        ];
+        fixture.slide = CT_Slide::from_xml(slide_xml(&shapes.concat()).as_bytes()).unwrap();
+        let context = fixture.context();
+        let run_fill = |index| {
+            context
+                .effective_text_properties(fixture.slide_shape(index), None, None)
+                .run
+                .fill
+        };
+        let expected = |value: &str| {
+            character(&format!(
+                "<a:rPr><a:solidFill><a:srgbClr val=\"{value}\"/></a:solidFill></a:rPr>"
+            ))
+            .fill
+        };
+
+        assert_eq!(run_fill(0), expected("111111"));
+        assert_eq!(run_fill(1), expected("222222"));
+        assert_eq!(run_fill(2), expected("333333"));
+        // A font colour that does not resolve keeps the inherited colour.
+        assert_eq!(run_fill(3), expected("111111"));
+        assert_eq!(run_fill(4), expected("111111"));
+        context
+            .resolve_slide((720.0, 540.0))
+            .expect("an unresolvable font colour does not fail the slide");
     }
 
     #[test]

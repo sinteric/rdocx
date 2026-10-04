@@ -247,8 +247,8 @@ pub struct LayoutLine {
     pub items: Vec<LineItem>,
     /// Total content width of the line.
     ///
-    /// Rich text spaces that end a line hang past its end, so they can take
-    /// this past `available_width`. See [`LayoutLine::hanging_space_counts`].
+    /// Spaces that end a line hang past its end, so they can take this past
+    /// `available_width`. See [`LayoutLine::hanging_space_counts`].
     pub width: f64,
     /// Maximum ascent on this line (above baseline).
     pub ascent: f64,
@@ -276,12 +276,26 @@ impl LayoutLine {
     }
 
     /// How many items at the visual start and at the visual end of the line
-    /// are rich text spaces that end it logically.
+    /// are spaces that end it logically.
     ///
     /// Those spaces hang past the line end, which is its visual right in
     /// left-to-right text and its visual left in right-to-left text. Alignment
     /// leaves them out of the width, and they may pass the available width.
+    ///
+    /// Plain text is never reordered, so its spaces hang at the visual end,
+    /// after an item that is not a space. Line breaking gives the spaces that
+    /// end a plain line an item of their own.
     pub fn hanging_space_counts(&self) -> (usize, usize) {
+        let is_plain_space = |item: &LineItem| matches!(item, LineItem::Text(segment) if is_space_run(&segment.text));
+        let plain_end = self
+            .items
+            .iter()
+            .rev()
+            .take_while(|item| is_plain_space(item))
+            .count();
+        if plain_end > 0 && plain_end < self.items.len() {
+            return (0, plain_end);
+        }
         let last_content = self
             .items
             .iter()
@@ -441,7 +455,8 @@ pub fn break_into_lines(
             BreakableSegment::Items(seg_items) => {
                 if params.wrap
                     && !line.items.is_empty()
-                    && line.width_with(&seg_items, fm) - hanging_space_width(&seg_items)
+                    && line.width_with(&seg_items, fm) > line.limit + 0.01
+                    && line.width_with(&seg_items, fm) - hanging_space_width(&seg_items, fm)?
                         > line.limit + 0.01
                 {
                     lines.push(line.break_line(params, fm, false, None));
@@ -463,9 +478,12 @@ pub fn break_into_lines(
                     segment,
                     break_points,
                 } = *boxed;
+                let hanging = terminal_u0020_width(&segment, fm)?;
                 let whole = InlineItem::Text(segment);
                 if !params.wrap
                     || line.width_with(std::slice::from_ref(&whole), fm) <= line.limit + 0.01
+                    || line.width_with(std::slice::from_ref(&whole), fm) - hanging
+                        <= line.limit + 0.01
                 {
                     font_ctx = Some((segment_font_id(&whole), segment_font_size(&whole)));
                     line.push(&whole, fm);
@@ -519,7 +537,51 @@ pub fn break_into_lines(
     // Flush remaining items as the last line
     lines.push(line.break_line(params, fm, true, None));
 
+    for line in &mut lines {
+        split_hanging_spaces(&mut line.items, fm)?;
+    }
+
     Ok(lines)
+}
+
+/// Give the spaces that end a plain line an item of their own while retaining
+/// their glyph advances and source spans.
+fn split_hanging_spaces(items: &mut Vec<LineItem>, fm: &FontManager) -> Result<()> {
+    let Some(LineItem::Text(segment)) = items.last() else {
+        return Ok(());
+    };
+    if segment.field_kind.is_some() || segment.note.is_some() || is_space_run(&segment.text) {
+        return Ok(());
+    }
+    let Some(spaces) = trailing_spaces(segment, fm)? else {
+        return Ok(());
+    };
+    let Some(LineItem::Text(ink)) = items.last_mut() else {
+        unreachable!("the last item is text");
+    };
+    let glyphs = ink.glyph_ids.len() - spaces;
+    let advances = ink.advances.split_off(glyphs);
+    let width = advances.iter().sum::<f64>();
+    ink.width -= width;
+    let source = ink.source.as_mut().map(|source| {
+        source.char_end -= spaces as u32;
+        SourceSpan {
+            char_start: source.char_end,
+            char_end: source.char_end + spaces as u32,
+            ..*source
+        }
+    });
+    let hanging = TextSegment {
+        text: ink.text.split_off(ink.text.len() - spaces),
+        glyph_ids: ink.glyph_ids.split_off(glyphs),
+        advances,
+        width,
+        source,
+        hyperlink_url: ink.hyperlink_url.clone(),
+        ..*ink
+    };
+    items.push(LineItem::Text(hanging));
+    Ok(())
 }
 
 /// The line `break_into_lines` is filling.
@@ -1507,22 +1569,71 @@ fn split_text_at_break_opportunities(seg: &TextSegment) -> Vec<TextBreakInfo> {
     breaks
 }
 
-/// Width of the spaces that end a group of rich text items.
+/// Width of the spaces that end a group of text items.
 ///
 /// They hang past the end of a line instead of wrapping the group, as Word and
-/// PowerPoint let them. Only rich text hangs: the plain path keeps counting a
-/// trailing space.
-fn hanging_space_width(items: &[InlineItem]) -> f64 {
-    items
-        .iter()
-        .rev()
-        .map_while(|item| match item {
+/// PowerPoint let them.
+fn hanging_space_width(items: &[InlineItem], fm: &FontManager) -> Result<f64> {
+    let mut width = 0.0;
+    for item in items.iter().rev() {
+        match item {
             InlineItem::MultilingualText(segment) if is_space_run(segment.text()) => {
-                Some(segment.width())
+                width += segment.width();
             }
-            _ => None,
+            InlineItem::Text(segment) | InlineItem::HyphenatedText { segment, .. } => {
+                width += terminal_u0020_width(segment, fm)?;
+                if !is_space_run(&segment.text) {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(width)
+}
+
+/// Width of the spaces that end a plain text segment.
+fn terminal_u0020_width(segment: &TextSegment, fm: &FontManager) -> Result<f64> {
+    Ok(trailing_spaces(segment, fm)?.map_or(0.0, |spaces| {
+        segment.advances[segment.advances.len() - spaces..]
+            .iter()
+            .sum()
+    }))
+}
+
+/// How many U+0020 spaces end a plain text segment, which are then as many
+/// glyphs at its end.
+///
+/// Plain text is shaped left to right, so its last glyphs are its last
+/// characters, whatever ligatures come before them. `None` when it ends with
+/// no space, holds a right-to-left character that would reverse its glyphs, or
+/// does not end with that many of the font's space glyph.
+fn trailing_spaces(segment: &TextSegment, fm: &FontManager) -> Result<Option<usize>> {
+    if segment.field_kind.is_some() || segment.note.is_some() {
+        return Ok(None);
+    }
+    let spaces = segment.text.len() - segment.text.trim_end_matches(' ').len();
+    let glyphs = segment.glyph_ids.len();
+    if spaces == 0
+        || glyphs < spaces
+        || segment.advances.len() != glyphs
+        || segment.text.chars().any(|character| {
+            matches!(
+                unicode_bidi::bidi_class(character),
+                unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL
+            )
         })
-        .sum()
+    {
+        return Ok(None);
+    }
+    let space = fm.shape_text(segment.font_id, " ", segment.font_size)?;
+    let [space_glyph] = space.glyph_ids[..] else {
+        return Ok(None);
+    };
+    Ok(segment.glyph_ids[glyphs - spaces..]
+        .iter()
+        .all(|glyph| *glyph == space_glyph)
+        .then_some(spaces))
 }
 
 fn inline_item_width(item: &InlineItem) -> f64 {
@@ -2459,6 +2570,63 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_line_lets_the_spaces_after_its_last_word_hang() {
+        let mut fm = deterministic_font_manager();
+        let plain_text = |line: &LayoutLine| {
+            line.items
+                .iter()
+                .map(|item| match item {
+                    LineItem::Text(segment) => segment.text.as_str(),
+                    _ => panic!("plain lines hold plain text"),
+                })
+                .collect::<String>()
+        };
+        // The comma fits and the spaces after it do not. U+0020 hangs, and a
+        // no-break space stays part of its word. Carlito ligates the "ffi" of
+        // "office", so the word has fewer glyphs than characters.
+        let service = "Repainted in 3 weeks while still in service,";
+        let office = "Repainted in 3 weeks while still in office,";
+        let cases = [
+            (service, " ", format!("{service} "), "or "),
+            (service, "   ", format!("{service}   "), "or "),
+            (
+                service,
+                "\u{a0} ",
+                "Repainted in 3 weeks while still in ".to_owned(),
+                "service,",
+            ),
+            (office, " ", format!("{office} "), "or "),
+        ];
+        for (first, spaces, first_line, next_start) in cases {
+            let ink = shaped_text_segment(&mut fm, first, 0.0).width;
+            let text = format!("{first}{spaces}or re-coated");
+            let items = [InlineItem::Text(shaped_text_segment(&mut fm, &text, 0.0))];
+            let lines = break_into_lines(
+                &items,
+                &LineBreakParams {
+                    available_width: ink + 1.0,
+                    ..Default::default()
+                },
+                &fm,
+            )
+            .unwrap();
+
+            assert_eq!(plain_text(&lines[0]), first_line, "{text:?}");
+            assert!(plain_text(&lines[1]).starts_with(next_start), "{text:?}");
+            // The spaces are an item of their own, past the available width.
+            assert_eq!(lines[0].hanging_space_counts(), (0, 1), "{text:?}");
+            let LineItem::Text(last) = lines[0].items.last().unwrap() else {
+                unreachable!("plain lines hold plain text");
+            };
+            assert_eq!(last.text, first_line[first_line.trim_end().len()..]);
+            assert_eq!(last.glyph_ids.len(), last.text.chars().count());
+            assert!(lines[0].width - last.width <= lines[0].available_width + 0.01);
+        }
+        let ligated = shaped_text_segment(&mut fm, office, 0.0);
+        assert!(ligated.glyph_ids.len() < office.chars().count());
+    }
+
+    #[test]
     fn hanging_spaces_sit_at_the_visual_end_of_their_direction() {
         let mut fm = deterministic_font_manager();
         let cases = [
@@ -3096,7 +3264,8 @@ mod tests {
             &fm,
         )
         .unwrap();
-        let words = lines[0].items.len() - 2;
+        // The final space now has its own hanging item and is not a word.
+        let words = lines[0].items.len() - 2 - lines[0].hanging_space_counts().1;
         let tab = tab_widths(&lines[0])[0];
         let end = 10.0 + tab + (words - 1) as f64 * word.width + bare;
         assert!(

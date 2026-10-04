@@ -914,8 +914,23 @@ Accepting keeps insertions and move destinations, while rejecting keeps
 deletions and move sources and converts deleted text and deleted field codes
 (`w:delText` and `w:delInstrText`) back to ordinary text and field codes.
 Property rejection restores exactly one namespace-correct prior property
-value. Contextual markers act on their owning run, paragraph mark, numbering
-property, or row. Resolution stages every affected package part, resolves
+value. A `w:pPrChange` holds only the base paragraph properties, so rejecting
+it keeps the paragraph mark `w:rPr` and the `w:sectPr`, which resolve their
+own markers, `w:rPrChange`, and `w:sectPrChange`. Rejecting a mark
+`w:rPrChange` replaces the whole mark formatting, including unmodelled
+children, and keeps only the mark markers. Redlines from rdocx
+0.14 and earlier carry prior mark formatting as a `w:rPr` in the prior
+properties. That child replaces current mark formatting and retains current
+paragraph-mark markers that stay. A mark formatting change that stays has no
+owner in this form and is refused. When only the edited paragraph had mark
+formatting, the prior holds no `w:rPr` and reads like Word's form, so rejecting
+it keeps the edited mark formatting. Contextual markers act on their owning
+run, paragraph mark, numbering property, or row. A removed paragraph mark
+merges with the next paragraph across a table that immediately follows it when
+every row of that table is removed by the same resolution. A removed paragraph
+mark inside removed content, such as a cell paragraph of a removed row, needs
+no merge partner. The merged paragraph keeps the resolved properties of the
+last paragraph, whose mark remains. Resolution stages every affected package part, resolves
 selected descendants before their enclosing subtree, reparses the complete
 candidate package, and commits once only after validation succeeds.
 
@@ -958,8 +973,11 @@ hyperlink outside a carried complex field still refuse the pair.
 Changed field results remain inside their field owner, while instruction or
 form changes replace that complete owner. Supported run, paragraph, table, and
 section properties emit property revisions that retain the original property
-sidecars. Unsupported formatting differences retain the original bytes and
-produce stable `ComparisonDiagnostic` values at the actual story path. Inputs
+sidecars. A changed paragraph records its prior base properties in
+`w:pPrChange` and its prior mark formatting in a `w:rPrChange` in the mark
+`w:rPr`, as Word's own Compare writes them. Unsupported formatting
+differences retain the original bytes and produce stable
+`ComparisonDiagnostic` values at the actual story path. Inputs
 with existing modeled revisions or differing story shells are rejected unless
 their story category is ignored. The root and owner start tags of a comment
 or note story compare as namespace-resolved trees, so a part written again
@@ -997,9 +1015,33 @@ paragraph mark as the story or control terminator. A self-closing original
 final paragraph expands around its marker without creating a raw sibling. This
 ownership lets acceptance retain every appended paragraph and rejection
 reconstruct the original without an empty terminal residue.
+When an inserted or deleted table stands between that boundary and a final
+inserted or deleted paragraph, the paragraph mark before the table carries the
+boundary, because resolving that change removes every row of the table.
+An inserted or deleted row carries its marker in `w:trPr`, and every cell
+paragraph mark and every cell run carries one too, nested tables included, as
+Word's own Compare writes it. Without the cell marks Word merges the adjacent
+paragraph into the first cell.
+A paragraph-mark marker is the first child of `w:rPr`, and a new `w:rPr` goes
+before `w:sectPr` and `w:pPrChange`, as the schema orders them.
+Removing the marked paragraph mark merges that paragraph into the final one,
+which keeps its own properties. When the two resolutions need different
+properties there, the final paragraph carries the accepted paragraph
+properties with a `w:pPrChange` that holds the rejected ones. When mark
+formatting differs, its mark `w:rPr` ends with a `w:rPrChange` that holds the
+rejected mark formatting, as Word's own Compare writes them. An inserted or
+moved-in paragraph therefore
+records the original properties of the paragraph before it, and a deleted or
+moved-out one the edited properties of that paragraph.
 Comparison patches only owned source spans, preserves every unowned byte,
 stages the complete package, proves that acceptance matches the edited policy
 projection and rejection matches the original, then commits once.
+Alignment leaves paragraph properties out so that a paragraph whose
+properties changed still matches, but the accept and reject projection adds
+the modeled properties of every paragraph of each story, including those in
+tables and content controls, unless formatting is ignored. A resolution that
+loses paragraph or mark formatting, apart from section breaks, therefore fails
+the postcondition.
 
 `rdocx-layout` owns the renderer-only revision projection. The
 `LayoutInput::revision_view` selector chooses an accepted or tracked view. The
@@ -1131,6 +1173,12 @@ page, where endnotes flow from the top of their own pages without a separator
 rule. A reference therefore carries a `NoteRef`, its stream and its number,
 because the streams number independently and a document may hold a footnote and
 an endnote sharing a number.
+
+The native document facade stages normal endnote creation, exact element
+reordering, and removal with matching body references. Endnotes use their own
+relationship-resolved part and ID allocation. Rich edits use the same checked
+story operations as footnotes, then reopen the candidate package before
+publication.
 
 ## Versioning
 
@@ -1303,7 +1351,15 @@ second document tree. The facade resolves package owners and stable source
 order. The existing `rdocx-oxml` grammar remains the authority for admitting
 content controls, revisions, and fields as typed content. Content rejected by
 that grammar remains one opaque preserved boundary and cannot expose nested
-owners or editable text. Word writes a text box twice in a run's
+owners or editable text.
+
+Footnote creation and removal stage the note part and body references as one
+package candidate. Reorder moves the exact note element bytes and retains its
+internal ID. Common story content, relationship, and comment operations edit
+rich note bodies through the resolved note owner. Each successful mutation
+reopens the candidate before it replaces live state.
+
+Word writes a text box twice in a run's
 `mc:AlternateContent`, as DrawingML in `mc:Choice` and as VML in
 `mc:Fallback`. That text box is one text-box story, read from the first
 Choice that holds a text box, the one layout draws. Any other Choice and the
@@ -1410,6 +1466,10 @@ then publish once. First-page creation enables `titlePg`. Even-page selection
 is controlled separately by the typed document setting. Rich edits continue
 through the container-neutral story operations rather than a second header or
 footer content model.
+Comment authoring uses the same checked story run range in every header and
+footer variant. The facade anchors selected paragraphs in the owning related
+part on a staged package, retains untouched producer XML around those spans,
+then publishes the part and comment definition together after validation.
 
 Word layout retains that physical ownership. The facade loads header and
 footer images under the main-part relationship that selects the story plus the
@@ -1486,6 +1546,16 @@ wrapper it flattens or leaves out, and reports the losses of the content it
 writes as it does outside them.
 Each paragraph contributes the same accepted-view text as paragraph text, so
 tracked insertions are included and tracked deletions are left out.
+The OOXML model owns accepted structural visibility. A deleted or moved-away
+body paragraph mark joins its paragraph to the next direct body paragraph
+unless a section break or intervening block prevents that join. Text omits the
+joining newline, while HTML and Markdown emit one block with the following
+paragraph's block properties. Accepted layout omits an empty joining
+paragraph and lays out retained joined content in the following block.
+Deleted or moved-away table rows are absent from accepted text, JSON, HTML,
+Markdown, MHTML picture traversal and layout. A table whose rows are all
+removed contributes no accepted block or spacing. Source model rows and
+editing indices remain intact, and tracked layout still shows them.
 The WASM binding uses `Document::text` for its existing `getText` method and
 otherwise owns one complete `Document`. It never reaches into
 `rdocx-oxml` or maintains a second package representation.

@@ -4108,7 +4108,7 @@ impl CT_Numbering {
 
     /// Serialize to XML bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
-        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        let mut writer = Writer::new(Vec::new());
         let declarations = self.preserved_namespace_declarations()?;
         let word_prefix = generated_prefix(&declarations, "w", W_NS);
         let relationship_prefix = generated_prefix(&declarations, "r", R_NS);
@@ -6373,16 +6373,18 @@ mod tests {
     }
 
     #[test]
-    fn canonical_properties_use_parent_writer_indentation() {
+    fn canonical_properties_follow_the_compact_part_layout() {
+        // Word writes a part without indentation, so a rewritten part keeps
+        // that layout down to the nested property writers.
         let mut numbering = CT_Numbering::new();
         numbering.add_numbered_list();
         let output = String::from_utf8(numbering.to_xml().unwrap()).unwrap();
 
         assert!(
-            output.contains("\n      <w:pPr>\n        <w:ind "),
+            output.contains(r#"<w:lvlJc w:val="left"/><w:pPr><w:ind "#),
             "{output}"
         );
-        assert!(!output.contains("</w:lvlJc><w:pPr>"), "{output}");
+        assert!(!output.contains('\n'), "{output}");
     }
 
     #[test]

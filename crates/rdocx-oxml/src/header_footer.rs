@@ -10,7 +10,9 @@ use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::{namespace_bindings, word_prefixes_at};
 use crate::properties::is_word_element;
 use crate::raw_xml::{capture_element, capture_empty_element};
-use crate::text::{CT_P, declare_w14_on_part_root};
+use crate::text::{
+    CT_P, ROOT_R_BINDING, ROOT_WP_BINDING, declare_w14_on_part_root, root_binding_scope,
+};
 
 const VML_NS: &str = "urn:schemas-microsoft-com:vml";
 const OFFICE_NS: &str = "urn:schemas-microsoft-com:office:office";
@@ -343,7 +345,21 @@ impl CT_HdrFtr {
     }
 
     fn to_xml_root(&self, root_tag: &str) -> Result<Vec<u8>> {
-        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        let wp_root_is_canonical = self
+            .extra_namespaces
+            .iter()
+            .find(|(name, _)| name == "xmlns:wp")
+            .is_none_or(|(_, namespace)| namespace == wp_ns);
+        let _binding_scope = root_binding_scope(
+            ROOT_R_BINDING
+                | if wp_root_is_canonical {
+                    ROOT_WP_BINDING
+                } else {
+                    0
+                },
+        );
+        let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",
@@ -359,7 +375,6 @@ impl CT_HdrFtr {
         ));
 
         // Always emit xmlns:wp for drawing elements
-        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
         let mut has_wp = false;
         for (key, _) in &self.extra_namespaces {
             if key == "xmlns:wp" {
@@ -1250,6 +1265,27 @@ mod tests {
         let root = &root[..root.find('>').unwrap()];
         assert!(root.contains(&format!(r#"xmlns:w14="{w14}""#)), "{output}");
         assert!(output.contains(r#"w14:paraId="1A2B3C4D""#), "{output}");
+    }
+
+    #[test]
+    fn a_rewritten_header_is_compact_and_declares_w_once() {
+        // Word writes a header without indentation and puts `w:rsid*` on
+        // nearly every paragraph and run, bound by the root alone.
+        let xml = format!(
+            r#"<w:hdr xmlns:w="{W_NS}"><w:p w:rsidR="00A1B2C3"><w:r w:rsidRPr="00A1B2C4"><w:t xml:space="preserve">header </w:t></w:r></w:p></w:hdr>"#
+        );
+        let header = CT_HdrFtr::from_xml(xml.as_bytes()).unwrap();
+        let output = String::from_utf8(header.to_xml_header().unwrap()).unwrap();
+        assert_eq!(output.matches("xmlns:w=").count(), 1, "{output}");
+        assert!(!output.contains('\n'), "{output}");
+        assert!(
+            output.contains(r#"<w:p w:rsidR="00A1B2C3"><w:r w:rsidRPr="00A1B2C4"><w:t xml:space="preserve">header </w:t></w:r></w:p>"#),
+            "{output}"
+        );
+        assert_eq!(
+            CT_HdrFtr::from_xml(output.as_bytes()).unwrap().paragraphs,
+            header.paragraphs
+        );
     }
 
     #[test]

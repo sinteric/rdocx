@@ -1887,7 +1887,7 @@ fn referenced_drawing_ids(content: &[BodyContent]) -> Vec<String> {
 
 fn referenced_hyperlink_ids(content: &[BodyContent]) -> Vec<String> {
     let mut ids = Vec::new();
-    visit_body_paragraphs(content, &mut |paragraph| {
+    visit_body_paragraphs(content, false, &mut |paragraph| {
         ids.extend(
             paragraph
                 .hyperlinks

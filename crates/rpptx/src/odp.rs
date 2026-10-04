@@ -595,8 +595,13 @@ fn from_odp_with_limits(bytes: &[u8], limits: OdpLimits) -> Result<OdpReadResult
                     let mut slide = presentation
                         .slide_mut(page_index)
                         .expect("new slide exists");
-                    let mut shape =
-                        slide.add_shape("rect", rect.left, rect.top, rect.width, rect.height)?;
+                    let mut shape = slide.add_unstyled_shape(
+                        "rect",
+                        rect.left,
+                        rect.top,
+                        rect.width,
+                        rect.height,
+                    )?;
                     if !text.is_empty() {
                         shape.set_text(&text)?;
                     }

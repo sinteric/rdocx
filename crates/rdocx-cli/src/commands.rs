@@ -18,7 +18,7 @@ use quick_xml::reader::NsReader;
 use rdocx::{
     BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, Document,
     HdrFtrType, HeaderFooterKind, RasterFormat, RasterOptions, RasterOutput, RevisionKind,
-    RunRange, StoryId, StoryItemKind, StoryKind,
+    RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
 };
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
@@ -41,6 +41,7 @@ pub struct RenderOptions<'a> {
     pub format: &'a str,
     pub quality: u8,
     pub transparent: bool,
+    pub revision_view: RevisionView,
 }
 
 #[derive(Clone, Copy)]
@@ -147,10 +148,15 @@ pub fn text(file: &Path, json_output: bool) -> Result<()> {
     if json_output {
         let document = parsed_main_document(file)?;
         let mut paragraphs = Vec::new();
+        let mut joining = Vec::new();
         for (body_index, content) in document.body.content.iter().enumerate() {
             match content {
                 BodyContent::Paragraph(paragraph) => {
-                    paragraphs.push(paragraph_json(body_index, &[], paragraph));
+                    joining.push(paragraph);
+                    if !document.body.accepted_paragraph_joins_next(body_index) {
+                        paragraphs.push(joined_paragraph_json(body_index, &joining));
+                        joining.clear();
+                    }
                 }
                 BodyContent::Table(table) => {
                     collect_table_paragraphs(body_index, &[], table, &mut paragraphs);
@@ -511,6 +517,28 @@ fn paragraph_json(body_index: usize, path: &[Value], paragraph: &CT_P) -> Value 
     })
 }
 
+fn joined_paragraph_json(body_index: usize, paragraphs: &[&CT_P]) -> Value {
+    let mut result = paragraph_json(body_index, &[], paragraphs[paragraphs.len() - 1]);
+    if paragraphs.len() == 1 {
+        return result;
+    }
+    let mut text = String::new();
+    let mut runs = Vec::new();
+    for paragraph in paragraphs {
+        let projected = paragraph_json(body_index, &[], paragraph);
+        text.push_str(projected["text"].as_str().unwrap_or_default());
+        if let Some(projected_runs) = projected["runs"].as_array() {
+            runs.extend(projected_runs.iter().cloned());
+        }
+    }
+    for (index, run) in runs.iter_mut().enumerate() {
+        run["index"] = json!(index);
+    }
+    result["text"] = json!(text);
+    result["runs"] = json!(runs);
+    result
+}
+
 fn run_formatting_json(run: &CT_R) -> Value {
     let Some(properties) = run.properties.as_ref() else {
         return Value::Null;
@@ -535,10 +563,22 @@ fn collect_table_paragraphs(
     table: &CT_Tbl,
     output: &mut Vec<Value>,
 ) {
-    for (row_index, row) in table.rows.iter().enumerate() {
-        let mut row_path = path.to_vec();
-        row_path.push(path_segment("row", row_index));
-        collect_row_paragraphs(body_index, &row_path, row, output);
+    // Row controls and direct rows retain their model paths and source order.
+    for boundary in 0..=table.rows.len() {
+        for (control_index, (at, _, control)) in table.content_controls.iter().enumerate() {
+            if *at == boundary {
+                let mut control_path = path.to_vec();
+                control_path.push(path_segment("content-control", control_index));
+                collect_control_paragraphs(body_index, &control_path, control, output);
+            }
+        }
+        if let Some(row) = table.rows.get(boundary)
+            && !row.accepted_view_removes()
+        {
+            let mut row_path = path.to_vec();
+            row_path.push(path_segment("row", boundary));
+            collect_row_paragraphs(body_index, &row_path, row, output);
+        }
     }
 }
 
@@ -548,10 +588,19 @@ fn collect_row_paragraphs(
     row: &CT_Row,
     output: &mut Vec<Value>,
 ) {
-    for (cell_index, cell) in row.cells.iter().enumerate() {
-        let mut cell_path = path.to_vec();
-        cell_path.push(path_segment("cell", cell_index));
-        collect_cell_paragraphs(body_index, &cell_path, cell, output);
+    for boundary in 0..=row.cells.len() {
+        for (control_index, (at, _, control)) in row.content_controls.iter().enumerate() {
+            if *at == boundary {
+                let mut control_path = path.to_vec();
+                control_path.push(path_segment("content-control", control_index));
+                collect_control_paragraphs(body_index, &control_path, control, output);
+            }
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            let mut cell_path = path.to_vec();
+            cell_path.push(path_segment("cell", boundary));
+            collect_cell_paragraphs(body_index, &cell_path, cell, output);
+        }
     }
 }
 
@@ -597,6 +646,7 @@ fn collect_control_paragraphs(
                 content_path.push(path_segment("table", content_index));
                 collect_table_paragraphs(body_index, &content_path, table, output);
             }
+            SdtContent::Row(row) if row.accepted_view_removes() => {}
             SdtContent::Row(row) => {
                 content_path.push(path_segment("row", content_index));
                 collect_row_paragraphs(body_index, &content_path, row, output);
@@ -615,6 +665,7 @@ fn collect_control_paragraphs(
 }
 
 /// Convert a DOCX file to another format.
+#[allow(clippy::too_many_arguments)]
 pub fn convert(
     file: &Path,
     to: &str,
@@ -622,9 +673,11 @@ pub fn convert(
     force: bool,
     dpi: u32,
     font_dir: Option<&Path>,
+    revision_view: RevisionView,
     image: ImageOptions<'_>,
 ) -> Result<()> {
     let doc = Document::open(file)?;
+    let render_options = rdocx::RenderOptions { revision_view };
 
     let default_ext = match to {
         "pdf" => "pdf",
@@ -640,6 +693,10 @@ pub fn convert(
             .into());
         }
     };
+
+    if revision_view == RevisionView::Tracked && matches!(default_ext, "html" | "md") {
+        return Err("--revision-view tracked applies only to PDF and image output".into());
+    }
 
     let output_path = match output {
         Some(p) => p.to_path_buf(),
@@ -660,9 +717,9 @@ pub fn convert(
                     .iter()
                     .map(|f| (f.family.as_str(), f.data.as_slice()))
                     .collect();
-                doc.to_pdf_with_fonts(&font_refs)?
+                doc.to_pdf_with_fonts_and_options(&font_refs, render_options)?
             } else {
-                doc.to_pdf()?
+                doc.to_pdf_with_options(render_options)?
             };
             stage_and_publish(&[(output_path.clone(), bytes)], force)?;
         }
@@ -682,7 +739,7 @@ pub fn convert(
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             let (format, extension) = parse_image_format(to, image.quality, image.transparent)?;
-            let layout = doc.layout_deterministic()?;
+            let layout = doc.layout_deterministic_with_options(render_options)?;
             let selected = selected_zero_based_pages(layout.layout.pages.len(), image.pages)?;
             match format {
                 RasterFormat::Tiff => {
@@ -1558,6 +1615,16 @@ pub fn parse_comparison_granularity(
         })
 }
 
+pub fn parse_revision_view(name: &str) -> std::result::Result<RevisionView, String> {
+    match name {
+        "accepted" => Ok(RevisionView::Accepted),
+        "tracked" => Ok(RevisionView::Tracked),
+        _ => Err(format!(
+            "unknown revision view {name:?}, expected accepted or tracked"
+        )),
+    }
+}
+
 /// Parse one `--ignore-story` value.
 pub fn parse_comparison_story(name: &str) -> std::result::Result<ComparisonStoryKind, String> {
     COMPARISON_STORIES
@@ -1849,7 +1916,9 @@ pub fn render(
     let out_dir = output_dir.unwrap_or_else(|| Path::new("."));
     let (format, extension) =
         parse_image_format(options.format, options.quality, options.transparent)?;
-    let layout = doc.layout_deterministic()?;
+    let layout = doc.layout_deterministic_with_options(rdocx::RenderOptions {
+        revision_view: options.revision_view,
+    })?;
     let selected = selected_render_pages(layout.layout.pages.len(), options.page, options.pages)?;
     let stem = file.file_stem().unwrap_or_default().to_string_lossy();
     let legacy_single_page = options.page.is_some();
@@ -2417,6 +2486,7 @@ mod tests {
             false,
             96,
             None,
+            RevisionView::Accepted,
             ImageOptions {
                 pages: None,
                 quality: 90,

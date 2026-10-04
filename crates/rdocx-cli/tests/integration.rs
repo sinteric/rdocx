@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::rel_types;
-use rdocx::{Document, WordPackageClass};
+use rdocx::{Document, RenderOptions, RevisionView, WordPackageClass};
 use serde_json::{Value, json};
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -2108,6 +2108,97 @@ fn render_uses_the_bundled_font_deterministic_path() {
 }
 
 #[test]
+fn issue_253_cli_revision_view_selects_tracked_output() {
+    let temp = TempWorkspace::new("issue-253-view");
+    let input = temp.path.join("redline.docx");
+    let mut document = fixture_document(&["Keep OLDWORD here."]);
+    document
+        .compare(
+            &fixture_document(&["Keep NEWWORD here."]),
+            "Reviewer",
+            "2026-09-30T12:00:00Z",
+        )
+        .unwrap();
+    document.save(&input).unwrap();
+    let opened = Document::open(&input).unwrap();
+    let accepted_pdf = opened.to_pdf().unwrap();
+    let tracked_pdf = opened
+        .to_pdf_with_options(RenderOptions {
+            revision_view: RevisionView::Tracked,
+        })
+        .unwrap();
+    assert_ne!(accepted_pdf, tracked_pdf);
+    for (view, expected) in [("accepted", accepted_pdf), ("tracked", tracked_pdf)] {
+        let output = temp.path.join(format!("{view}.pdf"));
+        let result = cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "-o",
+            path_text(&output),
+            "--revision-view",
+            view,
+        ]);
+        assert_success(&result, view);
+        assert_eq!(fs::read(&output).unwrap(), expected);
+    }
+    let invalid = temp.path.join("invalid.pdf");
+    let result = cli(&[
+        "convert",
+        path_text(&input),
+        "--to",
+        "pdf",
+        "-o",
+        path_text(&invalid),
+        "--revision-view",
+        "final",
+    ]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(!invalid.exists());
+    let html = temp.path.join("tracked.html");
+    let result = cli(&[
+        "convert",
+        path_text(&input),
+        "--to",
+        "html",
+        "-o",
+        path_text(&html),
+        "--revision-view",
+        "tracked",
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!html.exists());
+
+    let tracked_png = opened
+        .render_page_to_png_deterministic_with_options(
+            0,
+            24.0,
+            RenderOptions {
+                revision_view: RevisionView::Tracked,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let rendered = temp.path.join("rendered");
+    let result = cli(&[
+        "render",
+        path_text(&input),
+        "--dpi",
+        "24",
+        "--output-dir",
+        path_text(&rendered),
+        "--revision-view",
+        "tracked",
+    ]);
+    assert_success(&result, "tracked render");
+    assert_eq!(
+        fs::read(rendered.join("redline_page1.png")).unwrap(),
+        tracked_png
+    );
+}
+
+#[test]
 fn render_page_and_pages_flags_keep_legacy_and_range_indexing_separate() {
     let temp = TempWorkspace::new("render-page-pages");
     let input = temp.path.join("pages.docx");
@@ -3159,6 +3250,128 @@ fn compare_accept_and_reject_reproduce_each_input() {
 }
 
 const COMPARE_TIMESTAMP: &str = "2026-09-29T12:00:00Z";
+
+#[test]
+fn text_json_joins_nonempty_deleted_mark_paragraph_after_reopen() {
+    let temp = TempWorkspace::new("f-x167-text-joined-paragraph");
+    let input = temp.path.join("joined.docx");
+    let accepted_path = temp.path.join("accepted.docx");
+    write_document(&input, &["Tail"]);
+    let mut package = OpcPackage::open(&input).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+        .unwrap()
+        .replacen(
+            "<w:body>",
+            concat!(
+                r#"<w:body><w:p><w:pPr><w:rPr><w:del w:id="1" w:author="Ada"/></w:rPr></w:pPr><w:r><w:t xml:space="preserve">Joined </w:t></w:r></w:p>"#,
+                r#"<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Omega</w:t></w:r></w:p>"#,
+            ),
+            1,
+        );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    package.save(&input).unwrap();
+    let mut accepted = Document::open(&input).unwrap();
+    accepted.accept_all().unwrap();
+    accepted.save(&accepted_path).unwrap();
+
+    let records = |path: &Path| {
+        let output = cli(&["text", path_text(path), "--json"]);
+        assert_success(&output, "text --json");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["paragraphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|paragraph| {
+                (
+                    paragraph["text"].clone(),
+                    paragraph["style"].clone(),
+                    paragraph["runs"].clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(records(&input), records(&accepted_path));
+}
+
+#[test]
+fn text_json_omits_accepted_deleted_table_rows() {
+    let temp = TempWorkspace::new("f-x167-text-deleted-rows");
+    let original = temp.path.join("original.docx");
+    let edited = temp.path.join("edited.docx");
+    let redline = temp.path.join("redline.docx");
+    let mut document = fixture_document(&["a"]);
+    let mut table = document.add_table(2, 1);
+    table.cell(0, 0).unwrap().set_text("KEEP");
+    table.cell(1, 0).unwrap().set_text("GONE");
+    document.add_paragraph("b");
+    document.save(&original).unwrap();
+    let mut document = fixture_document(&["a"]);
+    document
+        .add_table(1, 1)
+        .cell(0, 0)
+        .unwrap()
+        .set_text("KEEP");
+    document.add_paragraph("b");
+    document.save(&edited).unwrap();
+    let compared = cli(&[
+        "compare",
+        path_text(&original),
+        path_text(&edited),
+        "--author",
+        "Alice",
+        "--timestamp",
+        "2026-09-30T12:00:00Z",
+        "--output",
+        path_text(&redline),
+    ]);
+    assert_success(&compared, "compare");
+    let plain = cli(&["text", path_text(&redline)]);
+    assert_success(&plain, "text");
+    assert_eq!(String::from_utf8(plain.stdout).unwrap(), "a\nKEEP\t\nb\n");
+    let structured = cli(&["text", path_text(&redline), "--json"]);
+    assert_success(&structured, "text --json");
+    let value: Value = serde_json::from_slice(&structured.stdout).unwrap();
+    let paragraphs = value["paragraphs"].as_array().unwrap();
+    assert_eq!(paragraphs.len(), 3);
+    assert_eq!(paragraphs[0]["text"], "a");
+    assert_eq!(paragraphs[1]["text"], "KEEP");
+    assert_eq!(paragraphs[1]["path"][0]["index"], 0);
+    assert_eq!(paragraphs[2]["text"], "b");
+}
+
+#[test]
+fn text_json_keeps_control_owned_rows_and_omits_deleted_ones() {
+    let temp = TempWorkspace::new("f-x167-control-rows");
+    let input = temp.path.join("control-rows.docx");
+    write_document(&input, &["Tail"]);
+    let mut package = OpcPackage::open(&input).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+        .unwrap()
+        .replacen(
+            "<w:body>",
+            concat!(
+                r#"<w:body><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#,
+                r#"<w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:r><w:t>KEEP</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt>"#,
+                r#"<w:sdt><w:sdtContent><w:tr><w:trPr><w:del w:id="1" w:author="Ada"/></w:trPr><w:tc><w:p><w:r><w:t>GONE</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt>"#,
+                r#"</w:tbl>"#,
+            ),
+            1,
+        );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    package.save(&input).unwrap();
+
+    let plain = cli(&["text", path_text(&input)]);
+    assert_success(&plain, "text");
+    assert_eq!(String::from_utf8(plain.stdout).unwrap(), "KEEP\t\nTail\n");
+    let structured = cli(&["text", path_text(&input), "--json"]);
+    assert_success(&structured, "text --json");
+    let value: Value = serde_json::from_slice(&structured.stdout).unwrap();
+    let paragraphs = value["paragraphs"].as_array().unwrap();
+    assert_eq!(paragraphs.len(), 2);
+    assert_eq!(paragraphs[0]["text"], "KEEP");
+    assert_eq!(paragraphs[1]["text"], "Tail");
+}
 
 /// Run `rdocx compare --json` and return its record.
 fn compare_record(original: &Path, edited: &Path, redline: &Path, options: &[&str]) -> Value {

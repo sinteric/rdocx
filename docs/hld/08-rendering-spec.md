@@ -36,7 +36,12 @@ glyph-cluster positions. Word assigns spans before shaping. Its initial text
 projection assigns one shaped segment to each formatting and provenance span.
 The shared line breaker alone discovers UAX 14 opportunities, reshapes each
 exact byte slice, and subdivides the scalar source range, so every wrapped
-fragment retains an exact contiguous source range. A language-aware inline
+fragment retains an exact contiguous source range. U+0020 spaces that end a
+line hang past it, as on the rich path and in Word and PowerPoint. The fit test
+leaves them out, the breaker splits their glyphs off the last fragment without
+reshaping it, and alignment and justification leave them out. Word paints no
+underline, strikethrough or highlight on them. A no-break space stays part of
+its word. A language-aware inline
 item additionally exposes embedded Liang opportunities for the `en`, `fr`,
 `de`, and `es` BCP 47 primary subtags. On overflow it tries candidates from
 right to left and selects the farthest opportunity whose prefix plus a shaped
@@ -85,7 +90,10 @@ programs into transient ordinary PresentationML groups before the shared
 resolver runs. Authoritative data-node text, layout-owned decorative shapes,
 quick styles, colours, connector paths, and the graphic-frame transform flow
 through the same text, paint, effect, geometry, group, and clipping machinery
-as ordinary shapes. The centred layouts set node alignment and line spacing as
+as ordinary shapes. A node's text colour comes from the colour definition's
+`dgm:txFillClrLst` entry. When the list is empty, the quick style's
+`a:fontRef` colour applies if present. Otherwise inherited text colour remains.
+The centred layouts set node alignment and line spacing as
 typed defaults that fill only what a data paragraph's own `a:pPr` leaves
 unset, so a node whose data says `algn="r"` renders right-aligned rather than
 as a labelled placeholder. An empty data paragraph takes no defaults. Static,
@@ -877,7 +885,10 @@ carries the fact on the lowered table block, and the row painter places the
 logically last cell first. The lowered column widths, every cell's grid column,
 the retained semantics and the structure tree stay in reading order, so cell
 ownership, the body fragments and the accessibility contract are unchanged. A
-left-to-right table takes the same placement arithmetic it always did.
+left-to-right table takes the same placement arithmetic it always did. Table
+justification and signed indentation resolve from the leading margin, which
+is the right margin for `w:bidiVisual`. Without authored or inherited
+justification, the table has zero indentation from that leading margin.
 
 A row's omitted leading grid columns move that row alone. The resolved offset
 is `w:wBefore` when present and otherwise the width of the `w:gridBefore`
@@ -1272,8 +1283,26 @@ therefore resolve to the embedded face in deterministic layout. Theme or font
 mutation invalidates completed normal and deterministic layouts while reusable
 engines compare the changed theme and font bytes in their full context.
 
-A direct footnote or endnote
-reference in an otherwise safe body paragraph remains cacheable. Its explicit
+A normal note keeps its package ID as its layout lookup key. The visible
+footnote and endnote labels are assigned independently from the first body
+reference to each note in projected document order. The same label shapes the
+body superscript and the marker beside the note. Reordering the note part does
+not renumber either marker. A removed note leaves the remaining IDs stable
+while the displayed sequence closes the gap. Custom marks and section restart
+policy remain outside this behavior.
+
+New normal endnotes join the independent endnote label stream. References in
+different sections retain one document-wide occurrence sequence, and their
+notes append after the final body page under the current document-end policy.
+Microsoft Word for Mac 16.113.2 places both endnotes of the F-273 mixed-section
+fixture on its second and final body page and displays endnote labels `i` and
+`ii`. The current deterministic renderer appends a third page and uses decimal
+labels `1` and `2`. The fixture asserts this known placement and format
+divergence while checking that both note streams keep independent occurrence
+order. F-274 owns placement and number-format policy.
+
+A direct footnote or endnote reference in an otherwise safe body paragraph
+remains cacheable. Its explicit
 note ID is part of the complete typed paragraph key. Retained paragraph reads
 compare the base context separately from the exact footnote and endnote parts.
 Changing the reference misses that paragraph. Changing either note part keeps
@@ -1438,6 +1467,13 @@ therefore equal without moving rendered output.
 
 ### Word revision views
 
+The native render options, Python rendering methods, and CLI PDF and image
+commands select the same accepted or tracked view. Accepted is the default.
+The selected view determines pagination before page indices or ranges are
+validated, so tracked content can add pages. Unknown view names fail before
+output is created. HTML and Markdown conversion do not accept the tracked
+rendering selector.
+
 `LayoutInput::revision_view` selects the accepted or tracked projection before
 Word text shaping. One ordered projection combines ordinary runs and typed
 revision wrappers at their preserved boundaries, including nested wrappers and
@@ -1453,6 +1489,24 @@ destinations and omits deletions and move sources. Tracked layout includes both
 sides. It forces single underline on insertion and move destination text and
 single strike on deletion and move source text while retaining the remaining
 resolved formatting.
+
+In the accepted view, a body paragraph whose mark is deleted or moved away
+joins the next direct body paragraph when no section break or intervening
+block prevents the join. A joining paragraph with no accepted content leaves
+no line, list label, outline entry, page break or spacing. Retained content
+is laid out with the following paragraph's properties and shares its line.
+The tracked view retains both paragraphs. Accepted table layout leaves out
+deleted or moved-away rows, including nested rows and rows inside controls,
+and leaves out a table whose rows are all removed. Remaining row source paths
+keep their model indices. Warm layout does not reuse a table cache when a row
+is removed from its accepted projection.
+
+A compared picture replacement holds deleted and inserted drawings in the
+tracked view. The accepted view shows the edited media and the rejected
+document shows the original media. A final table followed by a paragraph
+keeps row, cell text, and paragraph-mark revisions on their owning elements.
+Resolving either side preserves the paragraph and mark properties of the
+paragraph before the change, including after a final paragraph move.
 
 Provenance ranges are local to this selected projection. The field model's
 `Field::projected_text` decision is the single owner of whether a field cache
@@ -1501,6 +1555,14 @@ section's displayed sequence without changing the one-based physical output
 page identity. `PageFrame::page_number` is physical and
 `PageFrame::displayed_page_number` drives PAGE substitution plus first, even,
 and default header or footer selection.
+
+**A paragraph's `w:sectPr` ends its section.** It governs that paragraph and
+every block since the previous break, and the body `w:sectPr` governs the
+blocks after the last one (ECMA-376 17.6.17 and 17.6.18).
+`main_story_item_sections` resolves that owner for each main-story block once,
+and the block is broken to that section's measure and grid. Word writes a
+section this way whether the break sits on its own empty paragraph or on the
+last paragraph of content.
 
 Columns reach pagination. `sect_pr_to_geometry` resolves one track list per
 section, either equal-width tracks from `w:num` and `w:space` or explicit

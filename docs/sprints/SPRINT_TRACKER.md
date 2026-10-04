@@ -98,6 +98,9 @@ defended.
 | S81 | X | 3 | 3 | 0 | 15 | 1 | Integrated slide import, scoped replacement and built-in table styles, then proved the complete Issue 169 and six-item Issue 217 Python deck chains. The full gate passed with 75 Presentation Python tests, pinned python-pptx and LibreOffice evidence, 49 unchanged hashes, all 22 archives below 10 MiB and sprint review pass 1 clean. Reporter fixture acceptance and issue closure evidence continue in S82. No stories carried |
 | S82 | X | 3 | 3 | 0 | 13 | 1 | Exercised the original Word report and Presentation deck, completed both matrices and workflows, repaired image comparison and reconciled the original 22 issue criteria. The full gate passed with 168 Word and 76 Presentation Python tests, 49 unchanged hashes, all 22 archives below 10 MiB and sprint review pass 1 clean. Issues 158, 160 and 226 retain follow-up criteria. No stories carried |
 | S83 | X | 2 | 2 | 0 | 8 | 1 | Corrected Word package validity, accepted producer style, drawing and decimal measurement forms, and kept F-X160 output stable after F-X159's three declared hash changes. The full gate passed with 169 Word Python tests, 49 matching hashes, all 22 archives below 10 MiB and sprint review pass 1 clean. No stories carried |
+| S84 | X | 10 | 10 | 0 | 38 | 2 | Combined the S84 through S89 repair scope in one sprint, including PR 265's mixed-section regression. All nine issue contracts and 32 contribution dispositions have integrated evidence. The full gate passed with 175 Word and 77 Presentation Python tests, 49 matching hashes, 22 package archives below 10 MiB and sprint review pass 1 clean. GitHub closure follows the reviewed main push. No stories carried |
+| S85 | X | 1 | 1 | 0 | 1 | 1 | Pinned LibreOffice 26.2.5.2 for the macOS Presentation Python CI cell after the S84 main run exposed the missing viewer. The full integrated local gate passed, including 77 Presentation Python tests, 133 workflow checks, 49 matching hashes, both WASM targets, 22 package archives below 10 MiB and a clear supply-chain scan. Hosted CI and the 32 PR and nine issue dispositions follow the reviewed main push. No stories carried |
+| S86 | M24, X | 7 | 7 | 0 | 27 | 2 | Completed rich headers and footers, footnotes and endnotes, namespace preservation, and both family release preparations. The full gate passed with 49 matching hashes, 22 package archives below 10 MiB and clean sprint review pass 2. Hosted build-only run 37165122971 produced all 14 expected artifacts after one targeted Linux arm64 retry. Issue 266 stays open until the separately approved rpptx-v0.13.0 and v0.15.0 releases are published, verified and reported to the requester. No contributed PR was assigned and no stories carried |
 
 ## Completed features
 
@@ -532,6 +535,24 @@ defended.
 | F-X150 | S82 | M | 3 | 1 | 2026-10-02 | Reconciled all 22 original issue criteria with 18 passing rows, four unresolved rows and post-main issue decisions |
 | F-X159 | S83 | M | 3 | 1 | 2026-10-02 | Corrected fresh Word AppVersion and nested-table validity, opened the showcase in Word and reviewed a three-entry deterministic hash delta |
 | F-X160 | S83 | L | 5 | 1 | 2026-10-02 | Accepted producer style, drawing ID and decimal measurement variants with unchanged 49-entry hash output |
+| F-X169 | S84 | L | 5 | 1 | 2026-10-02 | Classified all 31 live PRs and eight issues, tied 19 older PRs to S76 integration commits, and aligned the whole-number roadmap assertion |
+| F-X161 | S84 | L | 5 | 1 | 2026-10-02 | Integrated PR 251's compact Word part serializers and namespace preservation with 20 reviewed Word XML baseline entries |
+| F-X165 | S84 | M | 3 | 1 | 2026-10-02 | Integrated PR 256's Python and CLI accepted or tracked view selectors with pinned PDF text evidence and invalid-selector checks |
+| F-X162 | S84 | M | 3 | 1 | 2026-10-02 | Integrated PR 241's governing section layout with two reviewed feature showcase PDF hash changes |
+| F-X163 | S84 | M | 3 | 1 | 2026-10-02 | Integrated PR 242's plain line hanging-space fit with the complete Issue 226 width matrix and reviewed PDF and pixel baselines |
+| F-X164 | S84 | M | 3 | 1 | 2026-10-02 | Integrated PR 252's theme style for new shapes and SmartArt text colour precedence with pinned PowerPoint and LibreOffice checks |
+| F-X166 | S84 | L | 5 | 2 | 2026-10-03 | Integrated PRs 257, 258, 260 and 261 with 80 Word for Mac accept and reject outcomes, final-block and picture regressions, and unchanged hashes |
+| F-X170 | S84 | M | 3 | 1 | 2026-10-03 | Added high-level Word style formatting for Issue 264 with public examples, round-trip resolution and unchanged hashes |
+| F-X167 | S84 | L | 5 | 1 | 2026-10-03 | Integrated accepted-view paragraph joins and deleted-row projection across text, CLI JSON, HTML, Markdown and PDF with 175 Python binding cases and unchanged hashes |
+| F-X168 | S84 | M | 3 | 1 | 2026-10-03 | Proved both Issue 158 fixture workflows, the identity and producer matrices, nine issue contracts and PR 265 mixed-section pagination on the integrated repair prefix |
+| F-X171 | S85 | S | 1 | 1 | 2026-10-03 | Pinned LibreOffice 26.2.5.2 in the macOS presentation Python CI cell, verified the reviewed DMG digest and restored the complete Issue 158 deck oracle gate |
+| F-271 | S86 | L | 5 | 1 | 2026-10-03 | Added rich content and staged comments across all header and footer variants, with scoped relationship and preservation checks |
+| F-X133 | S86 | S | 1 | 1 | 2026-10-03 | Scoped canonical root bindings in retained Word paragraphs while preserving standalone declarations and local shadows |
+| F-272 | S86 | L | 5 | 1 | 2026-10-03 | Added atomic rich footnote lifecycle and occurrence labels, with pinned Word continuation and package preservation evidence |
+| F-X172 | S86 | L | 5 | 1 | 2026-10-03 | Unified CLI and Python release assets under one family tag with producer attestations, complete checksums and closed-main publication gates |
+| F-273 | S86 | L | 5 | 1 | 2026-10-03 | Added atomic rich endnote authoring with independent IDs, preserved part XML and scoped assets, and recorded the pinned Word policy divergence |
+| F-X173 | S86 | M | 3 | 1 | 2026-10-03 | Prepared rpptx 0.13.0 across 15 Rust crates, CLI and Python with family notes, package evidence and Python 3.9 wheel smoke repair |
+| F-X174 | S86 | M | 3 | 1 | 2026-10-04 | Prepared rdocx 0.15.0 across seven Rust crates, CLI and Python with family notes, clean wheel smoke, package evidence and 49 matching hashes |
 
 ## Velocity
 
@@ -630,6 +651,9 @@ five working days.
 | S81 | 3 | 1 | 15.00 |
 | S82 | 3 | 1 | 15.00 |
 | S83 | 2 | 1 | 10.00 |
+| S84 | 10 | 2 | 25.00 |
+| S85 | 1 | 1 | 5.00 |
+| S86 | 7 | 2 | 17.50 |
 
 ## Escalation record
 
@@ -716,6 +740,8 @@ was done about it. Empty is the expected state.
 | 2026-10-02 | Sprint estimate variance exceeded 30 percent | S81 | Record 1 elapsed workday against 15 estimated for three completed dependency waves. Reviewed contributor increments and established Python, viewer and package gates compressed elapsed work while full integrated verification and sprint review remained explicit. The resulting 15.00 stories per week is a short contribution-intake result, so retain the dependency-defined S82 through S88 acceptance and repair boundaries |
 | 2026-10-02 | Sprint estimate variance exceeded 30 percent | S82 | Record 1 elapsed workday against 13 estimated for three completed acceptance and evidence stories. Existing test infrastructure and pinned fixture inputs reduced elapsed work while full integrated verification and sprint review remained explicit. The resulting 15.00 stories per week is a short acceptance-wave result, so retain the dependency-defined S83 through S88 repair boundaries |
 | 2026-10-02 | Sprint estimate variance exceeded 30 percent | S83 | Record 1 elapsed workday against 8 estimated for two completed dependency waves. Reviewed contributions and established Word, binding and package gates compressed elapsed work while full integrated verification and sprint review remained explicit. The resulting 10.00 stories per week is a short contribution-intake result, so retain the dependency-defined S84 through S88 repair boundaries |
+| 2026-10-03 | Sprint estimate variance exceeded 30 percent | S84 | Record 2 elapsed workdays against 38 estimated for ten completed stories. This deliberately combined the S84 through S89 repair scope to pay the full-test cost once. Isolated workers, reviewed contribution increments and one integrated acceptance gate reduced elapsed time without changing the 38-day planning estimate. The resulting 25.00 stories per week is not a sustainable forecast. Keep the dependency-defined S85 feature boundary |
+| 2026-10-04 | Sprint estimate variance exceeded 30 percent | S86 | Record 2 elapsed workdays against 27 estimated for seven completed stories. Isolated workers reused established authoring and release infrastructure while the integrated gate, clean review and hosted build evidence remained explicit. The resulting 17.50 stories per week is a short sprint result, so retain the dependency-defined S87 boundary |
 
 ## S79 contribution reconciliation
 
@@ -737,7 +763,7 @@ Issues [169](https://github.com/tensorbee/rdocx/issues/169#issuecomment-59500445
 
 No contributed PR was assigned to the S82 fixture and evidence wave. The verified [S82 main merge](https://github.com/tensorbee/rdocx/commit/470e3781811f34044d9a3acb2f5cb8af2d09a65b) carries all three completed F-IDs. Issues [156](https://github.com/tensorbee/rdocx/issues/156#issuecomment-5957215809), [164](https://github.com/tensorbee/rdocx/issues/164#issuecomment-5957230429), [166](https://github.com/tensorbee/rdocx/issues/166#issuecomment-5957233694), [169](https://github.com/tensorbee/rdocx/issues/169#issuecomment-5957237108), [170](https://github.com/tensorbee/rdocx/issues/170#issuecomment-5957245288) and [217](https://github.com/tensorbee/rdocx/issues/217#issuecomment-5957248701) received individual evidence and reporter-credit comments and were closed.
 
-Issues [158](https://github.com/tensorbee/rdocx/issues/158#issuecomment-5957255636), [160](https://github.com/tensorbee/rdocx/issues/160#issuecomment-5957258109) and [226](https://github.com/tensorbee/rdocx/issues/226#issuecomment-5957260298) remain open. F-X161 in S84 owns the compact Word part and namespace gap in Issue 160. F-X163 in S86 owns the plain-line spacing gap in Issue 226. Issue [163](https://github.com/tensorbee/rdocx/issues/163#issuecomment-5957261891) remains closed after its missing bookmark-after-table evidence passed on the S82 main merge. The original 22-issue ledger now has 19 passing rows and three unresolved rows.
+Issues [158](https://github.com/tensorbee/rdocx/issues/158#issuecomment-5957255636), [160](https://github.com/tensorbee/rdocx/issues/160#issuecomment-5957258109) and [226](https://github.com/tensorbee/rdocx/issues/226#issuecomment-5957260298) remain open. F-X161 in S84 owns the compact Word part and namespace gap in Issue 160. F-X163 was scheduled in S86 at S82 close and is now in S84 for the plain-line spacing gap in Issue 226. Issue [163](https://github.com/tensorbee/rdocx/issues/163#issuecomment-5957261891) remains closed after its missing bookmark-after-table evidence passed on the S82 main merge. The original 22-issue ledger now has 19 passing rows and three unresolved rows.
 
 ## S83 contribution and issue reconciliation
 

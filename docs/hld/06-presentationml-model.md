@@ -745,9 +745,15 @@ old click action named are removed.
 An ordinary shape has canonical non-visual properties, a typed transform,
 preset geometry, and a minimal text body. `add_shape` keeps the string API but
 accepts only names in the generated table of all 187 ECMA preset shapes. An
-unknown name returns a contextual error without changing the slide. A textbox
-uses `rect`, sets `txBox="1"`, has `a:noFill`, and contains `a:bodyPr`,
-`a:lstStyle`, and one required paragraph. An empty group contains the required
+unknown name returns a contextual error without changing the slide. The shape
+carries the `p:style` python-pptx writes between its `p:spPr` and `p:txBody`:
+`a:lnRef idx="1"`, `a:fillRef idx="3"`, and `a:effectRef idx="2"` in
+`accent1`, and `a:fontRef idx="minor"` in `lt1`. A shape with neither a style
+nor a direct fill or line draws nothing, so the style gives it the theme's
+accent fill, line, and effect with light text. HTML and ODP import map their
+source's own fill and line and add no style. A textbox
+uses `rect`, sets `txBox="1"`, has `a:noFill`, has no `p:style`, and contains
+`a:bodyPr`, `a:lstStyle`, and one required paragraph. An empty group contains the required
 `p:nvGrpSpPr` and `p:grpSpPr` shells, with no invented transform or members.
 Only a group added inside a group through `ShapesMut` also gets the zero
 `a:xfrm` described above.

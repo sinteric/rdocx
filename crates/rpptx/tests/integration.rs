@@ -53,6 +53,10 @@ fn html_public_import_saves_reopens_and_remains_editable() {
     );
 
     let bytes = imported.presentation.to_bytes().expect("HTML deck saves");
+    // The rectangle carries the source's own fill, with no theme line or text colour.
+    let package = open_opc(&bytes, "HTML import");
+    let slide_xml = package.get_part("/ppt/slides/slide1.xml").unwrap();
+    assert!(!String::from_utf8_lossy(slide_xml).contains("<p:style>"));
     let mut reopened = rpptx::Presentation::from_bytes(&bytes).expect("HTML deck reopens");
     reopened
         .slide_mut(0)
@@ -1000,6 +1004,10 @@ fn odp_round_trip_preserves_supported_presentation_content() {
             .any(|shape| shape.kind() == ShapeKind::Picture)
     );
     assert!(slide.shapes().any(|shape| shape.table().is_some()));
+    // ODP styles are not projected, so the rectangle gets no theme style either.
+    let package = open_opc(&source.presentation.to_bytes().unwrap(), "ODP import");
+    let slide_xml = package.get_part("/ppt/slides/slide1.xml").unwrap();
+    assert!(!String::from_utf8_lossy(slide_xml).contains("<p:style>"));
 
     // A text:line-break stays a line break, and each text:p a paragraph.
     let breaks = f222_minimal_odp(
@@ -3523,6 +3531,11 @@ const SMARTART_COLOR_RESOURCE: (&str, &str) = (
     "dc0a610ca9a665158d3afaff8612e29320e009f151990f74a265197a4e96f9a4",
 );
 
+const SMARTART_EMPTY_TEXT_COLOR_RESOURCE: (&str, &str) = (
+    "cs/accent1_2.gcs",
+    "976be28bebc3205a68a7ec604519fbe1a85b6b5fe13f4729ddabf147296848ff",
+);
+
 fn pinned_smartart_resources_available() -> bool {
     let resources = [
         SMARTART_STYLE_RESOURCE,
@@ -4193,6 +4206,87 @@ fn smartart_rust_source_bytes(family: &str) -> Vec<u8> {
         "../diagrams/colors1.xml",
     );
     package_bytes(package)
+}
+
+#[test]
+fn smartart_text_without_a_colour_list_entry_uses_the_quick_style_font_colour() {
+    if !pinned_smartart_resources_available()
+        || !smartart_resources_match(
+            Path::new(SMARTART_RESOURCE_ROOT),
+            &[SMARTART_EMPTY_TEXT_COLOR_RESOURCE],
+        )
+    {
+        eprintln!(
+            "SmartArt text colour check skipped because pinned PowerPoint resources are absent or hash-mismatched"
+        );
+        return;
+    }
+    // PowerPoint's accent1_2 colours give node0 no txFillClrLst, so the node
+    // text takes the fontRef colour of the simple1 quick style, lt1, and
+    // never the accent1 node fill.
+    let node_text_fills = |without_style_colour: bool| {
+        let mut package =
+            OpcPackage::from_reader(Cursor::new(authentic_smartart_oracle_source_bytes("list")))
+                .unwrap();
+        package.set_part(
+            "/ppt/diagrams/colors1.xml",
+            read_pinned_smartart_resource(
+                SMARTART_EMPTY_TEXT_COLOR_RESOURCE.0,
+                SMARTART_EMPTY_TEXT_COLOR_RESOURCE.1,
+            ),
+        );
+        if without_style_colour {
+            let style = String::from_utf8(
+                package
+                    .get_part("/ppt/diagrams/quickStyle1.xml")
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+            .replace(
+                r#"<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>"#,
+                r#"<a:fontRef idx="minor"/>"#,
+            );
+            package.set_part("/ppt/diagrams/quickStyle1.xml", style.into_bytes());
+        }
+        let presentation = Presentation::from_bytes(&package_bytes(package)).unwrap();
+        let (input, _) = presentation.render_deterministic().unwrap();
+        input.slides[0]
+            .shapes
+            .iter()
+            .filter_map(|shape| {
+                let ResolvedContent::Text(body) = &shape.content else {
+                    return None;
+                };
+                body.paragraphs
+                    .iter()
+                    .flat_map(|paragraph| &paragraph.runs)
+                    .find_map(|run| match run {
+                        ResolvedTextRun::Text { text, style } if !text.trim().is_empty() => {
+                            Some(style.fill.clone())
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let styled = node_text_fills(false);
+    assert!(!styled.is_empty());
+    assert!(
+        styled
+            .iter()
+            .all(|fill| *fill == Some(Paint::Solid(oxml_layout::Color::WHITE))),
+        "{styled:?}"
+    );
+    let unstyled = node_text_fills(true);
+    assert_eq!(unstyled.len(), styled.len());
+    assert!(
+        unstyled
+            .iter()
+            .all(|fill| *fill == Some(Paint::Solid(oxml_layout::Color::BLACK))),
+        "{unstyled:?}"
+    );
 }
 
 #[test]
@@ -6084,17 +6178,17 @@ fn animated_gif_and_motion_jpeg_avi_match_the_reviewed_two_machine_manifest() {
         AnimationGoldenManifest {
             timestamps: vec![0, 100, 200, 300, 400, 500],
             frame_hashes: vec![
-                4_894_345_659_775_260_357,
-                6_182_286_987_453_888_369,
-                13_510_962_248_632_293_461,
-                4_894_345_659_775_260_357,
-                4_350_559_588_561_512_901,
-                4_200_447_167_577_390_285,
+                17_556_814_090_165_878_936,
+                15_360_315_259_064_207_776,
+                3_087_000_066_843_575_397,
+                17_556_814_090_165_878_936,
+                8_655_552_810_443_283_030,
+                7_285_807_251_454_764_043,
             ],
             loop_repetitions: gif::Repeat::Finite(2),
             width: 96,
             height: 54,
-            container_hash: 5_365_094_422_666_602_990,
+            container_hash: 14_821_235_962_859_911_503,
         }
     );
 
@@ -6112,25 +6206,25 @@ fn animated_gif_and_motion_jpeg_avi_match_the_reviewed_two_machine_manifest() {
                 width: 96,
                 height: 54,
                 duration_ms: 600,
-                payload_sizes: vec![968, 974, 1_015, 968, 907, 908],
+                payload_sizes: vec![1_051, 1_041, 1_083, 1_051, 974, 967],
                 payload_hashes: vec![
-                    9_345_256_692_286_977_543,
-                    2_927_541_614_763_063_172,
-                    6_127_686_133_210_419_864,
-                    9_345_256_692_286_977_543,
-                    10_353_497_591_034_183_350,
-                    7_116_127_623_826_450_847,
+                    6_114_878_512_987_619_525,
+                    6_689_117_434_859_934_405,
+                    10_438_352_793_058_009_424,
+                    6_114_878_512_987_619_525,
+                    5_082_515_722_578_930_998,
+                    3_824_155_140_654_973_691,
                 ],
                 decoded_frame_hashes: vec![
-                    15_016_817_725_945_965_948,
-                    7_383_799_236_496_809_804,
-                    9_379_829_375_826_415_478,
-                    15_016_817_725_945_965_948,
-                    12_438_950_088_017_235_599,
-                    3_796_532_621_390_706_249,
+                    1_119_435_603_157_072_622,
+                    11_478_850_699_532_632_868,
+                    9_098_180_366_198_776_722,
+                    1_119_435_603_157_072_622,
+                    6_400_185_387_006_672_792,
+                    14_121_660_160_416_744_809,
                 ],
             },
-            container_hash: 6_525_351_511_319_371_367,
+            container_hash: 11_822_763_859_841_947_549,
             diagnostics: vec![
                 "media shape 6 rendered as deterministic Video placeholder".to_owned(),
                 "media shape 6 has unsupported content type `video/x-f227-opaque`".to_owned(),
@@ -8014,7 +8108,7 @@ const F124_ARTIFACT_SHA256: &str =
 const F116_ARTIFACT_SHA256: &str =
     "d36da6e8849eabd4487d2572baea19c3716ee7d0fe03aaa4714a28ce3c41de4f";
 const F116_CURRENT_ARTIFACT_SHA256: &str =
-    "4d469759c0539f1c7947389dc914298d10c984ad204becad26ea700a8bbd0f4b";
+    "f85098f013b90871a343d2da9b13d5bb3ab125788a7075cf2d423ac865efce08";
 const F116_FINAL_TITLES: [&str; 10] = [
     "F-116 slide 10",
     "F-116 slide 02",
@@ -18829,6 +18923,86 @@ fn an_authored_outer_shadow_is_drawn_below_and_right_of_its_shape() {
 }
 
 #[test]
+fn added_shape_carries_the_theme_style_and_renders_it() {
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(6).expect("add blank slide");
+    let mut slide = presentation.slide_mut(0).unwrap();
+    slide
+        .add_shape(
+            "rect",
+            Emu(914_400),
+            Emu(914_400),
+            Emu(2_743_200),
+            Emu(1_828_800),
+        )
+        .expect("add shape")
+        .set_text("Styled")
+        .expect("set shape text");
+    slide
+        .add_textbox(Emu(914_400), Emu(3_200_400), Emu(2_743_200), Emu(914_400))
+        .expect("add textbox")
+        .set_text("Plain")
+        .expect("set textbox text");
+
+    let bytes = presentation
+        .to_bytes()
+        .expect("serialize styled shape deck");
+    let package = open_opc(&bytes, "added shape style");
+    let xml =
+        String::from_utf8(package.get_part("/ppt/slides/slide1.xml").unwrap().to_vec()).unwrap();
+    // python-pptx 1.0.2 writes this style for add_shape and none for add_textbox.
+    let style = r#"</p:spPr><p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="2"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style><p:txBody>"#;
+    assert_eq!(xml.matches("<p:style>").count(), 1);
+    let shape_start = xml.find(r#"name="Shape 2""#).expect("added shape");
+    let textbox_start = xml.find(r#"name="TextBox 3""#).expect("added textbox");
+    assert!(xml[shape_start..textbox_start].contains(style));
+
+    let reopened = Presentation::from_bytes(&bytes).expect("reopen styled shape deck");
+    assert!(reopened.validate().is_empty());
+    let (input, layout) = reopened.render_deterministic().unwrap();
+    assert!(layout.diagnostics.is_empty(), "{:?}", layout.diagnostics);
+    let [shape, textbox] = &input.slides[0].shapes[..] else {
+        panic!("expected the shape and the textbox")
+    };
+    let run_fill = |shape: &rpptx_layout::ResolvedShape| {
+        let ResolvedContent::Text(body) = &shape.content else {
+            panic!("expected text")
+        };
+        let ResolvedTextRun::Text { style, .. } = &body.paragraphs[0].runs[0] else {
+            panic!("expected a text run")
+        };
+        style.fill.clone()
+    };
+    // The third theme fill is an accent1 gradient, the first theme line is
+    // 0.75 pt, and the second theme effect is an outer shadow.
+    assert!(matches!(shape.fill, Some(Paint::Linear { .. })));
+    assert_eq!(shape.line.as_ref().map(|line| line.width), Some(0.75));
+    assert!(shape.shadow.is_some());
+    assert_eq!(
+        run_fill(shape),
+        Some(Paint::Solid(oxml_layout::Color::WHITE))
+    );
+    assert_eq!(
+        (&textbox.fill, &textbox.line, &textbox.shadow),
+        (&None, &None, &None)
+    );
+    assert_ne!(
+        run_fill(textbox),
+        Some(Paint::Solid(oxml_layout::Color::WHITE))
+    );
+    // At 72 DPI the shape spans 72 to 288 by 72 to 216 pixels, and its text
+    // sits at the top left, so the bottom right of its interior is accent blue.
+    let png = reopened.slide_png_deterministic(0, 72.0).unwrap().unwrap();
+    let pixmap = tiny_skia::Pixmap::decode_png(&png).unwrap();
+    let pixel = pixmap.pixel(270, 200).unwrap();
+    assert!(
+        pixel.blue() > pixel.red() + 40,
+        "{:?}",
+        (pixel.red(), pixel.green(), pixel.blue())
+    );
+}
+
+#[test]
 fn four_appended_shapes_have_unique_ids_and_reopen() {
     let mut presentation = Presentation::new().expect("open bundled template");
     presentation.add_slide(0).expect("add slide");
@@ -19841,10 +20015,10 @@ fn rpptx_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(workspace.contains("\"crates/rpptx\""));
     assert!(workspace.contains(
-        "rpptx = { path = \"crates/rpptx\", version = \"0.12.1\", default-features = false }"
+        "rpptx = { path = \"crates/rpptx\", version = \"0.13.0\", default-features = false }"
     ));
     assert!(manifest.contains("name = \"rpptx\""));
-    assert!(manifest.contains("version = \"0.12.1\""));
+    assert!(manifest.contains("version = \"0.13.0\""));
     assert!(manifest.contains("publish = true"));
     assert!(manifest.contains("default = [\"default-template\", \"render\", \"system-fonts\"]"));
     assert!(manifest.contains("default-template = [\"dep:scraper\"]"));

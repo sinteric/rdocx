@@ -2,6 +2,7 @@ import io
 import posixpath
 import re
 import struct
+import subprocess
 import time
 import zipfile
 import zlib
@@ -55,6 +56,80 @@ def _tracked_document():
     document = rdocx.Document.from_bytes(original.to_bytes())
     document.compare(edited, "Ada", "2026-01-02T03:04:05Z")
     return document
+
+
+def test_issue_253_python_render_views():
+    from pathlib import Path
+
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("Keep OLDWORD here.")
+    edited = rdocx.Document()
+    edited.add_paragraph("Keep NEWWORD here.")
+    original.compare(edited, "Reviewer", "2026-09-30T12:00:00Z")
+    accepted = original.to_pdf()
+    assert accepted == original.to_pdf(revision_view="accepted")
+    assert accepted != original.to_pdf(revision_view="tracked")
+    fonts = Path(__file__).parents[2] / "oxml-layout" / "fonts"
+    assert original.to_pdf(font_dir=fonts) == original.to_pdf(
+        font_dir=fonts, revision_view="accepted"
+    )
+    assert original.to_pdf(font_dir=fonts) != original.to_pdf(
+        font_dir=fonts, revision_view="tracked"
+    )
+    for render in (
+        lambda **view: original.render_page_to_png(0, 24.0, **view),
+        lambda **view: original.render_all_pages(24.0, **view),
+        lambda **view: original.render_pages(dpi=24.0, **view),
+    ):
+        assert render() == render(revision_view="accepted")
+        assert render() != render(revision_view="tracked")
+        with pytest.raises(ValueError, match="unknown revision view"):
+            render(revision_view="final")
+    with pytest.raises(ValueError, match="unknown revision view"):
+        original.to_pdf(revision_view="final")
+
+
+def test_issue_253_selected_view_controls_page_count():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("OLDWORD " * 1500)
+    edited = rdocx.Document()
+    edited.add_paragraph("NEWWORD " * 1500)
+    original.compare(edited, "Reviewer", "2026-09-30T12:00:00Z")
+    accepted = original.render_pages(dpi=24.0)
+    tracked = original.render_pages(dpi=24.0, revision_view="tracked")
+    assert len(tracked) > len(accepted)
+    assert tracked == original.render_all_pages(24.0, revision_view="tracked")
+
+
+def test_issue_253_pdf_text_view(tmp_path):
+    import rdocx
+
+    version = subprocess.run(
+        ["pdftotext", "-v"], capture_output=True, check=True, text=True
+    )
+    assert "pdftotext version 26.01.0" in version.stderr.splitlines()
+
+    original = rdocx.Document()
+    original.add_paragraph("Keep OLDWORD here.")
+    edited = rdocx.Document()
+    edited.add_paragraph("Keep NEWWORD here.")
+    original.compare(edited, "Reviewer", "2026-09-30T12:00:00Z")
+
+    def text(view):
+        path = tmp_path / "redline.pdf"
+        path.write_bytes(original.to_pdf(revision_view=view))
+        return subprocess.run(
+            ["pdftotext", str(path), "-"], capture_output=True, check=True, text=True
+        ).stdout
+
+    accepted = text("accepted")
+    tracked = text("tracked")
+    assert "NEWWORD" in accepted and "OLDWORD" not in accepted
+    assert "NEWWORD" in tracked and "OLDWORD" in tracked
 
 
 def test_revisions_are_snapshots_and_resolution_reports_counts():
@@ -437,7 +512,7 @@ def test_update_fields_on_open_sets_clears_and_removes_the_setting():
         assert document.to_bytes() == before
 
 
-def _one_pixel_png():
+def _one_pixel_png(pixel=b"\xff\xff\xff"):
     def chunk(kind, data):
         crc = struct.pack(">I", zlib.crc32(kind + data))
         return struct.pack(">I", len(data)) + kind + data + crc
@@ -446,9 +521,62 @@ def _one_pixel_png():
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", header)
-        + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+        + chunk(b"IDAT", zlib.compress(b"\x00" + pixel))
         + chunk(b"IEND", b"")
     )
+
+
+def _body_images(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as package:
+        xml = package.read("word/document.xml").decode()
+        relationships = package.read("word/_rels/document.xml.rels").decode()
+        targets = {
+            re.search(r'Id="([^"]+)"', element).group(1): re.search(
+                r'Target="([^"]+)"', element
+            ).group(1)
+            for element in re.findall(r"<Relationship [^>]*>", relationships)
+        }
+        return [
+            package.read(posixpath.join("word", targets[embed]))
+            for embed in re.findall(r'r:embed="([^"]+)"', xml)
+        ]
+
+
+@pytest.mark.parametrize(
+    ("caption", "size"),
+    [
+        ("Figure 1. Caption.", (1, 0.66)),
+        ("Figure 1. New caption.", (1, 0.66)),
+        ("Figure 1. Caption.", (1.2, 0.8)),
+    ],
+)
+def test_compare_records_a_picture_whose_image_changed(caption, size):
+    import rdocx
+
+    red, blue = _one_pixel_png(b"\xff\x00\x00"), _one_pixel_png(b"\x00\x00\xff")
+
+    def document(image, caption="Figure 1. Caption.", size=(1, 0.66)):
+        document = rdocx.Document()
+        document.add_paragraph("Before the figure.")
+        document.add_picture(
+            image, "figure1.png", rdocx.Inches(size[0]), rdocx.Inches(size[1])
+        )
+        document.add_paragraph(caption)
+        return document
+
+    redline = document(red)
+    redline.compare(document(blue, caption, size), "Reviewer", "2026-09-30T12:00:00Z")
+    assert redline.revisions
+    tracked = redline.to_bytes()
+    assert _body_images(tracked) == [red, blue]
+    for resolve, image, text in (
+        ("accept_all", blue, caption),
+        ("reject_all", red, "Figure 1. Caption."),
+    ):
+        resolved = rdocx.Document.from_bytes(tracked)
+        getattr(resolved, resolve)()
+        assert _body_images(resolved.to_bytes()) == [image]
+        assert [paragraph.text for paragraph in resolved.paragraphs][-1] == text
 
 
 def test_add_picture_beside_a_content_control_ignores_an_unused_root_default():

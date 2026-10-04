@@ -39,7 +39,7 @@ rows are the enforced release-mode bounds plus one dated observation.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx | 1,240,655 compressed bytes, 7,192,556 member bytes, 36 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-02 |
+| Crates.io archive: rdocx | 1,267,396 compressed bytes, 7,351,730 member bytes, 36 members | 0.15.0 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-04 |
 | Large-document layout throughput | minimum 250 pages/s, observed 31,019.1 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
 | Large-document layout peak allocation | maximum 64 MiB, observed 29.03 MiB | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | peak live allocation | 2026-09-19 |
 | Large-document PDF throughput | minimum 1,000 pages/s, observed 60,058.0 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 deterministic layout pages | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
@@ -85,6 +85,36 @@ document.save("approved.docx")?;
 # Ok::<(), rdocx::Error>(())
 ```
 
+### Create and manage styles
+
+```rust,no_run
+use rdocx::{Alignment, Document, Length, StyleBuilder, StyleType};
+
+let mut document = Document::new();
+document.add_style(
+    StyleBuilder::paragraph("Callout", "Callout")
+        .based_on("Normal")
+        .alignment(Alignment::Center)
+        .space_before(Length::inches(0.125))
+        .space_after(Length::inches(0.125))
+        .indent_left(Length::inches(0.25))
+        .font("Aptos")
+        .size(12.0)
+        .bold(true)
+        .color("245A81"),
+)?;
+document.add_paragraph("Important").set_style("Callout");
+assert_eq!(document.style("Callout").unwrap().name(), Some("Callout"));
+assert!(document.styles().iter().any(|style| style.style_id() == "Callout"));
+document.set_style(StyleBuilder::paragraph("Callout", "Callout").size(13.0))?;
+document.set_default_style(StyleType::Paragraph, "Callout")?;
+document.add_style(StyleBuilder::paragraph("Unused", "Unused"))?;
+assert!(document.remove_style("Unused")?);
+
+document.save("styled.docx")?;
+# Ok::<(), rdocx::Error>(())
+```
+
 `save` writes the package class that a `.docx`, `.docm`, `.dotx`, or `.dotm`
 path names, so a `.dotx` template saved as `.docx` declares a document. A
 package that carries a VBA project cannot change to a macro-free extension.
@@ -112,7 +142,7 @@ Most Rust applications need only the facade:
 
 ```toml
 [dependencies]
-rdocx = "0.14.0"
+rdocx = "0.15.0"
 ```
 
 Bundled metric-compatible fonts are always available through deterministic
@@ -121,14 +151,14 @@ features when an application must use only the bundled set:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.14.0", default-features = false }
+rdocx = { version = "0.15.0", default-features = false }
 ```
 
 Native encryption and signing APIs are opt-in:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.14.0", features = ["agile-encryption", "digital-signatures"] }
+rdocx = { version = "0.15.0", features = ["agile-encryption", "digital-signatures"] }
 ```
 
 The workspace requires Rust 1.93 or newer and uses edition 2024.
@@ -138,7 +168,7 @@ The workspace requires Rust 1.93 or newer and uses edition 2024.
 Install the CLI version from the same stable family:
 
 ```sh
-cargo install rdocx-cli --version '^0.14.0'
+cargo install rdocx-cli --version '^0.15.0'
 ```
 
 Common commands:

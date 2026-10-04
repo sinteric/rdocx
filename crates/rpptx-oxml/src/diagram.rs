@@ -613,6 +613,9 @@ pub struct DiagramShapeStyle {
     pub fill_reference: Option<u32>,
     pub effect_reference: Option<u32>,
     pub font_reference: Option<String>,
+    /// The colour of `a:fontRef`, which PowerPoint uses for node text when
+    /// the colour definition's `dgm:txFillClrLst` is empty.
+    pub font_color: Option<ColorChoice>,
 }
 
 /// Typed projection of a `dgm:styleDef` part.
@@ -1451,44 +1454,71 @@ fn render_colors_in_list(
     let list_scope = scope.with_start(&list_start)?;
     let mut choices = Vec::new();
     for raw in color_children {
-        let Some(local) = first_local_name(&raw)? else {
-            continue;
-        };
-        if !matches!(
-            local.as_slice(),
-            b"srgbClr" | b"schemeClr" | b"sysClr" | b"prstClr"
-        ) || first_element_uri(&raw, &list_scope)?.as_deref() != Some(A_NS)
-        {
-            continue;
+        if let Some(choice) = render_color(&raw, &list_scope)? {
+            choices.push(choice);
         }
-        let (color_start, color_children, _) =
-            root_and_children_impl(&raw, &local, Some(A_NS), &list_scope)?;
-        let color_scope = list_scope.with_start(&color_start)?;
-        let mut sanitized = Writer::new(Vec::new());
-        sanitized.write_event(Event::Start(color_start.to_owned()))?;
-        for child in color_children {
-            let child_local = first_local_name(&child)?;
-            if child_local.as_deref().is_some_and(is_color_transform_name)
-                && first_element_uri(&child, &color_scope)?.as_deref() == Some(A_NS)
-            {
-                sanitized.get_mut().write_all(&child)?;
-            }
-        }
-        sanitized.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
-            color_start.name().as_ref(),
-        ))))?;
-        let bytes = sanitized.into_inner();
-        let mut reader = Reader::from_reader(bytes.as_slice());
-        let mut buffer = Vec::new();
-        let Event::Start(start) = reader.read_event_into(&mut buffer)? else {
-            return Err(unexpected(&color_start));
-        };
-        choices.push(
-            ColorChoice::from_xml(&mut reader, &start)
-                .map_err(|error| OxmlError::InvalidValue(error.to_string()))?,
-        );
     }
     Ok(choices)
+}
+
+/// Parses one DrawingML colour element with its modelled transforms, or
+/// returns `None` for an element that is not a colour.
+fn render_color(raw: &[u8], scope: &NamespaceBindings) -> Result<Option<ColorChoice>> {
+    let Some(local) = first_local_name(raw)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        local.as_slice(),
+        b"srgbClr" | b"schemeClr" | b"sysClr" | b"prstClr"
+    ) || first_element_uri(raw, scope)?.as_deref() != Some(A_NS)
+    {
+        return Ok(None);
+    }
+    let (color_start, color_children, _) = root_and_children_impl(raw, &local, Some(A_NS), scope)?;
+    let color_scope = scope.with_start(&color_start)?;
+    let mut sanitized = Writer::new(Vec::new());
+    sanitized.write_event(Event::Start(color_start.to_owned()))?;
+    for child in color_children {
+        let child_local = first_local_name(&child)?;
+        if child_local.as_deref().is_some_and(is_color_transform_name)
+            && first_element_uri(&child, &color_scope)?.as_deref() == Some(A_NS)
+        {
+            sanitized.get_mut().write_all(&child)?;
+        }
+    }
+    sanitized.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
+        color_start.name().as_ref(),
+    ))))?;
+    let bytes = sanitized.into_inner();
+    let mut reader = Reader::from_reader(bytes.as_slice());
+    let mut buffer = Vec::new();
+    let Event::Start(start) = reader.read_event_into(&mut buffer)? else {
+        return Err(unexpected(&color_start));
+    };
+    ColorChoice::from_xml(&mut reader, &start)
+        .map(Some)
+        .map_err(|error| OxmlError::InvalidValue(error.to_string()))
+}
+
+/// Returns the first colour of the style's `a:fontRef`, if it has one.
+fn font_reference_color(
+    style_children: &[Vec<u8>],
+    style_scope: &NamespaceBindings,
+) -> Result<Option<ColorChoice>> {
+    let Some(raw) = direct_children(style_children, style_scope, A_NS, b"fontRef")?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let (start, children, _) = root_and_children_impl(&raw, b"fontRef", Some(A_NS), style_scope)?;
+    let scope = style_scope.with_start(&start)?;
+    for child in children {
+        if let Some(color) = render_color(&child, &scope)? {
+            return Ok(Some(color));
+        }
+    }
+    Ok(None)
 }
 
 fn is_color_transform_name(name: &[u8]) -> bool {
@@ -1548,6 +1578,9 @@ fn parse_shape_style(
     let fill_reference = first(b"fillRef")?.and_then(|value| value.parse().ok());
     let effect_reference = first(b"effectRef")?.and_then(|value| value.parse().ok());
     let font_reference = first(b"fontRef")?;
+    let font_color = font_reference_color(&style_children, &style_scope)
+        .ok()
+        .flatten();
     Ok((line_reference.is_some()
         || fill_reference.is_some()
         || effect_reference.is_some()
@@ -1557,6 +1590,7 @@ fn parse_shape_style(
         fill_reference,
         effect_reference,
         font_reference,
+        font_color,
     }))
 }
 

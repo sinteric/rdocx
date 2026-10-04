@@ -4262,16 +4262,20 @@ fn style_xml(
         .effect
         .get(index % colors.effect.len().max(1))
         .unwrap_or(fill_color);
+    // An empty txFillClrLst leaves the text to the quick style's own font
+    // colour, as PowerPoint does, and a style without one names no colour.
     let text_color = colors
         .text_fill
         .get(index % colors.text_fill.len().max(1))
-        .unwrap_or(fill_color);
+        .or(style.font_color.as_ref())
+        .map(color_xml)
+        .transpose()?
+        .unwrap_or_default();
     Ok(format!(
-        "<p:style><a:lnRef idx=\"{line}\">{}</a:lnRef><a:fillRef idx=\"{fill}\">{}</a:fillRef><a:effectRef idx=\"{effect}\">{}</a:effectRef><a:fontRef idx=\"{font}\">{}</a:fontRef></p:style>",
+        "<p:style><a:lnRef idx=\"{line}\">{}</a:lnRef><a:fillRef idx=\"{fill}\">{}</a:fillRef><a:effectRef idx=\"{effect}\">{}</a:effectRef><a:fontRef idx=\"{font}\">{text_color}</a:fontRef></p:style>",
         color_xml(line_color)?,
         color_xml(fill_color)?,
         color_xml(effect_color)?,
-        color_xml(text_color)?,
     ))
 }
 
@@ -4465,6 +4469,43 @@ mod tests {
     const RESOURCE_ROOT: &str = "/Applications/Microsoft PowerPoint.app/Contents/Frameworks/SmartArt.framework/Versions/A/Resources/lo";
     const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
     const DGM_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+
+    #[test]
+    fn empty_text_colour_list_uses_the_style_font_colour_or_none() {
+        let font_ref = |font: &str, text_fill: &str| {
+            let style = CT_DiagramStyleDefinition::from_xml(format!(
+                r#"<dgm:styleDef xmlns:dgm="{DGM_NS}" xmlns:a="{A_NS}"><dgm:styleLbl name="node0"><dgm:style><a:lnRef idx="1"/><a:fillRef idx="1"/><a:effectRef idx="0"/>{font}</dgm:style></dgm:styleLbl></dgm:styleDef>"#
+            ).as_bytes())
+            .unwrap();
+            let colors = CT_DiagramColorsDefinition::from_xml(format!(
+                r#"<dgm:colorsDef xmlns:dgm="{DGM_NS}" xmlns:a="{A_NS}"><dgm:styleLbl name="node0"><dgm:fillClrLst><a:schemeClr val="accent1"/></dgm:fillClrLst><dgm:linClrLst><a:schemeClr val="lt1"/></dgm:linClrLst>{text_fill}</dgm:styleLbl></dgm:colorsDef>"#
+            ).as_bytes())
+            .unwrap();
+            let xml = style_xml(
+                style.labels[0].shape_style.as_ref().unwrap(),
+                &colors.render_projection().labels[0],
+                0,
+            )
+            .unwrap();
+            let start = xml.find("<a:fontRef").unwrap();
+            xml[start..xml.find("</p:style>").unwrap()].to_owned()
+        };
+        let styled = r#"<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>"#;
+
+        assert_eq!(font_ref(styled, ""), styled);
+        assert_eq!(font_ref(styled, "<dgm:txFillClrLst/>"), styled);
+        assert_eq!(
+            font_ref(r#"<a:fontRef idx="minor"/>"#, ""),
+            r#"<a:fontRef idx="minor"></a:fontRef>"#
+        );
+        assert_eq!(
+            font_ref(
+                styled,
+                r#"<dgm:txFillClrLst><a:schemeClr val="tx1"/></dgm:txFillClrLst>"#
+            ),
+            r#"<a:fontRef idx="minor"><a:schemeClr val="tx1"/></a:fontRef>"#
+        );
+    }
 
     fn text(value: &str) -> CT_TextBody {
         CT_TextBody::from_xml(

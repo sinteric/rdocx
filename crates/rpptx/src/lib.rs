@@ -7091,6 +7091,10 @@ impl<'a> SlideMut<'a> {
     }
 
     /// Appends an ordinary preset shape at the top of the slide's z-order.
+    ///
+    /// The shape carries the theme style python-pptx writes, so it shows the
+    /// theme's accent fill, line, and effect with light text until direct
+    /// properties replace them.
     pub fn add_shape(
         &mut self,
         preset: &str,
@@ -7101,6 +7105,20 @@ impl<'a> SlideMut<'a> {
     ) -> Result<ShapeMut<'_>> {
         append_new_member(self.shape_tree(), &[], |id| {
             preset_member(id, preset, left, top, width, height)
+        })
+    }
+
+    /// Appends a preset shape without a theme style for HTML and ODP imports.
+    pub(crate) fn add_unstyled_shape(
+        &mut self,
+        preset: &str,
+        left: Emu,
+        top: Emu,
+        width: Emu,
+        height: Emu,
+    ) -> Result<ShapeMut<'_>> {
+        append_new_member(self.shape_tree(), &[], |id| {
+            unstyled_preset_member(id, preset, left, top, width, height)
         })
     }
 
@@ -7286,6 +7304,27 @@ fn textbox_member(id: u32, left: Emu, top: Emu, width: Emu, height: Emu) -> Resu
 }
 
 fn preset_member(
+    id: u32,
+    preset: &str,
+    left: Emu,
+    top: Emu,
+    width: Emu,
+    height: Emu,
+) -> Result<ShapeTreeChild> {
+    let mut shape = CT_Shape::new_preset(
+        id,
+        &format!("Shape {id}"),
+        preset,
+        positioned_transform(left, top, width, height),
+    )
+    .map_err(|error| invalid_shape_construction("add shape", error))?;
+    shape
+        .set_default_style()
+        .map_err(|error| invalid_shape_construction("add shape", error))?;
+    Ok(ShapeTreeChild::Shape(shape))
+}
+
+fn unstyled_preset_member(
     id: u32,
     preset: &str,
     left: Emu,

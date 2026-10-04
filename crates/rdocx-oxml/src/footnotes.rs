@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::word_prefixes_at;
 use crate::properties::is_word_element;
-use crate::text::{CT_P, declare_w14_on_part_root};
+use crate::text::{CT_P, ROOT_R_BINDING, declare_w14_on_part_root, root_binding_scope};
 
 /// `ST_FtnEdn` — what a note in the stream is for.
 ///
@@ -176,7 +176,8 @@ impl CT_Footnotes {
     }
 
     fn to_xml_root(&self, root_tag: &str, item_tag: &str) -> Result<Vec<u8>> {
-        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        let _binding_scope = root_binding_scope(ROOT_R_BINDING);
+        let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",
@@ -274,6 +275,19 @@ fn parse_footnote_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewritten_notes_are_compact_and_declare_w_once() {
+        let xml = br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p w:rsidR="00A1B2C3"><w:r w:rsidRPr="00A1B2C4"><w:t>note</w:t></w:r></w:p></w:footnote></w:footnotes>"#;
+        let footnotes = CT_Footnotes::from_xml(xml).unwrap();
+        let output = String::from_utf8(footnotes.to_xml_footnotes().unwrap()).unwrap();
+        assert_eq!(output.matches("xmlns:w=").count(), 1, "{output}");
+        assert!(!output.contains('\n'), "{output}");
+        assert!(
+            output.contains(r#"<w:footnote w:id="1"><w:p w:rsidR="00A1B2C3"><w:r w:rsidRPr="00A1B2C4"><w:t>note</w:t></w:r></w:p></w:footnote>"#),
+            "{output}"
+        );
+    }
 
     #[test]
     fn a_note_paragraph_identity_stays_bound_under_the_written_root() {

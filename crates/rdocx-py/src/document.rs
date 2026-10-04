@@ -2144,16 +2144,18 @@ impl PyDocument {
         Ok(boundary)
     }
 
-    #[pyo3(signature = (*, fonts = None, font_dir = None))]
+    #[pyo3(signature = (*, fonts = None, font_dir = None, revision_view = "accepted"))]
     fn to_pdf<'py>(
         &self,
         py: Python<'py>,
         fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
         font_dir: Option<PathBuf>,
+        revision_view: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        let options = parse_render_options(revision_view)?;
         if fonts.is_none() && font_dir.is_none() {
             return py
-                .detach(|| self.inner.to_pdf())
+                .detach(|| self.inner.to_pdf_with_options(options))
                 .map(|bytes| PyBytes::new(py, &bytes))
                 .map_err(|error| rdocx_to_pyerr(py, error));
         }
@@ -2190,7 +2192,8 @@ impl PyDocument {
                 .iter()
                 .map(|(family, data)| (family.as_str(), data.as_slice()))
                 .collect::<Vec<_>>();
-            self.inner.to_pdf_with_fonts(&font_files)
+            self.inner
+                .to_pdf_with_fonts_and_options(&font_files, options)
         })
         .map(|bytes| PyBytes::new(py, &bytes))
         .map_err(|error| rdocx_to_pyerr(py, error))
@@ -2216,16 +2219,21 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (page_index, dpi = 150.0))]
+    #[pyo3(signature = (page_index, dpi = 150.0, *, revision_view = "accepted"))]
     fn render_page_to_png<'py>(
         &self,
         py: Python<'py>,
         page_index: usize,
         dpi: f64,
+        revision_view: &str,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        py.detach(|| self.inner.render_page_to_png(page_index, dpi))
-            .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
-            .map_err(|error| rdocx_to_pyerr(py, error))
+        let options = parse_render_options(revision_view)?;
+        py.detach(|| {
+            self.inner
+                .render_page_to_png_with_options(page_index, dpi, options)
+        })
+        .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
+        .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
     fn render_page_to_svg(
@@ -2249,15 +2257,22 @@ impl PyDocument {
         }))
     }
 
-    #[pyo3(signature = (dpi = 150.0))]
-    fn render_all_pages<'py>(&self, py: Python<'py>, dpi: f64) -> PyResult<Bound<'py, PyList>> {
+    #[pyo3(signature = (dpi = 150.0, *, revision_view = "accepted"))]
+    fn render_all_pages<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        revision_view: &str,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let options = parse_render_options(revision_view)?;
         let pages = py
-            .detach(|| self.inner.render_all_pages(dpi))
+            .detach(|| self.inner.render_all_pages_with_options(dpi, options))
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         PyList::new(py, pages.iter().map(|page| PyBytes::new(py, page)))
     }
 
-    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None))]
+    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, revision_view = "accepted"))]
+    #[allow(clippy::too_many_arguments)]
     fn render_pages(
         &self,
         py: Python<'_>,
@@ -2266,16 +2281,23 @@ impl PyDocument {
         quality: u8,
         transparent: bool,
         pages: Option<Vec<usize>>,
+        revision_view: &str,
     ) -> PyResult<Py<PyAny>> {
+        let options = parse_render_options(revision_view)?;
         let rendered = py
             .detach(|| {
                 let format = parse_raster_format(format, quality, transparent)?;
                 let selected = match pages {
                     Some(pages) => pages,
-                    None => (0..self.inner.layout()?.layout.pages.len()).collect(),
+                    None => {
+                        (0..self.inner.layout_with_options(options)?.layout.pages.len()).collect()
+                    }
                 };
-                self.inner
-                    .render_pages(&selected, rdocx::RasterOptions { dpi, format })
+                self.inner.render_pages_with_options(
+                    &selected,
+                    rdocx::RasterOptions { dpi, format },
+                    options,
+                )
             })
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         match rendered {
@@ -3743,6 +3765,19 @@ impl PyDocument {
         slf.borrow_mut(py).revisions.bump();
         Ok(())
     }
+}
+
+fn parse_render_options(revision_view: &str) -> PyResult<rdocx::RenderOptions> {
+    let revision_view = match revision_view {
+        "accepted" => rdocx::RevisionView::Accepted,
+        "tracked" => rdocx::RevisionView::Tracked,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown revision view {other:?}, expected accepted or tracked"
+            )));
+        }
+    };
+    Ok(rdocx::RenderOptions { revision_view })
 }
 
 fn parse_raster_format(

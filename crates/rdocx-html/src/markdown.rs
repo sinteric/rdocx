@@ -20,10 +20,10 @@ pub(crate) fn emit_markdown(
 ) -> String {
     let mut out = String::new();
 
-    for block in body_blocks(&body.content) {
+    for block in body_blocks(body) {
         match block {
             Block::Paragraph(p) => {
-                emit_paragraph(&mut out, p, styles, numbering, hyperlink_urls);
+                emit_paragraph(&mut out, &p, styles, numbering, hyperlink_urls);
             }
             Block::Table(tbl) => {
                 emit_table(&mut out, tbl, hyperlink_urls);
@@ -287,7 +287,7 @@ fn format_markdown_run(raw: &str, rpr: Option<&rdocx_oxml::properties::CT_RPr>) 
 
 /// Emit a table as a GFM pipe table.
 fn emit_table(out: &mut String, tbl: &CT_Tbl, hyperlink_urls: &HashMap<String, String>) {
-    if tbl.rows.is_empty() {
+    if tbl.rows().is_empty() {
         return;
     }
 
@@ -296,7 +296,11 @@ fn emit_table(out: &mut String, tbl: &CT_Tbl, hyperlink_urls: &HashMap<String, S
     let mut max_cols = 0;
 
     // Rows and cells that content controls wrap are written in place.
-    for row in tbl.rows() {
+    for row in tbl
+        .rows()
+        .into_iter()
+        .filter(|row| !row.accepted_view_removes())
+    {
         let mut cells: Vec<String> = Vec::new();
         for cell in row.cells() {
             let text = collect_cell_text(cell, hyperlink_urls);
@@ -355,12 +359,13 @@ fn collect_cell_text(
     for block in cell_blocks(cell) {
         match block {
             Block::Paragraph(p) => {
-                let text = collect_paragraph_text(p, hyperlink_urls);
+                let text = collect_paragraph_text(&p, hyperlink_urls);
                 let trimmed = text.trim().to_string();
                 if !trimmed.is_empty() {
                     parts.push(trimmed);
                 }
             }
+            Block::Table(table) if table.accepted_view_removes() => {}
             Block::Table(_) => {
                 parts.push("(nested table)".to_string());
             }

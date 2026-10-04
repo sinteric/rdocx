@@ -125,6 +125,8 @@ def exercise_rdocx_types(path: Path) -> None:
     assert_type(cell.vertical_merge, Literal["restart", "continue"] | None)
     package_bytes: bytes = loaded.to_bytes()
     pdf_bytes: bytes = opened.to_pdf()
+    tracked_pdf: bytes = opened.to_pdf(revision_view="tracked")
+    tracked_pages: list[bytes] | bytes = opened.render_pages(revision_view="tracked")
     pages: list[bytes] = opened.render_all_pages()
     maybe_page: bytes | None = opened.render_page_to_png(0)
     font_pdf: bytes = opened.to_pdf(fonts=[("Carlito", b"font")], font_dir=path)

@@ -4,7 +4,7 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 
 use crate::borders::CT_BorderEdge;
-use crate::content_control::{CT_Sdt, SdtOwner};
+use crate::content_control::{CT_Sdt, SdtContent, SdtOwner};
 use crate::drawing::AnchorAlignH;
 use crate::error::{OxmlError, Result};
 use crate::namespace::matches_local_name;
@@ -1256,6 +1256,10 @@ pub struct CT_TrPr {
     pub revision_xml_positions: Vec<usize>,
     /// Other row properties retained at their schema insertion slots.
     pub extra_xml: Vec<(usize, Vec<u8>)>,
+    /// Whether `extra_xml` holds a Word `w:moveFrom` marker with an id and an
+    /// author, which `Document::accept_all` removes the row for.
+    #[doc(hidden)]
+    pub moved_away: bool,
 }
 
 #[allow(non_snake_case)]
@@ -1344,13 +1348,13 @@ impl CT_TrPr {
                             pr.revision_xml_positions.push(at);
                         }
                     } else {
-                        pr.extra_xml.push((
-                            at,
-                            crate::text::raw_with_external_bindings(
-                                &capture_empty_element(e)?,
-                                owner_bindings,
-                            )?,
-                        ));
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_empty_element(e)?,
+                            owner_bindings,
+                        )?;
+                        pr.moved_away |= is_word_element(name.as_ref(), b"moveFrom", &prefixes)
+                            && CT_Revision::from_raw(raw.clone(), &prefixes).is_some();
+                        pr.extra_xml.push((at, raw));
                     }
                     boundary = next;
                 }
@@ -1380,13 +1384,13 @@ impl CT_TrPr {
                             pr.revision_xml_positions.push(at);
                         }
                     } else {
-                        pr.extra_xml.push((
-                            at,
-                            crate::text::raw_with_external_bindings(
-                                &capture_element(reader, e)?,
-                                owner_bindings,
-                            )?,
-                        ));
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_element(reader, e)?,
+                            owner_bindings,
+                        )?;
+                        pr.moved_away |= is_word_element(e.name().as_ref(), b"moveFrom", &prefixes)
+                            && CT_Revision::from_raw(raw.clone(), &prefixes).is_some();
+                        pr.extra_xml.push((at, raw));
                     }
                     boundary = next;
                 }
@@ -2210,6 +2214,21 @@ impl CT_Row {
         }
     }
 
+    /// Whether accepting every tracked change removes this row, which is the
+    /// row rule of `Document::accept_all`: its `w:trPr` carries a `w:del`
+    /// marker, or a `w:moveFrom` marker with an id and an author kept as
+    /// preserved XML ([`CT_TrPr::moved_away`]).
+    #[doc(hidden)]
+    pub fn accepted_view_removes(&self) -> bool {
+        self.properties.as_ref().is_some_and(|properties| {
+            properties.moved_away
+                || properties
+                    .revision_markers
+                    .iter()
+                    .any(|marker| marker.kind() == RevisionKind::Deletion)
+        })
+    }
+
     /// Report whether one raw row carrier retains root attributes.
     #[doc(hidden)]
     pub fn raw_is_root_attributes(position: usize, raw: &[u8]) -> bool {
@@ -2479,6 +2498,28 @@ impl CT_Tbl {
             extra_xml: Vec::new(),
             content_controls: Vec::new(),
         }
+    }
+
+    /// Whether accepting every tracked change removes this whole table, as
+    /// `Document::accept_all` does: it has a row, and every row it owns, rows
+    /// inside its row-level content controls included, is removed by
+    /// [`CT_Row::accepted_view_removes`]. Rows of nested tables do not count.
+    #[doc(hidden)]
+    pub fn accepted_view_removes(&self) -> bool {
+        fn control_rows<'a>(control: &'a CT_Sdt, rows: &mut Vec<&'a CT_Row>) {
+            for content in &control.content {
+                match content {
+                    SdtContent::Row(row) => rows.push(row),
+                    SdtContent::ContentControl(nested) => control_rows(nested, rows),
+                    _ => {}
+                }
+            }
+        }
+        let mut rows = self.rows.iter().collect::<Vec<_>>();
+        for (_, _, control) in &self.content_controls {
+            control_rows(control, &mut rows);
+        }
+        !rows.is_empty() && rows.iter().all(|row| row.accepted_view_removes())
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {

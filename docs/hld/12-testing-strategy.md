@@ -3254,7 +3254,7 @@ in CI.
 | doc | `cargo doc --workspace --no-deps --all-features --exclude rdocx-py --exclude rpptx-py` with `RUSTDOCFLAGS=-D warnings`, then `python3 scripts/readme_doctests.py` |
 | package-oxml-layout | Verify the exact 24-font and six licence-and-notice-file inventory, then build and size-check the verified archive |
 | msrv | Install exact uv 0.10.2, fetch both pinned corpora, then run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` under Rust 1.93 with an isolated uv cache and 8 MiB Rust test-thread stack |
-| python-bindings | On pull requests, build each Python package with `maturin develop --locked` in its own Python 3.12.9 environment, then run its complete pytest directory |
+| python-bindings | On pull requests, build each Python package with `maturin develop --locked` in its own Python 3.12.9 environment. The presentation cell mounts the SHA-256-pinned LibreOffice 26.2.5 macOS image, verifies build 26.2.5.2, and exposes `soffice` to the original Issue 158 deck workflow. Both cells then run their complete pytest directory with pinned Poppler 26.01.0. |
 | supply-chain | `cargo-deny check` |
 | ci-gate | Always validate that every selected filtered job succeeded and every unselected filtered job was skipped |
 | python-wheels | On manual dispatch, build six cp39-abi3 wheels and one source distribution for each Python package. On a `py-rdocx-v*` or `py-rpptx-v*` tag, build, validate, and publish only the selected package's seven artifacts. Install and test every compatible built artifact in a fresh environment. |
@@ -3486,6 +3486,35 @@ criteria.
 | #217 | Pass. All six drawing and transfer items run in one saved deck, with Python and LibreOffice checks: `crates/rpptx-py/tests/test_documented_examples.py::test_issue_217_complete_deck_chain`, `crates/rpptx-py/tests/test_documented_examples.py::test_issue_158_deck_fixture_acceptance`. | closed | Closed after S82 |
 | #226 | Unresolved. F-X146 covers rich-line pitch, but F-X163 in S86 still owns UAX 14 punctuation and hanging trailing-space parity for plain and explicit `w:rtl=false` runs at both widths. | open | Keep open |
 | #227 | Pass. Cell and related-story diffs give one count per changed paragraph: `crates/rdocx-cli/tests/integration.rs::diff_issue_227_locates_changed_body_cell_once`, `crates/rdocx-cli/tests/integration.rs::diff_compares_headers_footers_notes_and_comments`. Optional machine-readable output is a separate decision. | closed | Retain closed |
+
+### S84 live issue acceptance gate
+
+The S82 ledger above records its own historical main result. S84 checks the
+nine issues still open on 3 October against the combined repair branch. Each
+row names the criterion evidence to repeat on the final integrated result.
+The final `/verify --full`, sprint review, main merge and live GitHub
+reconciliation remain sprint boundary gates. No issue closes from a worker
+test alone.
+
+| Issue | Acceptance evidence on the S84 repair prefix | Final gate |
+|---|---|---|
+| #158 | The SHA-bound report and seven-slide deck pass `test_issue_158_word_fixture_acceptance`, `test_issue_158_complete_word_workflow` and `test_issue_158_deck_fixture_acceptance`. The complete Word and deck workflows save, reopen, compare or validate and render. The 18 by 7 identity and 11 by 8 producer matrices pass. | Close last, after every child issue and final main check. |
+| #160 | `test_issue_160_producer_matrix_across_operations_and_picture` covers all 88 producer cells, including packed fields, default namespace and picture insertion. `empty_comments_part_keeps_its_bytes_and_compares_against_its_own_save` checks the no-op comments part byte for byte. `replacement_reaches_content_controls` and `replace_with_expect_counts_the_text_of_content_controls_everywhere` cover nested body, inline, cell and related-story walkers. `an_edited_word_part_stays_compact_and_declares_w_once`, `issue_160_edited_styles_part_keeps_ignorable_root_binding` and the rewritten-root tests cover compact XML and `mc:Ignorable` bindings. | Repeat the matrix, relevant Rust and CLI tests, and hash gate on final main. |
+| #226 | `issue_226_plain_and_explicit_false_direction_match_word_line_counts` checks both 1.70 and 2.10 inch measures, plain and explicit `rtl=false`, against the pinned Word line counts. The F-X163 golden pixel manifest and seven PDF baselines use deterministic fonts and pinned Poppler 26.01.0 and LibreOffice 26.2.5.2. | Repeat the regression and reviewed baselines on final main. |
+| #244 | `test_add_shape_writes_the_python_pptx_theme_style_and_add_textbox_none` matches python-pptx 1.0.2 `p:style`. `added_shape_carries_the_theme_style_and_renders_it` and the effect-index-zero tests check native appearance and schema order. F-X164 opened its source-built deck in PowerPoint 16.113.3 without repair and saw the blue styled shape with white text, line and shadow. LibreOffice 26.2.5.2 and deterministic rpptx rendered the same shape. | Repeat the structural and render checks on final main. |
+| #245 | `an_edited_word_part_stays_compact_and_declares_w_once` edits a 50-paragraph Word package, checks one root `xmlns:w`, compact rewritten XML, untouched regions and reopening. The F-X161 review recorded the separate 20-entry OOXML hash delta. | Repeat the regression and 49-entry hash gate on final main. |
+| #253 | `test_issue_253_python_render_views`, `test_issue_253_selected_view_controls_page_count`, `test_issue_253_pdf_text_view` and `issue_253_cli_revision_view_selects_tracked_output` cover both Python PDF and page render paths, both CLI paths, accepted defaults, invalid selectors and old plus new versus new-only text. F-X167 checks accepted exporters after save and reopen against `accept_all()`, including deleted paragraphs and rows. | Repeat Python, CLI and accepted-view regressions on final main. |
+| #254 | `issue_254_comparison_records_a_picture_whose_image_changed` covers the three reported pairs in run and word granularities, both media parts, accepted and rejected captions and image sizes. The F-X166 Word for Mac 16.113.2 matrix audited 24 picture outcomes and saved media digests. | Repeat the source-built regression on final main and retain the pinned Word evidence. |
+| #255 | `issue_255_table_added_or_removed_with_final_paragraph_compares` covers all five failing pairs at both granularities. The final-control, schema-order and paragraph-property regressions cover nested and styled cases. F-X166 audited 40 core and 16 styled Word accept and reject outcomes after reopen. | Repeat the source-built regressions on final main and retain the pinned Word evidence. |
+| #264 | `style_builder_convenience_matches_typed_properties`, `high_level_style_survives_save_and_reopen` and the public README example cover common paragraph and run settings without constructing typed property structs, while leaving typed methods available. The added API is in F-X170. | Repeat both tests and the public example on final main. |
+
+PR 265's draft production change overlaps the completed F-X162 section
+ownership fix. Its independent `mixed_sections_use_their_own_measure_before_pagination`
+regression is retained in the existing layout test module. It compares three
+multipage portrait and landscape sections, including tables and content
+controls, with isolated deterministic renders and checks page size, text,
+line extents and margins. The final layout suite and hash gate must pass before
+the PR is closed as superseded.
 
 ## Gaps being closed
 

@@ -16974,3 +16974,363 @@ closure. The 18-page Word SSIM trend is advisory and below its target.
 **Hash harness.** Unchanged relative to the completed F-X159 prefix. All 49 entries matched in the worker and integrated result. The only S83 baseline movement remains F-X159's declared three feature-showcase entries.
 
 **Notes for future sessions.** Keep `work/f-x160-codex` through sprint review and closure. Issues 243, 246 and 247 have implementation evidence in the S83 result. Issue state changes belong after the sprint reaches `main`.
+
+### F-X169, Reconcile live contributions and open issue contracts
+
+**Sprint.** S84
+**Completed.** 2026-10-02
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** Refreshed the live GitHub intake of 31 PRs and eight open issues. The single S84 plan records each head, review and CI state, stack, overlap, issue coverage and remaining acceptance criterion. All 19 older open PRs have a supersession disposition tied to the S76 integration commits `26b3f880`, `c8975fb4` and `992930ce`. The 12 pending heads remain assigned to F-X161 through F-X167. The existing M23 and M24 roadmap assertion now checks the revised S85 to S90 schedule.
+
+**Non-obvious choices.** The older PR behavior was adopted incrementally in S76, while duplicate ancestors and measurement-only tails were omitted. Supersession is conditional on the final S84 combined gates. The open PR heads have no later revision than the recorded intake. The three hash baseline owners remain separate.
+
+**Deviations from the design plan.** The approved plan was updated to include the existing roadmap assertion after the scoped policy suite exposed its former S89 to S94 expectation. No product source changed.
+
+**Spec sections touched.** None. This is sprint intake and schedule evidence, not a product specification change.
+
+**Tests.** The live GitHub lists matched all 31 PR and eight issue rows. The roadmap assertion failed before its schedule update and passed afterward. The complete repository policy suite, formatting, prose, generated-skill check and scoped 49-entry hash harness passed. Microscope pass 1 found zero defects and zero smells. The integrated prefix passed its focused roadmap and prose checks. Full sprint verification and sprint review remain due after the dependent work.
+
+**Hash harness.** Unchanged, all 49 entries matched the worker's reviewed base.
+
+**Notes for future sessions.** Close no contribution or issue on this intake evidence alone. F-X161, F-X164 and F-X165 may now start. Keep `work/f-x169-codex` through sprint verification and review.
+
+### F-X161, Compact Word XML and namespace preservation
+
+**Sprint.** S84
+**Completed.** 2026-10-02
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** Reconciled PR 251 against the S83 and F-X169 prefix. Rewritten document, note, header, footer, comment, style and numbering parts now use compact XML. Retained root attributes omit a repeated canonical `w` binding while preserving aliases, foreign bindings and raw unknown subtrees. A 50-paragraph Issue 245 regression edits one word, keeps one `xmlns:w`, reopens and retains the other text and identities. The F-159 chart candidate and `rdocx` and `rdocx-oxml` archive measurements were re-pinned to the reviewed output.
+
+**Non-obvious choices.** The Word chart package digest changed only because of whitespace removal and its pinned PDF pixels still match the PowerPoint chart. The worker branch keeps distinct behavior and baseline commits. The integrated squash names the exact delta and the baseline was reviewed before F-X162.
+
+**Deviations from the design plan.** The README package measurements and their assertion carrier were added after the repository policy gate measured the serializer changes. The approved plan was clarified before completion.
+
+**Spec sections touched.** `docs/hld/04-opc-and-packaging.md`, edited Word part serialization, and `docs/hld/09-charts-spec.md`, the updated Word chart artifact evidence.
+
+**Tests.** The 50-paragraph regression failed on the claimed base with 104 `xmlns:w` declarations and passed after the change. The worker passed 595 OXML tests, 486 Word unit, 333 integration, 719 regression and 11 Python producer-matrix cases with pinned Poppler 26.01.0 and LibreOffice 26.2.5.2. Scoped Clippy, formatting, archive inventory, repository policy, prose and generated-skill checks passed. Microscope pass 1 found zero defects and zero smells. The integrated prefix passed its focused regression and 49-entry hash check. Full sprint verification and sprint review remain due.
+
+**Hash harness.** Exactly 20 `word/document.xml`, `word/numbering.xml` and `word/styles.xml` digests changed across the samples. No PDF or PNG entry changed. All 49 entries match the reviewed baseline.
+
+**Notes for future sessions.** F-X162 may start on this completed baseline prefix. Issue 245 and the remaining Issue 160 serialization criteria stay open until the final integrated result reaches main. Keep `work/f-x161-codex` through sprint verification and review.
+
+### F-X165, Python and CLI tracked revision view
+
+**Sprint.** S84
+**Completed.** 2026-10-02
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** Reconciled PR 256 against the completed intake and Word prefix. Python render methods and the Word CLI now select accepted or tracked revision views, reject invalid selectors and retain the accepted default. The CLI package archive measurement and README assertion were refreshed.
+
+**Non-obvious choices.** The F-X165 branch predates F-X161, so its squash required a manual reconciliation in the shared archive inventory. The integrated assertion keeps F-X161's `rdocx` and `rdocx-oxml` measurements and F-X165's `rdocx-cli` measurement. A separate integration microscope pass checked that conflict.
+
+**Deviations from the design plan.** The CLI archive measurement changed after the policy suite measured the new command surface. No new product API type was introduced.
+
+**Spec sections touched.** `docs/hld/08-rendering-spec.md`, revision view selection, and `docs/hld/10-bindings-spec.md`, Python and CLI signatures and errors.
+
+**Tests.** The worker passed 58 CLI tests, 99 isolated Python core and render tests with pinned Poppler 26.01.0, scoped Clippy, formatting, WASM, 132 repository policy tests, prose and generated-skill checks. Microscope pass 2 found zero defects and zero smells. The integrated reconciliation passed the archive assertion comparison, prose and 49-entry hash harness. Full sprint verification and sprint review remain due.
+
+**Hash harness.** Unchanged from the F-X161 prefix, all 49 entries matched.
+
+**Notes for future sessions.** F-X166 may start. Issue 253 remains open until the accepted-view follow-ups and final integrated Python and CLI gate pass on main. Keep `work/f-x165-codex` through sprint verification and review.
+
+### F-X162, Per-paragraph section width and pagination
+
+**Sprint.** S84
+**Completed.** 2026-10-02
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** Reconciled PR 241 on the F-X161 prefix. Each direct body paragraph, table and content control paragraph now lays out against its governing section. A paragraph section break applies to that paragraph and the preceding items since the prior break. The final body section applies to the remaining items. The 144, 252 and 360 pt deterministic regression failed on the old S84 code with the first section's right edge at 348.6 pt and passed after the fix.
+
+**Non-obvious choices.** The worker kept the behavior change and the two-entry PDF baseline in separate commits. It updated the `rdocx` and `rdocx-layout` archive measurements against the current S84 source. It did not change mirror-gutter or continuous-break pagination semantics, which are pre-existing follow-up scopes outside PR 241's section measure correction.
+
+**Deviations from the design plan.** The README archive rows and their assertion carrier were updated after measuring the changed packages. The integrated canonical hash compilation stalled under host load, so the combined result is deferred to the required sprint gate. The worker's 49-entry hash check passed.
+
+**Spec sections touched.** `docs/hld/08-rendering-spec.md`, Word section geometry and page numbering.
+
+**Tests.** The worker passed 302 `rdocx-layout` tests and the `rdocx` unit, integration and regression suites with pinned Poppler 26.01.0 and LibreOffice 26.2.5.2. Scoped Clippy, formatting, README inventory, repository policy, prose and generated-skill checks passed. Microscope pass 1 found zero defects and zero smells. The integrated full gate and sprint review remain due.
+
+**Hash harness.** Only `feature_showcase` `pdf/bytes` and `pdf/pages` changed. The worker baseline records these two reviewed entries and all 49 entries matched. The integrated result must rerun the hash harness at the final S84 gate.
+
+**Notes for future sessions.** F-X163 may start from this completed layout prefix. Keep `work/f-x162-codex` through sprint verification and review. Issues 160 and 245 remain open until the final integrated result reaches main.
+
+### F-X163, Plain-line trailing-space fit
+
+**Sprint.** S84
+**Completed.** 2026-10-02
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** Reconciled PR 242's plain line-path increment with the already integrated rich-line and F-X162 section changes. Terminal U+0020 spaces now hang past the fit measure without losing glyphs or source spans. Word and PowerPoint alignment and decoration use ink width. Field and note placeholders, NBSP, tabs and right-to-left text retain their guarded behavior. An Issue 226 regression verifies 1.70 and 2.10 inch widths in plain and explicit `rtl=false` paths, including no leading space or punctuation.
+
+**Non-obvious choices.** The worker ported PR 242's incremental hunks into the current line-state implementation rather than replaying its already integrated PR 222 ancestors. An existing right-tab test now counts the hanging space as a separate item instead of an extra word. The behavior, 16-entry hash update and two golden pixel updates have separate worker commits.
+
+**Deviations from the design plan.** The four affected package README measurements and their assertion carrier were updated after measuring the final source and tests. No public type or feature flag was added.
+
+**Spec sections touched.** `docs/hld/08-rendering-spec.md`, the renderer's input and plain line fit behavior.
+
+**Tests.** The Issue 226 regression failed on the pre-fix branch with seven lines at 2.10 inches and passed with the expected six. The worker passed 122 `oxml-layout`, 486 Word unit, 333 Word integration, 722 Word regression, 302 `rdocx-layout` and 106 `rpptx-render` tests with pinned Poppler 26.01.0 and LibreOffice 26.2.5.2. Scoped Clippy, formatting, README inventory, repository policy, prose and generated-skill checks passed. Microscope pass 1 found zero defects and zero smells. Full integrated verification and sprint review remain due.
+
+**Hash harness.** Seven sample PDFs changed in `pdf/bytes` and `pdf/pages`, plus the contract and invoice page-one PNG entries. No Word XML entry moved. All 49 worker entries and seven pinned Poppler pixel buffers match their reviewed baselines. The combined S84 gate must rerun them.
+
+**Notes for future sessions.** Issue 226 remains open until the full S84 result reaches main and its complete issue matrix is checked. Keep `work/f-x163-codex` through sprint verification and review.
+
+### F-X164, Added shape theme style
+
+**Sprint.** S84
+**Completed.** 2026-10-02
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** Reconciled PR 252 against the integrated presentation shape and SmartArt work. Newly authored shapes now carry the schema-ordered theme style references used by python-pptx 1.0.2. Imported shapes retain their raw XML and explicit formatting keeps precedence. SmartArt text colour uses its colour definition, then the quick style font colour, then inherited colour.
+
+**Non-obvious choices.** The worker's presentation package measurements were reconciled with the S84 Word and renderer measurements already on the sprint branch. An integration microscope pass reviewed this conflict. The direct PowerPoint 16.113.3 check opened the new shape deck without a repair prompt and showed white text on the blue theme shape.
+
+**Deviations from the design plan.** The worker also corrected SmartArt text colour inheritance and aligned the package inventory. The approved plan and HLD impact list include these changes.
+
+**Spec sections touched.** `docs/hld/06-presentationml-model.md`, new shape serialization, `docs/hld/07-inheritance-and-resolution.md`, theme style precedence, and `docs/hld/08-rendering-spec.md`, SmartArt text colour.
+
+**Tests.** The worker passed scoped Rust checks and 77 Python checks against pinned python-pptx 1.0.2, LibreOffice 26.2.5.2 conversion and PowerPoint 16.113.3 display. Clippy, formatting, prose, skill drift and repository policy gates passed. Microscope pass 2 and integration pass 1 found zero defects and zero smells. Full integrated verification and sprint review remain due.
+
+**Hash harness.** The worker's 49 Word entries matched. Presentation pins were re-recorded in a separate worker commit. The combined S84 gate must rerun all hashes and affected visual baselines.
+
+**Notes for future sessions.** Issue 244 remains open until the second-machine animation and final integrated evidence gate pass. Keep `work/f-x164-codex` through sprint verification and review.
+
+### F-X166, Picture and final-block comparison revisions
+
+**Sprint.** S84
+**Completed.** 2026-10-03
+**Size.** L, estimated 5 days, actual 2 days
+
+**What was built.** Reconciled PRs 257, 258, 260 and 261 against the F-X165 prefix. Comparison now tracks picture replacements by media payload and preserves both accept and reject relationships. Final table and paragraph changes carry marks on the right row, cell and paragraph owners. Acceptance and rejection preserve the correct paragraph and mark properties after save and reopen.
+
+**Non-obvious choices.** The F-X163 and F-X166 regression tails were both retained during integration. The F-X170 and F-X166 package measurements were replaced with one remeasurement of the combined archive. Word for Mac 16.113.2 accepted and rejected every generated redline, with 80 saved outcomes audited against the original and edited source packages. Word normalizes explicit false paragraph-mark bold values to absent values without changing their effect.
+
+**Deviations from the design plan.** The combined README archive measurement changed after F-X170 integration. The source behavior and HLD impact stayed within the approved plan.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, property and final-block revision ownership, `docs/hld/04-opc-and-packaging.md`, picture media preservation, and `docs/hld/08-rendering-spec.md`, tracked and resolved views.
+
+**Tests.** The worker passed the rdocx unit, integration and regression suites, 84 Python core tests, scoped Clippy, formatting, README doctests, policy, prose and generated-skill gates. Microscope pass 3 found zero defects and zero smells. Word for Mac passed 24 of 24 picture, 40 of 40 core final-block and 16 of 16 styled accept and reject outcomes. The integrated prefix passed eight focused Issue 254 and 255 regressions with an 8 MiB Rust test thread stack, both F-X170 style tests, README package inventory and four root examples, formatting, prose, skill sync and the hash harness. Full S84 verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker and integrated prefix, all 49 entries match.
+
+**Notes for future sessions.** F-X167 may start on this prefix. Issues 254 and 255 remain open until F-X168 checks the complete integrated criteria and `/close-sprint` reaches main. Keep `work/f-x166-codex` through sprint verification and review.
+
+### F-X170, High-level Word style formatting API
+
+**Sprint.** S84
+**Completed.** 2026-10-03
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** Added fluent `StyleBuilder` methods for alignment, space before and after, left indent, font, size, bold and colour. Existing `Document` style creation, update, removal, lookup and default selection remain the management surface. A public README example and regression tests prove common formatting survives save and reopen and resolves on document content for Issue 264.
+
+**Non-obvious choices.** Setting an explicit font fills all four script slots and clears inherited theme font references. Setting an explicit colour clears the theme colour, tint and shade. The builder's clear mask widened to hold those two clear operations while preserving typed property methods. The F-X166 integration later remeasured the combined `rdocx` archive, so the current README measurement covers both stories.
+
+**Deviations from the design plan.** None. No new crate, module, trait, generic or feature flag was introduced.
+
+**Spec sections touched.** `docs/hld/10-bindings-spec.md`, native style builder convenience formatting.
+
+**Tests.** The worker passed 486 Word unit, 333 integration and 724 regression tests, scoped Clippy, formatting, README doctests, 132 policy tests, package dry run, prose and generated-skill checks. Microscope pass 1 found zero defects and zero smells. The combined S84 prefix passed both style regressions, the README package inventory and four public examples, and the 49-entry hash harness. Full verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker and combined prefix, all 49 entries match.
+
+**Notes for future sessions.** Issue 264 remains open until F-X168 checks the API criterion on the complete S84 result and `/close-sprint` reaches main. Keep `work/f-x170-codex` through sprint verification and review.
+
+### F-X167, Accepted-view exporters and readers
+
+**Sprint.** S84
+**Completed.** 2026-10-03
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** Reconciled PRs 259, 262 and 263 on the F-X165 and F-X166 prefix. Accepted text, CLI JSON, HTML, Markdown and PDF layout now join a paragraph whose mark was deleted or moved away to the next direct paragraph. Deleted and moved-away table rows are omitted across those outputs and media traversal. The source model and editing indices remain intact.
+
+**Non-obvious choices.** A joining paragraph with no accepted content contributes no layout block or spacing. Retained content uses the following paragraph's block properties. Rows inside table content controls follow the same visibility rule, and a table with no retained rows contributes no block. The worker added regressions for these nested cases after microscope findings. Package archive measurements cover the final source.
+
+**Deviations from the design plan.** The final CLI JSON review found a nonempty deleted-mark paragraph still emitted separately. The worker fixed it and added saved and reopened parity against `accept_all()` before the zero-finding third review.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, accepted structural visibility, and `docs/hld/08-rendering-spec.md`, accepted layout and table rows.
+
+**Tests.** The worker passed 175 Python binding tests, 132 policy tests, the affected Rust crates, README and package gates, scoped Clippy and formatting. Microscope pass 3 found zero defects and zero smells. The integrated sprint tree passed the CLI JSON parity regression, prose and skill checks, and the 49-entry hash harness. Full S84 verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker and integrated prefix, all 49 entries match.
+
+**Notes for future sessions.** F-X168 may start on this completed prefix. Issue 253 remains open until the complete integrated acceptance matrix is checked on main. Keep `work/f-x167-codex` through sprint verification and review.
+
+### F-X168, Current issue and contribution closure evidence
+
+**Sprint.** S84
+**Completed.** 2026-10-03
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** Adopted PR 265's distinct mixed-section pagination regression on the completed F-X162 section implementation. The test compares three multipage portrait and landscape sections, tables, margins and direct or control-owned content with isolated deterministic renders. It fails against the old final-section selection and passes on the integrated code. The nine live issue contracts now have criterion-level evidence in `docs/hld/12-testing-strategy.md`.
+
+**Non-obvious choices.** PR 265's production change overlaps F-X162, so only its independent regression was adopted. The worker reread the comments and reviews for all 32 open PRs and the full bodies and comments for all nine open issues, then prepared individual dispositions for the post-main reconciliation. The separate F-X164 PowerPoint and F-X166 Word observations are retained as manual viewer evidence, without claiming a second-machine animation check that Issue 244 does not require.
+
+**Deviations from the design plan.** The worker checklist was clarified so scoped evidence and closure drafts complete this feature. Full verification, sprint review, main merge and live GitHub closure remain S84 boundary gates, rather than claims made by the worker handoff. The added layout test required a remeasured `rdocx-layout` package archive and assertion carrier.
+
+**Spec sections touched.** `docs/hld/12-testing-strategy.md`, S84 live issue acceptance gate.
+
+**Tests.** Both Issue 158 fixture workflows, the 18 by 7 identity and 11 by 8 producer matrices, and focused gates for Issues 160, 226, 244, 245, 253, 254, 255 and 264 passed on the worker prefix. The worker passed scoped verification, policy, archive inventory and the 49-entry hash harness. Microscope pass 2 found zero defects and zero smells. The PR 265 regression passed again after integration. Final full S84 verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker, all 49 entries match. Rerun on the final integrated sprint head.
+
+**Notes for future sessions.** After full verification and clean sprint review, `/close-sprint` must merge to main, then reconcile each of the 32 PRs and nine issues against live GitHub and evidence on main. Close Issue 158 last. Individual closure drafts were saved outside the worker worktree at `/private/tmp/rdocx-s84-closure-drafts.md`. Keep `work/f-x168-codex` through sprint verification and review.
+
+### F-X171, Pin LibreOffice for macOS Python acceptance
+
+**Sprint.** S85
+**Completed.** 2026-10-03
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** The macOS presentation Python CI cell now downloads the official LibreOffice 26.2.5 aarch64 image, checks its SHA-256, mounts it read-only, verifies exact build 26.2.5.2 and exposes `soffice` to the complete binding suite. The workflow contract detects missing, skipped, weakened or unpinned setup.
+
+**Non-obvious choices.** The `macos-26` runner is arm64, and the image digest was checked against the official download and a clean local mount. The existing Linux viewer installer and the Word Python matrix cell are unchanged. The S84 tag remains fixed while S85 repairs the hosted CI setup found after its main push.
+
+**Deviations from the design plan.** The F-ID test gate was clarified to use local workflow and oracle evidence, because hosted main CI cannot run before `/close-sprint`. The S85 sprint boundary owns the hosted gate and the prepared GitHub closures. The roadmap assertion moved with the planned feature sprints from S85 to S86.
+
+**Spec sections touched.** `docs/hld/12-testing-strategy.md`, the hosted Python binding CI row, and `docs/hld/14-development-backlog.md`, F-X171's completion and closure gate.
+
+**Tests.** The workflow assertion failed against the old CI job and passed after the setup step. All 133 workflow regressions and 77 source-built presentation Python tests passed with the pinned `soffice`. The reviewed DMG digest, clean mount, executable identity, formatting, prose and skill adapter checks passed. Microscope pass 1 found zero defects and zero smells. Full integrated verification, sprint review and hosted CI remain at the S85 boundary.
+
+**Hash harness.** Unchanged, all 49 entries match on the worker and integrated source.
+
+**Notes for future sessions.** After `/close-sprint` pushes S85, wait for the macOS presentation Python job and aggregate CI gate to pass on `main`. Only then post the individual 32 PR and nine issue dispositions, with Issue 158 last. Keep `work/f-x171-codex` through sprint verification and review.
+
+### F-271, Uniform rich header and footer editing
+
+**Sprint.** S86
+**Completed.** 2026-10-03
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** The existing story editing surface now handles rich content in all six header and footer variants. Comment ranges can be anchored in related story parts and published through a staged package reopen. The related part retains unmodelled paragraph XML and keeps its relationships scoped to that part.
+
+**Non-obvious choices.** Related-part comment anchoring edits the paragraph fragment in the selected part. Its package is validated and reopened before the live document changes. Body and table-cell comments keep their existing publication path.
+
+**Deviations from the design plan.** The initial worker pass missed the package reopen before publishing related-part comments. Integration review caught it, and the corrected worker passed another microscope review and scoped gate. An integration policy check also required the completed DOCX-038 capability row in `docs/hld/02-scope-and-non-goals.md`, beyond the plan's HLD impact list.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`, DOCX-038 completion, `docs/hld/03-architecture.md`, related story publication, and `docs/hld/14-development-backlog.md`, F-271 acceptance.
+
+**Tests.** The worker passed 488 Word unit, 333 integration, 745 regression and 2 documentation tests with pinned tools. Scoped Clippy, formatting, prose, generated skills, 133 policy tests and the archive inventory passed. The all-variant rich-content test and aliased-header rollback test passed. Microscope pass 4 found zero defects and zero smells. Full integrated verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker, all 49 entries match. The integrated sprint gate is due.
+
+**Notes for future sessions.** F-272 can start on this completed prefix. Keep `work/f-271-codex` until final sprint verification and review.
+
+### F-X133, Stop rebinding a canonical prefix on every retained element
+
+**Sprint.** S86
+**Completed.** 2026-10-03
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** Retained Word paragraph attributes now omit local `r`, `mc` and `wp` declarations when the serialized part root guarantees the same URI binding. Document, header, footer and note writers establish their actual root bindings for the duration of serialization. Standalone fragments, comments, noncanonical roots and true local shadows keep required declarations.
+
+**Non-obvious choices.** A thread-local scope restores the previous binding set on nested serialization and unwind. The guard ties suppression to the exact part root rather than the prefix spelling alone.
+
+**Deviations from the design plan.** The prior F-X161 work already removed repeated canonical `w` declarations. This story covered the remaining root-guaranteed prefixes and added conditional `wp` handling for producer roots.
+
+**Spec sections touched.** `docs/hld/04-opc-and-packaging.md`, retained namespace emission, and `docs/hld/14-development-backlog.md`, F-X133 acceptance.
+
+**Tests.** The named regression failed before the change and passed afterward. The worker passed 601 OXML tests, one documentation test, scoped Clippy, formatting, prose, generated skills, all 133 policy tests and exact package measurement. Microscope pass 4 found zero defects and zero smells. Full integrated verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker, all 49 entries match. The integrated sprint gate is due.
+
+**Notes for future sessions.** F-X173 can use this completed serialization prefix. Keep `work/f-x133-codex` until final sprint verification and review.
+
+### F-272, Rich footnote authoring
+
+**Sprint.** S86
+**Completed.** 2026-10-03
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** Native footnotes can be created with a body reference, located as stories, edited with existing rich content operations, reordered without changing IDs, and removed with every matching body reference in one staged mutation. Footnote paragraphs support scoped pictures, hyperlinks and comments, while separator and unknown XML survive save and reopen. Visible note labels follow reference occurrence while internal IDs stay stable.
+
+**Non-obvious choices.** The package-backed note part is reopened before publication. Reorder moves a source note fragment and keeps its stable ID. The layout label map uses body reference order, which matches the pinned Word output even when internal IDs begin at two.
+
+**Deviations from the design plan.** The Word comparison exposed raw internal IDs printed as visible labels. The worker added occurrence-based layout numbering and repeated the oracle and hash gates. No new crate, module, trait, generic or feature flag was introduced.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`, DOCX-039 completion, `docs/hld/03-architecture.md`, note story ownership, `docs/hld/04-opc-and-packaging.md`, preservation, `docs/hld/08-rendering-spec.md`, labels and continuation, `docs/hld/10-bindings-spec.md`, native API, and `docs/hld/14-development-backlog.md`, F-272 acceptance.
+
+**Tests.** The worker passed 488 Word unit, 334 integration, 750 regression, 303 layout and documentation tests, all 133 policy tests, scoped Clippy, formatting, prose, generated skills, archive inventory and the 22-package dry run. Microsoft Word for Mac 16.113.2 build 16.113.26092012 and deterministic local PDF both showed three pages, body note labels 1 and 2, a long note continuing through page three and a short note on page three. Microscope pass 1 found zero defects and zero smells. Full integrated verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the worker, all 49 entries match. The integrated sprint gate is due.
+
+**Notes for future sessions.** F-273 can start on this completed note substrate. Keep `work/f-272-codex` until final sprint verification and review.
+
+### F-X172, Unified release artifacts and provenance
+
+**Sprint.** S86
+**Completed.** 2026-10-03
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** `wheels.yml` now owns the only new family tag trigger for both Rust and Python publication. A tag selects one family, builds six CLI archives, six wheels and one source distribution, checks all thirteen payloads and writes one `SHA256SUMS` for the GitHub release. Build jobs attest each payload, and the aggregate job verifies provenance against the source SHA. The PyPI job remains in the trusted `wheels.yml` identity and `pypi` environment. A GitHub release waits for both registries and exact published Python file digests.
+
+**Non-obvious choices.** The tag workflow requires the tag SHA to match current `origin/main` and one annotated sprint tag at that SHA. The prepublication validator checks the exact selected publishable crate set, matching versions, workspace pins and lockfile entries. A patched 22-package dry run and exact selected archive inventory finish before either registry job can start. Manual dispatch remains build-only. Historical Python tags and changelog sections stay readable, but new publication uses only the combined family tags.
+
+**Deviations from the design plan.** Issue 266's request for a release from `main` led to post-close publication. F-X173 and F-X174 prepare versions and notes during S86, `/close-sprint` merges the reviewed tree, then `/release` applies separate exact-SHA approvals. An independent audit found and the worker fixed missing selected-crate and main-source machine checks plus stale HLD process prose before handoff.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, F-X172 acceptance, and `docs/hld/15-build-and-toolchain.md`, unified family publication and provenance.
+
+**Tests.** The new unified workflow and security mutation gate failed on the old split workflow and passed after the change. The worker passed 137 policy tests with 2 skips, formatting, prose, generated-skill drift, diff checks and a zero-finding microscope pass. Hosted build and registry publication remain the separate post-close release gates.
+
+**Hash harness.** Unchanged on the worker, all 49 entries match. The integrated sprint gate is due.
+
+**Notes for future sessions.** F-X173 and F-X174 can prepare the incubating and stable minor versions on this workflow. Keep `work/f-x172-codex` until final sprint verification and review. The user authorized an Issue 266 comment after both releases are verified, naming their published numbers and links.
+
+### F-273, Rich endnote authoring
+
+**Sprint.** S86
+**Completed.** 2026-10-03
+**Size.** L, estimated 5 days, actual 1 day
+
+**What was built.** Native endnotes can be created with a direct body reference, located as stories, edited with rich content, reordered without changing IDs, and removed with matching references in one staged mutation. Endnotes and footnotes keep separate ID spaces. Endnote pictures, hyperlinks and comments use the endnote part, while separator and unknown XML survive save and reopen.
+
+**Non-obvious choices.** The package-backed note part is reopened before publication. Word for Mac placed the two fixture endnotes on the final body page with Roman labels. The existing deterministic renderer appends an endnote page and uses decimal labels. The approved F-273 contract keeps that policy and asserts the difference explicitly. F-274 owns placement and number-format policy.
+
+**Deviations from the design plan.** The pinned Word comparison exposed an existing page-placement and label-format difference. The plan's differential gate and rendering spec now record and assert that difference without changing the F-273 API or renderer policy.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`, endnote authoring scope, `docs/hld/03-architecture.md`, note story ownership, `docs/hld/04-opc-and-packaging.md`, part and unknown XML preservation, `docs/hld/08-rendering-spec.md`, independent labels and the Word divergence, `docs/hld/10-bindings-spec.md`, native API, and `docs/hld/14-development-backlog.md`, F-273 acceptance.
+
+**Tests.** The named mixed-rich-notes gate passed on the integrated sprint tree. The worker passed 494 Word unit, 343 integration, 760 regression and documentation tests, all 137 policy tests, scoped Clippy, formatting, prose, generated skills, archive inventory and the 22-package dry run. Microsoft Word for Mac 16.113.2 build 16.113.26092012 opened the exact generated DOCX and showed two pages, footnote labels 1 and 2, endnote labels i and ii, and both endnotes after final body text. Microscope pass 2 found zero defects and zero smells. Full integrated verification and sprint review remain due.
+
+**Hash harness.** Unchanged on the integrated sprint tree, all 49 entries match.
+
+**Notes for future sessions.** F-X173 and F-X174 may now prepare both release families. Keep `work/f-273-codex` branch through final sprint review. The current append-page and decimal-label policies are documented for F-274.
+
+### F-X173, Prepare unified rpptx 0.13.0 family
+
+**Sprint.** S86
+**Completed.** 2026-10-03
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** The 15 selected shared OOXML and presentation Rust crates, their workspace pins, the `rpptx` CLI, `rpptx-py` metadata and `Cargo.lock` now agree on 0.13.0. The changelog contains family release notes with compatibility guidance, Issue 266 and authenticated contributor credit. Package assertions and README examples use the reviewed archive measurements. The release wheel smoke now runs on Python 3.9 and excludes only the pinned LibreOffice fixture from bare wheel runners.
+
+**Non-obvious choices.** The public `oxml-layout::LineBreakParams` fields require a pre-1.0 minor version. `rpptx-wasm` remains unpublished at its prior crate version. The wheel smoke keeps an equivalent length assertion where Python 3.9 lacks `zip(strict=True)`. Its Issue 158 viewer oracle still runs in the pinned CI suite. A hosted manual build-only rehearsal needs the final pushed sprint SHA, so it follows the integrated sprint gate and push before close.
+
+**Deviations from the design plan.** The approved plan's hosted build-only run was moved to the final pushed sprint SHA because worker branches do not push. A local wheel and source distribution check covers the dependency checkpoint. Local Python 3.9 rehearsal exposed and fixed the wheel smoke compatibility and LibreOffice environment defects.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, F-X173 release acceptance, and `docs/hld/15-build-and-toolchain.md`, unified family versions, artifact rehearsal and wheel smoke.
+
+**Tests.** The integrated `test_rpptx_v0_13_0_unified_family_contract` and release-note parser passed. The worker passed 17 affected crate test suites and Clippy, wasm check, 138 policy tests with two skips, formatting, prose, generated skills, README inventory and examples, and an exact 22-package locally patched dry run with every archive under 10 MiB. A clean Python 3.9 wheel install passed 75 examples, one skip and the one viewer deselection. The full Python 3.12 examples passed 77 cases with pinned LibreOffice and Poppler, plus strict mypy and stubtest. Microscope pass 1 found zero defects and zero smells. Final integrated verification, sprint review and hosted build-only rehearsal remain due.
+
+**Hash harness.** Unchanged on the reviewed worker, all 49 entries match. The final integrated sprint gate is due.
+
+**Notes for future sessions.** F-X174 may now prepare `v0.15.0` against these shared 0.13.0 packages. Keep `work/f-x173-codex` branch through final sprint review. Publish `rpptx-v0.13.0` only from the reviewed S86 main merge through `/release` and its separate final approval.
+
+### F-X174, Prepare unified rdocx 0.15.0 family
+
+**Sprint.** S86
+**Completed.** 2026-10-04
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** The seven selected Word Rust crates, their workspace pins, the `rdocx` CLI, Python project metadata and `Cargo.lock` now agree on 0.15.0. The changelog records Issue 266, compatibility guidance and authenticated contributor credit. The release preparation includes exact package measurements and clean Python wheel and source distribution checks.
+
+**Non-obvious choices.** The pre-1.0 minor version reflects source-incompatible public layout model changes. Historical 0.14.0 performance observations retain their dated version, while archive measurements reflect 0.15.0. Bare wheel runners exclude only the Issue 253 PDF text oracle that needs pinned Poppler 26.01.0. The full pinned CI suite keeps that case. Hosted six-platform build-only evidence follows the final reviewed sprint push before close, and publication requires a separate exact-SHA `/release` approval after close.
+
+**Deviations from the design plan.** The bare wheel smoke needed the narrow Issue 253 selection after a clean Python 3.9 install exposed its exact Poppler dependency. The risk and HLD now name this environment requirement. No publication is claimed by the preparation story.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, F-X174 release acceptance, and `docs/hld/15-build-and-toolchain.md`, stable family versions, artifact rehearsal and wheel smoke.
+
+**Tests.** The 0.15.0 family contract failed on the old 0.14.0 carriers and passes on the integrated source. The worker passed selected Rust crate tests and Clippy, a clean Python 3.9 wheel smoke with 156 cases and one bare-runner deselection, all 157 Python 3.12 cases with pinned Poppler, strict mypy and stubtest, 139 policy tests with two skips, docs, README examples, and the locally patched 22-package dry run. Microscope pass 1 found zero defects and zero smells. The integrated full workspace tests, policy suite, Clippy, no-default path, both WASM targets, docs, README examples, 22-package clean publish dry run and cargo-deny check passed. Hosted build-only rehearsal and release publication remain later gates.
+
+**Hash harness.** Unchanged on the integrated sprint source, all 49 entries match.
+
+**Notes for future sessions.** Keep `work/f-x174-codex` through final sprint review. Publish `v0.15.0` only from the reviewed S86 main merge through `/release` and its separate final approval. After both family releases are verified, comment on Issue 266 with `rpptx-v0.13.0` and `v0.15.0` and direct release links.

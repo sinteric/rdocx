@@ -219,6 +219,7 @@ fn smartart_parts_read_aliases_write_schema_order_and_preserve_raw_children() {
     assert_eq!(shape_style.line_reference, Some(2));
     assert_eq!(shape_style.fill_reference, Some(1));
     assert_eq!(shape_style.font_reference.as_deref(), Some("minor"));
+    assert_eq!(shape_style.font_color, None);
     assert_eq!(colors.labels[0].fill_colors, ["112233"]);
     assert_eq!(style.labels.len(), 1);
     assert_eq!(colors.labels.len(), 1);
@@ -295,12 +296,16 @@ fn smartart_projections_ignore_same_namespace_lookalikes_outside_schema_position
         DiagramLayoutFamily::Unsupported("unknown".to_owned())
     );
 
-    let style = CT_DiagramStyleDefinition::from_xml(br#"<d:styleDef xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><d:styleLbl name="owned"><d:style><a:lnRef idx="2"/><d:extLst><a:fillRef idx="99"/></d:extLst></d:style></d:styleLbl><d:extLst><d:styleLbl name="lookalike"><d:style><a:lnRef idx="99"/></d:style></d:styleLbl></d:extLst></d:styleDef>"#).unwrap();
+    let style = CT_DiagramStyleDefinition::from_xml(br#"<d:styleDef xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><d:styleLbl name="owned"><d:style><a:lnRef idx="2"/><d:extLst><a:fillRef idx="99"/></d:extLst><a:fontRef idx="minor"><d:opaque/><a:schemeClr val="lt1"/></a:fontRef></d:style></d:styleLbl><d:extLst><d:styleLbl name="lookalike"><d:style><a:lnRef idx="99"/></d:style></d:styleLbl></d:extLst></d:styleDef>"#).unwrap();
     assert_eq!(style.labels.len(), 1);
     assert_eq!(style.labels[0].name, "owned");
     let shape_style = style.labels[0].shape_style.as_ref().unwrap();
     assert_eq!(shape_style.line_reference, Some(2));
     assert_eq!(shape_style.fill_reference, None);
+    assert!(matches!(
+        &shape_style.font_color,
+        Some(oxml_drawing::color::ColorChoice::Scheme { value, .. }) if value == "lt1"
+    ));
 
     let colors = CT_DiagramColorsDefinition::from_xml(br#"<d:colorsDef xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><d:styleLbl name="owned"><d:fillClrLst><a:srgbClr val="112233"/><d:opaque><a:srgbClr val="FFFFFF"/></d:opaque></d:fillClrLst></d:styleLbl><d:extLst><d:styleLbl name="lookalike"><d:fillClrLst><a:srgbClr val="FFFFFF"/></d:fillClrLst></d:styleLbl></d:extLst></d:colorsDef>"#).unwrap();
     assert_eq!(colors.labels.len(), 1);
@@ -1832,7 +1837,7 @@ fn verify_fetched_corpus() {
 fn rpptx_oxml_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(manifest.contains("name = \"rpptx-oxml\""));
-    assert!(manifest.contains("version = \"0.12.1\""));
+    assert!(manifest.contains("version = \"0.13.0\""));
     assert!(manifest.contains("publish = true"));
     assert_eq!(
         P_NS,

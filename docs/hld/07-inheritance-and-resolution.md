@@ -371,7 +371,7 @@ spelling. An absent value means false.
 
 ### 3. The nine-level list style
 
-Seven sources, merged in this order, later winning per property and per level:
+Eight sources, merged in this order, later winning per property and per level:
 
 1. `p:defaultTextStyle` in `presentation.xml`
 2. The master's `p:txStyles`, selecting `p:titleStyle` for `title` and
@@ -380,9 +380,12 @@ Seven sources, merged in this order, later winning per property and per level:
    cells**
 3. The master placeholder's `a:lstStyle`
 4. The layout placeholder's `a:lstStyle`
-5. The shape's own `a:lstStyle`
-6. The paragraph's `a:pPr`
-7. The run's `a:rPr`
+5. The colour of the shape's `p:style/a:fontRef`, as the text fill of every
+   level, so `lt1` gives an inserted shape light text over its accent fill as
+   in PowerPoint
+6. The shape's own `a:lstStyle`
+7. The paragraph's `a:pPr`
+8. The run's `a:rPr`
 
 Within each list-style source, `a:defPPr` is applied to all nine levels before
 the matching `a:lvlNpPr`. Paragraph fields and nested default character fields
@@ -423,7 +426,8 @@ An opaque effect that still contains `phClr` returns
 
 `a:fontRef@idx` is not numeric. It retains the typed `major`, `minor`, or
 `none` collection selection. Typeface-token lookup within that collection is
-the separate font-resolution step described below.
+the separate font-resolution step described below. Its colour is the fifth
+text source of the list-style chain.
 
 ### 5. Colour
 

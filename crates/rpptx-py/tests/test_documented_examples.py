@@ -2167,8 +2167,10 @@ def test_placeholder_effective_geometry_matches_python_pptx_and_one_setter_keeps
     )
     oracle = pptx.Presentation(source)
     prs = rpptx.Presentation(source)
-    for slide, oracle_slide in zip(prs.slides, oracle.slides, strict=True):
-        for shape, expected in zip(slide.shapes, oracle_slide.shapes, strict=True):
+    assert len(prs.slides) == len(oracle.slides)
+    for slide, oracle_slide in zip(prs.slides, oracle.slides):
+        assert len(slide.shapes) == len(oracle_slide.shapes)
+        for shape, expected in zip(slide.shapes, oracle_slide.shapes):
             assert (shape.left, shape.top, shape.width, shape.height) == (None,) * 4
             geometry = shape.effective_geometry()
             assert geometry == (expected.left, expected.top, expected.width, expected.height)
@@ -2375,7 +2377,8 @@ def test_fill_and_line_formats_write_what_python_pptx_reads(tmp_path):
     prs.save(output)
     parts = _package_parts(output.read_bytes())
     slide_xml = parts["ppt/slides/slide1.xml"].decode()
-    assert slide_xml.count("<a:ln") == 1
+    assert len(re.findall(r"<a:ln[ />]", slide_xml)) == 1
+    assert slide_xml.count("<p:style>") == 2
 
     pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
     oracle = pptx.Presentation(output).slides[0].shapes
@@ -2737,7 +2740,7 @@ def test_line_dash_style_and_ends_write_what_python_pptx_reads(tmp_path):
     plain.line.dash_style = None
     plain.line.tail_end.type = None
     plain.line.head_end.width = None
-    assert b"<a:ln" not in plain.xml
+    assert not re.search(rb"<a:ln[ />]", plain.xml)
 
     prs.slides[0].shapes.add_connector(MSO_CONNECTOR.STRAIGHT, 0, 0, rpptx.Inches(2), 0)
     connector = prs.slides[0].shapes[1]
@@ -3742,6 +3745,48 @@ def test_import_slide_carries_pictures_links_notes_and_background_from_another_d
     embed = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
     assert slide.part.related_part(embed).blob == blue
 
+
+
+def test_add_shape_writes_the_python_pptx_theme_style_and_add_textbox_none(tmp_path):
+    import rpptx
+    import xml.etree.ElementTree as ET
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    assert pptx.__version__ == "1.0.2"
+
+    def styles(deck):
+        output = tmp_path / "styles.pptx"
+        deck.save(output)
+        slide_xml = _package_parts(output.read_bytes())["ppt/slides/slide1.xml"]
+        root = ET.fromstring(slide_xml)
+        p_ns = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+
+        def tree(element):
+            return (
+                element.tag,
+                tuple(sorted(element.attrib.items())),
+                tuple(tree(child) for child in element),
+            )
+
+        return [
+            tree(style)
+            for shape in root.iter(f"{p_ns}sp")
+            if (style := shape.find(f"{p_ns}style")) is not None
+        ]
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides[0].shapes.add_shape(1, 914400, 914400, 2743200, 1828800)
+    prs.slides[0].shapes.add_textbox(0, 0, 100, 100)
+    oracle = pptx.Presentation()
+    oracle.slides.add_slide(oracle.slide_layouts[6])
+    oracle.slides[0].shapes.add_shape(1, 914400, 914400, 2743200, 1828800)
+    oracle.slides[0].shapes.add_textbox(0, 0, 100, 100)
+
+    assert len(styles(prs)) == 1
+    assert styles(prs) == styles(oracle)
+    shape = prs.slides[0].shapes[0]
+    assert (shape.fill.type, shape.line.color.rgb) == (None, None)
 
 
 def test_add_shape_accepts_preset_names_and_every_mso_shape_member(tmp_path):

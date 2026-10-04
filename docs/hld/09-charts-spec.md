@@ -535,13 +535,20 @@ the embedded workbook. An external workbook, malformed ChartML or
 SpreadsheetML, missing relationship target, nested archive limit, or remaining
 raw trace rejects the complete document mutation.
 
-The reviewed Word candidate has SHA-256
+The reviewed Word candidate had SHA-256
 `79e9b9ff9e7557dbd09a365bb8c189806e700ed48ca768b27d7158cf2b41370b`.
 Microsoft Word 16.104, Info.plist build 16.104.25121423, opened that exact file
-without a repair warning. In the human-action gate, Edit Data opened the
-embedded workbook in Excel and the user successfully changed the chart data.
-The workbook initially carried `Category` and `Revenue` columns with `North,
-12.5`, `South, 19.0`, and `West, 14.25`.
+without a repair warning. In the human-action gate on that file, Edit Data
+opened the embedded workbook in Excel and the user successfully changed the
+chart data. The workbook initially carried `Category` and `Revenue` columns
+with `North, 12.5`, `South, 19.0`, and `West, 14.25`.
+
+The part serializers then stopped indenting, which moved the candidate to
+SHA-256 `904e718b1fe0e524be7df75430705a8a70e03089ed96460ad008c4016c36ad3d`
+with the same elements, attributes and text. Microsoft Word 16.111, build
+16.111.26072617, opened and exported that file without a repair warning. The
+Word 16.104 gate and the human Edit Data gate have not been run on it, and the
+ignored gate test still asserts Word 16.104.
 
 The native chart candidate has SHA-256
 `e6e9f7eef1c774d0414c5d0c3f1202da1a28635b5d089e15455b7adc3f66cb00`.
