@@ -8,6 +8,10 @@ use crate::block::{
     ParagraphBlock, ParagraphView, RowSemantics, ShapePreset, SharedLayoutBlock, TableView,
 };
 use crate::table::{CellBlock, FloatingTable, TableRow};
+use oxml_layout::line::{
+    break_into_lines_with_consumption, break_multilingual_into_lines_with_consumption,
+    inline_remainder,
+};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -802,7 +806,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 break;
             }
-        } else if let Some(table) = block.table() {
+        } else if let Some(mut table) = block.table_for_measure(pager.geometry.content_width()) {
             let body_index = block.body_index();
 
             // A floating table is positioned rather than flowed, so it never
@@ -813,7 +817,11 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                 continue;
             }
 
-            for (row_idx, row) in table.rows.iter().enumerate() {
+            for row_idx in 0..table.rows.len() {
+                table = block
+                    .table_for_measure(pager.geometry.content_width())
+                    .unwrap();
+                let row = &table.rows[row_idx];
                 // Read per row, because finishing a page may have moved the
                 // body into the next column track.
                 let row_semantics = table
@@ -828,10 +836,15 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                     // Word splits a row with a minimum height only when the
                     // part that stays on this page reaches that minimum, and
                     // otherwise moves the row whole.
-                    let split = split_simple_table_row(&pending, pending_semantics.as_ref(), space)
-                        .filter(|(fragment, ..)| {
-                            fragment.height >= pending.min_height || !pager.has_content()
-                        });
+                    let split = split_simple_table_row(
+                        &pending,
+                        pending_semantics.as_ref(),
+                        space,
+                        pager.geometry.body_rotation.is_some().then_some(pager.fm),
+                    )
+                    .filter(|(fragment, ..)| {
+                        fragment.height >= pending.min_height || !pager.has_content()
+                    });
                     if let Some((fragment, rest, fragment_semantics, rest_semantics)) = split {
                         paint_flowed_table_row(
                             &mut pager,
@@ -846,13 +859,53 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         pending_semantics = rest_semantics;
                         first_fragment = false;
                         moved_whole = false;
+                        let old_width = pager.geometry.content_width();
                         pager.finish_page();
+                        table = block
+                            .table_for_measure(pager.geometry.content_width())
+                            .unwrap();
+                        if pager.geometry.body_rotation.is_some()
+                            && old_width != pager.geometry.content_width()
+                        {
+                            if first_fragment {
+                                pending = table.rows[row_idx].clone();
+                                pending_semantics =
+                                    table.semantics.and_then(|s| s.rows.get(row_idx)).cloned();
+                            } else if let Some(refitted) = refit_table_row_fragment(
+                                &pending,
+                                pending_semantics.as_ref(),
+                                &table.rows[row_idx],
+                                pager.fm,
+                            ) {
+                                pending = refitted;
+                            }
+                        }
                         repeat_table_headers(&mut pager, &table, row_idx, body_index);
                         continue;
                     }
                     if pending.height > space && pager.has_content() && !moved_whole {
                         moved_whole = true;
+                        let old_width = pager.geometry.content_width();
                         pager.finish_page();
+                        table = block
+                            .table_for_measure(pager.geometry.content_width())
+                            .unwrap();
+                        if pager.geometry.body_rotation.is_some()
+                            && old_width != pager.geometry.content_width()
+                        {
+                            if first_fragment {
+                                pending = table.rows[row_idx].clone();
+                                pending_semantics =
+                                    table.semantics.and_then(|s| s.rows.get(row_idx)).cloned();
+                            } else if let Some(refitted) = refit_table_row_fragment(
+                                &pending,
+                                pending_semantics.as_ref(),
+                                &table.rows[row_idx],
+                                pager.fm,
+                            ) {
+                                pending = refitted;
+                            }
+                        }
                         repeat_table_headers(&mut pager, &table, row_idx, body_index);
                         continue;
                     }
@@ -900,6 +953,7 @@ fn split_simple_table_row(
     row: &TableRow,
     semantics: Option<&RowSemantics>,
     space: f64,
+    fm: Option<&FontManager>,
 ) -> Option<(
     TableRow,
     TableRow,
@@ -983,6 +1037,21 @@ fn split_simple_table_row(
             let CellBlock::Paragraph(rest_paragraph) = &mut rest_cell.blocks[0] else {
                 unreachable!("checked paragraph blocks above")
             };
+            if let Some(fm) = fm {
+                let direction = semantics
+                    .and_then(|row| row.cells.get(cell_index))
+                    .and_then(|cell| cell.blocks.get(count))
+                    .and_then(|block| match block {
+                        CellBlockSemantics::Paragraph(semantics) => {
+                            Some(semantics.reflow_direction)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(oxml_layout::TextDirection::Auto);
+                let width = rest_paragraph.reflow.as_ref()?.params.available_width;
+                let (_, consumption) = rebreak_paragraph(rest_paragraph, direction, width, fm)?;
+                consume_paragraph_input(rest_paragraph, *consumption.get(lines - 1)?, fm)?;
+            }
             rest_paragraph.lines.drain(..lines);
             rest_paragraph.space_before = 0.0;
             rest_paragraph.content_offset_top = 0.0;
@@ -1025,6 +1094,50 @@ fn split_simple_table_row(
         cell.merged_height = rest.height;
     }
     Some((first, rest, first_semantics, rest_semantics))
+}
+
+/// Resize only unconsumed plain cell content. The split guard has already
+/// excluded merges, rotations, nested tables, exact clipping and anchors.
+fn refit_table_row_fragment(
+    pending: &TableRow,
+    semantics: Option<&RowSemantics>,
+    template: &TableRow,
+    fm: &FontManager,
+) -> Option<TableRow> {
+    let mut adjusted = pending.clone();
+    adjusted.offset_left = template.offset_left;
+    let mut height = pending.min_height;
+    for (cell_index, cell) in adjusted.cells.iter_mut().enumerate() {
+        cell.width = template.cells.get(cell_index)?.width;
+        let width = (cell.width - cell.margin_left - cell.margin_right).max(0.0);
+        for (block_index, block) in cell.blocks.iter_mut().enumerate() {
+            let CellBlock::Paragraph(paragraph) = block else {
+                return None;
+            };
+            let direction = semantics
+                .and_then(|row| row.cells.get(cell_index))
+                .and_then(|cell| cell.blocks.get(block_index))
+                .and_then(|block| match block {
+                    CellBlockSemantics::Paragraph(semantics) => Some(semantics.reflow_direction),
+                    _ => None,
+                })
+                .unwrap_or(oxml_layout::TextDirection::Auto);
+            *paragraph = rebreak_paragraph(paragraph, direction, width, fm)?.0;
+        }
+        height = height.max(
+            cell.blocks.iter().map(CellBlock::total_height).sum::<f64>()
+                + cell.margin_top
+                + cell.margin_bottom
+                + cell.border_band_top
+                + cell.border_band_bottom,
+        );
+    }
+    adjusted.height = height;
+    for cell in &mut adjusted.cells {
+        cell.height = height;
+        cell.merged_height = height;
+    }
+    Some(adjusted)
 }
 
 fn paint_flowed_table_row(
@@ -3020,6 +3133,7 @@ fn reflow_around_wraps(
 
     let mut lines = para.lines.clone();
     let mut offset_top = 0.0;
+    let mut final_params = reflow.params.clone();
 
     // Two passes. The first reserves against the paragraph as laid out, the
     // second against the heights the first produced, which is what settles a
@@ -3080,6 +3194,7 @@ fn reflow_around_wraps(
         let mut params = reflow.params.clone();
         params.line_prefix_widths = prefix;
         params.line_suffix_widths = suffix;
+        final_params = params.clone();
 
         let reflowed = if reflow_direction != oxml_layout::TextDirection::Auto
             || reflow_items.iter().any(|item| {
@@ -3119,7 +3234,68 @@ fn reflow_around_wraps(
     let mut adjusted = para.clone();
     adjusted.lines = lines;
     adjusted.content_offset_top = offset_top;
+    if let Some(reflow) = adjusted.reflow.as_mut() {
+        reflow.params = final_params;
+    }
     Some(adjusted)
+}
+
+/// Rebreak retained logical input without repeating Word style or numbering
+/// resolution. Consumption is recorded before visual bidi ordering.
+fn rebreak_paragraph(
+    para: &ParagraphBlock,
+    direction: oxml_layout::TextDirection,
+    width: f64,
+    fm: &FontManager,
+) -> Option<(ParagraphBlock, Vec<usize>)> {
+    let reflow = para.reflow.as_ref()?;
+    let mut params = reflow.params.clone();
+    if params.available_width != width {
+        params.line_prefix_widths.clear();
+        params.line_suffix_widths.clear();
+    }
+    params.available_width = width;
+    let multilingual = direction != oxml_layout::TextDirection::Auto
+        || reflow.items.iter().any(|item| match item {
+            oxml_layout::InlineItem::MultilingualText(_) => true,
+            oxml_layout::InlineItem::Text(segment)
+            | oxml_layout::InlineItem::HyphenatedText { segment, .. }
+            | oxml_layout::InlineItem::Marker(segment) => {
+                segment.direction != oxml_layout::TextDirection::Auto
+            }
+            _ => false,
+        });
+    let (mut lines, consumption) = if multilingual {
+        break_multilingual_into_lines_with_consumption(&reflow.items, &params, fm, direction)
+    } else {
+        break_into_lines_with_consumption(&reflow.items, &params, fm)
+    }
+    .ok()?;
+    crate::convert::restore_word_line_heights(
+        &mut lines,
+        params.line_spacing,
+        reflow.grid_line_pitch_pt,
+        fm,
+        reflow.paragraph_mark,
+    );
+    let mut adjusted = para.clone();
+    adjusted.lines = lines;
+    adjusted.reflow.as_mut()?.params = params;
+    Some((adjusted, consumption))
+}
+
+fn consume_paragraph_input(
+    para: &mut ParagraphBlock,
+    consumed: usize,
+    fm: &FontManager,
+) -> Option<()> {
+    let reflow = para.reflow.as_mut()?;
+    reflow.items = inline_remainder(&reflow.items, consumed, fm).ok()?;
+    reflow.params.ind_first_line = 0.0;
+    reflow.params.ind_hanging = 0.0;
+    reflow.params.line_prefix_widths.clear();
+    reflow.params.line_suffix_widths.clear();
+    Some(())
 }
 
 fn paginate_paragraph<B: LayoutBlockLike>(
@@ -3129,6 +3305,25 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     blocks: &[B],
     pager: &mut Pager,
 ) {
+    let page_reflow = (pager.geometry.body_rotation.is_some() && para.reflow_allowed)
+        .then(|| {
+            rebreak_paragraph(
+                para.block,
+                para.reflow_direction,
+                pager.geometry.content_width(),
+                pager.fm,
+            )
+        })
+        .flatten();
+    let mut consumption = page_reflow.as_ref().map(|(_, cursors)| cursors.clone());
+    let para = page_reflow
+        .as_ref()
+        .map_or(para, |(block, _)| ParagraphView {
+            block,
+            semantics: para.semantics,
+            reflow_direction: para.reflow_direction,
+            reflow_allowed: para.reflow_allowed,
+        });
     let space_before = pager.space_before(para.space_before);
 
     // Flow the paragraph around anything floating in its band of the page,
@@ -3158,6 +3353,15 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         reflow_direction: para.reflow_direction,
         reflow_allowed: false,
     });
+    if reflowed.is_some() && pager.geometry.body_rotation.is_some() {
+        consumption = rebreak_paragraph(
+            para.block,
+            para.reflow_direction,
+            pager.geometry.content_width(),
+            pager.fm,
+        )
+        .map(|(_, cursors)| cursors);
+    }
 
     // A page break inside the paragraph ends the page after its line, whatever
     // widow control or keep-lines would decide. When the lines up to the break
@@ -3169,7 +3373,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             pager.cursor_y + space_before + para.content_offset_top,
         ) == split_at
     {
-        render_para_split(para, body_index, split_at, space_before, pager, block_idx);
+        render_para_split(
+            para,
+            body_index,
+            split_at,
+            space_before,
+            pager,
+            block_idx,
+            blocks,
+            consumption.as_deref(),
+        );
         return;
     }
 
@@ -3187,7 +3400,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                 return;
             }
             // Re-call with fresh page
-            paginate_paragraph(para, body_index, block_idx, blocks, pager);
+            paginate_paragraph(
+                ParagraphView {
+                    reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                    ..para
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
             return;
         }
 
@@ -3204,7 +3426,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 return;
             }
-            paginate_paragraph(para, body_index, block_idx, blocks, pager);
+            paginate_paragraph(
+                ParagraphView {
+                    reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                    ..para
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
             return;
         }
 
@@ -3212,7 +3443,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         if para.widow_control && lines_remaining < 2 && lines_that_fit >= 3 {
             // Would leave orphan — move one line to next page
             let split_at = lines_that_fit - 1;
-            render_para_split(para, body_index, split_at, space_before, pager, block_idx);
+            render_para_split(
+                para,
+                body_index,
+                split_at,
+                space_before,
+                pager,
+                block_idx,
+                blocks,
+                consumption.as_deref(),
+            );
             return;
         }
 
@@ -3224,6 +3464,8 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                 space_before,
                 pager,
                 block_idx,
+                blocks,
+                consumption.as_deref(),
             );
             return;
         }
@@ -3233,7 +3475,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         if pager.stopped_at.is_some() {
             return;
         }
-        paginate_paragraph(para, body_index, block_idx, blocks, pager);
+        paginate_paragraph(
+            ParagraphView {
+                reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                ..para
+            },
+            body_index,
+            block_idx,
+            blocks,
+            pager,
+        );
         return;
     }
 
@@ -3244,7 +3495,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         let lines_that_fit =
             pager.count_lines_that_fit_with_notes(&para.lines, para.content_offset_top);
         if lines_that_fit > 0 && lines_that_fit < para.lines.len() {
-            render_para_split(para, body_index, lines_that_fit, 0.0, pager, block_idx);
+            render_para_split(
+                para,
+                body_index,
+                lines_that_fit,
+                0.0,
+                pager,
+                block_idx,
+                blocks,
+                consumption.as_deref(),
+            );
             return;
         }
     }
@@ -3261,6 +3521,19 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         let chain = keep_next_chain_height(para.block, block_idx, blocks, pager);
         if pager.cursor_y + space_before + chain > pager.available_height_for(&para.lines) {
             pager.advance_flow_for_chain();
+            if pager.geometry.body_rotation.is_some() {
+                paginate_paragraph(
+                    ParagraphView {
+                        reflow_allowed: true,
+                        ..para
+                    },
+                    body_index,
+                    block_idx,
+                    blocks,
+                    pager,
+                );
+                return;
+            }
         }
     }
 
@@ -3356,11 +3629,27 @@ fn keep_next_chain_height<B: LayoutBlockLike>(
             break;
         }
         let Some(paragraph) = next.paragraph() else {
-            if let Some(table) = next.table() {
+            if let Some(table) = next.table_for_measure(pager.geometry.content_width()) {
                 height += space_after + table.rows.first().map_or(0.0, |row| row.height);
             }
             break;
         };
+        let selected = pager
+            .geometry
+            .body_rotation
+            .is_some()
+            .then(|| {
+                rebreak_paragraph(
+                    paragraph.block,
+                    paragraph.reflow_direction,
+                    pager.geometry.content_width(),
+                    pager.fm,
+                )
+            })
+            .flatten();
+        let paragraph = selected
+            .as_ref()
+            .map_or(paragraph, |(block, _)| ParagraphView { block, ..paragraph });
         height += if pager.geometry.do_not_use_html_paragraph_auto_spacing {
             space_after + paragraph.space_before
         } else {
@@ -3402,13 +3691,16 @@ fn forced_page_split(lines: &[LayoutLine]) -> Option<usize> {
 
 /// Split a paragraph at the given line index, rendering first part on current page
 /// and continuing the rest on a new page (recursively if needed).
-fn render_para_split(
+#[allow(clippy::too_many_arguments)]
+fn render_para_split<B: LayoutBlockLike>(
     para: ParagraphView<'_>,
     body_index: Option<usize>,
     split_at: usize,
     space_before: f64,
     pager: &mut Pager,
     block_idx: usize,
+    blocks: &[B],
+    consumption: Option<&[usize]>,
 ) {
     // Render lines before split on current page
     pager.cursor_y += space_before;
@@ -3473,6 +3765,37 @@ fn render_para_split(
                 })
         });
 
+    // Resume logical input rather than reusing the previous page's line
+    // widths. A trailing run break keeps its empty final line semantics.
+    if !ends_with_run_page_break
+        && let Some(consumed) = consumption.and_then(|cursors| cursors.get(split_at - 1))
+    {
+        let mut continuation = para.block.clone();
+        continuation.lines = remaining_lines.to_vec();
+        continuation.anchored.clear();
+        continuation.space_before = 0.0;
+        continuation.keep_lines = false;
+        continuation.page_break_before = false;
+        continuation.heading_level = None;
+        continuation.heading_text = None;
+        continuation.content_offset_top = 0.0;
+        if consume_paragraph_input(&mut continuation, *consumed, pager.fm).is_some() {
+            paginate_paragraph(
+                ParagraphView {
+                    block: &continuation,
+                    semantics: para.semantics,
+                    reflow_direction: para.reflow_direction,
+                    reflow_allowed: true,
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
+            return;
+        }
+    }
+
     // Split again where the remaining lines are still too tall, or at a page
     // break among them, whichever comes first.
     let overflow_split = (remaining_height > pager.available_height_for(remaining_lines))
@@ -3522,6 +3845,8 @@ fn render_para_split(
             0.0,
             pager,
             block_idx,
+            blocks,
+            None,
         );
         return;
     }
@@ -4598,9 +4923,8 @@ fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f
             .sum::<f64>()
 }
 
-/// Vertical body blocks are shaped once per section, before pagination chooses
-/// a page's story. Reserve every active variant so that shaping, table sizing
-/// and the transposed page band all use one stable measure.
+/// Prepare a conservative initial measure before selected-story pagination.
+/// Retained paragraph inputs and table variants can later use a wider band.
 pub(crate) fn reserve_vertical_header_footer_room(
     mut geometry: PageGeometry,
     content: Option<&HeaderFooterContent>,
@@ -4618,6 +4942,36 @@ pub(crate) fn reserve_vertical_header_footer_room(
         }
     }
     geometry
+}
+
+/// Distinct raw body measures for stories that can be selected in a section.
+/// Tables are prepared at these finite measures before pagination rotates them.
+pub(crate) fn vertical_story_measures(
+    base: &PageGeometry,
+    content: Option<&HeaderFooterContent>,
+    title_pg: bool,
+) -> Vec<f64> {
+    let mut measures = Vec::new();
+    if let Some(hf) = content {
+        let mut stories = vec![(&hf.header_blocks, &hf.footer_blocks)];
+        if title_pg {
+            stories.push((&hf.first_header_blocks, &hf.first_footer_blocks));
+        }
+        if hf.even_headers_active {
+            stories.push((&hf.even_header_blocks, &hf.even_footer_blocks));
+        }
+        for (header, footer) in stories {
+            let mut selected = base.clone();
+            selected.reserve_header_footer_room(header, footer);
+            let measure = selected.body_measure();
+            if !measures.contains(&measure) {
+                measures.push(measure);
+            }
+        }
+    } else {
+        measures.push(base.body_measure());
+    }
+    measures
 }
 
 /// Render header/footer blocks.
@@ -5376,6 +5730,77 @@ mod tests {
             reflow: None,
             content_offset_top: 0.0,
         }
+    }
+
+    #[test]
+    fn vertical_keep_next_prices_following_paragraph_at_selected_measure() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm
+            .resolve_font(Some("Liberation Sans"), false, false)
+            .unwrap();
+        let text = "following words ".repeat(80);
+        let mut segment = directional_test_segment(&text, TextDirection::Auto, None, None);
+        let shaped = fm.shape_text(id, &text, 12.0).unwrap();
+        segment.font_id = id;
+        segment.glyph_ids = shaped.glyph_ids;
+        segment.advances = shaped.advances;
+        segment.width = shaped.width;
+        let params = oxml_layout::LineBreakParams {
+            available_width: 408.0,
+            ..Default::default()
+        };
+        let mut following = make_para(1, 14.0);
+        following.keep_lines = true;
+        following.lines = break_into_lines(
+            &[oxml_layout::InlineItem::Text(segment.clone())],
+            &params,
+            &fm,
+        )
+        .unwrap();
+        following.reflow = Some(Box::new(crate::block::ParagraphReflow {
+            items: vec![oxml_layout::InlineItem::Text(segment)],
+            params,
+            grid_line_pitch_pt: None,
+            paragraph_mark: None,
+        }));
+        let first = make_para(1, 14.0);
+        let blocks = vec![
+            LayoutBlock::Paragraph(first.clone()),
+            LayoutBlock::Paragraph(following.clone()),
+        ];
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let empty = ResolvedWraps::new();
+        let pager = Pager::new(
+            PageGeometry {
+                body_rotation: Some(90.0),
+                ..Default::default()
+            },
+            None,
+            None,
+            false,
+            &media,
+            &notes,
+            &fm,
+            &empty,
+            1,
+            1,
+            true,
+            None,
+        );
+        let expected = rebreak_paragraph(
+            &following,
+            TextDirection::Auto,
+            pager.geometry.content_width(),
+            &fm,
+        )
+        .unwrap()
+        .0;
+        assert!(expected.lines.len() < following.lines.len());
+        assert_eq!(
+            keep_next_chain_height(&first, 0, &blocks, &pager),
+            first.content_height() + expected.content_height()
+        );
     }
 
     #[test]

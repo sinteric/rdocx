@@ -1545,6 +1545,21 @@ run split before an annotation carries the span with it rather than leaving it
 on the neighbouring run, and that a marked run advances exactly as far as an
 unmarked one.
 
+## Selected-story vertical continuation gate
+
+Deterministic renderer tests select unequal first, even and default headers
+and footers. Every body's non-space endpoints must fit its selected band, with
+the established terminal-space allowance. The nine tall-story paragraph/table
+alignment cases, accepted paragraph joins and section isolation remain gates.
+A split percentage-table row conserves indexed Unicode cell text, source ranges,
+short-cell content and list markers across changes in measure. Cold and warm
+layouts, source maps and numbering results must match, including a changed story.
+Footnote references on three distinct story measures each retain their note on
+the reference page. Keep-next lookahead prices the selected measure.
+Shared cursor tests cover rich bidi order, empty text, generated hyphens, markers,
+tabs, figures, explicit breaks and invalid cursors. These geometry and source
+checks do not claim native Word rendering fidelity.
+
 ## The grid and vertical geometry golden gate
 
 `grid_and_vertical_page_matches_the_pinned_geometry_and_reading_order` builds

@@ -18,7 +18,7 @@ The archive row is regenerated from the complete published package that carries 
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-layout | 4,634,181 compressed bytes, 9,269,681 member bytes, 51 members | 0.13.0 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-04 |
+| Crates.io archive: oxml-layout | 4,635,982 compressed bytes, 9,281,539 member bytes, 51 members | 0.13.0 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-04 |
 
 ## Use it when
 

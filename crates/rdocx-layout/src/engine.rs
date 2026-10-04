@@ -2090,16 +2090,7 @@ impl Engine {
                 content.as_ref().map(|(content, _)| content),
                 sect_pr.title_pg.unwrap_or(false),
             );
-            if reserved.margin_top != geometry.margin_top
-                || reserved.margin_bottom != geometry.margin_bottom
-            {
-                push_unique_diagnostic(
-                    &mut diagnostics,
-                    "vertical section uses the largest active header/footer band on every page"
-                        .to_owned(),
-                );
-            }
-            vertical_sections.push((sect_pr.clone(), reserved, content));
+            vertical_sections.push((sect_pr.clone(), geometry, reserved, content));
         }
 
         let mut carried: Option<CT_P> = None;
@@ -2132,10 +2123,10 @@ impl Engine {
                     let para_sect_pr = para.properties.as_ref().and_then(|p| p.sect_pr.as_ref());
                     let geometry = vertical_sections
                         .iter()
-                        .find(|(section, _, _)| section == sect_pr_for_layout)
+                        .find(|(section, _, _, _)| section == sect_pr_for_layout)
                         .map_or_else(
                             || sect_pr_to_geometry(sect_pr_for_layout),
-                            |(_, geometry, _)| geometry.clone(),
+                            |(_, _, reserved, _)| reserved.clone(),
                         );
 
                     let source = sources.and_then(|sources| {
@@ -2199,10 +2190,12 @@ impl Engine {
 
                     // If this paragraph has sect_pr, it ends a section
                     if let Some(sect_pr) = para_sect_pr {
-                        let (geometry, header_footer) = if let Some((_, geometry, content)) =
-                            vertical_sections.iter_mut().find(|(section, _, content)| {
-                                section == sect_pr && content.is_some()
-                            }) {
+                        let (geometry, header_footer) = if let Some((_, geometry, _, content)) =
+                            vertical_sections
+                                .iter_mut()
+                                .find(|(section, _, _, content)| {
+                                    section == sect_pr && content.is_some()
+                                }) {
                             (geometry.clone(), content.take())
                         } else {
                             let geometry = section_page_geometry(
@@ -2249,12 +2242,27 @@ impl Engine {
                 MainStoryLayoutItem::Table(tbl, path) => {
                     let geometry = vertical_sections
                         .iter()
-                        .find(|(section, _, _)| section == sect_pr_for_layout)
+                        .find(|(section, _, _, _)| section == sect_pr_for_layout)
                         .map_or_else(
                             || sect_pr_to_geometry(sect_pr_for_layout),
-                            |(_, geometry, _)| geometry.clone(),
+                            |(_, _, reserved, _)| reserved.clone(),
                         );
 
+                    let variant_widths = vertical_sections
+                        .iter()
+                        .find(|(section, _, _, _)| section == sect_pr_for_layout)
+                        .map(|(_, base, _, content)| {
+                            paginator::vertical_story_measures(
+                                base,
+                                content.as_ref().map(|(content, _)| content),
+                                sect_pr_for_layout.title_pg.unwrap_or(false),
+                            )
+                        })
+                        .unwrap_or_default();
+                    let numbering_before = variant_widths
+                        .iter()
+                        .any(|width| *width != geometry.body_measure())
+                        .then(|| num_state.clone());
                     let mut table_block = self.layout_body_table(
                         tbl,
                         geometry.body_measure(),
@@ -2268,6 +2276,46 @@ impl Engine {
                         &path,
                         sect_pr_for_layout.doc_grid.as_deref(),
                     )?;
+                    for width in variant_widths {
+                        let variant = if width == geometry.body_measure() {
+                            if let SharedLayoutBlock::Table { block, .. } = &table_block {
+                                Arc::clone(block)
+                            } else {
+                                unreachable!("body tables use shared layout")
+                            }
+                        } else {
+                            let mut numbering = numbering_before
+                                .as_ref()
+                                .expect("alternative measures retain preceding numbering")
+                                .clone();
+                            let mut variant_diagnostics = Vec::new();
+                            let SharedLayoutBlock::Table { block, .. } = self.layout_body_table(
+                                tbl,
+                                width,
+                                styles,
+                                input,
+                                &media,
+                                &mut numbering,
+                                &mut variant_diagnostics,
+                                sources,
+                                &WordStory::Document,
+                                &path,
+                                sect_pr_for_layout.doc_grid.as_deref(),
+                            )?
+                            else {
+                                unreachable!("body tables use shared layout")
+                            };
+                            for diagnostic in variant_diagnostics {
+                                if !diagnostics.contains(&diagnostic) {
+                                    diagnostics.push(diagnostic);
+                                }
+                            }
+                            block
+                        };
+                        if let SharedLayoutBlock::Table { variants, .. } = &mut table_block {
+                            variants.push((width, variant));
+                        }
+                    }
                     if sources.is_some() {
                         table_block.set_body_index(path[0]);
                     }
@@ -2277,9 +2325,9 @@ impl Engine {
         }
 
         // Remaining blocks belong to the final section
-        let (final_geometry, final_hf) = if let Some((_, geometry, content)) = vertical_sections
+        let (final_geometry, final_hf) = if let Some((_, geometry, _, content)) = vertical_sections
             .iter_mut()
-            .find(|(section, _, content)| section == &final_sect_pr && content.is_some())
+            .find(|(section, _, _, content)| section == &final_sect_pr && content.is_some())
         {
             (geometry.clone(), content.take())
         } else {
@@ -2341,7 +2389,17 @@ impl Engine {
         // pushed just above and is therefore already in this list.
         let content_widths: Vec<f64> = sections
             .iter()
-            .map(|section| section.geometry.content_width())
+            .flat_map(|section| {
+                let mut widths = vec![section.geometry.content_width()];
+                if section.geometry.body_rotation.is_some() {
+                    widths.extend(paginator::vertical_story_measures(
+                        &section.geometry,
+                        section.header_footer.as_ref(),
+                        section.title_pg,
+                    ));
+                }
+                widths
+            })
             .collect();
         let notes = NoteRegistry::build(
             input,
@@ -3115,6 +3173,7 @@ impl Engine {
             .map(|(block, semantics)| SharedLayoutBlock::Table {
                 block: Arc::new(block),
                 semantics,
+                variants: Vec::new(),
                 body_index: None,
             });
         }
@@ -3145,6 +3204,7 @@ impl Engine {
                     story,
                     path,
                 ),
+                variants: Vec::new(),
                 body_index: None,
             });
         }
@@ -3199,12 +3259,14 @@ impl Engine {
             return Ok(SharedLayoutBlock::Table {
                 block,
                 semantics,
+                variants: Vec::new(),
                 body_index: None,
             });
         }
         Ok(SharedLayoutBlock::Table {
             block: Arc::new(block),
             semantics,
+            variants: Vec::new(),
             body_index: None,
         })
     }
@@ -12348,7 +12410,7 @@ mod tests {
     }
 
     #[test]
-    fn vertical_first_even_and_default_stories_keep_one_body_measure() {
+    fn vertical_first_even_and_default_stories_use_selected_body_measures() {
         use rdocx_oxml::units::Twips;
 
         let mut input = cacheable_header_footer_input(&"Body words ".repeat(1600));
@@ -12379,6 +12441,13 @@ mod tests {
         let mut painted_body = String::new();
         let mut hanging_ends = 0;
         for page in &result.pages {
+            let (top, bottom) = if page.page_number == 1 {
+                (72.0, 720.0)
+            } else if page.page_number.is_multiple_of(2) {
+                (204.0, 612.0)
+            } else {
+                (156.0, 660.0)
+            };
             let mut body_runs = 0;
             oxml_layout::walk(&page.elements, &mut |element, transform| {
                 if let PositionedElement::Text(run) = element
@@ -12395,14 +12464,14 @@ mod tests {
                         let point = transform.apply(Point { x, y: run.origin.y });
                         let allowance = if end && hanging { width } else { 0.0 };
                         assert!(
-                            (204.0 - 0.01..=612.0 + allowance + 0.01).contains(&point.y),
+                            (top - 0.01..=bottom + allowance + 0.01).contains(&point.y),
                             "page {}: {point:?}, run {:?}, origin {:?}, advances {:?}",
                             page.page_number,
                             run.text,
                             run.origin,
                             run.advances
                         );
-                        if point.y > 612.0 + 0.01 {
+                        if point.y > bottom + 0.01 {
                             assert!(end && hanging, "only terminal spaces may pass the band");
                             hanging_ends += 1;
                         }
@@ -12426,6 +12495,226 @@ mod tests {
         let changed = engine.layout(&input).expect("changed story geometry");
         let fresh = deterministic_layout(&input);
         assert_eq!(format!("{:?}", changed.pages), format!("{:?}", fresh.pages));
+    }
+
+    #[test]
+    fn vertical_split_table_cells_resume_source_and_numbering_at_selected_widths() {
+        use rdocx_oxml::{numbering::CT_Numbering, units::Twips};
+        let text = (0..1800)
+            .map(|n| format!("W{n:04} café "))
+            .collect::<String>();
+        let mut input = cacheable_header_footer_input("");
+        input.images.clear();
+        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
+        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
+            let mut part = header_footer_part(&format!("{suffix} header"));
+            part.paragraphs[0].properties = Some(CT_PPr {
+                line_spacing: Some(Twips(height * 20)),
+                line_rule: Some("exact".to_owned()),
+                ..Default::default()
+            });
+            input.headers.insert(format!("rId-{suffix}-header"), part);
+        }
+        input.footers.clear();
+        input
+            .document
+            .body
+            .sect_pr
+            .as_mut()
+            .unwrap()
+            .footer_refs
+            .clear();
+        let parsed = CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="{}"><w:body><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Short cell once</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS,
+        ).as_bytes()).unwrap();
+        input.document.body.content = parsed.body.content;
+        let mut numbering = CT_Numbering::new();
+        let num_id = numbering.add_numbered_list();
+        input.numbering = Some(numbering);
+        let BodyContent::Table(table) = &mut input.document.body.content[0] else {
+            unreachable!()
+        };
+        table.rows[0].cells[0].paragraphs_mut()[0].properties = Some(CT_PPr {
+            num_id: Some(num_id),
+            num_ilvl: Some(0),
+            ..Default::default()
+        });
+        let mut after = CT_P::new();
+        after.add_run("After table");
+        after.properties = Some(CT_PPr {
+            num_id: Some(num_id),
+            num_ilvl: Some(0),
+            ..Default::default()
+        });
+        input.document.body.add_paragraph(after);
+        let mut engine = Engine::new_deterministic().unwrap();
+        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
+        let numbers = engine.numbering_by_source(sources.len());
+        assert_eq!(
+            numbers
+                .iter()
+                .flatten()
+                .map(|n| n.marker_text.as_str())
+                .collect::<Vec<_>>(),
+            ["1.", "2."]
+        );
+        assert!(cold.pages.len() >= 3);
+        let mut by_source = std::collections::BTreeMap::<u32, String>::new();
+        let mut markers = Vec::new();
+        for page in &cold.pages {
+            let top = if page.page_number == 1 {
+                156.0
+            } else if page.page_number.is_multiple_of(2) {
+                204.0
+            } else {
+                72.0
+            };
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                let PositionedElement::Text(run) = element else {
+                    return;
+                };
+                if transform.b.abs() < 0.9 {
+                    return;
+                }
+                if run.text == "1." || run.text == "2." {
+                    markers.push(run.text.clone());
+                    return;
+                }
+                if let Some(span) = run.source {
+                    assert_eq!(
+                        sources[span.node.get() as usize - 1].story,
+                        WordStory::Document
+                    );
+                    assert_eq!(
+                        span.char_end - span.char_start,
+                        run.text.chars().count() as u32
+                    );
+                    let prior = by_source.entry(span.node.get()).or_default();
+                    assert_eq!(span.char_start, prior.chars().count() as u32);
+                    prior.push_str(&run.text);
+                }
+                let point = transform.apply(run.origin);
+                assert!(
+                    (top - 0.01..=720.01).contains(&point.y),
+                    "page {}: {point:?}",
+                    page.page_number
+                );
+            });
+        }
+        assert_eq!(markers, ["1.", "2."]);
+        assert_eq!(
+            by_source.values().collect::<Vec<_>>(),
+            [
+                &text,
+                &"Short cell once".to_owned(),
+                &"After table".to_owned()
+            ]
+        );
+        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
+        assert_eq!(sources, warm_sources);
+        assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
+        assert_eq!(
+            format!("{numbers:?}"),
+            format!("{:?}", engine.numbering_by_source(warm_sources.len()))
+        );
+        // Removing numbering makes the same multi-measure table cacheable.
+        let BodyContent::Table(table) = &mut input.document.body.content[0] else {
+            unreachable!()
+        };
+        let paragraph = &mut table.rows[0].cells[0].paragraphs_mut()[0];
+        **paragraph = CT_P::new();
+        paragraph.add_run(&"Cached cell words ".repeat(100));
+        input.numbering = None;
+        let BodyContent::Paragraph(after) = &mut input.document.body.content[1] else {
+            unreachable!()
+        };
+        after.properties = None;
+        let mut cached = Engine::new_deterministic().unwrap();
+        let (cold, sources) = cached.layout_with_provenance(&input).unwrap();
+        assert_eq!(cached.table_cache_counts(), (0, 3));
+        let (warm, warm_sources) = cached.layout_with_provenance(&input).unwrap();
+        assert_eq!(cached.table_cache_counts(), (3, 3));
+        assert_eq!(sources, warm_sources);
+        assert_layout_results_equal(&cold, &warm);
+        input.headers.get_mut("rId-even-header").unwrap().paragraphs[0]
+            .properties
+            .as_mut()
+            .unwrap()
+            .line_spacing = Some(Twips(3600));
+        let (changed, changed_sources) = cached.layout_with_provenance(&input).unwrap();
+        let (fresh, fresh_sources) = Engine::new_deterministic()
+            .unwrap()
+            .layout_with_provenance(&input)
+            .unwrap();
+        assert_eq!(changed_sources, fresh_sources);
+        assert_layout_results_equal(&changed, &fresh);
+    }
+
+    #[test]
+    fn vertical_notes_follow_references_at_distinct_selected_story_measures() {
+        use rdocx_oxml::{
+            footnotes::{CT_Footnote, CT_Footnotes, NoteType},
+            text::CT_R,
+            units::Twips,
+        };
+        let mut input = cacheable_header_footer_input("");
+        input.images.clear();
+        input.footers.clear();
+        let section = input.document.body.sect_pr.as_mut().unwrap();
+        section.text_direction = Some("tbRl".to_owned());
+        section.footer_refs.clear();
+        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
+            let mut part = header_footer_part(&format!("{suffix} header"));
+            part.paragraphs[0].properties = Some(CT_PPr {
+                line_spacing: Some(Twips(height * 20)),
+                line_rule: Some("exact".to_owned()),
+                ..Default::default()
+            });
+            input.headers.insert(format!("rId-{suffix}-header"), part);
+        }
+        input.document.body.content.clear();
+        let mut notes = Vec::new();
+        for id in 1..=3 {
+            let mut paragraph = CT_P::new();
+            paragraph.add_run(&format!("Body reference {id}"));
+            paragraph.properties = Some(CT_PPr {
+                page_break_before: (id > 1).then_some(true),
+                ..Default::default()
+            });
+            let mut reference = CT_R::new("");
+            reference.content = vec![RunContent::FootnoteRef { id }];
+            paragraph.runs.push(reference);
+            input.document.body.add_paragraph(paragraph);
+            let mut note = CT_P::new();
+            note.add_run(&format!("Selected note {id}"));
+            notes.push(CT_Footnote {
+                id,
+                note_type: NoteType::Normal,
+                paragraphs: vec![note],
+            });
+        }
+        input.footnotes = Some(CT_Footnotes { footnotes: notes });
+        let mut engine = Engine::new_deterministic().unwrap();
+        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
+        assert_eq!(cold.pages.len(), 3);
+        for (index, page) in cold.pages.iter().enumerate() {
+            let mut text = String::new();
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let PositionedElement::Text(run) = element {
+                    text.push_str(&run.text);
+                }
+            });
+            for id in 1..=3 {
+                assert_eq!(
+                    text.contains(&format!("Selected note {id}")),
+                    id == index + 1
+                );
+            }
+        }
+        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
+        assert_eq!(sources, warm_sources);
+        assert_layout_results_equal(&cold, &warm);
     }
 
     #[test]
