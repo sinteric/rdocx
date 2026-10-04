@@ -14,9 +14,9 @@
     "feature_showcase:word/document.xml": "5a3e5c2760e9bf4c107d49a982d7c0686d7fc81aa451cd25fc1a3751b6da841a",
     "feature_showcase:word/numbering.xml": "2aa0599486d98573be0b7febb04ec63c08d3dfc5341b0f722b93cae113803bbc",
     "feature_showcase:word/styles.xml": "35989309420a74f62cd30fffe3d719548c1c71083c3422ec925b92e4d80969c6",
-    "invoice:page1.png": "d78bed48649fed8147249da820dde7c5f65499ba85e1493ebd04bd1de5265c4c",
-    "invoice:pdf/bytes": "873181a6bab44d258c70be8c3d5cab9bc67dc5fbf79ed0e899ea9ca2a07062a8",
-    "invoice:pdf/pages": "8ffd0b50e30b98c135668de72ec961b6d3feecf4239da189aa89792afe2a4e2d",
+    "invoice:page1.png": "45df7ea3fcf0309a535385bc271754009907bbf96ee5ae10768cb5fb688c20c9",
+    "invoice:pdf/bytes": "3e638ea3f8cb1a5c7f023da094216e5661d46af50ad365532a87a39d3a8b7323",
+    "invoice:pdf/pages": "3e57259dc267a5cc775774be412f9a6a3815488f4d962fa0996b762167cb64a3",
     "invoice:pdf/resources": "e48c1d7946b7e918931371e483bf48de7906358fd60213be521d49df2b83773c",
     "invoice:word/document.xml": "848426495d2a6f94e1c1514959938de96a13f9d2997d5ebfdb15ab0d18b7dbe7",
     "invoice:word/numbering.xml": null,
@@ -36,8 +36,8 @@
     "proposal:word/numbering.xml": "061e20beb3409ce0f3feda1a99793956124a2967dd23afe1b528dd8fdeb82182",
     "proposal:word/styles.xml": "eed587711f5026028d92c051eb117782454cfc77cca936087294c45b3bb634cb",
     "quote:page1.png": "f9ee8fb9532ebc866410971e4d6ea5af35d3b6b2b178745b71feab88919ba5ab",
-    "quote:pdf/bytes": "c1713e6692c8ca715e57cae133aae834050b9568238183dde3302dcae5476788",
-    "quote:pdf/pages": "315d493b00681f0b60446a78fb24023823162c1d15ce58c46ec1d591d3112716",
+    "quote:pdf/bytes": "ea720b5ab0b0156b0cdba8cad68c74a39e3f004137b6f25b6856f8635aea0d83",
+    "quote:pdf/pages": "296d748be2d89d5c55df1a0ae0bfb0421b1059ae78d5ce2ab5b698fe26a5f822",
     "quote:pdf/resources": "7e9626233181d07e8d0bfa3c302f6a457133de1e9b5a124ae0e0d53ed7dbe03d",
     "quote:word/document.xml": "0c72970432f77927f6fb3bd6e980f9e12eebcf3a4c56b5260bf5902ef92ebdb5",
     "quote:word/numbering.xml": "c6511604704117eb00ad2faffb9173e4f48d22f62557ca72a51d60b7907c8058",
@@ -50,5 +50,5 @@
     "report:word/numbering.xml": "2aa0599486d98573be0b7febb04ec63c08d3dfc5341b0f722b93cae113803bbc",
     "report:word/styles.xml": "aba749376daca9d4b58b538b845ff13eeab3bfd06842aa7cc59caf1581775e19"
   },
-  "reason": "F-X159 adds the required trailing paragraph after the feature showcase nested table, changing its Word XML and deterministic PDF pages and bytes"
+  "reason": "Hanji issue 69: accept the five independently reproduced invoice and quote output changes caused by honoring direct table justification. Rust 1.97.1 control matches all 49 previous entries. Candidate matches the reviewed five digests exactly, with all XML and PDF resources unchanged."
 }

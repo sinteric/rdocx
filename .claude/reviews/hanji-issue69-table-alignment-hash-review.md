@@ -117,3 +117,55 @@ did not modify source or images, and did not update a baseline. It only read
 the supplied evidence, compared data in memory, and wrote this review record.
 The zero-finding source review remains recorded separately in
 `hanji-issue69-table-alignment-pass-2.md`.
+
+## Reproduced baseline acceptance, 2026-10-04
+
+The original review above records the contribution before baseline
+acceptance. This follow-up independently regenerated both the control and
+the candidate with the repository-pinned Rust 1.97.1 toolchain on Linux.
+The worktrees used separate Cargo target directories so the sample generator
+could not reuse another worktree's compiled output path.
+
+- Control commit `fce69db01804b45598103e6363bd515b1405d66d` reports
+  `49 entries match` against the original checked-in baseline.
+- Candidate commit `f1ccc9afcbb513f55da699b28377251537d8f4f1` reproduces
+  exactly the five original and patched digest pairs listed above.
+- The other 44 entries match the control, including all 21 tracked XML
+  entries and all 7 PDF resource fingerprints.
+- Fresh visual inspection confirms the invoice totals table moves right.
+  Pixel comparison again confines every change to `(111, 1430)` inclusive
+  through `(1163, 1526)` exclusive in the 1275 by 1651 images.
+
+The five measured digests were accepted through the harness's
+`--update --reason` path. A subsequent fresh `--check` regeneration reports
+`49 entries match`. This baseline update changes only those five entries and
+the audit reason. It does not change the renderer, sample generator, scanner,
+fonts, or source XML.
+
+Validation observed on the resulting tree:
+
+- `cargo test --locked -p rdocx-layout`: 309 unit tests and 1 doctest pass.
+- `cargo clippy --locked -p rdocx-layout --all-targets --all-features -- -D warnings`:
+  passes, including local dependencies with Rust 1.97.1.
+- `cargo fmt --all --check`: passes.
+- `python3 scripts/hash_harness.py --check`: all 49 entries match after
+  regeneration with deterministic rendering.
+- `python3 -m unittest scripts.hash_harness -v`: 12 tests pass.
+- `python3 scripts/prose_check.py`: no violations.
+- `python3 scripts/sync_agent_skills.py --check`: 26 adapters in sync.
+
+The additional `python3 -m unittest scripts.test_sprint_workflow` run did
+not pass: 132 tests ran with 1 failure, 1 error and 2 skips. The README
+footprint inventory requires generated `target/package/*.crate` archives
+that are absent in this environment. The stable-family metadata check
+requires `cargo release config`, but `cargo-release` is not installed. The
+two skips require the separately published shared-family verification mode.
+The test runner, README validator, workspace manifest and lockfile are
+byte-identical to the control. Running those same two cases on the untouched
+control reproduces the same missing-archive failure and missing-command
+error. No prerequisite was removed or assertion weakened to conceal these
+limits.
+
+This is scoped rendering and baseline qualification. The full workspace,
+platform matrix, packaging and downstream Hanji suites were not rerun in
+this follow-up.
