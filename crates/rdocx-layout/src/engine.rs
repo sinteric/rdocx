@@ -12721,6 +12721,102 @@ mod tests {
     }
 
     #[test]
+    fn fractional_landscape_stories_select_exact_table_measures() {
+        use rdocx_oxml::units::Twips;
+        let mut input = cacheable_header_footer_input("");
+        input.images.clear();
+        let section = input.document.body.sect_pr.as_mut().unwrap();
+        section.page_width = Some(Twips(15840));
+        section.page_height = Some(Twips(12240));
+        section.text_direction = Some("tbRl".to_owned());
+        section
+            .header_refs
+            .retain(|r| r.hdr_ftr_type != HdrFtrType::Even);
+        section
+            .footer_refs
+            .retain(|r| r.hdr_ftr_type != HdrFtrType::Even);
+        for (suffix, height) in [("first", 6001), ("default", 8001)] {
+            for (parts, kind, line) in [
+                (&mut input.headers, "header", height),
+                (&mut input.footers, "footer", 2002),
+            ] {
+                let mut part = header_footer_part(&format!("{suffix} {kind}"));
+                part.paragraphs[0].properties = Some(CT_PPr {
+                    line_spacing: Some(Twips(line)),
+                    line_rule: Some("exact".to_owned()),
+                    ..Default::default()
+                });
+                parts.insert(format!("rId-{suffix}-{kind}"), part);
+            }
+        }
+        let table = |text: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let parsed = CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="{}"><w:body>{}<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>{}</w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS, table("Cell one"), table("Cell two"),
+        ).as_bytes()).unwrap();
+        input.document.body.content = parsed.body.content;
+        let mut engine = Engine::new_deterministic().unwrap();
+        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
+        assert_eq!(cold.pages.len(), 2);
+        let mut by_source = std::collections::BTreeMap::<u32, String>::new();
+        for (index, page) in cold.pages.iter().enumerate() {
+            let top = if index == 0 { 336.05 } else { 436.05 };
+            let mut tables = 0;
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if transform.b.abs() < 0.9 {
+                    return;
+                }
+                match element {
+                    PositionedElement::FilledRect { rect, .. } => {
+                        let start = transform.apply(Point {
+                            x: rect.x,
+                            y: rect.y,
+                        });
+                        let end = transform.apply(Point {
+                            x: rect.x + rect.width,
+                            y: rect.y + rect.height,
+                        });
+                        assert!((start.y.min(end.y) - top).abs() < 0.01);
+                        assert!((start.y.max(end.y) - 475.9).abs() < 0.01);
+                        tables += 1;
+                    }
+                    PositionedElement::Text(run) => {
+                        if let Some(span) = run.source {
+                            assert_eq!(
+                                sources[span.node.get() as usize - 1].story,
+                                WordStory::Document
+                            );
+                            let prior = by_source.entry(span.node.get()).or_default();
+                            assert_eq!(span.char_start, prior.chars().count() as u32);
+                            assert_eq!(
+                                span.char_end - span.char_start,
+                                run.text.chars().count() as u32
+                            );
+                            prior.push_str(&run.text);
+                            assert!((top - 0.01..=475.91).contains(&transform.apply(run.origin).y));
+                        }
+                    }
+                    _ => {}
+                }
+            });
+            assert_eq!(tables, 1);
+        }
+        assert_eq!(
+            by_source.values().map(String::as_str).collect::<Vec<_>>(),
+            ["Cell one", "", "Cell two"]
+        );
+        assert_eq!(engine.table_cache_counts(), (0, 4));
+        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
+        assert_eq!(engine.table_cache_counts(), (4, 4));
+        assert_eq!(sources, warm_sources);
+        assert_layout_results_equal(&cold, &warm);
+    }
+
+    #[test]
     fn vertical_notes_follow_references_at_distinct_selected_story_measures() {
         use rdocx_oxml::{
             footnotes::{CT_Footnote, CT_Footnotes, NoteType},

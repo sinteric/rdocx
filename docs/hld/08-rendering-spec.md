@@ -1691,6 +1691,9 @@ active story measures. Alternative measurements clone the numbering state from
 before the primary table, so counters advance once. Shared source and structure
 identities remain the same. Pagination selects unconsumed rows at the current
 measure, and rebreaks only the remaining plain cell content after a row split.
+Variant selection uses the page's selected measure before transposition can
+round it. Width comparison and cache identity remain exact, with no tolerance
+that can alias distinct measures. Horizontal pages use their active column width.
 Selected-template side and remaining bottom margins carry percentage cell
 spacing to the new measure. Removed fragment-top and completed-cell bottom
 gaps stay removed.

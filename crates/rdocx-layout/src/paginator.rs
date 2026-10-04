@@ -806,7 +806,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 break;
             }
-        } else if let Some(mut table) = block.table_for_measure(pager.geometry.content_width()) {
+        } else if let Some(mut table) = block.table_for_measure(pager.table_measure()) {
             let body_index = block.body_index();
 
             // A floating table is positioned rather than flowed, so it never
@@ -818,9 +818,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             }
 
             for row_idx in 0..table.rows.len() {
-                table = block
-                    .table_for_measure(pager.geometry.content_width())
-                    .unwrap();
+                table = block.table_for_measure(pager.table_measure()).unwrap();
                 let row = &table.rows[row_idx];
                 // Read per row, because finishing a page may have moved the
                 // body into the next column track.
@@ -861,9 +859,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         moved_whole = false;
                         let old_width = pager.geometry.content_width();
                         pager.finish_page();
-                        table = block
-                            .table_for_measure(pager.geometry.content_width())
-                            .unwrap();
+                        table = block.table_for_measure(pager.table_measure()).unwrap();
                         if pager.geometry.body_rotation.is_some()
                             && old_width != pager.geometry.content_width()
                         {
@@ -887,9 +883,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         moved_whole = true;
                         let old_width = pager.geometry.content_width();
                         pager.finish_page();
-                        table = block
-                            .table_for_measure(pager.geometry.content_width())
-                            .unwrap();
+                        table = block.table_for_measure(pager.table_measure()).unwrap();
                         if pager.geometry.body_rotation.is_some()
                             && old_width != pager.geometry.content_width()
                         {
@@ -1407,6 +1401,16 @@ impl<'a> Pager<'a> {
             (&hf.even_header_blocks, &hf.even_footer_blocks)
         } else {
             (&hf.header_blocks, &hf.footer_blocks)
+        }
+    }
+
+    /// Use the prepared story measure before transposition can round it.
+    /// Horizontal pages still select tables at their active column width.
+    fn table_measure(&self) -> f64 {
+        if self.geometry.body_rotation.is_some() {
+            self.page_geometry.body_measure()
+        } else {
+            self.geometry.content_width()
         }
     }
 
@@ -3639,7 +3643,7 @@ fn keep_next_chain_height<B: LayoutBlockLike>(
             break;
         }
         let Some(paragraph) = next.paragraph() else {
-            if let Some(table) = next.table_for_measure(pager.geometry.content_width()) {
+            if let Some(table) = next.table_for_measure(pager.table_measure()) {
                 height += space_after + table.rows.first().map_or(0.0, |row| row.height);
             }
             break;

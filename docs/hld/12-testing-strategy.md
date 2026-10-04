@@ -1556,6 +1556,8 @@ short-cell content and list markers across changes in measure. Cold and warm
 layouts, source maps and numbering results must match, including a changed story.
 A split cell with percentage spacing derives its half-gap from each selected
 story width while preserving every indexed Unicode source range exactly once.
+A fractional landscape gate restores the full selected table band, preserves
+body source ranges and verifies four exact-width cold builds and warm hits.
 Footnote references on three distinct story measures each retain their note on
 the reference page. Keep-next lookahead prices the selected measure.
 Shared cursor tests cover rich bidi order, empty text, generated hyphens, markers,
