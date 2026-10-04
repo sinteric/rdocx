@@ -1151,6 +1151,17 @@ position on a page. The inputs to line breaking are therefore kept alive past
 layout, but only for a document that actually holds a drawing whose wrap is not
 `none`, since those inputs hold the same shaped glyphs the laid-out lines do.
 
+Vertical sections also use retained logical paragraph input when a selected
+header or footer changes the body measure. Shared line breaking records logical
+consumption before bidi ordering, without adding fields to public carriers.
+The paginator trims consumed input and resets first-fragment indentation before
+rebreaking a continuation. Tables prepare at most three distinct active story
+measures through existing width-aware cache keys. The private shared table
+carrier owns those alternatives and shares source and structure semantics.
+Alternative table measurements clone the preceding numbering state, while
+split plain cells retain only unconsumed paragraph input. Initial conservative
+preparation and page-selected painting therefore use compatible measures.
+
 Text also flows around a wrapping drawing anchored to a **later** paragraph,
 which Word documents do routinely. A drawing framed by the page or a margin has
 a position without its own paragraph being placed, so one pass is enough. A

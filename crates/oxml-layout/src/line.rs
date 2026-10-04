@@ -401,7 +401,102 @@ pub fn break_into_lines(
     params: &LineBreakParams,
     fm: &FontManager,
 ) -> Result<Vec<LayoutLine>> {
+    break_into_lines_recorded(items, params, fm, None)
+}
+
+/// Break lines and record how much logical input each completed line consumes.
+/// Text consumes Unicode scalars. Markers, rich spans, objects, tabs and explicit
+/// breaks each consume one atomic unit. Painting order never changes this cursor.
+pub fn break_into_lines_with_consumption(
+    items: &[InlineItem],
+    params: &LineBreakParams,
+    fm: &FontManager,
+) -> Result<(Vec<LayoutLine>, Vec<usize>)> {
+    let mut consumption = Vec::new();
+    let lines = break_into_lines_recorded(items, params, fm, Some(&mut consumption))?;
+    Ok((lines, consumption))
+}
+
+fn inline_units(item: &InlineItem) -> usize {
+    match item {
+        InlineItem::Text(segment) | InlineItem::HyphenatedText { segment, .. } => {
+            segment.text.chars().count()
+        }
+        _ => 1,
+    }
+}
+
+/// Retain only input after a recorded logical cursor, preserving formatting,
+/// source ranges, language and object identity. Generated hyphens are not input.
+pub fn inline_remainder(
+    items: &[InlineItem],
+    mut consumed: usize,
+    fm: &FontManager,
+) -> Result<Vec<InlineItem>> {
+    let mut result = Vec::new();
+    for item in items {
+        let units = inline_units(item);
+        if consumed >= units {
+            consumed -= units;
+            continue;
+        }
+        if consumed == 0 {
+            result.push(item.clone());
+        } else {
+            let (segment, language) = match item {
+                InlineItem::Text(segment) => (segment, None),
+                InlineItem::HyphenatedText { segment, language } => (segment, Some(language)),
+                _ => {
+                    return Err(LayoutError::Layout(
+                        "logical cursor split an atomic inline item".to_owned(),
+                    ));
+                }
+            };
+            let byte_start = segment
+                .text
+                .char_indices()
+                .nth(consumed)
+                .map(|(index, _)| index)
+                .ok_or_else(|| LayoutError::Layout("logical cursor exceeded text".to_owned()))?;
+            let InlineItem::Text(remainder) = split_text_subsegment(
+                segment,
+                byte_start,
+                segment.text.len(),
+                text_segment_spacing(segment, fm)?,
+                fm,
+            )?
+            else {
+                unreachable!("text subsegment stays text")
+            };
+            result.push(match language {
+                Some(language) => InlineItem::HyphenatedText {
+                    segment: remainder,
+                    language: language.clone(),
+                },
+                None => InlineItem::Text(remainder),
+            });
+            consumed = 0;
+        }
+    }
+    if consumed != 0 {
+        return Err(LayoutError::Layout(
+            "logical cursor exceeded paragraph input".to_owned(),
+        ));
+    }
+    Ok(result)
+}
+
+fn break_into_lines_recorded(
+    items: &[InlineItem],
+    params: &LineBreakParams,
+    fm: &FontManager,
+    mut consumption: Option<&mut Vec<usize>>,
+) -> Result<Vec<LayoutLine>> {
+    let mut consumed = 0usize;
     if items.is_empty() {
+        if let Some(cursors) = consumption.as_mut() {
+            cursors.push(0);
+        }
         // Empty paragraph still gets one empty line
         return Ok(vec![LayoutLine {
             items: Vec::new(),
@@ -447,10 +542,16 @@ pub fn break_into_lines(
                 let mut tab = line.next_tab(params);
                 if params.wrap && tab.wraps && !line.items.is_empty() {
                     // A tab with no stop left on its line starts the next one.
+                    if let Some(cursors) = consumption.as_mut() {
+                        cursors.push(consumed);
+                    }
                     lines.push(line.break_line(params, fm, false, None));
                     tab = line.next_tab(params);
                 }
                 line.push_tab(tab, fm, font_ctx);
+                if consumption.is_some() {
+                    consumed += 1;
+                }
             }
             BreakableSegment::Items(seg_items) => {
                 if params.wrap
@@ -459,6 +560,9 @@ pub fn break_into_lines(
                     && line.width_with(&seg_items, fm) - hanging_space_width(&seg_items, fm)?
                         > line.limit + 0.01
                 {
+                    if let Some(cursors) = consumption.as_mut() {
+                        cursors.push(consumed);
+                    }
                     lines.push(line.break_line(params, fm, false, None));
                 }
 
@@ -471,6 +575,9 @@ pub fn break_into_lines(
                         font_ctx = Some((seg.font_id(), seg.base().font_size));
                     }
                     line.push(item, fm);
+                    if consumption.is_some() {
+                        consumed += inline_units(item);
+                    }
                 }
             }
             BreakableSegment::Hyphenated(boxed) => {
@@ -487,6 +594,7 @@ pub fn break_into_lines(
                 {
                     font_ctx = Some((segment_font_id(&whole), segment_font_size(&whole)));
                     line.push(&whole, fm);
+                    consumed += inline_units(&whole);
                     continue;
                 }
                 let InlineItem::Text(segment) = whole else {
@@ -501,10 +609,16 @@ pub fn break_into_lines(
                 }) =
                     fitting_hyphenation(&segment, &break_points, line.used_width(), line.limit, fm)?
                 {
+                    if consumption.is_some() {
+                        consumed += prefix.text.chars().count();
+                    }
                     for text in [prefix, hyphen] {
                         let item = InlineItem::Text(text);
                         font_ctx = Some((segment_font_id(&item), segment_font_size(&item)));
                         line.push(&item, fm);
+                    }
+                    if let Some(cursors) = consumption.as_mut() {
+                        cursors.push(consumed);
                     }
                     lines.push(line.break_line(params, fm, false, None));
                     segments.push_front(BreakableSegment::Hyphenated(Box::new(
@@ -514,6 +628,9 @@ pub fn break_into_lines(
                         },
                     )));
                 } else if !line.items.is_empty() {
+                    if let Some(cursors) = consumption.as_mut() {
+                        cursors.push(consumed);
+                    }
                     lines.push(line.break_line(params, fm, false, None));
                     segments.push_front(BreakableSegment::Hyphenated(Box::new(
                         HyphenatedSegment {
@@ -525,16 +642,28 @@ pub fn break_into_lines(
                     let item = InlineItem::Text(segment);
                     font_ctx = Some((segment_font_id(&item), segment_font_size(&item)));
                     line.push(&item, fm);
+                    if consumption.is_some() {
+                        consumed += inline_units(&item);
+                    }
                 }
             }
             BreakableSegment::ForcedBreak(break_kind) => {
                 let is_last = matches!(break_kind, ForcedBreakKind::Page | ForcedBreakKind::Column);
+                if consumption.is_some() {
+                    consumed += 1;
+                }
+                if let Some(cursors) = consumption.as_mut() {
+                    cursors.push(consumed);
+                }
                 lines.push(line.break_line(params, fm, is_last, Some(break_kind)));
             }
         }
     }
 
     // Flush remaining items as the last line
+    if let Some(cursors) = consumption.as_mut() {
+        cursors.push(consumed);
+    }
     lines.push(line.break_line(params, fm, true, None));
 
     for line in &mut lines {
@@ -995,7 +1124,28 @@ pub fn break_multilingual_into_lines(
     fm: &FontManager,
     base_direction: TextDirection,
 ) -> Result<Vec<LayoutLine>> {
-    let mut lines = break_into_lines(items, params, fm)?;
+    let lines = break_into_lines(items, params, fm)?;
+    reorder_multilingual_lines(lines, base_direction)
+}
+
+/// The same consumption cursors as the logical breaker, with visual bidi order.
+pub fn break_multilingual_into_lines_with_consumption(
+    items: &[InlineItem],
+    params: &LineBreakParams,
+    fm: &FontManager,
+    base_direction: TextDirection,
+) -> Result<(Vec<LayoutLine>, Vec<usize>)> {
+    let (lines, consumption) = break_into_lines_with_consumption(items, params, fm)?;
+    Ok((
+        reorder_multilingual_lines(lines, base_direction)?,
+        consumption,
+    ))
+}
+
+fn reorder_multilingual_lines(
+    mut lines: Vec<LayoutLine>,
+    base_direction: TextDirection,
+) -> Result<Vec<LayoutLine>> {
     let mut paragraph_text = String::new();
     let mut line_maps = Vec::with_capacity(lines.len());
     let mut has_text = false;
@@ -2823,6 +2973,190 @@ mod tests {
             assert_eq!(pair[0].node, node);
             assert_eq!(pair[0].char_end, pair[1].char_start);
         }
+    }
+
+    #[test]
+    fn logical_consumption_resumes_unicode_and_atomic_items_once() {
+        let mut fm = deterministic_font_manager();
+        let mut segment = shaped_text_segment(&mut fm, "café words 界 words ", 0.0);
+        let node = crate::SourceNodeId::new(7).unwrap();
+        segment.source = Some(crate::SourceSpan {
+            node,
+            char_start: 13,
+            char_end: 13 + segment.text.chars().count() as u32,
+        });
+        let marker = shaped_text_segment(&mut fm, "1.", 0.0);
+        let items = vec![
+            InlineItem::Marker(marker),
+            InlineItem::Text(segment),
+            InlineItem::Tab,
+            InlineItem::Figure {
+                item: Box::new(InlineItem::Image {
+                    width: 15.0,
+                    height: 10.0,
+                    media_id: crate::MediaId(77),
+                }),
+                alternate_text: "owned".into(),
+                structure_id: None,
+            },
+            InlineItem::PageBreak,
+            InlineItem::Text(shaped_text_segment(&mut fm, "after break", 0.0)),
+        ];
+        let params = LineBreakParams {
+            available_width: 70.0,
+            ..LineBreakParams::default()
+        };
+        let (lines, cursors) = break_into_lines_with_consumption(&items, &params, &fm).unwrap();
+        assert_eq!(lines.len(), cursors.len());
+        assert_eq!(
+            format!("{lines:?}"),
+            format!("{:?}", break_into_lines(&items, &params, &fm).unwrap())
+        );
+        assert_eq!(
+            *cursors.last().unwrap(),
+            items.iter().map(inline_units).sum::<usize>()
+        );
+        let rest = inline_remainder(&items, cursors[0], &fm).unwrap();
+        assert!(
+            !rest
+                .iter()
+                .any(|item| matches!(item, InlineItem::Marker(_)))
+        );
+        assert_eq!(
+            rest.iter()
+                .filter(|item| matches!(item, InlineItem::Tab))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rest.iter()
+                .filter(|item| matches!(item, InlineItem::Figure { .. }))
+                .count(),
+            1
+        );
+        let prefix: String = lines[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                LineItem::Text(segment) => Some(segment.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let rest_text: String = rest
+            .iter()
+            .filter_map(|item| match item {
+                InlineItem::Text(segment) => Some(segment.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prefix + &rest_text, "café words 界 words after break");
+        assert!(inline_remainder(&items, usize::MAX, &fm).is_err());
+        let (_, next) = break_into_lines_with_consumption(
+            &rest,
+            &LineBreakParams {
+                available_width: 110.0,
+                ..params
+            },
+            &fm,
+        )
+        .unwrap();
+        assert_eq!(*next.last().unwrap() + cursors[0], *cursors.last().unwrap());
+    }
+
+    #[test]
+    fn logical_consumption_keeps_rich_bidi_input_order_and_empty_text() {
+        let mut fm = deterministic_font_manager();
+        let text = "Latin אבג words דהו words ".repeat(12);
+        let segment = shaped_text_segment(&mut fm, &text, 0.0);
+        let mut items = fm
+            .shape_multilingual_paragraph(vec![(segment, None)], TextDirection::RightToLeft, false)
+            .unwrap()
+            .into_iter()
+            .map(InlineItem::MultilingualText)
+            .collect::<Vec<_>>();
+        items.insert(0, InlineItem::Text(shaped_text_segment(&mut fm, "", 0.0)));
+        let params = LineBreakParams {
+            available_width: 140.0,
+            ..Default::default()
+        };
+        let (lines, cursors) = break_multilingual_into_lines_with_consumption(
+            &items,
+            &params,
+            &fm,
+            TextDirection::RightToLeft,
+        )
+        .unwrap();
+        assert_eq!(
+            format!("{lines:?}"),
+            format!(
+                "{:?}",
+                break_multilingual_into_lines(&items, &params, &fm, TextDirection::RightToLeft,)
+                    .unwrap()
+            )
+        );
+        assert_eq!(*cursors.last().unwrap(), items.len() - 1);
+        assert_eq!(cursors.len(), lines.len());
+        let resume = cursors[2];
+        let remainder = inline_remainder(&items, resume, &fm).unwrap();
+        let logical_text = |items: &[InlineItem]| {
+            items
+                .iter()
+                .filter_map(|item| match item {
+                    InlineItem::MultilingualText(segment) => Some(segment.text()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        assert_eq!(
+            logical_text(&items[1..=resume]) + &logical_text(&remainder),
+            text
+        );
+        let (_, next) = break_multilingual_into_lines_with_consumption(
+            &remainder,
+            &LineBreakParams {
+                available_width: 230.0,
+                ..params
+            },
+            &fm,
+            TextDirection::RightToLeft,
+        )
+        .unwrap();
+        assert_eq!(resume + next.last().unwrap(), items.len() - 1);
+    }
+
+    #[test]
+    fn logical_consumption_excludes_generated_hyphens() {
+        let mut fm = deterministic_font_manager();
+        let text = "extraordinary representation";
+        let items = [InlineItem::HyphenatedText {
+            segment: shaped_text_segment(&mut fm, text, 0.0),
+            language: "en".into(),
+        }];
+        let (lines, cursors) = break_into_lines_with_consumption(
+            &items,
+            &LineBreakParams {
+                available_width: 55.0,
+                ..LineBreakParams::default()
+            },
+            &fm,
+        )
+        .unwrap();
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.items)
+                .any(|item| matches!(item, LineItem::Text(segment) if segment.text == "-"))
+        );
+        assert_eq!(*cursors.last().unwrap(), text.chars().count());
+        let rest = inline_remainder(&items, cursors[0], &fm).unwrap();
+        let InlineItem::HyphenatedText { segment, language } = &rest[0] else {
+            panic!("hyphenation retained");
+        };
+        assert_eq!(language, "en");
+        assert_eq!(
+            segment.text,
+            text.chars().skip(cursors[0]).collect::<String>()
+        );
     }
 
     #[test]

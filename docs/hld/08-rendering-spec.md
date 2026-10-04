@@ -1677,14 +1677,30 @@ use the same inter-paragraph spacing, collapsed by default and summed under
 each selected variant, so a tall default story does not displace a blank
 first-page story.
 
-Vertical sections shape paragraphs and size tables against the page height
-before rotating the body. Their active header and footer variants are measured
-before body layout, and the largest active band is reserved on every page.
-Line breaking, paragraph alignment, table widths and the transposed pagination
-band therefore use the same measure. Story selection and painting still follow
-the page variant. The reservation is conservative on pages with shorter or
-blank stories, and a diagnostic records that limit. Per-page variable vertical
-measures require a separate body reflow path.
+Vertical sections shape initial paragraphs against the largest active story
+band before rotating the body. Pagination starts from authored margins and
+reserves the selected first, even or default story on each page. Retained
+logical input is rebroken to that page's vertical measure, including paragraph
+continuations. A cursor recorded before visual bidi ordering consumes Unicode
+scalars in plain text and atomic markers, rich spans, tabs, objects and breaks.
+Generated hyphens consume no extra input. Continuations reset first-line
+indentation and do not replay list markers or anchors.
+
+Tables use the existing width-aware layout cache to prepare the finite distinct
+active story measures. Alternative measurements clone the numbering state from
+before the primary table, so counters advance once. Shared source and structure
+identities remain the same. Pagination selects unconsumed rows at the current
+measure, and rebreaks only the remaining plain cell content after a row split.
+Variant selection uses the page's selected measure before transposition can
+round it. Width comparison and cache identity remain exact, with no tolerance
+that can alias distinct measures. Horizontal pages use their active column width.
+Selected-template side and remaining bottom margins carry percentage cell
+spacing to the new measure. Removed fragment-top and completed-cell bottom
+gaps stay removed.
+Repeated header rows use the selected measure. Notes are registered at every
+selected vertical measure, preserving the registry's single numbering advance
+and the raw width used by endnote pages. Existing whole-row guards for
+merges, rotations, nested tables, exact clipping and anchors remain in force.
 
 The native authoring facade preserves that selection contract. Creating a
 first-page story enables the section title-page state. Creating an even-page
