@@ -17334,3 +17334,43 @@ closure. The 18-page Word SSIM trend is advisory and below its target.
 **Hash harness.** Unchanged on the integrated sprint source, all 49 entries match.
 
 **Notes for future sessions.** Keep `work/f-x174-codex` through final sprint review. Publish `v0.15.0` only from the reviewed S86 main merge through `/release` and its separate final approval. After both family releases are verified, comment on Issue 266 with `rpptx-v0.13.0` and `v0.15.0` and direct release links.
+
+### F-X175, Refresh CLI archive evidence after release hardening
+
+**Sprint.** S87
+**Completed.** 2026-10-04
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** The `rdocx-cli` and `rpptx-cli` README archive measurements and their enforced inventory now reflect the reviewed Windows stack correction. The roadmap policy assertion matches the approved move of the related-story wave from S87 to S88. No application behavior, version carrier, release workflow or public API changed.
+
+**Non-obvious choices.** The exact tar member totals are the package payload check. Compressed bytes are dated macOS observations with the existing 64-byte tolerance for generated VCS metadata. Both archive rows use the 4 October measurements. The S86 main CI found only Docs and Release regressions failures, both caused by the stale CLI rows.
+
+**Deviations from the design plan.** The existing roadmap test also expected an M24 story in S87. Its expected sprint set was updated after the user approved a focused release repair. The package check used the direct archive builder and validator instead of the record mode, which would rewrite unrelated measurement rows.
+
+**Spec sections touched.** None. F-X175 implements the package evidence rule already in `docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** Both CLI archive validators fail on the old rows and pass after the update. The worker passed the focused README regression, all 139 workflow policy tests with two skips, both CLI crate Clippy checks and test suites, the 22-crate patched dry run, and a zero-finding microscope pass. The integrated full gate passed formatting, workspace Clippy, workspace tests, 49 matching hashes, prose, generated skills, policy, no-default layout, both WASM targets, docs, README examples, all 22 selected archives under 10 MiB and cargo-deny. Hosted Linux CI and the final sprint review follow the pushed sprint SHA.
+
+**Hash harness.** Unchanged, all 49 entries match on the integrated sprint source.
+
+**Notes for future sessions.** Publish `rpptx-v0.13.0` and `v0.15.0` only after the reviewed S87 main merge, green hosted CI and each release's separate exact-SHA approval. After both family releases are verified, comment on Issue 266 with their numbers and direct release links.
+
+### F-X176, Repair unified release inventory and respin PowerPoint
+
+**Sprint.** S88
+**Completed.** 2026-10-04
+**Size.** M, estimated 3 days, actual 1 day
+
+**What was built.** The unified release job now checks the unpacked package directories left by a successful Cargo workspace dry run against the exact selected family. It rejects missing, extra and incomplete packages. The 15 shared OOXML and PowerPoint Rust crates, the PowerPoint CLI and Python distribution, workspace pins, lockfile and current release notes now agree on 0.13.1. Word remains at 0.15.0 with updated shared pins. Both families have current package measurements and examples.
+
+**Non-obvious choices.** Rust 1.97.1 removes `.crate` archives after a clean `cargo publish --workspace --dry-run` but leaves unpacked `target/package` directories. The first `rpptx-v0.13.0` tag remains immutable and published nothing. The replacement uses `rpptx-v0.13.1`, while `v0.15.0` remains the Word target. The archive size gate builds archives separately and keeps every selected package below 10 MiB.
+
+**Deviations from the design plan.** None. Hosted build-only and CI evidence follow the reviewed sprint push before close.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, F-X176 release regression gate, and `docs/hld/15-build-and-toolchain.md`, selected version carriers and package inventory mechanism.
+
+**Tests.** The fresh-target inventory test rejects missing, extra and malformed selected packages for both families. Both family and release-note contracts pass. The clean 22-crate patched dry run and selected inventories pass. The integrated full gate passed formatting, workspace Clippy, workspace Rust tests, 140 policy tests with two skips, no-default layout, both WASM targets, docs, README examples, cargo-deny and package verification. Clean Python 3.9 and 3.12 wheel suites, strict typing and stubs passed on the reviewed feature. Microscope pass 2 found zero defects and zero smells. Hosted build-only rehearsal and CI follow the final sprint push.
+
+**Hash harness.** Unchanged on the integrated sprint tree, all 49 entries match.
+
+**Notes for future sessions.** Keep `work/f-x176-codex` through sprint close. After hosted build-only and CI pass, close S88 and prepare both releases from its exact reviewed main SHA. Obtain a separate final `/release` approval for each tag. After both registry and GitHub releases are verified, comment on Issue 266 with `rpptx-v0.13.1` and `v0.15.0` and their direct release links.
