@@ -1877,6 +1877,10 @@ fn flatten_arc(
     ] {
         ensure_finite(value, context)?;
     }
+    // Preset corners can collapse to a point. They leave the pen unchanged.
+    if width_radius == 0.0 && height_radius == 0.0 {
+        return Ok(Vec::new());
+    }
     if width_radius <= 0.0 || height_radius <= 0.0 {
         return Err(GeometryError::InvalidArcRadius);
     }
@@ -2142,6 +2146,110 @@ mod tests {
         };
         assert_close(x, 0.0);
         assert_close(y, 5.0);
+    }
+
+    #[test]
+    fn zero_radius_preset_corners_retain_supported_rounded_geometry() {
+        for name in ["round2SameRect", "round2DiagRect"] {
+            let preset = CT_PresetGeometry2D::new(name).unwrap();
+            let geometry = preset.evaluate((100.0, 100.0)).unwrap().unwrap();
+            assert_eq!(geometry.paths.len(), 1, "{name}");
+            let path = &geometry.paths[0];
+            assert_eq!(path.last(), Some(&EvaluatedPathCommand::Close), "{name}");
+            let mut corners = 0;
+            for command in path {
+                match command {
+                    EvaluatedPathCommand::CubicTo {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x,
+                        y,
+                    } => {
+                        corners += 1;
+                        assert!([x1, y1, x2, y2, x, y].iter().all(|v| v.is_finite()));
+                        for value in [x1, y1, x2, y2, x, y] {
+                            assert_close(*value, value.clamp(0.0, 100.0));
+                        }
+                    }
+                    EvaluatedPathCommand::MoveTo { x, y }
+                    | EvaluatedPathCommand::LineTo { x, y } => {
+                        assert!(x.is_finite() && y.is_finite());
+                        assert!((0.0..=100.0).contains(x) && (0.0..=100.0).contains(y));
+                    }
+                    EvaluatedPathCommand::Close => {}
+                }
+            }
+            assert_eq!(corners, 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn point_degenerate_arcs_preserve_the_current_point_and_existing_guards() {
+        let evaluator = GuideEvaluator::new(100.0, 100.0).unwrap();
+        let start = PathCommand::MoveTo {
+            x: literal(10.0),
+            y: literal(20.0),
+        };
+        let following = PathCommand::ArcTo {
+            width_radius: literal(10.0),
+            height_radius: literal(5.0),
+            start_angle: literal(0.0),
+            sweep_angle: literal(QUARTER_CIRCLE),
+        };
+        let control = evaluator
+            .evaluate_path(&[start.clone(), following.clone()])
+            .unwrap();
+        for (width, height) in [(0.0, 0.0), (-0.0, 0.0)] {
+            let point_arc = PathCommand::ArcTo {
+                width_radius: literal(width),
+                height_radius: literal(height),
+                start_angle: literal(QUARTER_CIRCLE),
+                sweep_angle: literal(-QUARTER_CIRCLE),
+            };
+            assert_eq!(
+                evaluator
+                    .evaluate_path(&[start.clone(), point_arc, following.clone()])
+                    .unwrap(),
+                control
+            );
+        }
+        for (width, height) in [
+            (0.0, 5.0),
+            (10.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, -1.0),
+            (-1.0, 5.0),
+        ] {
+            assert_eq!(
+                flatten_arc((10.0, 20.0), width, height, 0.0, QUARTER_CIRCLE),
+                Err(GeometryError::InvalidArcRadius)
+            );
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for values in [
+                (invalid, 0.0, 0.0, QUARTER_CIRCLE),
+                (0.0, invalid, 0.0, QUARTER_CIRCLE),
+                (0.0, 0.0, invalid, QUARTER_CIRCLE),
+                (0.0, 0.0, 0.0, invalid),
+            ] {
+                assert!(matches!(
+                    flatten_arc((10.0, 20.0), values.0, values.1, values.2, values.3),
+                    Err(GeometryError::NonFiniteValue(_))
+                ));
+            }
+        }
+        assert_eq!(
+            flatten_arc(
+                (10.0, 20.0),
+                10.0,
+                5.0,
+                0.0,
+                QUARTER_CIRCLE * (MAX_ARC_SEGMENTS + 1) as f64
+            ),
+            Err(GeometryError::ArcSweepTooLarge)
+        );
     }
 
     #[test]

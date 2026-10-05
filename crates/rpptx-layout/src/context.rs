@@ -5809,6 +5809,72 @@ mod tests {
     }
 
     #[test]
+    fn zero_radius_preset_corners_resolve_for_slide_and_layout_shapes() {
+        for name in ["round2SameRect", "round2DiagRect"] {
+            let shape = |adjustments: &str| {
+                shape_with_details(
+                    None,
+                    None,
+                    &format!(
+                        r#"<a:xfrm><a:off x="254000" y="381000"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="{name}"><a:avLst>{adjustments}</a:avLst></a:prstGeom><a:solidFill><a:srgbClr val="EE0000"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="112233"/></a:solidFill></a:ln>"#
+                    ),
+                    Some("<a:bodyPr/><a:lstStyle/>"),
+                )
+                .replace("<a:p/>", "<a:p><a:r><a:t>unchanged label</a:t></a:r></a:p>")
+            };
+            let defaults = shape("");
+            let authored =
+                shape(r#"<a:gd name="adj1" fmla="val 16667"/><a:gd name="adj2" fmla="val 0"/>"#);
+            let fixture = Fixture::new(&authored, &authored, "");
+            let control = Fixture::new(&defaults, &defaults, "");
+            let resolved = fixture.context().resolve_slide((720.0, 540.0)).unwrap();
+            assert_eq!(
+                resolved,
+                control.context().resolve_slide((720.0, 540.0)).unwrap()
+            );
+            assert_eq!(resolved.shapes.len(), 2);
+            assert!(
+                resolved.diagnostics.is_empty(),
+                "{name}: {:?}",
+                resolved.diagnostics
+            );
+            for shape in &resolved.shapes {
+                assert_eq!(shape.unsupported, None, "{name}");
+                assert_eq!(
+                    shape.bounds,
+                    Rect {
+                        x: 20.0,
+                        y: 30.0,
+                        width: 100.0,
+                        height: 100.0
+                    }
+                );
+                assert_eq!(shape.fill, Some(Paint::Solid(Color::from_hex("EE0000"))));
+                assert_eq!(shape.line.as_ref().unwrap().width, 1.0);
+                let ResolvedContent::Text(text) = &shape.content else {
+                    panic!("lost label")
+                };
+                assert!(
+                    matches!(&text.paragraphs[0].runs[0], ResolvedTextRun::Text { text, .. } if text == "unchanged label")
+                );
+                let ResolvedGeometry::Custom { paths, .. } = &shape.geometry else {
+                    panic!("{name} lost its rounded silhouette")
+                };
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0].commands.last(), Some(&PathCommand::Close));
+                assert_eq!(
+                    paths[0]
+                        .commands
+                        .iter()
+                        .filter(|command| matches!(command, PathCommand::CurveTo { .. }))
+                        .count(),
+                    2
+                );
+            }
+        }
+    }
+
+    #[test]
     fn connector_presets_reuse_geometry_and_preserve_line_ends() {
         let line = r#"<a:ln w="12700"><a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:headEnd type="triangle"/></a:ln>"#;
         let fixture = Fixture::new(

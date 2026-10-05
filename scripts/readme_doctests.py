@@ -392,6 +392,8 @@ ARCHIVE_REMEASUREMENT_DATES = {
 }
 MEASUREMENT_PLATFORM = "macOS 26.6.2, Apple M5 Max, arm64"
 ARCHIVE_REMEASUREMENT_PLATFORMS = {
+    "oxml-drawing": "macOS 27.0.1, Apple M1 Max, arm64",
+    "rpptx-layout": "macOS 27.0.1, Apple M1 Max, arm64",
     "rdocx": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-chart": "macOS 27.0.1, Apple M1 Max, arm64",
     "oxml-layout": "macOS 27.0.1, Apple M1 Max, arm64",
