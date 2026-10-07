@@ -463,6 +463,13 @@ evaluator gets written either way, so the presets become data rather than code.
 Presets additionally carry the `<a:rect>` text rectangle needed to place text
 inside non-rectangular shapes.
 
+A DrawingML arc with both radii zero is a point and leaves the current pen
+position unchanged after finite-value validation. Generated preset corners
+can reach this case through default zero adjustments. The shared evaluator
+omits only that point arc, retaining the positive-radius rounded corners and
+the rest of the path. Negative radii and unsupported single-zero-axis forms
+retain the existing diagnostic. Positive arcs keep their segment budget.
+
 Presentation connectors reuse these generated definitions. `line` and
 `straightConnector1` produce a single open segment. Bent and curved connector
 presets retain their adjustment values and produce the generated ordered line
@@ -1646,7 +1653,10 @@ VML shape with finite positive point bounds becomes a watermark only when it
 contains one VML text path string or one relationship-namespaced image id.
 Namespace aliases and shadows are resolved by expanded name. Unsupported,
 ambiguous, malformed, or unrelated VML remains preserved but does not enter
-layout. Named VML colours and six-digit RGB values lower to shared colour.
+layout. Named VML colours and three-digit or six-digit RGB values lower to shared
+colour. Shorthand RGB duplicates each hexadecimal digit, so `#e00` lowers to
+the same colour as `#ee0000`. Other lengths and non-hexadecimal values remain
+unsupported.
 Unsupported colours and unresolved image relationships suppress that watermark
 and add a stable diagnostic.
 

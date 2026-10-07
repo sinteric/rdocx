@@ -18,7 +18,7 @@ The archive row is regenerated from the complete published package that carries 
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-layout | 4,635,982 compressed bytes, 9,281,539 member bytes, 51 members | 0.13.0 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-04 |
+| Crates.io archive: oxml-layout | 4,635,983 compressed bytes, 9,281,539 member bytes, 51 members | 0.13.1 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-05 |
 
 ## Use it when
 
@@ -45,4 +45,4 @@ let accent = Color::from_hex("3366CC");
 assert_eq!((accent.r, accent.g, accent.b), (0.2, 0.4, 0.8));
 ```
 
-Add `oxml-layout = { version = "0.13.0", default-features = false }` to your dependencies. Enable the default `system-fonts` feature only when host font discovery is intended.
+Add `oxml-layout = { version = "0.13.1", default-features = false }` to your dependencies. Enable the default `system-fonts` feature only when host font discovery is intended.

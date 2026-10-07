@@ -14,6 +14,17 @@ exactly one as its test gate.
 | `golden` | Byte or pixel comparison against a recorded baseline | the hash harness |
 | `differential` | Compared against an external oracle | LibreOffice for renders, python-docx and python-pptx for the bindings |
 
+The zero-radius preset corner gate requires the official round2SameRect and
+round2DiagRect defaults to retain two rounded corners, finite coordinates and
+closure. A point arc must leave the pen unchanged before a following positive
+arc. Negative, single-zero-axis and non-finite radius forms remain rejected,
+and positive arcs retain their segment limit. The Presentation rider authors
+both direct slide and shared layout shapes, comparing complete resolved state
+against explicit equivalent defaults. It requires concrete curved geometry,
+unchanged paint, stroke, bounds and source text, with no fallback diagnostic.
+The 186-name default probe and real-file reproduction are scoped evidence,
+not native PowerPoint certification.
+
 The table-row pagination regression uses source-built tagged lines and a
 footer-only-page sentinel because Issue 138's private 53-page package is not
 available. The deterministic layout must place each tag on exactly one page,
@@ -999,6 +1010,12 @@ image relationships, forced media-id collisions, blank selected variants,
 entity-decoded settings, unsupported colour and media diagnostics, atomic
 rejection, and margin-relative centering. No sample authors a watermark, so the
 49-entry hash harness remains unchanged.
+
+The shorthand-watermark regression compares complete owned page output and
+diagnostics against equivalent six-digit RGB, including mixed, black and white
+values. It requires a visible watermark, exact colour, unchanged body text and
+identical warm output. Unsupported lengths and non-hexadecimal forms remain
+rejected. The existing watermark golden and selection assertions stay intact.
 
 The advanced table geometry golden gate is
 `fixed_autofit_and_nested_table_geometry_matches_reviewed_word_pages`. It
