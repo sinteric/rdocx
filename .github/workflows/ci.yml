@@ -63,6 +63,7 @@ jobs:
               - 'tools/**'
             wasm:
               - '.github/workflows/ci.yml'
+              - '.mise.toml'
               - '.cargo/**'
               - 'Cargo.lock'
               - 'Cargo.toml'
@@ -299,10 +300,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Set up Node 24.11.1
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - name: Set up mise Node and pnpm
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          node-version: "24.11.1"
+          version: "2026.9.14"
       - name: Install wasm-pack 0.15.0
         shell: bash
         run: |
@@ -333,8 +334,8 @@ jobs:
         run: |
           package_root="${RUNNER_TEMP}/wasm-packages"
           tarball_root="${RUNNER_TEMP}/wasm-tarballs"
-          npm_cache="${RUNNER_TEMP}/npm-cache"
-          mkdir -p "$package_root" "$tarball_root" "$npm_cache"
+          pnpm_store="${RUNNER_TEMP}/pnpm-store"
+          mkdir -p "$package_root" "$tarball_root" "$pnpm_store"
           wasm-pack build --target bundler --scope tensorbee --release --out-dir "$package_root/rdocx-wasm" crates/rdocx-wasm --locked
           wasm-pack build --target bundler --scope tensorbee --release --out-dir "$package_root/rpptx-wasm" crates/rpptx-wasm --locked
 
@@ -372,9 +373,11 @@ jobs:
             local consumer_root
             local installed_root
             assert_inventory "$package_dir" "$expected_name" "$expected_version" "$stem"
-            tarball="$(npm pack "$package_dir" --cache "$npm_cache" --ignore-scripts --pack-destination "$tarball_root")"
+            tarball="$tarball_root/${stem}.tgz"
+            pnpm --dir "$package_dir" --config.ignore-scripts=true pack --out "$tarball"
             consumer_root="$(mktemp -d "${RUNNER_TEMP}/${stem}-consumer.XXXXXX")"
-            npm install --prefix "$consumer_root" --cache "$npm_cache" --ignore-scripts --no-audit --no-fund --package-lock=false "$tarball_root/$tarball"
+            printf '{"private":true,"type":"module"}\n' > "$consumer_root/package.json"
+            pnpm --dir "$consumer_root" --store-dir "$pnpm_store" --ignore-scripts add "$tarball"
             installed_root="$consumer_root/node_modules/$expected_name"
             assert_inventory "$installed_root" "$expected_name" "$expected_version" "$stem"
             (

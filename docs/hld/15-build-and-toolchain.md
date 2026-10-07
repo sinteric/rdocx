@@ -784,8 +784,8 @@ placeholder numbers, and unbounded superlatives across the 27-page family.
 Version, tag, publication, and release-family metadata remain unchanged.
 
 **A WASM target and Node job.** It installs the `wasm32-unknown-unknown` target,
-uses exact Node 24.11.1 and wasm-pack 0.15.0, and checks both facade-backed WASM
-crates with the locked workspace graph. It then runs both packages' inline Node
+uses Node 24.21.0 and pnpm 10.34.6 from `.mise.toml`, plus wasm-pack
+0.15.0, and checks both facade-backed WASM crates with the locked workspace graph. It then runs both packages' inline Node
 regressions. It installs the official Binaryen version 125 Linux archive after
 checking exact SHA-256
 `7c3bc16599c8274a04d34a504fe4be2047884f900e0e2da2f6fb9cd667183be4`,
@@ -795,12 +795,12 @@ places its `wasm-opt` on `PATH`, and verifies the exact official identity
 Both WASM manifests use release optimization arguments `-Oz`,
 `--enable-bulk-memory`, and `--enable-nontrapping-float-to-int`. The job builds
 the exact scoped release bundler packages with locked dependencies, packs each
-one locally, installs it into a separate fresh consumer with an isolated cache
-and scripts disabled, and checks exact identity, WASM, JavaScript glue, public
+one locally with pnpm, installs it into a separate fresh consumer with an
+isolated store and scripts disabled, and checks exact identity, WASM, JavaScript glue, public
 TypeScript declarations, and imports. The package gate grants no registry
 authentication, token, OIDC, publication, release, or tag authority. The
 document suite also requires generated `toPdf` to return a complete PDF with an
-embedded bundled Carlito font. Checkout, setup-node, the Rust toolchain, and the
+embedded bundled Carlito font. Checkout, mise-action, the Rust toolchain, and the
 Rust cache use reviewed full commit SHAs. The presentation render-profile and
 optimized-size gates remain local.
 

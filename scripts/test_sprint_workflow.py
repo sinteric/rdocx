@@ -2251,7 +2251,7 @@ class SprintWorkflowTests(unittest.TestCase):
                 "step:0",
                 "step:1",
                 "step:2",
-                "Set up Node 24.11.1",
+                "Set up mise Node and pnpm",
                 "Install wasm-pack 0.15.0",
                 "Install wasm-opt 125",
                 "Check WASM targets",
@@ -2285,26 +2285,26 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertEqual(self.yaml_direct_lines(steps[0], 8), ())
         self.assertEqual(self.yaml_direct_lines(steps[2], 8), ())
 
-        node = self.yaml_step(job, "Set up Node 24.11.1")
+        node = self.yaml_step(job, "Set up mise Node and pnpm")
         self.assertEqual(
             self.yaml_step_actions(node),
             (
-                "actions/setup-node@"
-                "249970729cb0ef3589644e2896645e5dc5ba9c38",
+                "jdx/mise-action@"
+                "c2a87611a18de5b3828c5652fe268e992400cb5c",
             ),
         )
         self.assertEqual(
             self.yaml_direct_lines(node, 8),
             (
-                "uses: actions/setup-node@"
-                "249970729cb0ef3589644e2896645e5dc5ba9c38",
+                "uses: jdx/mise-action@"
+                "c2a87611a18de5b3828c5652fe268e992400cb5c",
                 "with:",
             ),
         )
         node_inputs = self.yaml_block(node, "        with:")
         self.assertEqual(
             self.yaml_direct_lines(node_inputs, 10),
-            ('node-version: "24.11.1"',),
+            ('version: "2026.9.14"',),
         )
 
         install = self.yaml_step(job, "Install wasm-pack 0.15.0")
@@ -2365,7 +2365,7 @@ class SprintWorkflowTests(unittest.TestCase):
         for expected in (
             'package_root="${RUNNER_TEMP}/wasm-packages"',
             'tarball_root="${RUNNER_TEMP}/wasm-tarballs"',
-            'npm_cache="${RUNNER_TEMP}/npm-cache"',
+            'pnpm_store="${RUNNER_TEMP}/pnpm-store"',
             "wasm-pack build --target bundler --scope tensorbee --release "
             '--out-dir "$package_root/rdocx-wasm" crates/rdocx-wasm --locked',
             "wasm-pack build --target bundler --scope tensorbee --release "
@@ -2374,14 +2374,11 @@ class SprintWorkflowTests(unittest.TestCase):
             '"0.15.0" "rdocx_wasm"',
             'verify_package "$package_root/rpptx-wasm" "@tensorbee/rpptx-wasm" '
             '"0.12.1" "rpptx_wasm"',
-            "npm install --prefix \"$consumer_root\" --cache \"$npm_cache\" "
-            "--ignore-scripts --no-audit --no-fund --package-lock=false "
-            '"$tarball_root/$tarball"',
+            'pnpm --dir "$consumer_root" --store-dir "$pnpm_store" --ignore-scripts add "$tarball"',
         ):
             self.assertEqual(package_lines.count(expected), 1, expected)
         self.assertIn(
-            'npm pack "$package_dir" --cache "$npm_cache" --ignore-scripts '
-            '--pack-destination "$tarball_root"',
+            'pnpm --dir "$package_dir" --config.ignore-scripts=true pack --out "$tarball"',
             packages,
         )
         self.assertIn('import(\\"$expected_name\\")', packages)
@@ -2393,6 +2390,8 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn('${stem}.d.ts', packages)
         forbidden = (
             "npm publish",
+            "pnpm publish",
+            "pnpm login",
             "npm login",
             "npm adduser",
             "npm token",
@@ -2481,40 +2480,40 @@ class SprintWorkflowTests(unittest.TestCase):
                 ):
                     self.assert_wasm_optimizer_metadata_contract({member: mutated})
 
-    def assert_wasm_setup_node_provenance_contract(
+    def assert_wasm_mise_provenance_contract(
         self, ci: str, testing_hld: str
     ) -> None:
-        reviewed_sha = "249970729cb0ef3589644e2896645e5dc5ba9c38"
-        reviewed_tag = "v6.5.0"
+        reviewed_sha = "c2a87611a18de5b3828c5652fe268e992400cb5c"
+        reviewed_tag = "v4"
         job = self.yaml_block(ci, "  wasm:")
         provenance_line = (
-            f"        uses: actions/setup-node@{reviewed_sha} # {reviewed_tag}"
+            f"        uses: jdx/mise-action@{reviewed_sha} # {reviewed_tag}"
         )
         self.assertEqual(job.count(provenance_line), 1)
-        self.assertIn(f"setup-node {reviewed_tag}", testing_hld)
-        self.assertNotIn("setup-node v6.1.0", testing_hld)
+        self.assertIn(f"mise-action {reviewed_tag}", testing_hld)
+        self.assertNotIn("mise-action v3", testing_hld)
 
-    def test_wasm_setup_node_provenance_matches_the_testing_hld(self) -> None:
+    def test_wasm_mise_provenance_matches_the_testing_hld(self) -> None:
         ci = (workflow.REPO / ".github/workflows/ci.yml").read_text(
             encoding="utf-8"
         )
         testing_hld = (workflow.REPO / "docs/hld/12-testing-strategy.md").read_text(
             encoding="utf-8"
         )
-        self.assert_wasm_setup_node_provenance_contract(ci, testing_hld)
+        self.assert_wasm_mise_provenance_contract(ci, testing_hld)
 
         mutations = {
             "stale-workflow-comment": (
                 ci.replace(
-                    "249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0",
-                    "249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.1.0",
+                    "c2a87611a18de5b3828c5652fe268e992400cb5c # v4",
+                    "c2a87611a18de5b3828c5652fe268e992400cb5c # v3",
                     1,
                 ),
                 testing_hld,
             ),
             "stale-hld-label": (
                 ci,
-                testing_hld.replace("setup-node v6.5.0", "setup-node v6.1.0", 1),
+                testing_hld.replace("mise-action v4", "mise-action v3", 1),
             ),
         }
         for name, (mutated_ci, mutated_hld) in mutations.items():
@@ -2523,7 +2522,7 @@ class SprintWorkflowTests(unittest.TestCase):
                 name,
             )
             with self.subTest(name=name), self.assertRaises(AssertionError):
-                self.assert_wasm_setup_node_provenance_contract(
+                self.assert_wasm_mise_provenance_contract(
                     mutated_ci, mutated_hld
                 )
 
@@ -2568,11 +2567,11 @@ class SprintWorkflowTests(unittest.TestCase):
                 "c19371144df3bb44fab255c43d04cbc2ab54d1c4",
                 "0000000000000000000000000000000000000000",
             ),
-            "wrong-setup-node-sha": mutate_job(
-                "249970729cb0ef3589644e2896645e5dc5ba9c38",
+            "wrong-mise-sha": mutate_job(
+                "c2a87611a18de5b3828c5652fe268e992400cb5c",
                 "0000000000000000000000000000000000000000",
             ),
-            "wrong-node-version": mutate_job("24.11.1", "24"),
+            "floating-mise-version": mutate_job("2026.9.14", "latest"),
             "unlocked-wasm-pack-install": mutate_job(
                 "cargo install wasm-pack --version 0.15.0 --locked",
                 "cargo install wasm-pack --version 0.15.0",
@@ -2663,9 +2662,7 @@ class SprintWorkflowTests(unittest.TestCase):
                 "crates/rdocx-wasm",
             ),
             "missing-clean-install": mutate_job(
-                "          npm install --prefix \"$consumer_root\" --cache "
-                "\"$npm_cache\" --ignore-scripts --no-audit --no-fund "
-                "--package-lock=false \"$tarball_root/$tarball\"\n",
+                '          pnpm --dir "$consumer_root" --store-dir "$pnpm_store" --ignore-scripts add "$tarball"\n',
                 "",
             ),
             "registry-authentication": mutate_job(
