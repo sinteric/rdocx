@@ -1484,6 +1484,7 @@ impl Importer<'_> {
             field_kind: None,
             field_source: None,
             note: None,
+            note_reference_source: None,
             tab_aligned: None,
         };
         if state.graphics_supported && state.fill_supported && state.text_visible {
@@ -4208,7 +4209,9 @@ fn decode_pdf_string(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xfe, 0xff]) {
         String::from_utf16_lossy(
             &bytes[2..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
                 .collect::<Vec<_>>(),
         )
@@ -4228,7 +4231,7 @@ fn decode_pdf_uri_string(bytes: &[u8]) -> Option<String> {
     if payload.len() % 2 != 0 {
         return None;
     }
-    char::decode_utf16(payload.chunks_exact(2).map(|chunk| {
+    char::decode_utf16(payload.as_chunks::<2>().0.iter().map(|chunk| {
         if little_endian {
             u16::from_le_bytes([chunk[0], chunk[1]])
         } else {
@@ -4971,7 +4974,7 @@ fn stroke_line(stroke: &Stroke) -> Result<CT_LineProperties> {
         }
         let width = stroke.width.max(1.0 / EMU_PER_POINT);
         let mut xml = String::from("<a:custDash>");
-        for pair in values.chunks_exact(2) {
+        for pair in values.as_chunks::<2>().0.iter() {
             let dash = drawingml_dash_units(pair[0], width).ok_or_else(|| {
                 import_error(
                     None,
@@ -5222,7 +5225,7 @@ mod tests {
         let mut top = pixmap.height();
         let mut right = 0;
         let mut bottom = 0;
-        for (index, pixel) in pixmap.data().chunks_exact(4).enumerate() {
+        for (index, pixel) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
             if pixel[3] == 0 || (pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240) {
                 continue;
             }

@@ -20,7 +20,7 @@ This exact published migration package supplies the archive row.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-opc | 3,643 compressed bytes, 9,668 member bytes, 6 members | 0.15.0 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-05 |
+| Crates.io archive: rdocx-opc | 3,633 compressed bytes, 9,654 member bytes, 6 members | 0.16.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 
@@ -43,7 +43,7 @@ assert!(package.parts.is_empty());
 
 ```toml
 [dependencies]
-rdocx-opc = "0.15.0"
+rdocx-opc = "0.16.0"
 ```
 
 For new code, replace both the dependency and the import with `oxml-opc` and

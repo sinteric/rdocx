@@ -2182,6 +2182,7 @@ mod tests {
             field_kind: None,
             field_source: None,
             note: None,
+            note_reference_source: None,
         }
     }
 
@@ -2567,7 +2568,12 @@ mod tests {
             let destination = &mut font[strings + offset..strings + offset + length];
             match (platform, length) {
                 (0 | 3, 14) => {
-                    for (bytes, ch) in destination.chunks_exact_mut(2).zip(family.bytes()) {
+                    for (bytes, ch) in destination
+                        .as_chunks_mut::<2>()
+                        .0
+                        .iter_mut()
+                        .zip(family.bytes())
+                    {
                         bytes.copy_from_slice(&(ch as u16).to_be_bytes());
                     }
                 }
@@ -2784,6 +2790,7 @@ mod tests {
                     field_kind: None,
                     field_source: None,
                     note: None,
+                    note_reference_source: None,
                 },
                 None,
                 TextDirection::LeftToRight,

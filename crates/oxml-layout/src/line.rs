@@ -176,6 +176,8 @@ pub struct TextSegment {
     pub field_source: Option<FieldSource>,
     /// If this segment is a note reference marker, which note it points at.
     pub note: Option<NoteRef>,
+    /// Structural source of a note reference, independent of generated glyph text.
+    pub note_reference_source: Option<SourceSpan>,
 }
 
 /// A single item positioned on a line.
@@ -1530,6 +1532,7 @@ fn split_text_subsegment(
         field_kind: seg.field_kind,
         field_source: seg.field_source,
         note: seg.note,
+        note_reference_source: seg.note_reference_source,
     }))
 }
 
@@ -1653,6 +1656,7 @@ fn generated_hyphen(segment: &TextSegment, spacing: f64, fm: &FontManager) -> Re
         field_kind: segment.field_kind,
         field_source: segment.field_source,
         note: segment.note,
+        note_reference_source: segment.note_reference_source,
     })
 }
 
@@ -1976,6 +1980,7 @@ fn shape_leader(
         field_kind: None,
         field_source: None,
         note: None,
+        note_reference_source: None,
     })
 }
 
@@ -2095,6 +2100,7 @@ mod tests {
             field_kind: None,
             field_source: None,
             note: None,
+            note_reference_source: None,
         }
     }
 
@@ -2136,6 +2142,7 @@ mod tests {
             field_kind: None,
             field_source: None,
             note: None,
+            note_reference_source: None,
         }
     }
 
@@ -2858,6 +2865,7 @@ mod tests {
             field_kind: segment.field_kind,
             field_source: segment.field_source,
             note: segment.note,
+            note_reference_source: segment.note_reference_source,
             tab_aligned: None,
         };
     }

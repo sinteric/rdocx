@@ -17,7 +17,7 @@ exact re-export of the shared ChartML model and renderer.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-chart | 6,639 compressed bytes, 21,136 member bytes, 6 members | 0.13.1 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-05 |
+| Crates.io archive: rpptx-chart | 6,627 compressed bytes, 21,122 member bytes, 6 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 
@@ -42,7 +42,7 @@ assert_ne!(category_axis, value_axis);
 
 ```toml
 [dependencies]
-rpptx-chart = "0.13.1"
+rpptx-chart = "0.14.0"
 ```
 
 For new code, replace both the dependency and the import with `oxml-chart` and
