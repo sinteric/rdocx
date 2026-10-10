@@ -18,7 +18,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-drawing | 182,732 compressed bytes, 1,230,160 member bytes, 24 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `oxml-drawing` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: oxml-drawing | 182,726 compressed bytes, 1,230,160 member bytes, 24 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `oxml-drawing` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 

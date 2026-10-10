@@ -28,6 +28,22 @@ comparisons in test helpers are adapted without changing expected values.
 Boolean simplifications retain short-circuit order and side effects.
 These adaptations change no public signature or intended rendering behavior.
 
+The first normal CI MSRV run finds one additional integration mismatch in
+`direct_table_alignment_overrides_style_and_reopens`. This test is introduced by
+upstream F-X182 and is absent from the fork base. Its RTL center shift expects
+physical x to increase by 162 points. The existing fork converts a leading-side
+offset to physical left, so that shift decreases physical x by 162 points.
+The base already contains `rtl_table_alignment_and_signed_indent_use_the_leading_margin`
+and the same physical conversion. The targeted MSRV case reproduces the mismatch.
+The test now converts its logical expected shift to physical x for RTL cases.
+All direct/style, nested, compatibility, signed-indent, border, fill and
+preservation assertions remain. Renderer code and goldens are unchanged.
+These RTL expectations describe the existing fork contract, not new native
+Office evidence. The reconciled integration case passes on Rust 1.93, as does
+the unchanged signed-indent unit case. Whole-workspace Clippy, 49 output hashes,
+formatting, refreshed archive inventory and policy checks pass after the adapter.
+Final CI must be rerun on this reconciled test head.
+
 Archive footprint rows are remeasured from all 22 locked local packages after
 the compatibility adapters on Debian 13.6, x86_64. Two measurement rounds converge
 and the complete README inventory validator passes. The existing normalized
@@ -63,5 +79,6 @@ The ignored cases retain their upstream external evidence requirements.
 Formatting and both WASM binding compile checks pass. The repository policy
 module executes 139 passing cases across the complete run and missing-tool
 retry, with two explicitly gated published-family checks skipped.
-Normal CI must confirm the complete corpus and pinned external tools on the
-final PR head. No final-head CI pass is claimed by this local review.
+Normal CI fetched the complete corpus and pinned external tools. The first head
+passes the related hard gates and bindings but fails the new RTL test assumption.
+The final reconciled PR head needs its own complete CI result.

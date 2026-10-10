@@ -25,7 +25,7 @@ and produces fixed or flow output without an Office host.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 72,959 compressed bytes, 326,473 member bytes, 8 members | 0.16.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: rdocx-cli | 72,961 compressed bytes, 326,473 member bytes, 8 members | 0.16.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 
