@@ -1059,9 +1059,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Read as _, Seek as _, SeekFrom, Write};
+    use std::io::{Cursor, SeekFrom, Write};
 
-    use base64::prelude::{BASE64_STANDARD, Engine as _};
+    use base64::prelude::BASE64_STANDARD;
     use cbc::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
 
     use super::*;
@@ -1351,7 +1351,9 @@ mod tests {
             assert!(byte_len.is_multiple_of(2));
             let end = self.position + byte_len;
             let value = self.bytes[self.position..end]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
                 .collect::<Vec<_>>();
             self.position = end;

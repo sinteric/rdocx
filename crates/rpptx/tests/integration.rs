@@ -810,8 +810,8 @@ fn source_built_html_matches_pinned_chrome_after_save_and_reopen() {
         let mut top = pixmap.height();
         let mut right = 0_u32;
         let mut bottom = 0_u32;
-        for (index, pixel) in pixmap.data().chunks_exact(4).enumerate() {
-            if pixel != color {
+        for (index, pixel) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
+            if *pixel != color {
                 continue;
             }
             let x = index as u32 % pixmap.width();
@@ -5569,9 +5569,9 @@ fn animated_export_samples_transitions_clicks_and_media_fallbacks_in_order() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>();
     assert_eq!(messages.len(), 12);
-    for frame in messages.chunks_exact(2) {
+    for frame in messages.as_chunks::<2>().0.iter() {
         assert_eq!(
-            frame,
+            frame.as_slice(),
             [
                 format!("media shape {media_shape_id} rendered as deterministic Video placeholder"),
                 format!(
@@ -9000,7 +9000,9 @@ fn m21_handout_thumbnail_bounds(png: &[u8]) -> Vec<M21NormalizedBounds> {
         "expected three thumbnail border pairs: {horizontal_edges:?}"
     );
     horizontal_edges
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| M21NormalizedBounds {
             left: f64::from(pair[0].1) / f64::from(pixmap.width()),
             top: f64::from(pair[0].0) / f64::from(pixmap.height()),
@@ -20015,10 +20017,10 @@ fn rpptx_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(workspace.contains("\"crates/rpptx\""));
     assert!(workspace.contains(
-        "rpptx = { path = \"crates/rpptx\", version = \"0.13.1\", default-features = false }"
+        "rpptx = { path = \"crates/rpptx\", version = \"0.14.0\", default-features = false }"
     ));
     assert!(manifest.contains("name = \"rpptx\""));
-    assert!(manifest.contains("version = \"0.13.1\""));
+    assert!(manifest.contains("version = \"0.14.0\""));
     assert!(manifest.contains("publish = true"));
     assert!(manifest.contains("default = [\"default-template\", \"render\", \"system-fonts\"]"));
     assert!(manifest.contains("default-template = [\"dep:scraper\"]"));

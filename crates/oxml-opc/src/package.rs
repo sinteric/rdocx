@@ -643,7 +643,7 @@ fn first_invalid_xml_character(data: &[u8]) -> Option<(u32, usize, usize)> {
 }
 
 fn first_invalid_utf16_character(data: &[u8], little_endian: bool) -> Option<(u32, usize, usize)> {
-    let units = data.chunks_exact(2).map(|pair| {
+    let units = data.as_chunks::<2>().0.iter().map(|pair| {
         if little_endian {
             u16::from_le_bytes([pair[0], pair[1]])
         } else {

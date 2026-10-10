@@ -537,7 +537,7 @@ fn render_group_effects(
                 let target_start = (y + blur_radius) * width + blur_radius;
                 for (target, pixel) in alpha[target_start..target_start + source_width]
                     .iter_mut()
-                    .zip(source.chunks_exact(4))
+                    .zip(source.as_chunks::<4>().0)
                 {
                     *target = pixel[3];
                 }
@@ -553,7 +553,13 @@ fn render_group_effects(
                 continue;
             };
             let color_alpha = color.a.clamp(0.0, 1.0);
-            for (pixel, source_alpha) in shadow.data_mut().chunks_exact_mut(4).zip(alpha) {
+            for (pixel, source_alpha) in shadow
+                .data_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(alpha)
+            {
                 let alpha = (f64::from(source_alpha) * color_alpha).round() as u8;
                 pixel[0] = (color.r.clamp(0.0, 1.0) * f64::from(alpha)).round() as u8;
                 pixel[1] = (color.g.clamp(0.0, 1.0) * f64::from(alpha)).round() as u8;
@@ -584,7 +590,7 @@ fn alpha_bounds(layer: &Pixmap) -> Option<(usize, usize, usize, usize)> {
     let mut right = 0;
     let mut bottom = 0;
     let mut found = false;
-    for (index, pixel) in layer.data().chunks_exact(4).enumerate() {
+    for (index, pixel) in layer.data().as_chunks::<4>().0.iter().enumerate() {
         if pixel[3] == 0 {
             continue;
         }
@@ -1059,12 +1065,12 @@ fn render_image(
         // Convert RGB to RGBA
         let mut rgba = Vec::with_capacity(decoded.width as usize * decoded.height as usize * 4);
         if let Some(alpha) = &decoded.alpha {
-            for (rgb, &a) in decoded.data.chunks_exact(3).zip(alpha.iter()) {
+            for (rgb, &a) in decoded.data.as_chunks::<3>().0.iter().zip(alpha.iter()) {
                 let color = tiny_skia::ColorU8::from_rgba(rgb[0], rgb[1], rgb[2], a).premultiply();
                 rgba.extend_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
             }
         } else {
-            for rgb in decoded.data.chunks_exact(3) {
+            for rgb in decoded.data.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
         }

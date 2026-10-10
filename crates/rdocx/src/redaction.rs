@@ -316,7 +316,9 @@ fn rewrite_utf16_sensitive_xml(
         ));
     }
     let code_units = encoded
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|bytes| {
             if little_endian {
                 u16::from_le_bytes([bytes[0], bytes[1]])
@@ -2015,7 +2017,9 @@ mod tests {
             assert_eq!(count, 1);
             assert_eq!(&rewritten[..2], &encoded[..2]);
             let decoded = rewritten[2..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|bytes| {
                     if little_endian {
                         u16::from_le_bytes([bytes[0], bytes[1]])

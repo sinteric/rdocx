@@ -904,7 +904,7 @@ impl CT_PPr {
         let child_external_bindings = all_bindings
             .iter()
             .filter(|binding| {
-                !local_bindings.contains(binding) && !(binding.0 == "w" && binding.1 == W_NS)
+                !(local_bindings.contains(binding) || binding.0 == "w" && binding.1 == W_NS)
             })
             .cloned()
             .collect::<Vec<_>>();

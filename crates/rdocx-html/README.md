@@ -17,7 +17,7 @@ from semantic Word content without running pagination.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-html | 18,547 compressed bytes, 72,244 member bytes, 11 members | 0.15.0 | macOS 27.0.1, Apple M1 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-html` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-05 |
+| Crates.io archive: rdocx-html | 18,548 compressed bytes, 72,230 member bytes, 11 members | 0.16.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-html` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 
@@ -45,5 +45,5 @@ fn export(input: &HtmlInput) -> (String, String) {
 
 ```toml
 [dependencies]
-rdocx-html = "0.15.0"
+rdocx-html = "0.16.0"
 ```
