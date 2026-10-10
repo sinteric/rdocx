@@ -17,8 +17,9 @@ The related layout suite passes all 335 cases, including existing fork cases.
 Both rendering manifests are copied from the immutable upstream revision before
 running the harness. F-X183's reviewed table side-padding and legacy placement
 changes supersede the older fork alignment deltas. The deterministic hash harness
-matched all 49 entries before the final Rust compatibility adapters, without
-recording goldens or changing comparison code. The final-head rerun is pending.
+matched all 49 entries after the final Rust compatibility adapters, without
+recording goldens or changing comparison code. The reviewed deterministic
+animation GIF and Motion JPEG AVI manifest also passes after those adapters.
 
 Rust 1.99 introduces a constant chunk-size lint. Fixed-size chunk iteration uses
 `as_chunks` or `as_chunks_mut`, available below the workspace's Rust 1.93 MSRV.
@@ -27,18 +28,22 @@ comparisons in test helpers are adapted without changing expected values.
 Boolean simplifications retain short-circuit order and side effects.
 These adaptations change no public signature or intended rendering behavior.
 
-Archive footprint rows were initially remeasured from the locked local packages
-on Debian 13.6, x86_64. The later Rust compatibility adapters require another
-remeasurement before the PR is ready. The existing normalized member counts and
-64-byte gzip comparison tolerance are retained. Historical performance
-observations retain their original platform and date.
+Archive footprint rows are remeasured from all 22 locked local packages after
+the compatibility adapters on Debian 13.6, x86_64. Two measurement rounds converge
+and the complete README inventory validator passes. The existing normalized
+member counts and 64-byte gzip comparison tolerance are retained. Historical
+performance observations retain their original platform and date.
 
 The required PPTX corpus has 49 verified decks locally. The final Google Slides
 export is blocked by the Cloud network with a tunnel HTTP 403. All 22 affected
 corpus checks are recorded as blocked, not passed. The unchanged CI fetches and
 verifies the complete 50-deck corpus before executing those checks.
 The complete Word regression suite and external Office comparisons have not
-been rerun locally. Compilation is distinguished from WASM execution.
+been rerun locally. Three additional native library tests stop on external
+Poppler version assertions. The required 26.01.0 download also receives a tunnel
+HTTP 403, while the installed pdftotext reports 25.03.0 and pdftoppm reports
+26.05.0. Those tests are not counted as passes and their assertions are retained.
+Compilation is distinguished from WASM execution.
 
 Hanji remains pinned to the previous fork main. A future S90 consumer repin needs
 its own API adaptations and preview acceptance evidence. This PR provides no
@@ -49,7 +54,14 @@ test expectations, and repository structure. No additional source defect was
 found in the conflict resolutions. The missing corpus input remains an explicit
 verification limit and is not resolved by weakening a test.
 
-Final verification is pending: whole-workspace Clippy after the equivalent
-compatibility changes, related raster and animation tests, the deterministic
-hash rerun, and the refreshed archive footprint inventory. No PR or final-head
-CI pass has been claimed at this checkpoint.
+Whole-workspace Clippy with all targets and features passes on Rust 1.99 after
+the equivalent compatibility changes. Rust 1.93 native library checks execute
+125 passing oxml-layout cases, 72 oxml-opc cases with one ignored, 96 oxml-pdf
+cases with one version-gated failure and one ignored, 513 rdocx cases with two
+version-gated failures and seven ignored, and 85 rpptx cases with four ignored.
+The ignored cases retain their upstream external evidence requirements.
+Formatting and both WASM binding compile checks pass. The repository policy
+module executes 139 passing cases across the complete run and missing-tool
+retry, with two explicitly gated published-family checks skipped.
+Normal CI must confirm the complete corpus and pinned external tools on the
+final PR head. No final-head CI pass is claimed by this local review.
