@@ -2069,14 +2069,21 @@ const RAW_CHILD_POSITION_MASK: usize = !RAW_CHILD_FLAGS;
 const VML_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:vml";
 const OFFICE_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:office:office";
 
-fn decode_run_text(encoded: &BytesText<'_>, name: QName<'_>) -> Result<String> {
+fn decode_run_text(encoded: &BytesText<'_>) -> Result<String> {
     // Keep the original reader's structural and UTF-8 checks before projecting
     // character data. A raw span is not escaped text: CDATA is already literal.
     let raw = encoded
         .decode()
         .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
-    let mut text_reader = Reader::from_str(&raw);
-    Ok(crate::xml_text::read_element_text(&mut text_reader, name))
+    // The span is element content, not a document. Give it an element context
+    // so a leading U+FEFF remains text rather than being stripped as a BOM.
+    let wrapped = format!("<text>{raw}</text>");
+    let mut text_reader = Reader::from_str(&wrapped);
+    text_reader.read_event()?;
+    Ok(crate::xml_text::read_element_text(
+        &mut text_reader,
+        QName(b"text"),
+    ))
 }
 
 fn resolved_name_matches(
@@ -2596,7 +2603,7 @@ impl CT_R {
                                 .unwrap_or(false)
                         });
                         let encoded = reader.read_text(name)?;
-                        let text = decode_run_text(&encoded, name)?;
+                        let text = decode_run_text(&encoded)?;
                         match content.last_mut() {
                             Some(RunContent::FootnoteRef {
                                 custom_mark: Some(mark),
@@ -2619,7 +2626,7 @@ impl CT_R {
                             })
                         });
                         let encoded = reader.read_text(name)?;
-                        let text = decode_run_text(&encoded, name)?;
+                        let text = decode_run_text(&encoded)?;
                         content.push(RunContent::DeletedText(CT_Text {
                             text,
                             preserve_space: preserve,
@@ -3313,7 +3320,7 @@ fn simple_result_run_display(raw: &[u8], word_prefixes: &[String]) -> Result<Opt
                     let text = reader
                         .read_text(start.name())
                         .ok()
-                        .and_then(|text| decode_run_text(&text, start.name()).ok())
+                        .and_then(|text| decode_run_text(&text).ok())
                         .unwrap_or_default();
                     display.get_or_insert_default().push_str(&text);
                 } else if is_word_element(start.name().as_ref(), b"tab", &prefixes) {
@@ -6522,7 +6529,7 @@ impl CT_P {
                 Event::Start(element) if word && element.local_name().as_ref() == b"t" => {
                     let encoded = reader.read_text(element.name())?;
                     if let Some(text) = text.as_mut() {
-                        text.push_str(&decode_run_text(&encoded, element.name())?);
+                        text.push_str(&decode_run_text(&encoded)?);
                     }
                 }
                 Event::Eof => return Ok(None),
@@ -14080,6 +14087,39 @@ mod tests {
             CT_P::comment_range_text_from_source(xml.as_bytes(), 4).unwrap(),
             Some("한글 &amp; &#xAC00;&".into()),
         );
+    }
+
+    #[test]
+    fn leading_format_character_survives_all_run_text_projections() {
+        for payload in [
+            "\u{feff}text",
+            "&#xFEFF;text",
+            "<![CDATA[\u{feff}text]]>",
+            "<![CDATA[]]>\u{feff}text",
+        ] {
+            let expected = "\u{feff}text";
+            for tag in ["t", "delText"] {
+                let run = format!("<w:r><w:{tag}>{payload}</w:{tag}></w:r>");
+                let paragraph = parse_paragraph(&run);
+                assert_eq!(paragraph.runs[0].text(), expected, "{tag}: {payload:?}");
+                assert_eq!(
+                    simple_result_run_display(run.as_bytes(), &["w".into()])
+                        .unwrap()
+                        .as_deref(),
+                    Some(expected),
+                );
+            }
+            let range = format!(
+                r#"<w:p xmlns:w="{}"><w:commentRangeStart w:id="4"/><w:r><w:t>{payload}</w:t></w:r><w:commentRangeEnd w:id="4"/></w:p>"#,
+                crate::namespace::W_NS,
+            );
+            assert_eq!(
+                CT_P::comment_range_text_from_source(range.as_bytes(), 4)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected),
+            );
+        }
     }
 
     #[test]
