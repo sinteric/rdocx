@@ -2069,10 +2069,9 @@ const RAW_CHILD_POSITION_MASK: usize = !RAW_CHILD_FLAGS;
 const VML_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:vml";
 const OFFICE_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:office:office";
 
-fn read_run_text(reader: &mut Reader<&[u8]>, name: QName<'_>) -> Result<String> {
+fn decode_run_text(encoded: &BytesText<'_>, name: QName<'_>) -> Result<String> {
     // Keep the original reader's structural and UTF-8 checks before projecting
     // character data. A raw span is not escaped text: CDATA is already literal.
-    let encoded = reader.read_text(name)?;
     let raw = encoded
         .decode()
         .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
@@ -2596,7 +2595,8 @@ impl CT_R {
                                 })
                                 .unwrap_or(false)
                         });
-                        let text = read_run_text(reader, name)?;
+                        let encoded = reader.read_text(name)?;
+                        let text = decode_run_text(&encoded, name)?;
                         match content.last_mut() {
                             Some(RunContent::FootnoteRef {
                                 custom_mark: Some(mark),
@@ -2618,7 +2618,8 @@ impl CT_R {
                                 a.key.as_ref() == b"xml:space" && a.value.as_ref() == b"preserve"
                             })
                         });
-                        let text = read_run_text(reader, name)?;
+                        let encoded = reader.read_text(name)?;
+                        let text = decode_run_text(&encoded, name)?;
                         content.push(RunContent::DeletedText(CT_Text {
                             text,
                             preserve_space: preserve,
@@ -3311,7 +3312,8 @@ fn simple_result_run_display(raw: &[u8], word_prefixes: &[String]) -> Result<Opt
                 {
                     let text = reader
                         .read_text(start.name())
-                        .map(|text| crate::xml_text::decode_escaped(&text))
+                        .ok()
+                        .and_then(|text| decode_run_text(&text, start.name()).ok())
                         .unwrap_or_default();
                     display.get_or_insert_default().push_str(&text);
                 } else if is_word_element(start.name().as_ref(), b"tab", &prefixes) {
@@ -6520,7 +6522,7 @@ impl CT_P {
                 Event::Start(element) if word && element.local_name().as_ref() == b"t" => {
                     let encoded = reader.read_text(element.name())?;
                     if let Some(text) = text.as_mut() {
-                        text.push_str(&crate::xml_text::decode_escaped(&encoded));
+                        text.push_str(&decode_run_text(&encoded, element.name())?);
                     }
                 }
                 Event::Eof => return Ok(None),
@@ -14053,6 +14055,31 @@ mod tests {
             assert!(matches!(reader.read_event().unwrap(), Event::Start(_)));
             assert!(CT_R::from_xml(&mut reader).is_err());
         }
+    }
+
+    #[test]
+    fn cdata_simple_field_cache_display_matches_typed_run_text() {
+        for tag in ["t", "delText"] {
+            let xml = format!(
+                r#"<q:r xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:{tag} xml:space="preserve"> <![CDATA[한글 &amp; &#xAC00;]]>&amp; </q:{tag}><q:tab/><q:t>end</q:t></q:r>"#,
+            );
+            assert_eq!(
+                simple_result_run_display(xml.as_bytes(), &["w".into()]).unwrap(),
+                Some(" 한글 &amp; &#xAC00;& \tend".into()),
+            );
+        }
+    }
+
+    #[test]
+    fn cdata_comment_range_source_matches_typed_literal_text() {
+        let xml = format!(
+            r#"<q:p xmlns:q="{}"><q:commentRangeStart q:id="4"/><q:r><q:t><![CDATA[한글 &amp; &#xAC00;]]>&amp;</q:t></q:r><q:commentRangeEnd q:id="4"/></q:p>"#,
+            crate::namespace::W_NS,
+        );
+        assert_eq!(
+            CT_P::comment_range_text_from_source(xml.as_bytes(), 4).unwrap(),
+            Some("한글 &amp; &#xAC00;&".into()),
+        );
     }
 
     #[test]
