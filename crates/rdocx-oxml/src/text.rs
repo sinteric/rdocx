@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
-use quick_xml::name::{Namespace, ResolveResult};
+use quick_xml::name::{Namespace, QName, ResolveResult};
 use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 
 use crate::content_control::{CT_Sdt, SdtContent, SdtOwner};
@@ -2069,6 +2069,23 @@ const RAW_CHILD_POSITION_MASK: usize = !RAW_CHILD_FLAGS;
 const VML_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:vml";
 const OFFICE_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:office:office";
 
+fn decode_run_text(encoded: &BytesText<'_>) -> Result<String> {
+    // Keep the original reader's structural and UTF-8 checks before projecting
+    // character data. A raw span is not escaped text: CDATA is already literal.
+    let raw = encoded
+        .decode()
+        .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
+    // The span is element content, not a document. Give it an element context
+    // so a leading U+FEFF remains text rather than being stripped as a BOM.
+    let wrapped = format!("<text>{raw}</text>");
+    let mut text_reader = Reader::from_str(&wrapped);
+    text_reader.read_event()?;
+    Ok(crate::xml_text::read_element_text(
+        &mut text_reader,
+        QName(b"text"),
+    ))
+}
+
 fn resolved_name_matches(
     namespace: &ResolveResult<'_>,
     local_name: &[u8],
@@ -2585,13 +2602,8 @@ impl CT_R {
                                 })
                                 .unwrap_or(false)
                         });
-                        // `read_text` returns the raw markup span, so entity
-                        // references in it still need resolving.
                         let encoded = reader.read_text(name)?;
-                        encoded
-                            .decode()
-                            .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
-                        let text = crate::xml_text::decode_escaped(&encoded);
+                        let text = decode_run_text(&encoded)?;
                         match content.last_mut() {
                             Some(RunContent::FootnoteRef {
                                 custom_mark: Some(mark),
@@ -2614,10 +2626,7 @@ impl CT_R {
                             })
                         });
                         let encoded = reader.read_text(name)?;
-                        encoded
-                            .decode()
-                            .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
-                        let text = crate::xml_text::decode_escaped(&encoded);
+                        let text = decode_run_text(&encoded)?;
                         content.push(RunContent::DeletedText(CT_Text {
                             text,
                             preserve_space: preserve,
@@ -3310,7 +3319,8 @@ fn simple_result_run_display(raw: &[u8], word_prefixes: &[String]) -> Result<Opt
                 {
                     let text = reader
                         .read_text(start.name())
-                        .map(|text| crate::xml_text::decode_escaped(&text))
+                        .ok()
+                        .and_then(|text| decode_run_text(&text).ok())
                         .unwrap_or_default();
                     display.get_or_insert_default().push_str(&text);
                 } else if is_word_element(start.name().as_ref(), b"tab", &prefixes) {
@@ -6519,7 +6529,7 @@ impl CT_P {
                 Event::Start(element) if word && element.local_name().as_ref() == b"t" => {
                     let encoded = reader.read_text(element.name())?;
                     if let Some(text) = text.as_mut() {
-                        text.push_str(&crate::xml_text::decode_escaped(&encoded));
+                        text.push_str(&decode_run_text(&encoded)?);
                     }
                 }
                 Event::Eof => return Ok(None),
@@ -13961,6 +13971,155 @@ mod tests {
         let rpr = run.properties.as_ref().unwrap();
         assert_eq!(rpr.bold, Some(true));
         assert_eq!(rpr.italic, Some(true));
+    }
+
+    #[test]
+    fn cdata_run_text_keeps_hangul_and_literal_entity_spelling() {
+        for (xml, expected) in [
+            ("<![CDATA[한글 😀]]>", "한글 😀"),
+            (
+                "<![CDATA[&amp; &#xAC00; &#65; <tag>]]>",
+                "&amp; &#xAC00; &#65; <tag>",
+            ),
+            (
+                "앞&amp;<![CDATA[한글 <&amp;>]]>&#x41;<![CDATA[]]>끝",
+                "앞&한글 <&amp;>A끝",
+            ),
+            ("&lt;![CDATA[&amp;amp;]]&gt;", "<![CDATA[&amp;]]>"),
+        ] {
+            let p = parse_paragraph(&format!(
+                r#"<w:r><w:t xml:space="preserve">{xml}</w:t><w:tab/><w:t>after</w:t></w:r>"#,
+            ));
+            let RunContent::Text(text) = &p.runs[0].content[0] else {
+                panic!("text");
+            };
+            assert_eq!(text.text, expected);
+            assert!(text.preserve_space);
+            assert_eq!(p.text(), format!("{expected}\tafter"));
+        }
+    }
+
+    #[test]
+    fn cdata_deleted_run_text_is_decoded_without_changing_revision_kind() {
+        let p = parse_paragraph(
+            r#"<w:r><w:delText xml:space="preserve"> <![CDATA[한글 &amp; &#xAC00;]]>&amp; </w:delText><w:t>kept</w:t></w:r>"#,
+        );
+        let RunContent::DeletedText(text) = &p.runs[0].content[0] else {
+            panic!("deleted text");
+        };
+        assert_eq!(text.text, " 한글 &amp; &#xAC00;& ");
+        assert!(text.preserve_space);
+        assert_eq!(p.text(), " 한글 &amp; &#xAC00;& kept");
+    }
+
+    #[test]
+    fn cdata_custom_note_marks_do_not_keep_markup() {
+        for kind in ["footnoteReference", "endnoteReference"] {
+            let p = parse_paragraph(&format!(
+                r#"<w:r><w:{kind} w:id="2" w:customMarkFollows="1"/><w:t><![CDATA[*&amp;]]></w:t></w:r>"#,
+            ));
+            match &p.runs[0].content[0] {
+                RunContent::FootnoteRef { custom_mark, .. }
+                | RunContent::EndnoteRef { custom_mark, .. } => {
+                    assert_eq!(custom_mark.as_deref(), Some("*&amp;"));
+                }
+                _ => panic!("note reference"),
+            }
+            assert_eq!(p.runs[0].content.len(), 1);
+        }
+    }
+
+    #[test]
+    fn cdata_run_roundtrip_keeps_unknown_children_and_text_semantics() {
+        let unknown = r#"<ext:keep xmlns:ext="urn:producer" value="&amp;"><![CDATA[unmodelled &amp;]]></ext:keep>"#;
+        let p = parse_paragraph(&format!(
+            r#"<q:r xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:t><![CDATA[한글 &amp;]]></q:t>{unknown}<q:t>&amp;end</q:t></q:r>"#,
+        ));
+        assert_eq!(p.text(), "한글 &amp;&end");
+        assert_eq!(p.runs[0].extra_xml, vec![unknown.as_bytes().to_vec()]);
+        let mut writer = Writer::new(Vec::new());
+        p.to_xml(&mut writer).unwrap();
+        let output = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(output.contains(unknown));
+        let inner = output
+            .strip_prefix("<w:p>")
+            .unwrap()
+            .strip_suffix("</w:p>")
+            .unwrap();
+        let reopened = parse_paragraph(inner);
+        assert_eq!(reopened.text(), p.text());
+        assert_eq!(reopened.runs[0].extra_xml, p.runs[0].extra_xml);
+    }
+
+    #[test]
+    fn cdata_run_text_still_rejects_invalid_encoding_and_truncation() {
+        for xml in [
+            &b"<w:r><w:t><![CDATA[\xff]]></w:t></w:r>"[..],
+            &b"<w:r><w:delText><![CDATA[\xff]]></w:delText></w:r>"[..],
+            &b"<w:r><w:t><![CDATA[text]]></w:r>"[..],
+        ] {
+            let mut reader = Reader::from_reader(xml);
+            assert!(matches!(reader.read_event().unwrap(), Event::Start(_)));
+            assert!(CT_R::from_xml(&mut reader).is_err());
+        }
+    }
+
+    #[test]
+    fn cdata_simple_field_cache_display_matches_typed_run_text() {
+        for tag in ["t", "delText"] {
+            let xml = format!(
+                r#"<q:r xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:{tag} xml:space="preserve"> <![CDATA[한글 &amp; &#xAC00;]]>&amp; </q:{tag}><q:tab/><q:t>end</q:t></q:r>"#,
+            );
+            assert_eq!(
+                simple_result_run_display(xml.as_bytes(), &["w".into()]).unwrap(),
+                Some(" 한글 &amp; &#xAC00;& \tend".into()),
+            );
+        }
+    }
+
+    #[test]
+    fn cdata_comment_range_source_matches_typed_literal_text() {
+        let xml = format!(
+            r#"<q:p xmlns:q="{}"><q:commentRangeStart q:id="4"/><q:r><q:t><![CDATA[한글 &amp; &#xAC00;]]>&amp;</q:t></q:r><q:commentRangeEnd q:id="4"/></q:p>"#,
+            crate::namespace::W_NS,
+        );
+        assert_eq!(
+            CT_P::comment_range_text_from_source(xml.as_bytes(), 4).unwrap(),
+            Some("한글 &amp; &#xAC00;&".into()),
+        );
+    }
+
+    #[test]
+    fn leading_format_character_survives_all_run_text_projections() {
+        for payload in [
+            "\u{feff}text",
+            "&#xFEFF;text",
+            "<![CDATA[\u{feff}text]]>",
+            "<![CDATA[]]>\u{feff}text",
+        ] {
+            let expected = "\u{feff}text";
+            for tag in ["t", "delText"] {
+                let run = format!("<w:r><w:{tag}>{payload}</w:{tag}></w:r>");
+                let paragraph = parse_paragraph(&run);
+                assert_eq!(paragraph.runs[0].text(), expected, "{tag}: {payload:?}");
+                assert_eq!(
+                    simple_result_run_display(run.as_bytes(), &["w".into()])
+                        .unwrap()
+                        .as_deref(),
+                    Some(expected),
+                );
+            }
+            let range = format!(
+                r#"<w:p xmlns:w="{}"><w:commentRangeStart w:id="4"/><w:r><w:t>{payload}</w:t></w:r><w:commentRangeEnd w:id="4"/></w:p>"#,
+                crate::namespace::W_NS,
+            );
+            assert_eq!(
+                CT_P::comment_range_text_from_source(range.as_bytes(), 4)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected),
+            );
+        }
     }
 
     #[test]
