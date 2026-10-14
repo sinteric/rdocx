@@ -692,6 +692,30 @@ rewriting them during the release ceremony.
 Listed in `12-testing-strategy.md`. The matrix carries these
 repository-specific gates:
 
+**Sequential test scheduling and qualification admission.** Ordinary Rust test
+harnesses use `RUST_TEST_THREADS=1`. The Python binding matrix uses
+`max-parallel: 1`. Compiler parallelism remains separate. New automatic updates
+cancel obsolete runs in the same workflow/event/PR/ref. The existing scheduled
+supply-chain check keeps a distinct run group because dependency vulnerabilities
+can change independently of repository edits.
+
+Keep named shared-setup core/static/build stages and their original assertions.
+The actual Python/WASM bindings, pinned document-output oracles and golden/schema
+checks protect public file/package behavior that smaller mocks cannot establish.
+They run on the existing isolated hosted environments with path-filtered inputs,
+fixed sources/versions and explicit failure gates. The large-document gate below
+protects published deterministic throughput and heap guarantees with one fixed
+synthetic case, rather than an unbounded load campaign. Each is an existing
+bounded product or distribution contract that must block relevant source PRs.
+
+Further component/integration/race/E2E needs a protected critical failure, why
+smaller checks are insufficient, necessity on every relevant PR and stable
+isolated cost. Other related qualification runs locally at PR submission with
+exact SHA, environment, commands, scope, results and skipped/untested boundaries
+in the body/comment. Do not add manual Actions or nightly substitutes. Diagnose
+setup, fixture/build/test time and resource pressure before more test workers
+or shards. CI scheduling changes do not qualify new rendering output or a release.
+
 **Path-filtered expensive jobs with one aggregate gate.** A `changes` job uses
 `dorny/paths-filter` v4.0.3 at immutable reviewed commit
 `ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d`. Its inline filters cover the full

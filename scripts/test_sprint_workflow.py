@@ -931,7 +931,7 @@ class SprintWorkflowTests(unittest.TestCase):
         strategy = self.yaml_block(job, "    strategy:")
         self.assertEqual(
             self.yaml_direct_lines(strategy, 6),
-            ("fail-fast: false", "matrix:"),
+            ("fail-fast: false", "max-parallel: 1", "matrix:"),
         )
         matrix = self.yaml_block(strategy, "      matrix:")
         self.assertEqual(self.yaml_direct_lines(matrix, 8), ("package:",))
