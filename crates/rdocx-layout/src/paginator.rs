@@ -8,6 +8,10 @@ use crate::block::{
     ParagraphBlock, ParagraphView, RowSemantics, ShapePreset, SharedLayoutBlock, TableView,
 };
 use crate::table::{CellBlock, FloatingTable, TableRow};
+use oxml_layout::line::{
+    break_into_lines_with_consumption, break_multilingual_into_lines_with_consumption,
+    inline_remainder,
+};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -181,6 +185,19 @@ impl PageGeometry {
         match self.body_rotation {
             Some(_) => self.content_height(),
             None => self.content_width(),
+        }
+    }
+
+    fn reserve_header_footer_room(&mut self, header: &[ParagraphBlock], footer: &[ParagraphBlock]) {
+        if !header.is_empty() {
+            self.margin_top = self
+                .margin_top
+                .max(self.header_distance + header_footer_height(header, self));
+        }
+        if !footer.is_empty() {
+            self.margin_bottom = self
+                .margin_bottom
+                .max(self.footer_distance + header_footer_height(footer, self));
         }
     }
 
@@ -1017,7 +1034,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 break;
             }
-        } else if let Some(table) = block.table() {
+        } else if let Some(mut table) = block.table_for_measure(pager.table_measure()) {
             let body_index = block.body_index();
 
             // A floating table is positioned rather than flowed, so it never
@@ -1028,7 +1045,9 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                 continue;
             }
 
-            for (row_idx, row) in table.rows.iter().enumerate() {
+            for row_idx in 0..table.rows.len() {
+                table = block.table_for_measure(pager.table_measure()).unwrap();
+                let row = &table.rows[row_idx];
                 // Read per row, because finishing a page may have moved the
                 // body into the next column track.
                 let row_semantics = table
@@ -1043,10 +1062,15 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                     // Word splits a row with a minimum height only when the
                     // part that stays on this page reaches that minimum, and
                     // otherwise moves the row whole.
-                    let split = split_simple_table_row(&pending, pending_semantics.as_ref(), space)
-                        .filter(|(fragment, ..)| {
-                            fragment.height >= pending.min_height || !pager.has_content()
-                        });
+                    let split = split_simple_table_row(
+                        &pending,
+                        pending_semantics.as_ref(),
+                        space,
+                        pager.geometry.body_rotation.is_some().then_some(pager.fm),
+                    )
+                    .filter(|(fragment, ..)| {
+                        fragment.height >= pending.min_height || !pager.has_content()
+                    });
                     if let Some((fragment, rest, fragment_semantics, rest_semantics)) = split {
                         paint_flowed_table_row(
                             &mut pager,
@@ -1061,13 +1085,49 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         pending_semantics = rest_semantics;
                         first_fragment = false;
                         moved_whole = false;
+                        let old_width = pager.geometry.content_width();
                         pager.finish_page();
+                        table = block.table_for_measure(pager.table_measure()).unwrap();
+                        if pager.geometry.body_rotation.is_some()
+                            && old_width != pager.geometry.content_width()
+                        {
+                            if first_fragment {
+                                pending = table.rows[row_idx].clone();
+                                pending_semantics =
+                                    table.semantics.and_then(|s| s.rows.get(row_idx)).cloned();
+                            } else if let Some(refitted) = refit_table_row_fragment(
+                                &pending,
+                                pending_semantics.as_ref(),
+                                &table.rows[row_idx],
+                                pager.fm,
+                            ) {
+                                pending = refitted;
+                            }
+                        }
                         repeat_table_headers(&mut pager, &table, row_idx, body_index);
                         continue;
                     }
                     if pending.height > space && pager.has_content() && !moved_whole {
                         moved_whole = true;
+                        let old_width = pager.geometry.content_width();
                         pager.finish_page();
+                        table = block.table_for_measure(pager.table_measure()).unwrap();
+                        if pager.geometry.body_rotation.is_some()
+                            && old_width != pager.geometry.content_width()
+                        {
+                            if first_fragment {
+                                pending = table.rows[row_idx].clone();
+                                pending_semantics =
+                                    table.semantics.and_then(|s| s.rows.get(row_idx)).cloned();
+                            } else if let Some(refitted) = refit_table_row_fragment(
+                                &pending,
+                                pending_semantics.as_ref(),
+                                &table.rows[row_idx],
+                                pager.fm,
+                            ) {
+                                pending = refitted;
+                            }
+                        }
                         repeat_table_headers(&mut pager, &table, row_idx, body_index);
                         continue;
                     }
@@ -1117,6 +1177,7 @@ fn split_simple_table_row(
     row: &TableRow,
     semantics: Option<&RowSemantics>,
     space: f64,
+    fm: Option<&FontManager>,
 ) -> Option<(
     TableRow,
     TableRow,
@@ -1200,6 +1261,21 @@ fn split_simple_table_row(
             let CellBlock::Paragraph(rest_paragraph) = &mut rest_cell.blocks[0] else {
                 unreachable!("checked paragraph blocks above")
             };
+            if let Some(fm) = fm {
+                let direction = semantics
+                    .and_then(|row| row.cells.get(cell_index))
+                    .and_then(|cell| cell.blocks.get(count))
+                    .and_then(|block| match block {
+                        CellBlockSemantics::Paragraph(semantics) => {
+                            Some(semantics.reflow_direction)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(oxml_layout::TextDirection::Auto);
+                let width = rest_paragraph.reflow.as_ref()?.params.available_width;
+                let (_, consumption) = rebreak_paragraph(rest_paragraph, direction, width, fm)?;
+                consume_paragraph_input(rest_paragraph, *consumption.get(lines - 1)?, fm)?;
+            }
             rest_paragraph.lines.drain(..lines);
             rest_paragraph.space_before = 0.0;
             rest_paragraph.content_offset_top = 0.0;
@@ -1242,6 +1318,60 @@ fn split_simple_table_row(
         cell.merged_height = rest.height;
     }
     Some((first, rest, first_semantics, rest_semantics))
+}
+
+/// Resize only unconsumed plain cell content. The split guard has already
+/// excluded merges, rotations, nested tables, exact clipping and anchors.
+fn refit_table_row_fragment(
+    pending: &TableRow,
+    semantics: Option<&RowSemantics>,
+    template: &TableRow,
+    fm: &FontManager,
+) -> Option<TableRow> {
+    let mut adjusted = pending.clone();
+    adjusted.offset_left = template.offset_left;
+    let mut height = pending.min_height;
+    for (cell_index, cell) in adjusted.cells.iter_mut().enumerate() {
+        let selected = template.cells.get(cell_index)?;
+        cell.width = selected.width;
+        cell.margin_left = selected.margin_left;
+        cell.margin_right = selected.margin_right;
+        // Percentage cell spacing changes these margins with the measure.
+        // The split already removed the top gap and completed cells' bottom.
+        cell.margin_bottom = if cell.blocks.is_empty() {
+            0.0
+        } else {
+            selected.margin_bottom
+        };
+        let width = (cell.width - cell.margin_left - cell.margin_right).max(0.0);
+        for (block_index, block) in cell.blocks.iter_mut().enumerate() {
+            let CellBlock::Paragraph(paragraph) = block else {
+                return None;
+            };
+            let direction = semantics
+                .and_then(|row| row.cells.get(cell_index))
+                .and_then(|cell| cell.blocks.get(block_index))
+                .and_then(|block| match block {
+                    CellBlockSemantics::Paragraph(semantics) => Some(semantics.reflow_direction),
+                    _ => None,
+                })
+                .unwrap_or(oxml_layout::TextDirection::Auto);
+            *paragraph = rebreak_paragraph(paragraph, direction, width, fm)?.0;
+        }
+        height = height.max(
+            cell.blocks.iter().map(CellBlock::total_height).sum::<f64>()
+                + cell.margin_top
+                + cell.margin_bottom
+                + cell.border_band_top
+                + cell.border_band_bottom,
+        );
+    }
+    adjusted.height = height;
+    for cell in &mut adjusted.cells {
+        cell.height = height;
+        cell.merged_height = height;
+    }
+    Some(adjusted)
 }
 
 fn paint_flowed_table_row(
@@ -1479,6 +1609,10 @@ impl<'a> Pager<'a> {
     fn begin_page(&mut self) {
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
+        if let Some(hf) = self.header_footer {
+            let (header, footer) = self.selected_header_footer(hf);
+            page.reserve_header_footer_room(header, footer);
+        }
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
         }
@@ -1492,6 +1626,7 @@ impl<'a> Pager<'a> {
                 width: track.width,
             })
             .collect();
+        self.content_height = page.content_height().max(0.0);
         self.page_geometry = page;
         if let Some(numbering) = self.section_geometry.line_numbers.as_ref()
             && numbering.restart == ST_LineNumberRestart::NewPage
@@ -1499,6 +1634,29 @@ impl<'a> Pager<'a> {
             self.next_line_number = numbering.start;
         }
         self.apply_active_track();
+    }
+
+    fn selected_header_footer<'b>(
+        &self,
+        hf: &'b HeaderFooterContent,
+    ) -> (&'b [ParagraphBlock], &'b [ParagraphBlock]) {
+        if self.is_first_page && self.title_pg {
+            (&hf.first_header_blocks, &hf.first_footer_blocks)
+        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
+            (&hf.even_header_blocks, &hf.even_footer_blocks)
+        } else {
+            (&hf.header_blocks, &hf.footer_blocks)
+        }
+    }
+
+    /// Use the prepared story measure before transposition can round it.
+    /// Horizontal pages still select tables at their active column width.
+    fn table_measure(&self) -> f64 {
+        if self.geometry.body_rotation.is_some() {
+            self.page_geometry.body_measure()
+        } else {
+            self.geometry.content_width()
+        }
     }
 
     /// Narrow the body geometry to the active column track.
@@ -2529,13 +2687,7 @@ impl<'a> Pager<'a> {
 
         if let Some(hf) = self.header_footer {
             // Choose header blocks: first-page or default
-            let header_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_header_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_header_blocks
-            } else {
-                &hf.header_blocks
-            };
+            let (header_blocks, _) = self.selected_header_footer(hf);
             let header_directions = self.header_footer_semantics.map(|semantics| {
                 if self.is_first_page && self.title_pg {
                     semantics.first_header_directions.as_slice()
@@ -2568,13 +2720,7 @@ impl<'a> Pager<'a> {
 
         if let Some(hf) = self.header_footer {
             // Choose footer blocks: first-page or default
-            let footer_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_footer_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_footer_blocks
-            } else {
-                &hf.footer_blocks
-            };
+            let (_, footer_blocks) = self.selected_header_footer(hf);
             let footer_directions = self.header_footer_semantics.map(|semantics| {
                 if self.is_first_page && self.title_pg {
                     semantics.first_footer_directions.as_slice()
@@ -2585,7 +2731,7 @@ impl<'a> Pager<'a> {
                 }
             });
             if !footer_blocks.is_empty() {
-                let footer_height: f64 = footer_blocks.iter().map(|b| b.content_height()).sum();
+                let footer_height = header_footer_height(footer_blocks, &self.page_geometry);
                 let footer_y = self.page_geometry.page_height
                     - self.page_geometry.footer_distance
                     - footer_height;
@@ -3617,6 +3763,7 @@ fn reflow_around_wraps(
 
     let mut lines = para.lines.clone();
     let mut offset_top = 0.0;
+    let mut final_params = reflow.params.clone();
 
     // Two passes. The first reserves against the paragraph as laid out, the
     // second against the heights the first produced, which is what settles a
@@ -3677,6 +3824,7 @@ fn reflow_around_wraps(
         let mut params = reflow.params.clone();
         params.line_prefix_widths = prefix;
         params.line_suffix_widths = suffix;
+        final_params = params.clone();
 
         let reflowed = if reflow_direction != oxml_layout::TextDirection::Auto
             || reflow_items.iter().any(|item| {
@@ -3716,7 +3864,68 @@ fn reflow_around_wraps(
     let mut adjusted = para.clone();
     adjusted.lines = lines;
     adjusted.content_offset_top = offset_top;
+    if let Some(reflow) = adjusted.reflow.as_mut() {
+        reflow.params = final_params;
+    }
     Some(adjusted)
+}
+
+/// Rebreak retained logical input without repeating Word style or numbering
+/// resolution. Consumption is recorded before visual bidi ordering.
+fn rebreak_paragraph(
+    para: &ParagraphBlock,
+    direction: oxml_layout::TextDirection,
+    width: f64,
+    fm: &FontManager,
+) -> Option<(ParagraphBlock, Vec<usize>)> {
+    let reflow = para.reflow.as_ref()?;
+    let mut params = reflow.params.clone();
+    if params.available_width != width {
+        params.line_prefix_widths.clear();
+        params.line_suffix_widths.clear();
+    }
+    params.available_width = width;
+    let multilingual = direction != oxml_layout::TextDirection::Auto
+        || reflow.items.iter().any(|item| match item {
+            oxml_layout::InlineItem::MultilingualText(_) => true,
+            oxml_layout::InlineItem::Text(segment)
+            | oxml_layout::InlineItem::HyphenatedText { segment, .. }
+            | oxml_layout::InlineItem::Marker(segment) => {
+                segment.direction != oxml_layout::TextDirection::Auto
+            }
+            _ => false,
+        });
+    let (mut lines, consumption) = if multilingual {
+        break_multilingual_into_lines_with_consumption(&reflow.items, &params, fm, direction)
+    } else {
+        break_into_lines_with_consumption(&reflow.items, &params, fm)
+    }
+    .ok()?;
+    crate::convert::restore_word_line_heights(
+        &mut lines,
+        params.line_spacing,
+        reflow.grid_line_pitch_pt,
+        fm,
+        reflow.paragraph_mark,
+    );
+    let mut adjusted = para.clone();
+    adjusted.lines = lines;
+    adjusted.reflow.as_mut()?.params = params;
+    Some((adjusted, consumption))
+}
+
+fn consume_paragraph_input(
+    para: &mut ParagraphBlock,
+    consumed: usize,
+    fm: &FontManager,
+) -> Option<()> {
+    let reflow = para.reflow.as_mut()?;
+    reflow.items = inline_remainder(&reflow.items, consumed, fm).ok()?;
+    reflow.params.ind_first_line = 0.0;
+    reflow.params.ind_hanging = 0.0;
+    reflow.params.line_prefix_widths.clear();
+    reflow.params.line_suffix_widths.clear();
+    Some(())
 }
 
 fn paginate_paragraph<B: LayoutBlockLike>(
@@ -3726,6 +3935,25 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     blocks: &[B],
     pager: &mut Pager,
 ) {
+    let page_reflow = (pager.geometry.body_rotation.is_some() && para.reflow_allowed)
+        .then(|| {
+            rebreak_paragraph(
+                para.block,
+                para.reflow_direction,
+                pager.geometry.content_width(),
+                pager.fm,
+            )
+        })
+        .flatten();
+    let mut consumption = page_reflow.as_ref().map(|(_, cursors)| cursors.clone());
+    let para = page_reflow
+        .as_ref()
+        .map_or(para, |(block, _)| ParagraphView {
+            block,
+            semantics: para.semantics,
+            reflow_direction: para.reflow_direction,
+            reflow_allowed: para.reflow_allowed,
+        });
     let space_before = pager.space_before(para.space_before);
 
     // Flow the paragraph around anything floating in its band of the page,
@@ -3755,6 +3983,15 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         reflow_direction: para.reflow_direction,
         reflow_allowed: false,
     });
+    if reflowed.is_some() && pager.geometry.body_rotation.is_some() {
+        consumption = rebreak_paragraph(
+            para.block,
+            para.reflow_direction,
+            pager.geometry.content_width(),
+            pager.fm,
+        )
+        .map(|(_, cursors)| cursors);
+    }
 
     // A page break inside the paragraph ends the page after its line, whatever
     // widow control or keep-lines would decide. When the lines up to the break
@@ -3766,7 +4003,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             pager.cursor_y + space_before + para.content_offset_top,
         ) == split_at
     {
-        render_para_split(para, body_index, split_at, space_before, pager, block_idx);
+        render_para_split(
+            para,
+            body_index,
+            split_at,
+            space_before,
+            pager,
+            block_idx,
+            blocks,
+            consumption.as_deref(),
+        );
         return;
     }
 
@@ -3784,7 +4030,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                 return;
             }
             // Re-call with fresh page
-            paginate_paragraph(para, body_index, block_idx, blocks, pager);
+            paginate_paragraph(
+                ParagraphView {
+                    reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                    ..para
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
             return;
         }
 
@@ -3801,7 +4056,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 return;
             }
-            paginate_paragraph(para, body_index, block_idx, blocks, pager);
+            paginate_paragraph(
+                ParagraphView {
+                    reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                    ..para
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
             return;
         }
 
@@ -3809,7 +4073,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         if para.widow_control && lines_remaining < 2 && lines_that_fit >= 3 {
             // Would leave orphan — move one line to next page
             let split_at = lines_that_fit - 1;
-            render_para_split(para, body_index, split_at, space_before, pager, block_idx);
+            render_para_split(
+                para,
+                body_index,
+                split_at,
+                space_before,
+                pager,
+                block_idx,
+                blocks,
+                consumption.as_deref(),
+            );
             return;
         }
 
@@ -3821,6 +4094,8 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                 space_before,
                 pager,
                 block_idx,
+                blocks,
+                consumption.as_deref(),
             );
             return;
         }
@@ -3830,7 +4105,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         if pager.stopped_at.is_some() {
             return;
         }
-        paginate_paragraph(para, body_index, block_idx, blocks, pager);
+        paginate_paragraph(
+            ParagraphView {
+                reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                ..para
+            },
+            body_index,
+            block_idx,
+            blocks,
+            pager,
+        );
         return;
     }
 
@@ -3841,7 +4125,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         let lines_that_fit =
             pager.count_lines_that_fit_with_notes(&para.lines, para.content_offset_top);
         if lines_that_fit > 0 && lines_that_fit < para.lines.len() {
-            render_para_split(para, body_index, lines_that_fit, 0.0, pager, block_idx);
+            render_para_split(
+                para,
+                body_index,
+                lines_that_fit,
+                0.0,
+                pager,
+                block_idx,
+                blocks,
+                consumption.as_deref(),
+            );
             return;
         }
     }
@@ -3858,6 +4151,19 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         let chain = keep_next_chain_height(para.block, block_idx, blocks, pager);
         if pager.cursor_y + space_before + chain > pager.available_height_for(&para.lines) {
             pager.advance_flow_for_chain();
+            if pager.geometry.body_rotation.is_some() {
+                paginate_paragraph(
+                    ParagraphView {
+                        reflow_allowed: true,
+                        ..para
+                    },
+                    body_index,
+                    block_idx,
+                    blocks,
+                    pager,
+                );
+                return;
+            }
         }
     }
 
@@ -3953,11 +4259,27 @@ fn keep_next_chain_height<B: LayoutBlockLike>(
             break;
         }
         let Some(paragraph) = next.paragraph() else {
-            if let Some(table) = next.table() {
+            if let Some(table) = next.table_for_measure(pager.table_measure()) {
                 height += space_after + table.rows.first().map_or(0.0, |row| row.height);
             }
             break;
         };
+        let selected = pager
+            .geometry
+            .body_rotation
+            .is_some()
+            .then(|| {
+                rebreak_paragraph(
+                    paragraph.block,
+                    paragraph.reflow_direction,
+                    pager.geometry.content_width(),
+                    pager.fm,
+                )
+            })
+            .flatten();
+        let paragraph = selected
+            .as_ref()
+            .map_or(paragraph, |(block, _)| ParagraphView { block, ..paragraph });
         height += if pager.geometry.do_not_use_html_paragraph_auto_spacing {
             space_after + paragraph.space_before
         } else {
@@ -3999,13 +4321,16 @@ fn forced_page_split(lines: &[LayoutLine]) -> Option<usize> {
 
 /// Split a paragraph at the given line index, rendering first part on current page
 /// and continuing the rest on a new page (recursively if needed).
-fn render_para_split(
+#[allow(clippy::too_many_arguments)]
+fn render_para_split<B: LayoutBlockLike>(
     para: ParagraphView<'_>,
     body_index: Option<usize>,
     split_at: usize,
     space_before: f64,
     pager: &mut Pager,
     block_idx: usize,
+    blocks: &[B],
+    consumption: Option<&[usize]>,
 ) {
     // Render lines before split on current page
     pager.cursor_y += space_before;
@@ -4070,6 +4395,37 @@ fn render_para_split(
                 })
         });
 
+    // Resume logical input rather than reusing the previous page's line
+    // widths. A trailing run break keeps its empty final line semantics.
+    if !ends_with_run_page_break
+        && let Some(consumed) = consumption.and_then(|cursors| cursors.get(split_at - 1))
+    {
+        let mut continuation = para.block.clone();
+        continuation.lines = remaining_lines.to_vec();
+        continuation.anchored.clear();
+        continuation.space_before = 0.0;
+        continuation.keep_lines = false;
+        continuation.page_break_before = false;
+        continuation.heading_level = None;
+        continuation.heading_text = None;
+        continuation.content_offset_top = 0.0;
+        if consume_paragraph_input(&mut continuation, *consumed, pager.fm).is_some() {
+            paginate_paragraph(
+                ParagraphView {
+                    block: &continuation,
+                    semantics: para.semantics,
+                    reflow_direction: para.reflow_direction,
+                    reflow_allowed: true,
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
+            return;
+        }
+    }
+
     // Split again where the remaining lines are still too tall, or at a page
     // break among them, whichever comes first.
     let overflow_split = (remaining_height > pager.available_height_for(remaining_lines))
@@ -4119,6 +4475,8 @@ fn render_para_split(
             0.0,
             pager,
             block_idx,
+            blocks,
+            None,
         );
         return;
     }
@@ -5189,6 +5547,73 @@ fn render_change_bar_at(
     });
 }
 
+/// Height of the painted story, including collapsed inter-paragraph spacing.
+fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f64 {
+    let content: f64 = blocks.iter().map(ParagraphBlock::content_height).sum();
+    content
+        + blocks
+            .windows(2)
+            .map(|pair| {
+                if geometry.do_not_use_html_paragraph_auto_spacing {
+                    pair[0].space_after + pair[1].space_before
+                } else {
+                    pair[0].space_after.max(pair[1].space_before)
+                }
+            })
+            .sum::<f64>()
+}
+
+/// Prepare a conservative initial measure before selected-story pagination.
+/// Retained paragraph inputs and table variants can later use a wider band.
+pub(crate) fn reserve_vertical_header_footer_room(
+    mut geometry: PageGeometry,
+    content: Option<&HeaderFooterContent>,
+    title_pg: bool,
+) -> PageGeometry {
+    if geometry.body_rotation.is_some()
+        && let Some(hf) = content
+    {
+        geometry.reserve_header_footer_room(&hf.header_blocks, &hf.footer_blocks);
+        if title_pg {
+            geometry.reserve_header_footer_room(&hf.first_header_blocks, &hf.first_footer_blocks);
+        }
+        if hf.even_headers_active {
+            geometry.reserve_header_footer_room(&hf.even_header_blocks, &hf.even_footer_blocks);
+        }
+    }
+    geometry
+}
+
+/// Distinct raw body measures for stories that can be selected in a section.
+/// Tables are prepared at these finite measures before pagination rotates them.
+pub(crate) fn vertical_story_measures(
+    base: &PageGeometry,
+    content: Option<&HeaderFooterContent>,
+    title_pg: bool,
+) -> Vec<f64> {
+    let mut measures = Vec::new();
+    if let Some(hf) = content {
+        let mut stories = vec![(&hf.header_blocks, &hf.footer_blocks)];
+        if title_pg {
+            stories.push((&hf.first_header_blocks, &hf.first_footer_blocks));
+        }
+        if hf.even_headers_active {
+            stories.push((&hf.even_header_blocks, &hf.even_footer_blocks));
+        }
+        for (header, footer) in stories {
+            let mut selected = base.clone();
+            selected.reserve_header_footer_room(header, footer);
+            let measure = selected.body_measure();
+            if !measures.contains(&measure) {
+                measures.push(measure);
+            }
+        }
+    } else {
+        measures.push(base.body_measure());
+    }
+    measures
+}
+
 /// Render header/footer blocks.
 fn render_hf_blocks(
     blocks: &[ParagraphBlock],
@@ -5206,6 +5631,13 @@ fn render_hf_blocks(
     let (elements, behind, front) = layers;
     let mut y = start_y - geometry.margin_top; // Convert to relative
     for (index, para) in blocks.iter().enumerate() {
+        if let Some(previous) = index.checked_sub(1).and_then(|i| blocks.get(i)) {
+            y += if geometry.do_not_use_html_paragraph_auto_spacing {
+                previous.space_after + para.space_before
+            } else {
+                previous.space_after.max(para.space_before)
+            };
+        }
         place_cell_anchored(
             &para.anchored,
             geometry,
@@ -6028,6 +6460,78 @@ mod tests {
             reflow: None,
             content_offset_top: 0.0,
         }
+    }
+
+    #[test]
+    fn vertical_keep_next_prices_following_paragraph_at_selected_measure() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm
+            .resolve_font(Some("Liberation Sans"), false, false)
+            .unwrap();
+        let text = "following words ".repeat(80);
+        let mut segment = directional_test_segment(&text, TextDirection::Auto, None, None);
+        let shaped = fm.shape_text(id, &text, 12.0).unwrap();
+        segment.font_id = id;
+        segment.glyph_ids = shaped.glyph_ids;
+        segment.advances = shaped.advances;
+        segment.width = shaped.width;
+        let params = oxml_layout::LineBreakParams {
+            available_width: 408.0,
+            ..Default::default()
+        };
+        let mut following = make_para(1, 14.0);
+        following.keep_lines = true;
+        following.lines = break_into_lines(
+            &[oxml_layout::InlineItem::Text(segment.clone())],
+            &params,
+            &fm,
+        )
+        .unwrap();
+        following.reflow = Some(Box::new(crate::block::ParagraphReflow {
+            items: vec![oxml_layout::InlineItem::Text(segment)],
+            params,
+            grid_line_pitch_pt: None,
+            paragraph_mark: None,
+        }));
+        let first = make_para(1, 14.0);
+        let blocks = vec![
+            LayoutBlock::Paragraph(first.clone()),
+            LayoutBlock::Paragraph(following.clone()),
+        ];
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let empty = ResolvedWraps::new();
+        let pager = Pager::new(
+            PageGeometry {
+                body_rotation: Some(90.0),
+                ..Default::default()
+            },
+            None,
+            None,
+            false,
+            false,
+            &media,
+            &notes,
+            &fm,
+            &empty,
+            1,
+            1,
+            true,
+            None,
+        );
+        let expected = rebreak_paragraph(
+            &following,
+            TextDirection::Auto,
+            pager.geometry.content_width(),
+            &fm,
+        )
+        .unwrap()
+        .0;
+        assert!(expected.lines.len() < following.lines.len());
+        assert_eq!(
+            keep_next_chain_height(&first, 0, &blocks, &pager),
+            first.content_height() + expected.content_height()
+        );
     }
 
     #[test]
@@ -7204,6 +7708,90 @@ mod tests {
         );
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].page_number, 1);
+    }
+
+    #[test]
+    fn page_top_spacing_and_upstream_paragraph_collapse_remain_unchanged() {
+        let fm = FontManager::new();
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let wraps = ResolvedWraps::new();
+        let mut pager = Pager::new(
+            PageGeometry::default(),
+            None,
+            None,
+            false,
+            false,
+            &media,
+            &notes,
+            &fm,
+            &wraps,
+            1,
+            1,
+            true,
+            None,
+        );
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.track_index = 1;
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.track_index = 0;
+        pager.page_number = 2;
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.cursor_y = 40.0;
+        pager.previous_space_after = 12.0;
+        assert_eq!(pager.space_before(24.0), 12.0);
+    }
+
+    #[test]
+    fn body_room_tracks_selected_header_and_footer_on_each_page() {
+        let fm = FontManager::new();
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let wraps = ResolvedWraps::new();
+        let mut header = make_para(1, 60.0);
+        header.space_after = 12.0;
+        let mut next = make_para(1, 60.0);
+        next.space_before = 24.0;
+        let hf = HeaderFooterContent {
+            header_blocks: vec![header, next],
+            footer_blocks: vec![make_para(1, 90.0)],
+            first_header_blocks: vec![make_para(1, 10.0)],
+            first_footer_blocks: vec![],
+            even_header_blocks: vec![make_para(1, 80.0)],
+            even_footer_blocks: vec![make_para(1, 100.0)],
+            even_headers_active: true,
+            watermark: None,
+            first_watermark: None,
+            even_watermark: None,
+        };
+        let mut pager = Pager::new(
+            PageGeometry::default(),
+            Some(&hf),
+            None,
+            true,
+            false,
+            &media,
+            &notes,
+            &fm,
+            &wraps,
+            1,
+            1,
+            true,
+            None,
+        );
+        assert_eq!(pager.geometry.margin_top, 72.0);
+        assert_eq!(pager.geometry.margin_bottom, 72.0);
+        pager.is_first_page = false;
+        pager.header_page_number = 2;
+        pager.begin_page();
+        assert_eq!(pager.geometry.margin_top, 116.0);
+        assert_eq!(pager.geometry.margin_bottom, 136.0);
+        assert_eq!(pager.available_height(), 540.0);
+        pager.header_page_number = 3;
+        pager.begin_page();
+        assert_eq!(pager.geometry.margin_top, 180.0);
+        assert_eq!(pager.geometry.margin_bottom, 126.0);
+        assert_eq!(pager.available_height(), 486.0);
     }
 
     #[test]

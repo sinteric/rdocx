@@ -3042,7 +3042,9 @@ mod tests {
         assert_eq!(rendered, expanded);
         assert!(
             rendered
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[..3] != [255, 255, 255])
         );
     }
@@ -3302,7 +3304,9 @@ mod tests {
     fn luminance_ssim(left: &[u8], right: &[u8]) -> f64 {
         assert_eq!(left.len(), right.len());
         let left = left
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| {
                 0.2126 * f64::from(pixel[0])
                     + 0.7152 * f64::from(pixel[1])
@@ -3310,7 +3314,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let right = right
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| {
                 0.2126 * f64::from(pixel[0])
                     + 0.7152 * f64::from(pixel[1])
@@ -3473,7 +3479,13 @@ mod tests {
 
     fn golden_png() -> Vec<u8> {
         let mut pixmap = resvg::tiny_skia::Pixmap::new(16, 12).unwrap();
-        for (index, pixel) in pixmap.data_mut().chunks_exact_mut(4).enumerate() {
+        for (index, pixel) in pixmap
+            .data_mut()
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             let x = index % 16;
             let y = index / 16;
             let dark = (x / 4 + y / 3) % 2 == 0;

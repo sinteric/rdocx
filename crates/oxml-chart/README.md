@@ -11,6 +11,8 @@ and geometry.
 - Ordered preservation of unmodelled XML around typed edits.
 - Sparse caches, explicit axis bounds, mixed plots, labels, and theme-resolved
   series paint remain editable without losing unsupported plot payloads.
+- Pie and doughnut category colors and legends respect varied theme accents,
+  explicit series fills, and direct point fills.
 
 ## Measured footprint and speed
 
@@ -18,7 +20,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-chart | 110,676 compressed bytes, 704,519 member bytes, 6 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-14 |
+| Crates.io archive: oxml-chart | 113,657 compressed bytes, 723,984 member bytes, 6 members | 0.14.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `oxml-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
