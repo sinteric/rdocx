@@ -3156,7 +3156,15 @@ fn font_data_for_face(
         // A source that fontdb features enabled elsewhere in the build add,
         // such as `memmap`'s shared file, read through fontdb itself.
         #[allow(unreachable_patterns)]
-        _ => db.with_face_data(id, |data, index| (Arc::from(data), index)),
+        _ => {
+            if let Some(data) = memory_face_data.get(&id) {
+                return Some((Arc::clone(data), face_index));
+            }
+            let (data, face_index) =
+                db.with_face_data(id, |bytes, index| (Arc::<[u8]>::from(bytes), index))?;
+            memory_face_data.insert(id, Arc::clone(&data));
+            Some((data, face_index))
+        }
     }
 }
 
