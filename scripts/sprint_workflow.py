@@ -31,7 +31,10 @@ import hashlib
 from email.message import Message
 from email.parser import Parser
 import json
+import os
 import re
+import signal
+import stat
 import string
 import subprocess
 import sys
@@ -1431,6 +1434,22 @@ def cmd_validate_handoff(args: argparse.Namespace) -> int:
             f"Verify must record `{expected_verify}, pass`."
         )
 
+    checkpoint = fields.get("Checkpoint", "")
+    external = fields.get("External gates", "")
+    test_gate = fields.get("Test gate", "")
+    pending = any("external ci pending" in value.lower() for value in (verify, test_gate)) or bool(external)
+    if checkpoint and checkpoint != "external-ci-source-availability":
+        problems.append("unknown handoff checkpoint")
+    if pending and checkpoint != "external-ci-source-availability":
+        problems.append("pending external CI requires its source-availability checkpoint")
+    if checkpoint == "external-ci-source-availability":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ./_-]{2,240}, pending", external) or external[:-9].strip().lower() in ("ci", "external ci", "gates"):
+            problems.append("external checkpoint requires named actual gates, pending")
+        if verify != f"{expected_verify}, local checks pass, external CI pending":
+            problems.append("external checkpoint must distinguish local checks from pending scoped acceptance")
+        if not test_gate.endswith(", pass, external CI pending") or re.search(r"\bcomplet(?:e|ed)\b", test_gate, re.I):
+            problems.append("external checkpoint requires actual local test checks with external CI pending")
+
     if problems:
         print(f"validate-handoff {path}: REFUSED", file=sys.stderr)
         for p in problems:
@@ -1513,6 +1532,7 @@ def cmd_close_preflight(args: argparse.Namespace) -> int:
 COMPATIBILITY_COUNTS = {"BASE": 24, "XML": 14, "LIFE": 16, "AREA": 46}
 COMPATIBILITY_MANIFEST_SHA = "7501e001301a703988526f76c9961b35b345a1c17f8e1d383e9477d5947b22e1"
 COMPATIBILITY_BODY_SHA = "2f4348dd55dcd1b8889badd8ca407d9f790cf38327c00ec3ae31dd5b02b3f66e"
+COMPATIBILITY_FREEZE_SHA = "d3cf81e655dfb1f7d35745487d46e2ceb8c3c826167439cc970911eec3ac21f7"
 COMPATIBILITY_DIVERGENCES = {"W-XML-02", "P-AREA-17"}
 
 
@@ -1551,6 +1571,342 @@ def compatibility_observations(facts: list) -> None:
             raise ValueError("qualification needs concrete typed observations")
         for reference in fact["evidence"]:
             compatibility_artifact(reference)
+
+
+def compatibility_git_source(root: Path) -> dict:
+    """Capture actual clean Git identity and every tracked working byte."""
+    def git(*args):
+        return subprocess.check_output(["git", "--no-optional-locks", *args], cwd=root)
+    if git("status", "--porcelain", "--untracked-files=no").strip():
+        raise ValueError("compatibility clean Git source has tracked changes")
+    entries = [entry.split(b"\t", 1) for entry in git("ls-tree", "-r", "-z", "HEAD").split(b"\0") if entry]
+    tracked = set(filter(None, git("ls-files", "-z").decode().split("\0")))
+    if tracked != {name.decode() for _, name in entries}:
+        raise ValueError("compatibility clean Git tracked paths differ from HEAD")
+    object_format = git("rev-parse", "--show-object-format").decode().strip()
+    files = {}
+    for metadata, encoded_name in entries:
+        mode, kind, oid = metadata.decode().split()
+        name = encoded_name.decode()
+        path = root / name
+        if kind != "blob" or mode not in ("100644", "100755") or path.is_symlink() or not path.is_file():
+            raise ValueError("compatibility source must contain regular tracked files")
+        raw = path.read_bytes()
+        git_object = hashlib.new(object_format, b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
+        if git_object != oid or stat.S_IMODE(path.stat().st_mode) != int(mode, 8) & 0o777:
+            raise ValueError("compatibility clean Git working bytes or mode differ from HEAD")
+        files[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw),
+                       "mode": stat.S_IMODE(path.stat().st_mode)}
+    return {"head": git("rev-parse", "HEAD").decode().strip(),
+            "tree": git("rev-parse", "HEAD^{tree}").decode().strip(),
+            "index_sha256": hashlib.sha256(git("ls-files", "--stage", "-z")).hexdigest(),
+            "files": files}
+
+
+def compatibility_process(argv: list[str], cwd: Path, env: dict, timeout: int, log: Path) -> dict:
+    """Bound this case session and leave an auditable lease for the outer job."""
+    signals = []
+    timed_out = False
+    child = None
+    pending_error = None
+    old_handler = signal.getsignal(signal.SIGTERM)
+    lease_path = log.with_suffix(".lease.json")
+    lease = {"argv_sha256": hashlib.sha256(json.dumps(argv).encode()).hexdigest(), "cleanup": None}
+    def interrupted(signum, frame):
+        raise InterruptedError("compatibility case supervisor interrupted")
+    signal.signal(signal.SIGTERM, interrupted)
+    with log.open("xb") as output:
+        try:
+            # Do not expose the small spawn-to-lease interval to SIGTERM.
+            old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+            try:
+                child = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
+                                         start_new_session=True)
+                identity = subprocess.check_output(["/bin/ps", "-p", str(child.pid), "-o", "uid=,pgid=,lstart="],
+                                                   env=dict(os.environ, LC_ALL="C"), timeout=5).decode().strip()
+                lease.update(pid=child.pid, pgid=child.pid, process_identity=identity)
+                fd = os.open(lease_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "w") as stream:
+                    json.dump(lease, stream)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            child.wait(timeout=timeout)
+        except BaseException as error:
+            timed_out = isinstance(error, subprocess.TimeoutExpired)
+            pending_error = None if timed_out else error
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            if child is not None:
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    try:
+                        os.killpg(child.pid, sig)
+                        signals.append(sig.name)
+                    except ProcessLookupError:
+                        break
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                gone = False
+                for _ in range(50):
+                    try:
+                        os.killpg(child.pid, 0)
+                    except ProcessLookupError:
+                        gone = True
+                        break
+                    time.sleep(0.1)
+                result = {"exit_code": child.returncode, "timed_out": timed_out,
+                          "cleanup": {"groupGone": gone, "leaderReaped": child.returncode is not None,
+                                      "leaseReleaseSafe": gone and child.returncode is not None, "signals": signals}}
+                lease.update(cleanup=result["cleanup"], exit_code=child.returncode)
+                lease_path.write_text(json.dumps(lease, indent=2) + "\n")
+            signal.signal(signal.SIGTERM, old_handler)
+    if pending_error is not None:
+        raise pending_error
+    if child is None:
+        raise ValueError("compatibility case process did not start")
+    return result
+
+
+def compatibility_execute(config: dict) -> dict:
+    """Execute the original corpus once, with a separate approved input overlay."""
+    if config.get("status") != "admitted":
+        raise ValueError("compatibility execution configuration must be admitted")
+    expected_identity = config["github_identity"]
+    stable_identity = {"GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_ACTOR", "GITHUB_TRIGGERING_ACTOR",
+                       "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_SHA", "GITHUB_WORKFLOW_REF",
+                       "GITHUB_WORKFLOW_SHA", "GITHUB_JOB"}
+    dynamic_identity = {"GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"}
+    identity = {key: os.environ.get(key) for key in stable_identity | dynamic_identity}
+    if set(expected_identity) != stable_identity or any(identity[key] != value for key, value in expected_identity.items()) or (
+        identity["GITHUB_REPOSITORY"] != "tensorbee/rdocx" or identity["GITHUB_ACTOR"] != "mantissaman"
+        or identity["GITHUB_TRIGGERING_ACTOR"] != "mantissaman" or identity["GITHUB_EVENT_NAME"] != "workflow_dispatch"
+        or identity["GITHUB_JOB"] != "owner-compatibility" or identity["GITHUB_SHA"] != config["head"]
+        or identity["GITHUB_WORKFLOW_SHA"] != config["head"]
+        or not str(identity["GITHUB_REF"]).startswith("refs/heads/")
+        or identity["GITHUB_WORKFLOW_REF"] != f"tensorbee/rdocx/.github/workflows/ci.yml@{identity['GITHUB_REF']}"
+        or any(not re.fullmatch(r"[1-9][0-9]*", str(identity[key])) for key in dynamic_identity)
+    ):
+        raise ValueError("compatibility execution GitHub identity is not admitted")
+    root = Path(config["source_root"]).resolve()
+    before = compatibility_git_source(root)
+    for key in ("head", "tree", "index_sha256"):
+        if before[key] != config[key]:
+            raise ValueError(f"compatibility execution source changed: {key}")
+    if before["files"] != json.loads(compatibility_artifact(config["source_manifest"])):
+        raise ValueError("compatibility execution tracked source changed")
+    build = json.loads(compatibility_artifact(config["build_provenance"]))
+    if build.get("status") != "admitted" or build["current_source_manifest_sha256"] != config["source_manifest"]["sha256"]:
+        raise ValueError("compatibility build provenance is not admitted for this source")
+    capture = json.loads(compatibility_artifact(build["build_source_capture"]))["files"]
+    def provider(name):
+        return name.startswith(("crates/", ".cargo/")) or name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs")
+    current = {name: pin for name, pin in before["files"].items() if provider(name)}
+    built = {name: {key: pin[key] for key in ("sha256", "size", "mode")} for name, pin in capture.items() if provider(name)}
+    if not current or current != built or set(build["products"]) != {"rdocx", "rpptx"}:
+        raise ValueError("compatibility compiled provider graph differs from the actual build")
+    for reference in build["products"].values():
+        compatibility_artifact(reference)
+    probes_sha = hashlib.sha256(json.dumps(config["installed_probes"], sort_keys=True).encode()).hexdigest()
+    if build["installed_probes_sha256"] != probes_sha:
+        raise ValueError("compatibility installed products do not match admitted build provenance")
+    manifest_raw = compatibility_artifact(config["manifest"])
+    body_raw = compatibility_artifact(config["body_manifest"])
+    if hashlib.sha256(manifest_raw).hexdigest() != COMPATIBILITY_MANIFEST_SHA or (
+        hashlib.sha256(body_raw).hexdigest() != COMPATIBILITY_BODY_SHA
+    ):
+        raise ValueError("compatibility execution requires the original frozen manifests")
+    manifest = json.loads(manifest_raw)
+    records = manifest["records"]
+    ids = {row["id"] for row in records}
+    if len(records) != 100 or len(ids) != 100 or any(
+        sum(row["area"] == area for row in records) != count for area, count in COMPATIBILITY_COUNTS.items()
+    ) or sum(row["family"] == "W" for row in records) != 49 or sum(row["family"] == "P" for row in records) != 51:
+        raise ValueError("compatibility execution allocation must remain the frozen 100")
+    frozen = Path(config["manifest"]["path"]).parent
+    support = frozen / "support.py"
+    if hashlib.sha256(support.read_bytes()).hexdigest() != manifest["support_sha256"]:
+        raise ValueError("compatibility frozen support changed")
+    overlay = json.loads(compatibility_artifact(config["runtime_overlay"]))
+    changed = {"fixtures/native-notes.pptx", "fixtures/transition-sound.pptx"}
+    if overlay.get("status") != "admitted" or set(overlay["replacements"]) != changed:
+        raise ValueError("compatibility runtime overlay must admit exactly the two revised native inputs")
+    for ref in overlay["native_producer_evidence"]:
+        compatibility_artifact(ref)
+    if not overlay["native_producer_evidence"]:
+        raise ValueError("compatibility overlay requires actual native producer evidence")
+    closure_raw = compatibility_artifact(config["frozen_closure"])
+    if hashlib.sha256(closure_raw).hexdigest() != COMPATIBILITY_FREEZE_SHA:
+        raise ValueError("compatibility frozen executable closure changed")
+    closure = json.loads(closure_raw)["files"]
+    closure_by_path = {row["path"]: row for row in closure}
+    inputs = {"support.py": support.read_bytes()}
+    for row in closure:
+        name = row["path"]
+        if not name.startswith("fixtures/"):
+            continue
+        if name in changed:
+            revision = overlay["replacements"][name]
+            if revision["original_sha256"] != row["sha256"]:
+                raise ValueError("compatibility overlay lost original native input identity")
+            raw = compatibility_artifact(revision["replacement"])
+        else:
+            raw = compatibility_artifact({"path": str(frozen / name), "sha256": row["sha256"]})
+        inputs[name] = raw
+    if not changed.issubset(inputs):
+        raise ValueError("compatibility frozen executable fixture closure is incomplete")
+    for row in records:
+        name = row["script_path"]
+        if name != f"scripts/{row['id']}.py" or name not in closure_by_path or closure_by_path[name]["sha256"] != row["script_sha256"]:
+            raise ValueError("compatibility script identity changed")
+        inputs[name] = compatibility_artifact({"path": str(frozen / name), "sha256": row["script_sha256"]})
+    guards = config["runtime_guards"]
+    if not guards:
+        raise ValueError("compatibility execution requires installed products and external tool guards")
+    def authenticate():
+        for reference in (config["manifest"], config["body_manifest"], config["frozen_closure"], config["runtime_overlay"]):
+            compatibility_artifact(reference)
+        if support.read_bytes() != inputs["support.py"]:
+            raise ValueError("compatibility original frozen support changed")
+        for row in records:
+            compatibility_artifact({"path": str(frozen / row["script_path"]), "sha256": row["script_sha256"]})
+        for name in inputs:
+            if not name.startswith("fixtures/"):
+                continue
+            reference = overlay["replacements"][name]["replacement"] if name in changed else {
+                "path": str(frozen / name), "sha256": closure_by_path[name]["sha256"]}
+            compatibility_artifact(reference)
+        for reference in overlay["native_producer_evidence"]:
+            compatibility_artifact(reference)
+        for path, digest in guards.items():
+            compatibility_artifact({"path": path, "sha256": digest})
+        if compatibility_git_source(root) != before:
+            raise ValueError("compatibility source changed during execution")
+    if set(config["interpreters"]) != {"W", "P"} or set(config["installed_probes"]) != {"W", "P"}:
+        raise ValueError("compatibility execution requires both installed products")
+    probe = ("import hashlib,importlib,json,pathlib,sys;"
+             "from importlib.metadata import distribution;"
+             "m=importlib.import_module(sys.argv[1]);d=distribution(sys.argv[1]);"
+             "print(json.dumps({'module':str(pathlib.Path(m.__file__).resolve()),'version':d.version,"
+             "'files':{str(pathlib.Path(d.locate_file(f)).resolve()):hashlib.sha256(pathlib.Path(d.locate_file(f)).read_bytes()).hexdigest() "
+             "for f in d.files if pathlib.Path(d.locate_file(f)).is_file() and not str(f).endswith(('.pyc','.pyo'))}},sort_keys=True))")
+    def installed():
+        for family, product in (("W", "rdocx"), ("P", "rpptx")):
+            python = config["interpreters"][family]
+            if python not in guards:
+                raise ValueError("compatibility interpreter is unpinned")
+            result = json.loads(subprocess.check_output([python, "-I", "-B", "-c", probe, product], timeout=30))
+            if not result["files"] or result["module"] not in result["files"] or result != config["installed_probes"][family] or any(guards.get(path) != digest for path, digest in result["files"].items()):
+                raise ValueError("compatibility installed product identity changed")
+    authenticate()
+    installed()
+    output = Path(config["output"]).resolve()
+    if output.exists() or output == root or output.is_relative_to(root):
+        raise ValueError("compatibility execution needs a fresh external output directory")
+    timeout = config["case_timeout_seconds"]
+    if type(timeout) is not int or not 1 <= timeout <= 3600:
+        raise ValueError("compatibility case timeout must be finite")
+    output.mkdir(parents=True)
+    execution = output / "frozen-execution"
+    execution.mkdir()
+    for name, raw in inputs.items():
+        target = execution / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    def artifact(path):
+        return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    attempts = []
+    error = None
+    try:
+        for row in records:
+            authenticate()
+            work = output / "cases" / row["id"]
+            work.mkdir(parents=True)
+            script = execution / row["script_path"]
+            env = {key: value for key, value in os.environ.items() if key not in (
+                "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTEST_ADDOPTS", "DYLD_INSERT_LIBRARIES", "BASH_ENV", "ENV")}
+            env.update(config["environment"])
+            # Preserve the frozen direct-script assertion traceback. The sole
+            # import-path override is this authenticated support directory.
+            env.update(PYTHONPATH=str(execution), PYTHONNOUSERSITE="1")
+            result = compatibility_process([config["interpreters"][row["family"]], "-s", "-B", str(script)],
+                                           work, env, timeout, work / "process.log")
+            attempts.append(dict(id=row["id"], family=row["family"], area=row["area"], attempt_number=1,
+                                 script_sha256=row["script_sha256"], **result, evidence=[artifact(work / "process.log")]))
+            (output / "attempts.json").write_text(json.dumps(attempts, indent=2) + "\n")
+            if not result["cleanup"]["leaseReleaseSafe"]:
+                raise ValueError("compatibility process cleanup is unsafe")
+        authenticate()
+        installed()
+        for name, raw in inputs.items():
+            if (execution / name).read_bytes() != raw:
+                raise ValueError("compatibility execution altered a frozen body or runtime input")
+    except BaseException as failure:
+        error = f"{type(failure).__name__}: {failure}"
+        raise
+    finally:
+        receipt = {"source_kind": "git", "dirty": False, "head": before["head"], "tree": before["tree"],
+                   "index_sha256": before["index_sha256"], "attempted": len(attempts), "error": error,
+                   "assertions_exit_zero": sum(row["exit_code"] == 0 and not row["timed_out"] for row in attempts),
+                   "full_acceptance_percent": None, "qualification_status": "pending",
+                   "runtime_overlay": config["runtime_overlay"], "historical_score_relabelled": False}
+        receipt["github_identity"] = identity
+        receipt["build_provenance"] = config["build_provenance"]
+        receipt["missing_non_runtime_history"] = [row for row in closure if not row["path"].startswith(("scripts/", "fixtures/"))
+                                                   and not (frozen / row["path"]).is_file()]
+        (output / "execution-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    return receipt
+
+
+def cmd_compatibility_execute(args: argparse.Namespace) -> int:
+    """Keep execution and subsequent independently admitted reporting in one job."""
+    try:
+        if not 0 <= args.qualification_wait_seconds <= 1800:
+            raise ValueError("compatibility qualification wait must be finite")
+        config_raw = compatibility_artifact({"path": str(Path(args.config).resolve()), "sha256": args.config_sha})
+        config = json.loads(config_raw)
+        receipt = compatibility_execute(config)
+        output = Path(config["output"])
+        deadline = time.monotonic() + args.qualification_wait_seconds
+        packet_path = output / "owner-admitted-report-packet.json"
+        while not packet_path.exists() and time.monotonic() < deadline:
+            time.sleep(1)
+        if not packet_path.exists():
+            raise ValueError("current CI attempts still await independent file/native qualification")
+        if packet_path.stat().st_size > 10_000_000:
+            raise ValueError("compatibility qualification packet exceeds the bound")
+        packet = json.loads(packet_path.read_text())
+        attempts = output / "attempts.json"
+        if packet["attempts"] != {"path": str(attempts), "sha256": hashlib.sha256(attempts.read_bytes()).hexdigest()}:
+            raise ValueError("compatibility reporting must use this actual CI attempt")
+        provenance = json.loads(compatibility_artifact(packet["provenance"]))
+        if provenance.get("github_identity") != receipt["github_identity"]:
+            raise ValueError("compatibility reporting must bind the actual CI run and attempt")
+        if provenance["source_manifest"] != config["source_manifest"] or any(
+            provenance[key] != receipt[key] for key in ("head", "tree", "index_sha256", "source_kind", "dirty")
+        ):
+            raise ValueError("compatibility reporting source differs from this actual CI execution")
+        result = compatibility_report(packet)
+        (output / "qualified-report.json").write_text(json.dumps(result, indent=2) + "\n")
+        # Never upload raw captured output, Office resources or saved documents.
+        # The job summary contains only this fixed count/identity projection.
+        summary = {key: result[key] for key in ("denominator", "by_area", "documentation_subset", "total",
+                                               "full_acceptance_percent", "threshold_met")}
+        summary["github_identity"] = receipt["github_identity"]
+        raw = json.dumps(summary, indent=2)
+        if len(raw.encode()) > 16384:
+            raise ValueError("compatibility report summary exceeds the upload bound")
+        if any(not re.fullmatch(r"[WP]-(BASE|XML|LIFE|AREA)-[0-9]{2}", case_id)
+               for row in [summary["total"], summary["documentation_subset"], *summary["by_area"].values()]
+               for case_id in row["unexpected_failure_ids"]):
+            raise ValueError("compatibility report contains an unreviewed output identity")
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
+            stream.write("## Current unchanged compatibility corpus\n\n```json\n" + raw + "\n```\n")
+        print(json.dumps(summary, sort_keys=True))
+        return 0 if result["threshold_met"] and not result["total"]["unexpected_failure_ids"] else 1
+    except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError) as error:
+        print(f"compatibility-execute: REFUSED: {type(error).__name__}", file=sys.stderr)
+        return 1
 
 
 def compatibility_named_non_successes(packet: dict, source_sha: str, attempts_raw: bytes, by_id: dict) -> set[str]:
@@ -1646,9 +2002,21 @@ def compatibility_report(packet: dict) -> dict:
         if not attempt["evidence"]:
             raise ValueError(f"compatibility attempt has no retained evidence: {record['id']}")
     provenance = json.loads(compatibility_artifact(packet["provenance"]))
-    # The selected source is a working-byte capture, not the Base commit tree.
-    if provenance["source_kind"] != "working-copy" or not provenance["dirty"]:
-        raise ValueError("compatibility source must identify the actual dirty candidate")
+    # Historical dirty captures and actual clean Git executions are distinct.
+    if provenance["source_kind"] == "working-copy":
+        if provenance["dirty"] is not True:
+            raise ValueError("compatibility working-copy source must identify the actual dirty candidate")
+    elif provenance["source_kind"] == "git":
+        if provenance["dirty"] is not False:
+            raise ValueError("compatibility clean Git source cannot claim dirty bytes")
+        current = compatibility_git_source(Path(provenance["source_root"]))
+        for key in ("head", "tree", "index_sha256"):
+            if current[key] != provenance[key]:
+                raise ValueError(f"compatibility clean Git identity changed: {key}")
+        if current["files"] != json.loads(compatibility_artifact(provenance["source_manifest"])):
+            raise ValueError("compatibility clean Git tracked bytes changed")
+    else:
+        raise ValueError("compatibility source kind must be working-copy or git")
     for key, size in (("base", 40), ("head", 40), ("index_sha256", 64)):
         if not re.fullmatch(rf"[0-9a-f]{{{size}}}", provenance[key]):
             raise ValueError(f"compatibility source identity is invalid: {key}")
@@ -1802,6 +2170,11 @@ def main() -> int:
     p = sub.add_parser("published-unified-release"); p.add_argument("tag"); p.add_argument("directory"); p.set_defaults(fn=cmd_published_unified_release)
     p = sub.add_parser("python-release-artifacts"); p.add_argument("tag"); p.add_argument("directory"); p.set_defaults(fn=cmd_python_release_artifacts)
     p = sub.add_parser("compatibility-report"); p.add_argument("packet"); mode = p.add_mutually_exclusive_group(required=True); mode.add_argument("--check", action="store_true"); mode.add_argument("--render", action="store_true"); p.set_defaults(fn=cmd_compatibility_report)
+    p = sub.add_parser("compatibility-execute")
+    p.add_argument("config")
+    p.add_argument("--config-sha", required=True)
+    p.add_argument("--qualification-wait-seconds", type=int, default=1800)
+    p.set_defaults(fn=cmd_compatibility_execute)
 
     args = ap.parse_args()
     if getattr(args, "fid", None) and not FID_RE.match(args.fid):

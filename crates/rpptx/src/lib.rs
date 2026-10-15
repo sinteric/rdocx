@@ -5292,6 +5292,36 @@ impl Presentation {
         if candidate.checked_owner_xml(owner)? == before {
             return Ok(());
         }
+        let previous = relationship_ids(&before)
+            .map_err(|error| invalid_shape_mutation("replace XML", error.to_string()))?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let referenced = candidate.owner_relationship_ids(owner.part())?;
+        let part = candidate.owner_part_name(owner.part())?.to_owned();
+        if let Some(relationships) = candidate.package.get_part_rels(&part).cloned() {
+            let mut released = HashSet::new();
+            let retained = relationships
+                .items
+                .iter()
+                .filter(|relationship| {
+                    let superseded = previous.contains(&relationship.id)
+                        && !referenced.contains(&relationship.id)
+                        && relationship_requires_xml_reference(&relationship.rel_type);
+                    if superseded && !relationship_is_external(relationship) {
+                        released
+                            .insert(OpcPackage::resolve_rel_target(&part, &relationship.target));
+                    }
+                    !superseded
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if retained.len() != relationships.items.len() {
+                let retained = relationships.rebind_for_import(retained, &HashMap::new())?;
+                candidate.package.set_part_rels(&part, retained);
+                prune_unreachable_parts(&mut candidate.package, &released);
+                candidate.media_store = MediaStore::scan(&candidate.package);
+            }
+        }
         candidate.commit_owned_parts(Some(owner.part()))?;
         *self = candidate;
         Ok(())
@@ -18914,30 +18944,28 @@ fn resolve_master_records(
     presentation_part: &str,
     presentation: &CT_Presentation,
 ) -> Result<Vec<MasterRecord>> {
-    presentation
-        .slide_master_ids
-        .iter()
-        .map(|entry| {
-            let relationship = package
-                .get_part_rels(presentation_part)
-                .and_then(|rels| rels.get_by_id(&entry.relationship_id))
-                .ok_or_else(|| Error::MissingRelationship {
-                    source_part: presentation_part.to_owned(),
-                    relationship_id: entry.relationship_id.clone(),
-                })?;
-            require_relationship_type(presentation_part, relationship, rel_types::SLIDE_MASTER)?;
-            reject_external(presentation_part, relationship)?;
-            let part_name = OpcPackage::resolve_rel_target(presentation_part, &relationship.target);
-            let master = CT_SlideMaster::from_xml(required_part(package, &part_name)?)
-                .map_err(|error| error.to_string());
-            Ok(MasterRecord {
-                id: entry.id,
-                part_name,
-                master,
-                dirty: false,
-            })
-        })
-        .collect()
+    let mut masters = Vec::with_capacity(presentation.slide_master_ids.len());
+    for entry in &presentation.slide_master_ids {
+        let relationship = package
+            .get_part_rels(presentation_part)
+            .and_then(|rels| rels.get_by_id(&entry.relationship_id))
+            .ok_or_else(|| Error::MissingRelationship {
+                source_part: presentation_part.to_owned(),
+                relationship_id: entry.relationship_id.clone(),
+            })?;
+        require_relationship_type(presentation_part, relationship, rel_types::SLIDE_MASTER)?;
+        reject_external(presentation_part, relationship)?;
+        let part_name = OpcPackage::resolve_rel_target(presentation_part, &relationship.target);
+        let master = CT_SlideMaster::from_xml(required_part(package, &part_name)?)
+            .map_err(|error| error.to_string());
+        masters.push(MasterRecord {
+            id: entry.id,
+            part_name,
+            master,
+            dirty: false,
+        });
+    }
+    Ok(masters)
 }
 
 fn resolve_layouts(
@@ -29148,6 +29176,257 @@ mod write_tests {
             .children
             .push(ShapeTreeChild::GraphicFrame(Box::new(frame)));
         id
+    }
+
+    #[test]
+    fn fx226_checked_chart_alias_releases_only_superseded_graph() {
+        let (mut deck, first, _) = fx215_native_deck();
+        let other = deck
+            .add_chart(
+                0,
+                ChartKind::Bar,
+                Emu(5),
+                Emu(0),
+                Emu(2_000_000),
+                Emu(1_000_000),
+                &fx215_native_replacement(),
+            )
+            .unwrap()
+            .child
+            .non_visual_id()
+            .unwrap();
+        let (_, old_id, old_chart, _, old_workbook) = deck.chart_owner(0, first, "test").unwrap();
+        let (_, other_id, other_chart, _, other_workbook) =
+            deck.chart_owner(0, other, "test").unwrap();
+        let retained = [other_chart, other_workbook].map(|part| {
+            let bytes = deck.package.get_part(&part).unwrap().to_vec();
+            (part, bytes)
+        });
+        let owner = PptXmlOwner::Shape(ShapeOwner::Slide(0), &[0]);
+        let xml = String::from_utf8(deck.checked_owner_xml(owner).unwrap()).unwrap();
+        let replacement = xml.replace(
+            &format!("r:id=\"{old_id}\""),
+            &format!("r:id=\"{other_id}\""),
+        );
+        assert_ne!(xml, replacement);
+        deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[0], &replacement)
+            .unwrap();
+        assert!(deck.validate().is_empty(), "{:?}", deck.validate());
+        assert!(!deck.package.contains_part(&old_chart));
+        assert!(!deck.package.contains_part(&old_workbook));
+        for (part, bytes) in retained {
+            assert_eq!(deck.package.get_part(&part), Some(bytes.as_slice()));
+        }
+        let bytes = deck.to_bytes().unwrap();
+        deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[0], &replacement)
+            .unwrap();
+        assert_eq!(deck.to_bytes().unwrap(), bytes);
+        let reopened = Presentation::from_bytes(&bytes).unwrap();
+        assert!(reopened.validate().is_empty());
+        assert_eq!(
+            reopened.chart_data(0, first).unwrap(),
+            reopened.chart_data(0, other).unwrap()
+        );
+    }
+
+    #[test]
+    fn fx226_checked_chart_cleanup_preserves_complete_owner_and_shared_targets() {
+        for retained_by in ["sibling", "group", "opaque", "foreign", "other_part"] {
+            let (mut deck, first, old_data) = fx215_native_deck();
+            let other = deck
+                .add_chart(
+                    0,
+                    ChartKind::Bar,
+                    Emu(5),
+                    Emu(0),
+                    Emu(2_000_000),
+                    Emu(1_000_000),
+                    &fx215_native_replacement(),
+                )
+                .unwrap()
+                .child
+                .non_visual_id()
+                .unwrap();
+            let (_, old_id, old_chart, _, old_workbook) =
+                deck.chart_owner(0, first, "test").unwrap();
+            let (_, new_id, _, _, _) = deck.chart_owner(0, other, "test").unwrap();
+            let mut opaque = None;
+            match retained_by {
+                "sibling" | "group" => {
+                    fx215_second_frame(&mut deck, 0, &old_id);
+                    if retained_by == "group" {
+                        let child = deck.slides[0]
+                            .slide
+                            .common_slide_data
+                            .shape_tree
+                            .children
+                            .pop()
+                            .unwrap();
+                        let mut group =
+                            rpptx_oxml::shape_tree::CT_GroupShape::new_empty(100, "Retained group");
+                        group.children.push(child);
+                        deck.slides[0]
+                            .slide
+                            .common_slide_data
+                            .shape_tree
+                            .children
+                            .push(ShapeTreeChild::GroupShape(Box::new(group)));
+                    }
+                }
+                "opaque" | "foreign" => {
+                    let namespace = if retained_by == "opaque" {
+                        R_NS
+                    } else {
+                        "urn:f226:foreign"
+                    };
+                    let raw = format!(
+                        "<p:extLst><p:ext uri=\"f226\"><f:keep xmlns:f=\"urn:f226\" xmlns:r=\"{namespace}\" r:id=\"{old_id}\"/></p:ext></p:extLst>"
+                    );
+                    let slide = String::from_utf8(deck.slides[0].slide.to_xml().unwrap()).unwrap();
+                    let source = slide.replace("</p:sld>", &format!("{raw}</p:sld>"));
+                    deck.slides[0].slide = CT_Slide::from_xml(source.as_bytes()).unwrap();
+                    opaque = Some(raw);
+                }
+                "other_part" => {
+                    deck.add_slide(6).unwrap();
+                    let part = deck.slides[1].part_name.clone();
+                    let mut relations = deck.package.get_part_rels(&part).cloned().unwrap();
+                    let id = relations.add(rel_types::CHART, "../charts/chart1.xml");
+                    deck.package.set_part_rels(&part, relations);
+                    let frame = fx215_second_frame(&mut deck, 1, &id);
+                    assert_eq!(deck.chart_data(1, frame).unwrap().1, old_data);
+                }
+                _ => unreachable!(),
+            }
+            deck.package
+                .set_part("/ppt/custom/f226-orphan.xml", b"<orphan/>".to_vec());
+            deck.package
+                .content_types
+                .add_override("/ppt/custom/f226-orphan.xml", "application/xml");
+            let original_chart = deck.package.get_part(&old_chart).unwrap().to_vec();
+            let original_workbook = deck.package.get_part(&old_workbook).unwrap().to_vec();
+            let slide_part = deck.slides[0].part_name.clone();
+            let relations = deck.package.get_part_rels(&slide_part).unwrap();
+            let raw = String::from_utf8(relations.to_xml().unwrap())
+                .unwrap()
+                .replace(
+                    "<Relationships ",
+                    "<Relationships xmlns:f=\"urn:f226:metadata\" f:root=\"keep\" ",
+                )
+                .replace(
+                    &format!("Id=\"{new_id}\""),
+                    &format!("f:row=\"keep\" Id=\"{new_id}\""),
+                );
+            deck.package.set_part_rels(
+                &slide_part,
+                Relationships::from_xml(raw.as_bytes()).unwrap(),
+            );
+            let xml = String::from_utf8(
+                deck.checked_owner_xml(PptXmlOwner::Shape(ShapeOwner::Slide(0), &[0]))
+                    .unwrap(),
+            )
+            .unwrap();
+            let changed = xml.replace(&format!("r:id=\"{old_id}\""), &format!("r:id=\"{new_id}\""));
+            deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[0], &changed)
+                .unwrap();
+            assert!(
+                deck.validate().is_empty(),
+                "{retained_by}: {:?}",
+                deck.validate()
+            );
+            let keep_row = matches!(retained_by, "sibling" | "group" | "opaque");
+            let keep_target = keep_row || retained_by == "other_part";
+            assert_eq!(
+                deck.package
+                    .get_part_rels(&slide_part)
+                    .unwrap()
+                    .get_by_id(&old_id)
+                    .is_some(),
+                keep_row
+            );
+            assert_eq!(deck.package.contains_part(&old_chart), keep_target);
+            assert_eq!(deck.package.contains_part(&old_workbook), keep_target);
+            if keep_target {
+                assert_eq!(
+                    deck.package.get_part(&old_chart),
+                    Some(original_chart.as_slice())
+                );
+                assert_eq!(
+                    deck.package.get_part(&old_workbook),
+                    Some(original_workbook.as_slice())
+                );
+            }
+            assert_eq!(
+                deck.package.get_part("/ppt/custom/f226-orphan.xml"),
+                Some(b"<orphan/>".as_slice())
+            );
+            let relations = String::from_utf8(
+                deck.package
+                    .get_part_rels(&slide_part)
+                    .unwrap()
+                    .to_xml()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(relations.contains("f:root=\"keep\"") && relations.contains("f:row=\"keep\""));
+            if let Some(raw) = opaque {
+                assert!(
+                    String::from_utf8(deck.slides[0].slide.to_xml().unwrap())
+                        .unwrap()
+                        .contains(&raw)
+                );
+            }
+            let bytes = deck.to_bytes().unwrap();
+            let reopened = Presentation::from_bytes(&bytes).unwrap();
+            assert!(reopened.validate().is_empty());
+        }
+    }
+
+    #[test]
+    fn fx226_checked_xml_external_release_and_invalid_replacement_are_atomic() {
+        let (mut deck, first, old_data) = fx215_native_deck();
+        deck.set_shape_hyperlink(0, first, Some("https://example.com/f226"))
+            .unwrap();
+        let xml = String::from_utf8(
+            deck.checked_owner_xml(PptXmlOwner::Shape(ShapeOwner::Slide(0), &[0]))
+                .unwrap(),
+        )
+        .unwrap();
+        let before = deck.to_bytes().unwrap();
+        let missing = xml.replace("r:id=\"", "r:id=\"missing");
+        assert!(
+            deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[0], &missing)
+                .is_err()
+        );
+        assert_eq!(deck.to_bytes().unwrap(), before);
+        assert_eq!(deck.chart_data(0, first).unwrap().1, old_data);
+        assert!(
+            deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[0], "<p:graphicFrame")
+                .is_err()
+        );
+        assert_eq!(deck.to_bytes().unwrap(), before);
+        let start = xml.find("<a:hlinkClick").unwrap();
+        let end = start + xml[start..].find("/>").unwrap() + 2;
+        let mut without = xml.clone();
+        without.replace_range(start..end, "");
+        deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[0], &without)
+            .unwrap();
+        assert!(deck.validate().is_empty());
+        assert!(
+            deck.package
+                .get_part_rels(&deck.slides[0].part_name)
+                .unwrap()
+                .items
+                .iter()
+                .all(|r| r.rel_type != rel_types::HYPERLINK)
+        );
+        assert_eq!(deck.chart_data(0, first).unwrap().1, old_data);
+        assert!(
+            Presentation::from_bytes(&deck.to_bytes().unwrap())
+                .unwrap()
+                .validate()
+                .is_empty()
+        );
     }
 
     #[test]

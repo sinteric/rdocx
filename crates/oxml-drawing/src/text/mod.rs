@@ -47,7 +47,7 @@ struct SourceBodyProperties {
 #[derive(Clone, Debug)]
 pub struct CT_TextBody {
     pub body_properties: CT_TextBodyProperties,
-    list_style: Option<CT_TextListStyle>,
+    list_style: Option<Box<CT_TextListStyle>>,
     paragraphs: Vec<CT_TextParagraph>,
     raw_children: OrderedRawChildren,
     source_root: Vec<String>,
@@ -226,7 +226,7 @@ impl CT_TextBody {
                         return Err(TextError::DuplicateElement("lstStyle".to_owned()));
                     }
                     let raw = capture_element(reader, &element)?;
-                    list_style = Some(CT_TextListStyle::from_xml_with_namespaces(
+                    list_style = Some(CT_TextListStyle::from_xml_boxed_with_namespaces(
                         &raw,
                         &namespaces,
                     )?);
@@ -237,7 +237,7 @@ impl CT_TextBody {
                         return Err(TextError::DuplicateElement("lstStyle".to_owned()));
                     }
                     let raw = capture_empty_element(&element)?;
-                    list_style = Some(CT_TextListStyle::from_xml_with_namespaces(
+                    list_style = Some(CT_TextListStyle::from_xml_boxed_with_namespaces(
                         &raw,
                         &namespaces,
                     )?);
@@ -416,7 +416,7 @@ impl CT_TextBody {
     }
 
     pub fn list_style(&self) -> Option<&CT_TextListStyle> {
-        self.list_style.as_ref()
+        self.list_style.as_deref()
     }
 
     pub fn paragraph_count(&self) -> usize {
@@ -580,6 +580,70 @@ mod tests {
     use std::panic;
 
     use super::{CT_TextBody, CT_TextListStyle};
+
+    #[test]
+    fn fx225_text_style_boxing_preserves_source_and_public_callers() {
+        let opaque = "<e:foreign v='keep&amp;exact'><!--raw--><e:child/></e:foreign>";
+        let mut levels = String::new();
+        for level in 1..=9 {
+            levels.push_str(&format!("<q:lvl{level}pPr marL=\"{level}\"><q:defRPr lang=\"en-US\"/><e:level n='{level}'/></q:lvl{level}pPr>"));
+        }
+        let xml = format!(
+            "<q:txBody xmlns:q='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:e='urn:extension'><q:bodyPr/><q:lstStyle e:owner='original'><q:defPPr algn=\"ctr\"/>{levels}{opaque}</q:lstStyle><q:p><q:r><q:t>source</q:t></q:r></q:p></q:txBody>"
+        );
+        let body = CT_TextBody::from_xml(xml.as_bytes()).unwrap();
+        let style: Option<&CT_TextListStyle> = body.list_style();
+        assert_eq!(style.unwrap().level(1).unwrap().left_margin, Some(1));
+        assert_eq!(style.unwrap().level(9).unwrap().left_margin, Some(9));
+        let serialized = body.to_xml().unwrap();
+        assert!(String::from_utf8_lossy(&serialized).contains(opaque));
+        let mut clone = body.clone();
+        assert_eq!(clone, body);
+        clone.set_text("changed");
+        clone.paragraph_mut(0).unwrap().add_run(" appended");
+        assert_eq!(body.plain_text(), "source");
+        assert_eq!(clone.list_style(), body.list_style());
+        assert_eq!(clone.empty_like().list_style(), body.list_style());
+        let saved = clone.to_xml().unwrap();
+        let saved_text = String::from_utf8_lossy(&saved);
+        assert!(saved_text.contains(opaque));
+        assert!(saved_text.contains("e:owner='original'"));
+        for level in 1..9 {
+            assert!(
+                saved_text.find(&format!("<q:lvl{level}pPr")).unwrap()
+                    < saved_text.find(&format!("<q:lvl{}pPr", level + 1)).unwrap()
+            );
+        }
+        assert_eq!(
+            CT_TextBody::from_xml(&saved).unwrap().to_xml().unwrap(),
+            saved
+        );
+        let mut direct = style.unwrap().clone();
+        direct.level1.as_mut().unwrap().left_margin = Some(73);
+        assert_eq!(
+            CT_TextListStyle::from_xml(&direct.to_xml().unwrap())
+                .unwrap()
+                .level(1)
+                .unwrap()
+                .left_margin,
+            Some(73)
+        );
+        assert_eq!(
+            body.list_style().unwrap().level(1).unwrap().left_margin,
+            Some(1)
+        );
+        for xml in [
+            b"<a:txBody><a:bodyPr/><a:p/></a:txBody>".as_slice(),
+            b"<a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody>".as_slice(),
+        ] {
+            let value = CT_TextBody::from_xml(xml).unwrap();
+            assert_eq!(value.clone().to_xml().unwrap(), value.to_xml().unwrap());
+            assert_eq!(
+                CT_TextBody::from_xml(&value.to_xml().unwrap()).unwrap(),
+                value
+            );
+        }
+    }
 
     #[test]
     fn autofit_opaque_choice_keeps_inherited_wrapper_namespace_scope() {

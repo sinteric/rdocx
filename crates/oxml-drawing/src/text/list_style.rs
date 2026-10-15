@@ -96,6 +96,13 @@ impl CT_TextListStyle {
         xml: &[u8],
         inherited: &TextNamespaceScope,
     ) -> Result<Self> {
+        Self::from_xml_boxed_with_namespaces(xml, inherited).map(|style| *style)
+    }
+
+    pub(super) fn from_xml_boxed_with_namespaces(
+        xml: &[u8],
+        inherited: &TextNamespaceScope,
+    ) -> Result<Box<Self>> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
@@ -132,22 +139,22 @@ impl CT_TextListStyle {
         }
     }
 
-    fn from_start(start: &BytesStart<'_>) -> Result<Self> {
-        Ok(Self {
+    fn from_start(start: &BytesStart<'_>) -> Result<Box<Self>> {
+        Ok(Box::new(Self {
             raw_attributes: capture_raw_attributes(start)?,
             source_root: text_root_spellings(start)?,
             source_tag: std::str::from_utf8(start.name().as_ref())
                 .map_err(OxmlError::from)?
                 .to_owned(),
             ..Self::default()
-        })
+        }))
     }
 
     fn from_element(
         reader: &mut Reader<&[u8]>,
         start: &BytesStart<'_>,
         inherited: &TextNamespaceScope,
-    ) -> Result<Self> {
+    ) -> Result<Box<Self>> {
         let mut namespaces = text_fragment_scope(start, inherited)?;
         namespaces.fixed_list_style_children = true;
         let mut style = Self::from_start(start)?;

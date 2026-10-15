@@ -104,6 +104,17 @@ push to the end of the sprint run.
    worker's harness result has not been re-established on the integrated tree.
 4. Do not push. `/run-sprint` pushes once, after its gate and its review loop.
 
+### External CI source availability handoff
+
+A handoff marked `external-ci-source-availability` uses the explicit
+preparation exception in `/complete-feature`. Validate its local evidence and
+named pending external gates instead of claiming complete scoped acceptance.
+Integrate it in batch as reviewed, keeping its plan approved and its feature
+in-progress. Preserve its pending gates in the existing plan, progress record
+and run state before consuming the handoff. It does not permit a worker push
+or feature completion. The orchestrator owns the source availability
+checkpoint described in `/run-sprint`.
+
 ## Refused situations
 
 - **Integrating without a validating handoff.** No exceptions.

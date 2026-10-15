@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -351,6 +352,8 @@ class SprintWorkflowTests(unittest.TestCase):
         environment = os.environ.copy()
         environment.update(
             {
+                "OWNER_MODE": "false",
+                "OWNER_RESULT": "skipped",
                 "EVENT_NAME": event_name,
                 "CHANGES_RESULT": changes_result,
             }
@@ -603,12 +606,20 @@ class SprintWorkflowTests(unittest.TestCase):
             "supply-chain",
             "prose",
         }
-        self.assertEqual(needs, filtered_jobs | {"changes"})
+        self.assertEqual(needs, filtered_jobs | {"changes", "owner-compatibility", "no-default-features", "release-regressions", "clippy", "fmt", "doc", "package-oxml-layout"})
         step = self.yaml_step(gate, "Validate filtered jobs")
         environment = self.yaml_block(step, "        env:")
         self.assertEqual(
             self.yaml_direct_lines(environment, 10),
             (
+                "OWNER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true }}",
+                "OWNER_RESULT: ${{ needs['owner-compatibility'].result }}",
+                "NO_DEFAULT_FEATURES_RESULT: ${{ needs['no-default-features'].result }}",
+                "RELEASE_REGRESSIONS_RESULT: ${{ needs['release-regressions'].result }}",
+                "CLIPPY_RESULT: ${{ needs['clippy'].result }}",
+                "FMT_RESULT: ${{ needs['fmt'].result }}",
+                "DOC_RESULT: ${{ needs['doc'].result }}",
+                "PACKAGE_OXML_LAYOUT_RESULT: ${{ needs['package-oxml-layout'].result }}",
                 "EVENT_NAME: ${{ github.event_name }}",
                 "CHANGES_RESULT: ${{ needs.changes.result }}",
                 "TEST_SELECTED: ${{ needs.changes.outputs.test }}",
@@ -1021,7 +1032,7 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assert_no_success_short_circuit(self.operative_lines(test_step))
             self.assertLess(job.index(setup), job.index(test_step))
             self.assertNotIn("continue-on-error", setup + test_step)
-        self.assertEqual(self.yaml_mapping_key_count(ci, "RUST_MIN_STACK"), 2)
+        self.assertEqual(self.yaml_mapping_key_count(ci, "RUST_MIN_STACK"), 4)
 
     def assert_python_pr_job_contract(self, ci: str) -> None:
         triggers = self.yaml_block(ci, "on:")
@@ -1029,7 +1040,7 @@ class SprintWorkflowTests(unittest.TestCase):
             line.split(":", 1)[0]
             for line in self.yaml_direct_lines(triggers, 2)
         )
-        self.assertEqual(trigger_keys, ("push", "pull_request", "schedule"))
+        self.assertEqual(trigger_keys, ("push", "pull_request", "workflow_dispatch", "schedule"))
         pull_request = self.yaml_block(triggers, "  pull_request:")
         self.assertEqual(self.yaml_direct_lines(pull_request, 4), ())
 
@@ -1052,6 +1063,7 @@ class SprintWorkflowTests(unittest.TestCase):
                 "if: needs.changes.outputs.python_bindings == 'true'",
                 "name: Python bindings (${{ matrix.package.distribution }})",
                 "runs-on: macos-26",
+                "env:",
                 "strategy:",
                 "steps:",
             ),
@@ -1059,6 +1071,10 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertFalse(
             any("continue-on-error:" in line for line in self.operative_lines(job))
         )
+        self.assertEqual(self.yaml_direct_lines(self.yaml_block(job, "    env:"), 6), (
+            'CARGO_PROFILE_DEV_OPT_LEVEL: "2"', 'CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"',
+            'CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"',
+        ))
 
         strategy = self.yaml_block(job, "    strategy:")
         self.assertEqual(
@@ -1242,6 +1258,94 @@ class SprintWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assert_python_pr_job_contract(ci)
+
+    def assert_owner_compatibility_job(self, ci: str) -> None:
+        job = self.yaml_block(ci, "  owner-compatibility:")
+        self.assertEqual(self.yaml_direct_lines(job, 4), (
+            "name: Owner unchanged compatibility corpus", "if: >-",
+            'runs-on: ["${{ inputs.runner_label }}"]',
+            "timeout-minutes: 120", "permissions:", "steps:",
+        ))
+        condition = job.split("    if: >-\n", 1)[1].split("    runs-on:", 1)[0]
+        self.assertEqual(" ".join(condition.split()),
+                         "github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true && "
+                         "github.repository == 'tensorbee/rdocx' && github.actor == 'mantissaman' && "
+                         "github.triggering_actor == 'mantissaman' && github.sha == inputs.source_sha && "
+                         "github.ref == inputs.source_ref && startsWith(github.ref, 'refs/heads/') && "
+                         "github.workflow_sha == inputs.workflow_sha")
+        self.assertEqual(self.yaml_direct_lines(self.yaml_block(job, "    permissions:"), 6), ("contents: read",))
+        steps = self.yaml_steps(job)
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(self.yaml_step_identity(steps[0], 0), "Execute and qualify the unchanged frozen corpus")
+        for forbidden in ("uses:", "continue-on-error:", "upload-artifact", "id-token:", "always()"):
+            self.assertNotIn(forbidden, job)
+        self.assertIn("shell: /bin/bash --noprofile --norc -e -o pipefail {0}", steps[0])
+        self.assertIn("working-directory: /private/tmp/S91.1-F-X227-owner-ci/source", steps[0])
+        self.assertIn("compatibility-execute /private/tmp/S91.1-F-X227-owner-ci/execution-config.json", steps[0])
+        self.assertIn("--qualification-wait-seconds 1800", steps[0])
+        self.assertEqual(self.yaml_direct_lines(self.yaml_block(steps[0], "        env:"), 10),
+                         ("F_X227_CONFIG_SHA: ${{ inputs.config_sha }}",))
+        script = self.yaml_run_script(steps[0])
+        self.assertNotIn("${{", script)
+        self.assertIn('[[ "$F_X227_CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]]', script)
+        self.assertIn('--config-sha "$F_X227_CONFIG_SHA"', script)
+
+    def test_owner_compatibility_job_refuses_unreviewed_routing_and_actions(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        self.assert_owner_compatibility_job(ci)
+        owner = self.yaml_block(ci, "  owner-compatibility:")
+        changes = {
+            "actor": ("github.actor == 'mantissaman'", "true"),
+            "triggering-actor": ("github.triggering_actor == 'mantissaman'", "true"),
+            "manual": ("github.event_name == 'workflow_dispatch'", "true"),
+            "reviewed-sha": ("github.sha == inputs.source_sha", "true"),
+            "reviewed-ref": ("github.ref == inputs.source_ref", "true"),
+            "reviewed-workflow": ("github.workflow_sha == inputs.workflow_sha", "true"),
+            "default-labels": ('runs-on: ["${{ inputs.runner_label }}"]', 'runs-on: [self-hosted]'),
+            "config-input": ("F_X227_CONFIG_SHA: ${{ inputs.config_sha }}", "F_X227_CONFIG_SHA: wrong"),
+            "permission": ("contents: read", "contents: write"),
+            "job-env": ("    steps:", "    env:\n      BASH_ENV: malicious\n    steps:"),
+            "action": ("    steps:", "    steps:\n      - uses: malicious/action@main"),
+            "timeout": ("timeout-minutes: 120", "timeout-minutes: 9999"),
+            "shell": ("shell: /bin/bash --noprofile --norc -e -o pipefail {0}", "shell: sh"),
+            "cwd": ("working-directory: /private/tmp/S91.1-F-X227-owner-ci/source", "working-directory: /tmp/other"),
+        }
+        for name, (old, new) in changes.items():
+            self.assertIn(old, owner)
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                self.assert_owner_compatibility_job(ci.replace(owner, owner.replace(old, new, 1), 1))
+
+    def test_owner_dispatch_aggregate_requires_only_its_actual_success(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        script = self.yaml_run_script(self.yaml_step(self.yaml_block(ci, "  ci-gate:"), "Validate filtered jobs"))
+        env = self.ci_gate_environment(selected={}, results={}, changes_result="skipped", event_name="workflow_dispatch")
+        env.update(OWNER_MODE="true", OWNER_RESULT="success")
+        extras = ("NO_DEFAULT_FEATURES", "RELEASE_REGRESSIONS", "CLIPPY", "FMT", "DOC", "PACKAGE_OXML_LAYOUT")
+        for key in extras:
+            env[key + "_RESULT"] = "skipped"
+        def run(values):
+            return subprocess.run(("bash", "-eu", "-o", "pipefail", "-c", script), env=values, capture_output=True).returncode
+        self.assertEqual(run(env), 0)
+        for result in ("failure", "cancelled", "skipped", ""):
+            self.assertNotEqual(run(dict(env, OWNER_RESULT=result)), 0)
+        for key in (*extras, "TEST", "MSRV", "WASM", "PYTHON_BINDINGS", "PRESENTATION_FIDELITY", "WORD_FIDELITY", "HASH_HARNESS", "SUPPLY_CHAIN", "PROSE", "CHANGES"):
+            self.assertNotEqual(run(dict(env, **{key + "_RESULT": "success"})), 0, key)
+        self.assertNotEqual(run(dict(env, OWNER_MODE="false")), 0)
+        exclusion = "!(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true)"
+        for name in ("changes", "no-default-features", "release-regressions", "clippy", "fmt", "doc", "package-oxml-layout"):
+            self.assertIn(exclusion, self.yaml_block(ci, f"  {name}:"), name)
+
+    def test_debug_optimized_binding_jobs_keep_all_debug_safety_guards(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        self.assert_python_pr_job_contract(ci)
+        binding = self.yaml_block(ci, "  python-bindings:")
+        for old, new in [('CARGO_PROFILE_DEV_OPT_LEVEL: "2"', 'CARGO_PROFILE_DEV_OPT_LEVEL: "0"'),
+                         ('CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"', 'CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "false"'),
+                         ('CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"', 'CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "false"'),
+                         ('maturin develop --locked', 'maturin develop --release --locked')]:
+            self.assertIn(old, binding)
+            with self.subTest(field=old), self.assertRaises(AssertionError):
+                self.assert_python_pr_job_contract(ci.replace(binding, binding.replace(old, new, 1), 1))
 
     def test_python_font_bootstrap_cannot_be_skipped_or_narrowed(self) -> None:
         ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
@@ -2361,9 +2465,9 @@ class SprintWorkflowTests(unittest.TestCase):
             "cancel-other-package-on-failure": ci.replace(
                 "fail-fast: false", "fail-fast: true", 1
             ),
-            "unversioned-pytest": ci.replace("pytest==9.1.1", "pytest", 1),
-            "wrong-python-version": ci.replace(
-                'python-version: "3.12.9"', 'python-version: "3.13"', 1
+            "unversioned-pytest": mutate_job("pytest==9.1.1", "pytest"),
+            "wrong-python-version": mutate_job(
+                'python-version: "3.12.9"', 'python-version: "3.13"'
             ),
             "wrong-rdocx-oracle": ci.replace(
                 "python-docx==1.2.0", "python-docx==1.1.2", 1
@@ -2456,29 +2560,25 @@ class SprintWorkflowTests(unittest.TestCase):
                 "          workspaces: crates/rdocx-py\n",
                 1,
             ),
-            "wrong-setup-python-sha": ci.replace(
+            "wrong-setup-python-sha": mutate_job(
                 "a309ff8b426b58ec0e2a45f0f869d46889d02405",
                 "0000000000000000000000000000000000000000",
-                1,
             ),
-            "wrong-setup-python-sha-with-required-comment": ci.replace(
+            "wrong-setup-python-sha-with-required-comment": mutate_job(
                 "actions/setup-python@"
                 "a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0",
                 "actions/setup-python@"
                 "0000000000000000000000000000000000000000 "
                 "# v6.2.0 a309ff8b426b58ec0e2a45f0f869d46889d02405",
-                1,
             ),
-            "setup-python-extra-input": ci.replace(
+            "setup-python-extra-input": mutate_job(
                 '          python-version: "3.12.9"\n',
                 '          python-version: "3.12.9"\n'
                 '          architecture: "x64"\n',
-                1,
             ),
-            "setup-python-comment-smuggled-version": ci.replace(
+            "setup-python-comment-smuggled-version": mutate_job(
                 '          python-version: "3.12.9"\n',
                 '          python-version: "3.13" # python-version: "3.12.9"\n',
-                1,
             ),
             "missing-rpptx-exclusion": ci.replace(
                 "--exclude rdocx-py --exclude rpptx-py",
@@ -2497,7 +2597,7 @@ class SprintWorkflowTests(unittest.TestCase):
             line.split(":", 1)[0]
             for line in self.yaml_direct_lines(triggers, 2)
         )
-        self.assertEqual(trigger_keys, ("push", "pull_request", "schedule"))
+        self.assertEqual(trigger_keys, ("push", "pull_request", "workflow_dispatch", "schedule"))
         pull_request = self.yaml_block(triggers, "  pull_request:")
         self.assertEqual(self.yaml_direct_lines(pull_request, 4), ())
 
@@ -3041,6 +3141,106 @@ class SprintWorkflowTests(unittest.TestCase):
             with self.subTest(mutation=name), self.assertRaises((AssertionError, ValueError)):
                 self.assert_wheel_priority_routes(value)
 
+    def assert_native_font_tool_routes(self, ci: str) -> None:
+        for name in ("test", "msrv"):
+            job = self.yaml_block(ci, f"  {name}:")
+            setup = self.yaml_step(job, "Prepare independent native font tools")
+            self.assertEqual(self.yaml_direct_lines(setup, 8), ("shell: bash", "run: |"))
+            self.assertEqual(self.yaml_run_lines(setup), (
+                'native_venv="${RUNNER_TEMP}/native-font-tools-venv"',
+                'python3 -m venv "$native_venv"',
+                '"$native_venv/bin/python" -m pip install pytest==9.1.1 meson==1.9.1',
+                'export PATH="$native_venv/bin:$PATH"',
+                '\"$native_venv/bin/python\" -I -B crates/rdocx-py/tests/test_rendering_threads.py \\',
+                '--prepare-fx195-inputs "${RUNNER_TEMP}/native-font-tools" \\',
+                '--native-tools-only',
+            ))
+            self.assert_no_success_short_circuit(self.yaml_run_lines(setup))
+            self.assertLess(job.index("Prepare independent native font tools"), job.index("Run full workspace suite"))
+            self.assertIn("libcairo2-dev libglib2.0-dev", self.yaml_step(job, "Install pinned Poppler 26.01.0"))
+            python = self.yaml_step(job, "Set up Python 3.12")
+            self.assertIn('python-version: "3.12.9"', python)
+            self.assertIn('actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405', python)
+        for name in ("test", "presentation-fidelity"):
+            step = self.yaml_step(self.yaml_block(ci, f"  {name}:"), "Run deterministic animation golden")
+            self.assertEqual(self.yaml_direct_lines(self.yaml_block(step, "        env:"), 10), ('RUST_MIN_STACK: "8388608"',))
+            self.assertIn("animated_gif_and_motion_jpeg_avi_match_the_reviewed_two_machine_manifest", step)
+            self.assert_no_success_short_circuit(self.operative_lines(step))
+
+    def test_native_font_tools_and_animation_stack_routes(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        self.assert_native_font_tool_routes(ci)
+        job = self.yaml_block(ci, "  msrv:")
+        step = self.yaml_step(job, "Prepare independent native font tools")
+        mutations = {
+            "missing": ci.replace(step, ""),
+            "commented": ci.replace('--native-tools-only', '# --native-tools-only', 1),
+            "swallowed": ci.replace('--native-tools-only', '--native-tools-only || true', 1),
+            "wrong-version": ci.replace('meson==1.9.1', 'meson==1.9.0', 1),
+            "late": ci.replace(step, "").replace(job.replace(step, ""), job.replace(step, "") + step),
+            "missing-stack": ci.replace('          RUST_MIN_STACK: "8388608"\n', '', 2),
+        }
+        for name, value in mutations.items():
+            self.assertNotEqual(ci, value, name)
+            with self.subTest(mutation=name), self.assertRaises((AssertionError, ValueError)):
+                self.assert_native_font_tool_routes(value)
+
+    def test_native_font_tool_preparation_keeps_source_and_full_mode_contract(self) -> None:
+        import ast
+        path = workflow.REPO / "crates/rdocx-py/tests/test_rendering_threads.py"
+        source = path.read_text()
+        function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "_fx195_prepare_inputs")
+        branch = next(node for node in function.body if isinstance(node, ast.If) and ast.unparse(node.test) == "native_tools_only")
+        body = ast.get_source_segment(source, branch)
+        self.assertIn("assert source_guard() == before", body)
+        self.assertIn("assert all(digest(p) == sha for p, sha in tool_guards.items())", body)
+        self.assertIn("GITHUB_PATH", body)
+        self.assertIn("'actual-independent-native-tools-prepared'", body)
+        self.assertIsInstance(branch.body[-1], ast.Return)
+        self.assertLess(branch.lineno, source[:source.index("    fonts = root / 'crates/oxml-layout/fonts'", source.index('def _fx195_prepare_inputs'))].count('\n') + 1)
+        self.assertIn("2357ed966c6ced7bfa720b0640c0231065af01158fbea215093ffa15aed44371", source)
+        self.assertIn("assert identities[name] == name + ' (HarfBuzz) 14.4.0'", source)
+        self.assertIn("'actual-independent-inputs-prepared'", source)
+        self.assertIn("'actual_transitive_abi_qualified': True", source)
+        self.assertIn("'rustc_verbose_version': compiler_version", source)
+
+    def test_closed_main_sprint_tag_guard_executes_actual_shell(self) -> None:
+        wheels = (workflow.REPO / ".github/workflows/wheels.yml").read_text()
+        step = self.yaml_step(self.yaml_block(wheels, "  release-assets:"), "Verify tag points to the closed main merge")
+        shell = '\n'.join(self.yaml_run_lines(step))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            repo = root / "repo"
+            subprocess.run(["git", "clone", str(remote), str(repo)], check=True, capture_output=True)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL).decode().strip()
+            git("config", "user.name", "Guard test")
+            git("config", "user.email", "guard@example.invalid")
+            git("checkout", "-b", "main")
+            git("commit", "--allow-empty", "-m", "first")
+            head = git("rev-parse", "HEAD")
+            git("push", "origin", "main")
+            cases = (("s91", True, True), ("s91.1", True, True), ("", True, False),
+                     ("S91.1", True, False), ("s91.1x", True, False),
+                     ("s91.1.2", True, False), ("s91", False, False),
+                     ("duplicate", True, False), ("wrong-main", True, False))
+            for name, annotated, expected in cases:
+                for tag in git("tag").splitlines():
+                    git("tag", "-d", tag)
+                tags = ("s91", "s91.1") if name == "duplicate" else ("s91.1",) if name == "wrong-main" else (name,) if name else ()
+                for tag in tags:
+                    git("tag", "-a", tag, "-m", "closed") if annotated else git("tag", tag)
+                sha = head
+                if name == "wrong-main":
+                    git("commit", "--allow-empty", "-m", "not main")
+                    sha = git("rev-parse", "HEAD")
+                result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", shell], cwd=repo,
+                                        env={**os.environ, "GITHUB_SHA": sha}, capture_output=True)
+                with self.subTest(case=name, annotated=annotated):
+                    self.assertEqual(result.returncode == 0, expected, result.stderr.decode())
+
     def assert_wheels_workflow_contract(self, workflow_bytes: bytes) -> None:
         wheels = workflow_bytes.decode("utf-8", errors="strict")
         self.assertIn('tags: ["v*", "rpptx-v*"]', wheels)
@@ -3104,7 +3304,10 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn('[[ "${GITHUB_SHA}" == "${main_sha}" ]]', aggregate)
         self.assertIn('git tag --points-at "${GITHUB_SHA}" --list \'s[0-9]*\'', aggregate)
         self.assertIn('git cat-file -t "refs/tags/${sprint_tags}"', aggregate)
-        self.assertIn('[[ "${sprint_tags}" =~ ^s[0-9]+$ ]]', aggregate)
+        self.assertIn('[[ "${sprint_tags}" =~ ^s[0-9]+(\\.[0-9]+)?$ ]]', aggregate)
+        self.assertIn("sed '/^$/d' | wc -l | tr -d ' '", aggregate)
+        self.assertIn('\" == 1 ]]', aggregate)
+        self.assertIn('[[ "$(git cat-file -t "refs/tags/${sprint_tags}")" == tag ]]', aggregate)
         self.assertLess(aggregate.index("Verify tag points to the closed main merge"), aggregate.index("Verify publication archives"))
         self.assertIn('unified-release-family "${{ github.ref_name }}"', aggregate)
         self.assertIn("Verify selected package inventory", aggregate)
@@ -3165,6 +3368,8 @@ class SprintWorkflowTests(unittest.TestCase):
             "missing-main-sha-check": ('[[ "${GITHUB_SHA}" == "${main_sha}" ]]', 'true'),
             "missing-sprint-tag-check": ('git tag --points-at "${GITHUB_SHA}" --list \'s[0-9]*\'', 'echo s86'),
             "sprint-tag-not-annotated": ('git cat-file -t "refs/tags/${sprint_tags}"', 'echo tag'),
+            "missing-sprint-count": ('| wc -l | tr -d \' \'', '| echo 1 #'),
+            "missing-annotation-comparison": ('\" == tag ]]', '\" == commit ]]'),
             "missing-package-inventory": (
                 'validate_release_package_inventory(', 'print('
             ),
@@ -6914,6 +7119,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertEqual(
             direct,
             (
+                "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}",
                 "name: Release regressions",
                 "runs-on: ubuntu-latest",
                 "steps:",
@@ -7457,6 +7663,39 @@ Pedro Assumpcao and the rdocx maintainers.
                         "Verify must record `/verify --scoped F-123, pass`.",
                         stderr.getvalue(),
                     )
+
+    def test_external_ci_handoff_requires_exact_pending_checkpoint(self) -> None:
+        handoff = """**F-ID**: F-123
+**Owner**: codex
+**Branch**: work/f-123-codex
+**Worktree**: /tmp/unit
+**Base**: abc123
+**Head**: def456
+**Design plan**: .claude/plans/F-123-design.md
+**Microscope**: review, 0 defects, 0 smells
+**Verify**: /verify --scoped F-123, local checks pass, external CI pending
+**Hash harness**: unchanged
+**Test gate**: executor_controls, pass, external CI pending
+**Checkpoint**: external-ci-source-availability
+**External gates**: owner-compatibility actual100 qualification, pending
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.md"
+            args = argparse.Namespace(path=str(path), fid="F-123")
+            path.write_text(handoff)
+            with contextlib.redirect_stdout(io.StringIO()): self.assertEqual(workflow.cmd_validate_handoff(args), 0)
+            for old, new in (
+                ("**Checkpoint**: external-ci-source-availability\n", ""),
+                ("external-ci-source-availability", "unknown-checkpoint"),
+                ("owner-compatibility actual100 qualification, pending", ""),
+                ("owner-compatibility actual100 qualification, pending", "external CI, pending"),
+                ("local checks pass, external CI pending", "pass"),
+                ("executor_controls, pass, external CI pending", "complete, pass, external CI pending"),
+                ("executor_controls, pass, external CI pending", "executor_controls, pass"),
+            ):
+                with self.subTest(change=(old, new)), contextlib.redirect_stderr(io.StringIO()):
+                    path.write_text(handoff.replace(old, new))
+                    self.assertEqual(workflow.cmd_validate_handoff(args), 1)
 
     def test_recorded_evidence_captures_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -8527,6 +8766,64 @@ class DocxAuthoringConformanceTests(unittest.TestCase):
 
 
 class CompatibilityReportTests(unittest.TestCase):
+    def test_owner_executor_exists_and_rejects_unadmitted_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "admitted"):
+            workflow.compatibility_execute({"status": "pending"})
+
+    def test_clean_git_source_admission_checks_actual_tree_and_working_bytes(self) -> None:
+        repository = self.root / "clean-source"
+        repository.mkdir()
+        def git(*args):
+            return subprocess.check_output(["git", "--no-optional-locks", *args], cwd=repository).decode().strip()
+        git("init", "-q")
+        (repository / "provider.py").write_text("VALUE = 1\n")
+        git("add", "provider.py")
+        git("-c", "user.name=Unit", "-c", "user.email=unit@example.invalid", "commit", "-qm", "unit")
+        manifest = {"provider.py": {"sha256": hashlib.sha256((repository / "provider.py").read_bytes()).hexdigest(), "mode": 420, "size": 10}}
+        self.source = self.artifact("clean-source.json", manifest)
+        provenance = {"source_kind": "git", "dirty": False, "source_root": str(repository),
+                      "base": git("rev-parse", "HEAD"), "head": git("rev-parse", "HEAD"),
+                      "tree": git("rev-parse", "HEAD^{tree}"),
+                      "index_sha256": hashlib.sha256(subprocess.check_output(["git", "--no-optional-locks", "ls-files", "--stage", "-z"], cwd=repository)).hexdigest(),
+                      "source_manifest": self.source, "evidence": [self.evidence]}
+        self.packet["provenance"] = self.artifact("provenance.json", provenance)
+        self.assertIsNone(workflow.compatibility_report(self.packet)["full_acceptance_percent"])
+        for field, value in (("dirty", True), ("tree", "0" * 40), ("head", "0" * 40), ("index_sha256", "0" * 64)):
+            with self.subTest(field=field):
+                self.packet["provenance"] = self.artifact("provenance.json", dict(provenance, **{field: value}))
+                with self.assertRaises(ValueError):
+                    workflow.compatibility_report(self.packet)
+        self.packet["provenance"] = self.artifact("provenance.json", provenance)
+        (repository / "provider.py").write_text("VALUE = 2\n")
+        with self.assertRaises(ValueError):
+            workflow.compatibility_report(self.packet)
+        git("update-index", "--assume-unchanged", "provider.py")
+        self.assertEqual(git("status", "--porcelain"), "")
+        with self.assertRaisesRegex(ValueError, "working bytes or mode"):
+            workflow.compatibility_report(self.packet)
+        (repository / "provider.py").write_text("VALUE = 1\n")
+        git("config", "core.filemode", "false")
+        (repository / "provider.py").chmod(0o755)
+        self.assertEqual(git("status", "--porcelain"), "")
+        with self.assertRaisesRegex(ValueError, "working bytes or mode"):
+            workflow.compatibility_report(self.packet)
+
+    def test_owner_ci_keeps_literal_steps_and_debug_optimized_hosted_suites(self) -> None:
+        text = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        self.assertIn("  owner-compatibility:", text)
+        job = text.split("  owner-compatibility:", 1)[1].split("\n  ci-gate:", 1)[0]
+        self.assertNotIn("uses:", job)
+        self.assertIn("workflow_dispatch", job)
+        self.assertIn("github.actor == 'mantissaman'", job)
+        self.assertIn("github.triggering_actor == 'mantissaman'", job)
+        self.assertIn("compatibility-execute", job)
+        binding = text.split("  python-bindings:", 1)[1].split("\n  wasm:", 1)[0]
+        self.assertIn('CARGO_PROFILE_DEV_OPT_LEVEL: "2"', binding)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"', binding)
+        self.assertIn('CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"', binding)
+        self.assertIn('maturin develop --locked', binding)
+        self.assertNotIn('maturin develop --release', binding)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -8562,6 +8859,255 @@ class CompatibilityReportTests(unittest.TestCase):
         raw = json.dumps(value, sort_keys=True).encode()
         path.write_bytes(raw)
         return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+
+    def unit_execution_config(self) -> dict:
+        """A synthetic protocol fixture. Never a product or native acceptance."""
+        source = self.root / "unit-source"
+        (source / "crates/unit/src").mkdir(parents=True)
+        provider = source / "crates/unit/src/lib.rs"
+        provider.write_text("// unit only\n")
+        def git(*args):
+            return subprocess.check_output(["git", "--no-optional-locks", *args], cwd=source)
+        git("init", "-q"); git("add", ".")
+        git("-c", "user.name=Unit", "-c", "user.email=unit@example.invalid", "commit", "-qm", "unit")
+        current = workflow.compatibility_git_source(source)
+        captured = self.artifact("unit-source-map.json", current["files"])
+        frozen = self.root / "unit-frozen"
+        (frozen / "scripts").mkdir(parents=True)
+        (frozen / "support.py").write_text("TOKEN = 'unit-only'\n")
+        def ref(path):
+            return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        records, closure = [], []
+        for row in self.records:
+            name = f"scripts/{row['id']}.py"
+            path = frozen / name
+            path.write_text("from support import *\nassert TOKEN == 'unit-only'\n")
+            records.append(dict(row, script_path=name, script_sha256=ref(path)["sha256"]))
+            closure.append({"path": name, "sha256": ref(path)["sha256"]})
+        replacements = {}
+        for i, name in enumerate(("fixtures/native-notes.pptx", "fixtures/transition-sound.pptx")):
+            replacement = self.root / f"unit-revision-{i}"
+            replacement.write_bytes(b"unit-only fixture revision")
+            original = str(i) * 64
+            replacements[name] = {"original_sha256": original, "replacement": ref(replacement)}
+            closure.append({"path": name, "sha256": original})
+        manifest = frozen / "manifest.json"
+        manifest.write_text(json.dumps({"records": records, "support_sha256": ref(frozen / "support.py")["sha256"]}))
+        bodies = frozen / "body-manifest.json"; bodies.write_text('{"unit_test_only":true}')
+        freeze = frozen / "freeze-receipt.json"; freeze.write_text(json.dumps({"files": closure}))
+        self.enterContext(patch.object(workflow, "COMPATIBILITY_MANIFEST_SHA", ref(manifest)["sha256"]))
+        self.enterContext(patch.object(workflow, "COMPATIBILITY_BODY_SHA", ref(bodies)["sha256"]))
+        self.enterContext(patch.object(workflow, "COMPATIBILITY_FREEZE_SHA", ref(freeze)["sha256"]))
+        python = str(Path(sys.executable).resolve())
+        probes = {family: {"module": str(provider), "version": "unit-only", "files": {str(provider): ref(provider)["sha256"]}}
+                  for family in ("W", "P")}
+        build = self.artifact("unit-build-provenance.json", {"status": "admitted", "current_source_manifest_sha256": captured["sha256"],
+                              "build_source_capture": self.artifact("unit-build-capture.json", {"files": current["files"]}),
+                              "products": {"rdocx": self.evidence, "rpptx": self.evidence},
+                              "installed_probes_sha256": hashlib.sha256(json.dumps(probes, sort_keys=True).encode()).hexdigest()})
+        identity = {"GITHUB_REPOSITORY": "tensorbee/rdocx", "GITHUB_REPOSITORY_ID": "unit-only",
+                    "GITHUB_ACTOR": "mantissaman", "GITHUB_TRIGGERING_ACTOR": "mantissaman", "GITHUB_EVENT_NAME": "workflow_dispatch",
+                    "GITHUB_REF": "refs/heads/unit", "GITHUB_SHA": current["head"],
+                    "GITHUB_WORKFLOW_REF": "tensorbee/rdocx/.github/workflows/ci.yml@refs/heads/unit",
+                    "GITHUB_WORKFLOW_SHA": current["head"], "GITHUB_RUN_ID": "12345", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_JOB": "owner-compatibility"}
+        self.enterContext(patch.dict(os.environ, identity))
+        real = subprocess.check_output
+        def output(argv, *args, **kwargs):
+            if argv[0] == python and "-c" in argv:
+                return json.dumps(probes["W" if argv[-1] == "rdocx" else "P"]).encode()
+            return real(argv, *args, **kwargs)
+        self.enterContext(patch.object(workflow.subprocess, "check_output", side_effect=output))
+        return {"status": "admitted", "source_root": str(source), **{key: current[key] for key in ("head", "tree", "index_sha256")},
+                "github_identity": {key: value for key, value in identity.items() if key not in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")}, "source_manifest": captured, "build_provenance": build,
+                "manifest": ref(manifest), "body_manifest": ref(bodies), "frozen_closure": ref(freeze),
+                "runtime_overlay": self.artifact("unit-overlay.json", {"status": "admitted", "replacements": replacements,
+                                                  "native_producer_evidence": [self.evidence]}),
+                "runtime_guards": {python: ref(Path(python))["sha256"], str(provider): ref(provider)["sha256"]},
+                "interpreters": {"W": python, "P": python}, "installed_probes": probes,
+                "case_timeout_seconds": 5, "environment": {}, "output": str(self.root / "unit-actual-attempt")}
+
+    def test_executor_runs_exact_whole_unit_corpus_without_creating_acceptance(self) -> None:
+        config = self.unit_execution_config()
+        receipt = workflow.compatibility_execute(config)
+        self.assertEqual(receipt["attempted"], 100)
+        self.assertEqual(receipt["assertions_exit_zero"], 100)
+        self.assertIsNone(receipt["full_acceptance_percent"])
+        self.assertEqual(receipt["qualification_status"], "pending")
+        self.assertEqual(receipt["github_identity"]["GITHUB_RUN_ID"], "12345")
+        self.assertEqual(receipt["github_identity"]["GITHUB_RUN_ATTEMPT"], "1")
+        self.assertEqual(len(receipt["github_identity"]), 12)
+        rows = json.loads((Path(config["output"]) / "attempts.json").read_text())
+        self.assertEqual(len({r["id"] for r in rows}), 100)
+        self.assertTrue(all(r["attempt_number"] == 1 and r["cleanup"]["leaseReleaseSafe"] for r in rows))
+        with self.assertRaisesRegex(ValueError, "fresh external"):
+            workflow.compatibility_execute(config)
+
+    def test_executor_binds_actual_dynamic_run_ids_without_predicting_dispatch(self) -> None:
+        config = self.unit_execution_config()
+        self.assertNotIn("GITHUB_RUN_ID", config["github_identity"])
+        self.assertNotIn("GITHUB_RUN_ATTEMPT", config["github_identity"])
+        with patch.object(workflow, "compatibility_process") as launch:
+            for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+                for wrong in ("", "0", "-1", "abc", "1x", "01"):
+                    with self.subTest(key=key, wrong=wrong), patch.dict(os.environ, {key: wrong}):
+                        with self.assertRaisesRegex(ValueError, "GitHub identity"): workflow.compatibility_execute(config)
+                with patch.dict(os.environ):
+                    os.environ.pop(key)
+                    with self.assertRaisesRegex(ValueError, "GitHub identity"): workflow.compatibility_execute(config)
+            for key in ("GITHUB_SHA", "GITHUB_REF", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF"):
+                with patch.dict(os.environ, {key: "wrong"}):
+                    with self.assertRaisesRegex(ValueError, "GitHub identity"): workflow.compatibility_execute(config)
+            launch.assert_not_called()
+
+    def test_executor_rejects_input_and_build_mutations_before_any_case(self) -> None:
+        config = self.unit_execution_config()
+        build = json.loads(workflow.compatibility_artifact(config["build_provenance"]))
+        wrong = dict(build, installed_probes_sha256="0" * 64)
+        with patch.object(workflow, "compatibility_process") as launch:
+            config["build_provenance"] = self.artifact("wrong-build.json", wrong)
+            with self.assertRaisesRegex(ValueError, "installed products"):
+                workflow.compatibility_execute(config)
+            config["build_provenance"] = self.artifact("unit-build-provenance.json", build)
+            support = Path(config["manifest"]["path"]).parent / "support.py"
+            original = support.read_bytes(); support.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "support changed"):
+                workflow.compatibility_execute(config)
+            support.write_bytes(original)
+            script = support.parent / "scripts/W-BASE-01.py"; script.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "evidence changed"):
+                workflow.compatibility_execute(config)
+            launch.assert_not_called()
+
+    def test_executor_refuses_changed_allocation_and_overlay_identity(self) -> None:
+        config = self.unit_execution_config()
+        original_ref = dict(config["manifest"])
+        original_raw = workflow.compatibility_artifact(original_ref)
+        original = json.loads(original_raw)
+        with patch.object(workflow, "compatibility_process") as launch:
+            for mutation in ("missing", "extra", "duplicate", "renamed"):
+                value = json.loads(json.dumps(original))
+                if mutation == "missing": value["records"].pop()
+                if mutation == "extra": value["records"].append(dict(value["records"][0]))
+                if mutation == "duplicate": value["records"][1]["id"] = value["records"][0]["id"]
+                if mutation == "renamed": value["records"][0]["id"] = "W-BASE-99"
+                Path(original_ref["path"]).write_text(json.dumps(value))
+                ref = {"path": original_ref["path"], "sha256": hashlib.sha256(Path(original_ref["path"]).read_bytes()).hexdigest()}
+                with patch.object(workflow, "COMPATIBILITY_MANIFEST_SHA", ref["sha256"]):
+                    config["manifest"] = ref
+                    with self.assertRaises(ValueError): workflow.compatibility_execute(config)
+            Path(original_ref["path"]).write_bytes(original_raw)
+            config["manifest"] = original_ref
+            overlay = json.loads(workflow.compatibility_artifact(config["runtime_overlay"]))
+            first = next(iter(overlay["replacements"]))
+            for mutation in ("original", "replacement"):
+                value = json.loads(json.dumps(overlay))
+                if mutation == "original": value["replacements"][first]["original_sha256"] = "f" * 64
+                else: value["replacements"][first]["replacement"]["sha256"] = "f" * 64
+                config["runtime_overlay"] = self.artifact("unit-mutated-overlay.json", value)
+                with self.assertRaises(ValueError): workflow.compatibility_execute(config)
+            launch.assert_not_called()
+
+    def test_executor_detects_post_case_source_input_and_install_tampering(self) -> None:
+        original_root = self.root
+        real_process = workflow.compatibility_process
+        for target in ("source", "input", "install", "copied-body"):
+            with self.subTest(target=target):
+                self.root = original_root / target; self.root.mkdir()
+                config = self.unit_execution_config()
+                tampered = False
+                original_probe = workflow.subprocess.check_output
+                def probe_after(*args, **kwargs):
+                    value = original_probe(*args, **kwargs)
+                    if target == "install" and tampered and "-c" in args[0]:
+                        value = json.loads(value); value["version"] = "changed"; return json.dumps(value).encode()
+                    return value
+                def one_case(*args):
+                    nonlocal tampered
+                    result = real_process(*args)
+                    tampered = True
+                    if target == "source":
+                        (Path(config["source_root"]) / "crates/unit/src/lib.rs").write_text("changed")
+                    elif target == "input":
+                        (Path(config["manifest"]["path"]).parent / "support.py").write_text("changed")
+                    elif target == "install":
+                        pass
+                    else:
+                        (Path(config["output"]) / "frozen-execution/support.py").write_text("changed")
+                    return result
+                with patch.object(workflow, "compatibility_process", side_effect=one_case), \
+                     patch.object(workflow.subprocess, "check_output", side_effect=probe_after):
+                    with self.assertRaises(ValueError): workflow.compatibility_execute(config)
+                receipt = json.loads((Path(config["output"]) / "execution-receipt.json").read_text())
+                self.assertIsNotNone(receipt["error"])
+                self.assertIsNone(receipt["full_acceptance_percent"])
+        self.root = original_root
+
+    def test_executor_stops_at_first_unsafe_case_lease(self) -> None:
+        config = self.unit_execution_config()
+        def unsafe(argv, cwd, env, timeout, log):
+            log.write_text("owned synthetic unsafe lease")
+            return {"exit_code": 0, "timed_out": False, "cleanup": {"leaseReleaseSafe": False}}
+        with patch.object(workflow, "compatibility_process", side_effect=unsafe) as launch:
+            with self.assertRaisesRegex(ValueError, "cleanup is unsafe"): workflow.compatibility_execute(config)
+            self.assertEqual(launch.call_count, 1)
+        receipt = json.loads((Path(config["output"]) / "execution-receipt.json").read_text())
+        self.assertEqual(receipt["attempted"], 1)
+        self.assertIsNone(receipt["full_acceptance_percent"])
+
+    def test_current_execution_without_native_admission_cannot_emit_score(self) -> None:
+        config = self.unit_execution_config()
+        ref = self.artifact("unit-execution-config.json", config)
+        args = argparse.Namespace(config=ref["path"], config_sha=ref["sha256"], qualification_wait_seconds=0)
+        receipt = {"head": config["head"], "tree": config["tree"], "index_sha256": config["index_sha256"],
+                   "source_kind": "git", "dirty": False}
+        Path(config["output"]).mkdir()
+        summary = self.root / "summary.md"
+        with patch.object(workflow, "compatibility_execute", return_value=receipt), \
+             patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(workflow.cmd_compatibility_execute(args), 1)
+        self.assertFalse(summary.exists())
+        self.assertFalse((Path(config["output"]) / "qualified-report.json").exists())
+
+    def test_same_job_summary_uses_only_qualified_fixed_count_projection(self) -> None:
+        config = self.unit_execution_config()
+        out = Path(config["output"]); out.mkdir()
+        attempts = out / "attempts.json"; attempts.write_text("[]")
+        ref = self.artifact("unit-config.json", config)
+        receipt = {"source_kind": "git", "dirty": False, **{k: config[k] for k in ("head", "tree", "index_sha256")},
+                   "github_identity": dict(config["github_identity"], GITHUB_RUN_ID="12345", GITHUB_RUN_ATTEMPT="1")}
+        provenance = self.artifact("unit-provenance.json", dict(receipt, source_manifest=config["source_manifest"]))
+        packet = {"attempts": {"path": str(attempts), "sha256": hashlib.sha256(attempts.read_bytes()).hexdigest()}, "provenance": provenance}
+        packet_path = out / "owner-admitted-report-packet.json"; packet_path.write_text(json.dumps(packet))
+        args = argparse.Namespace(config=ref["path"], config_sha=ref["sha256"], qualification_wait_seconds=0)
+        summary_path = self.root / "summary.md"
+        counts = {"unexpected_failure_ids": [], "correct_file": 95}
+        result = {"denominator": 100, "by_area": {"BASE": counts}, "documentation_subset": counts,
+                  "total": counts, "full_acceptance_percent": 95, "threshold_met": True,
+                  "captured_stdout": "OWNED-RESOURCE-SENTINEL", "saved_document": "OWNED-RESOURCE-SENTINEL"}
+        with patch.object(workflow, "compatibility_execute", return_value=receipt), \
+             patch.object(workflow, "compatibility_report", return_value=result) as report, \
+             patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary_path)}), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            bad = json.loads(json.dumps(packet)); bad["attempts"]["sha256"] = "f" * 64
+            packet_path.write_text(json.dumps(bad))
+            self.assertEqual(workflow.cmd_compatibility_execute(args), 1)
+            report.assert_not_called()
+            packet_path.write_text(json.dumps(packet))
+            self.assertEqual(workflow.cmd_compatibility_execute(args), 0)
+        summary = summary_path.read_text()
+        self.assertNotIn("OWNED-RESOURCE-SENTINEL", summary)
+        self.assertIn('"full_acceptance_percent": 95', summary)
+        self.assertLess(len(summary.encode()), 16384)
+
+    def test_actual_case_timeout_reaps_its_owned_process_group(self) -> None:
+        log = self.root / "timeout.log"
+        result = workflow.compatibility_process([sys.executable, "-c", "import time;time.sleep(60)"], self.root,
+                                               dict(os.environ), 1, log)
+        self.assertTrue(result["timed_out"])
+        self.assertTrue(result["cleanup"]["groupGone"])
+        self.assertTrue(result["cleanup"]["leaderReaped"])
+        self.assertNotEqual(result["exit_code"], 0)
 
     def qualify(self) -> None:
         observations = [{"observation": "Unit fixture only, never native acceptance", "kind": "source-model",

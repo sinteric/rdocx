@@ -17,7 +17,7 @@ schema order, and retains unmodelled XML alongside typed edits.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-oxml | 530,677 compressed bytes, 3,268,280 member bytes, 32 members | 0.16.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
+| Crates.io archive: rdocx-oxml | 530,681 compressed bytes, 3,268,280 member bytes, 32 members | 0.16.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 

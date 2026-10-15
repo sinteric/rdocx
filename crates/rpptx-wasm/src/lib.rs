@@ -437,6 +437,51 @@ mod tests {
         assert_complete_package_round_trip(&source, &Uint8Array::new(&output).to_vec());
     }
 
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn fx225_list_style_parse_with_real_caller_state() {
+        let source = nontrivial_deck();
+        let mut author = rpptx::Presentation::from_bytes(&source).unwrap();
+        author
+            .slide_mut(0)
+            .unwrap()
+            .add_textbox(
+                rpptx::Emu(100),
+                rpptx::Emu(100),
+                rpptx::Emu(1_000_000),
+                rpptx::Emu(500_000),
+            )
+            .unwrap()
+            .set_text("Retained real caller")
+            .unwrap();
+        let mut package = OpcPackage::from_reader(Cursor::new(author.to_bytes().unwrap())).unwrap();
+        let slide = package.parts.get_mut("/ppt/slides/slide1.xml").unwrap();
+        let xml = String::from_utf8(slide.clone()).unwrap();
+        assert!(xml.contains("<a:lstStyle/>"));
+        let mut style =
+            String::from("<a:lstStyle xmlns:e='urn:fx225' e:proof='source'><a:defPPr/>");
+        for level in 1..=9 {
+            style.push_str(&format!(
+                "<a:lvl{level}pPr marL=\"{level}\"><a:defRPr lang=\"en-US\"/></a:lvl{level}pPr>"
+            ));
+        }
+        style.push_str("<e:opaque v='keep&amp;exact'/></a:lstStyle>");
+        *slide = xml.replace("<a:lstStyle/>", &style).into_bytes();
+        let mut buffer = Cursor::new(Vec::new());
+        package.write_to(&mut buffer).unwrap();
+        let source = buffer.into_inner();
+        let parsed = WasmPresentation::from_bytes(&source).unwrap();
+        let clone = parsed.to_bytes().unwrap();
+        assert_complete_package_round_trip(&source, &clone);
+        let output = OpcPackage::from_reader(Cursor::new(clone)).unwrap();
+        assert!(String::from_utf8_lossy(&output.parts["/ppt/slides/slide1.xml"]).contains(&style));
+        assert_eq!(
+            author.len(),
+            1,
+            "the real authoring caller remains live through parsing"
+        );
+    }
+
     #[cfg(feature = "render")]
     #[test]
     fn render_profile_returns_a_complete_pdf() {

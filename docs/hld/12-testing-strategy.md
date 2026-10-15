@@ -4248,8 +4248,22 @@ Original failed candidates remain distinct from genuinely changed successors.
 
 The full report binds one complete first-attempt run to its exact source and
 paired installed artifacts. Results from different candidates cannot be
-stitched into a score. CI tests the retained report contract without claiming
-to execute the external corpus or native applications.
+stitched into a score. Public CI tests the retained report contract alongside
+the complete binding suites. A separate owner-only manual job executes all100
+frozen scripts with an independently admitted runtime-input revision. The
+original scripts, support and manifest remain unchanged. Missing historical
+non-runtime evidence is reported separately from the executable closure.
+
+The owner job authenticates clean Git blobs, modes, tree and semantic index,
+both installed projects, actual build provenance and external inputs before
+and after execution. A dirty historical capture remains a separate source
+kind. Every specimen gets one bounded process group and a fresh working
+directory. Script exits do not supply file or native credit. The same CI job
+waits for independent admission of its actual attempt packet, including all42
+hard gates and51 native clauses, before publishing qualified per-area counts.
+Only the bounded count and source/run identity projection enters the job
+summary. Saved documents, Office fonts, media and captured specimen output
+remain in the task-owned local evidence directory.
 
 Table collection controls exercise both first-axis orders across append and
 remove, surviving own and opposite-axis collections, retired indexed members,

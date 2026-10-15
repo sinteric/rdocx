@@ -1056,6 +1056,12 @@ references and opaque producer payloads remain untouched.
 
 An ordinary `CT_Shape` owns its required `p:spPr` as a public boxed
 `CT_ShapeProperties`. The allocation keeps individual shape projections small.
+
+A text body privately heap-owns its optional ten-level list defaults. Borrowed
+list-style access keeps the same native type, and absence needs no allocation.
+The internal parser keeps owned style results boxed until they reach that
+body, preserving the public paragraph-property slots, captured namespaces,
+opaque child bytes and source order.
 Explicit bounded parser frames handle group descent. Field access remains direct
 through `Box` dereferencing.
 Modelled transform, geometry, fill, line, and effect children write with fixed

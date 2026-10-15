@@ -1950,6 +1950,17 @@ when typed equality ignores source-root markup. Existing relationship,
 metadata and signature invalidation rules apply before candidate publication.
 Exact source no-ops do not rewrite package bytes.
 
+A successful checked edit releases only known reference-bearing relationships
+owned by the original selected fragment and absent from the complete updated
+physical owner XML. Sibling, group and retained opaque qualified references
+keep their rows alive. Foreign namespace lookalikes do not create relationship
+authority. Surviving relationship metadata remains source-preserved. Only
+internal payload targets released by that operation enter candidate pruning,
+including newly unreachable chart and workbook descendants. Other incoming
+package edges preserve shared targets, and unrelated producer orphans survive.
+External references are never fetched. Cleanup stays inside the cloned
+transaction and completes before serialize, reopen and live publication.
+
 ## Embedded font package transactions
 
 Word writes checked single-face sfnt input as ODTTF with its explicit or

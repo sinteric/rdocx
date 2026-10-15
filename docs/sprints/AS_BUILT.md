@@ -19524,3 +19524,91 @@ The exact22-package locally patched publication dry run passes without uploading
 
 
 **Release workflow amendment.** A check before hosted dispatch found that bare-wheel jobs selected mandatory oracle-dependent cases without preparing their inputs. Both native and musllinux jobs now consume the exact existing37 Word and41 PowerPoint priority/compatibility node IDs from one positive inventory, SHA28abec50, using structured argv with explicit Docker environment transport. Full equipped acceptance is retained. Genuine bare Python3.9 collection and runtime pass all78 with source and installed guards stable, receiptb82fbb3a under `/private/tmp/S91-F-X221-wheel-routing-amendment-1`. Full policy records159 passes and two existing skips. After policy-only assertion strengthening, all four affected controls pass. Custodydc9a68fc retains both source versions without relabelling the original full invocation. Independent working review8beaaa24 is clean. Shell syntax is checked, with actual Docker and other hosted targets still awaiting rehearsal. No product, rendering, dependency or wheel payload bytes change. The earlier clean sprint reviewpass2 remains historical and the changed workflow receives the final integrated successor review.
+
+### F-X224, Repair hosted release tool and stack routing
+
+**Sprint.** S91.1
+**Completed.** 2026-10-15, scoped completion
+**Size.** M, estimated2 days, actual not recorded
+
+**What was built.** Native Test and MSRV consumers prepare source-qualified HarfBuzz14.4.0 before use. Both deterministic animation commands retain the approved8MiB native budget. Release preflight accepts exactly one annotated integer or single-fraction sprint tag at current main, preserving all family and publication guards.
+
+**Non-obvious choices.** The native-only branch reuses the independent source producer without requiring installed bindings, Rust reference compilation or generated font inputs. A later hosted failure exposed three external raster expectations omitted from the already approved F-X210 Georgia-to-Gelasio delta.
+
+**Deviations from the design plan.** The separately reviewed golden correction changes only contract, proposal and report decoded RGBA expectations and attribution. Four unrelated rasters, dimensions, DPI, Poppler version and exact comparison remain unchanged.
+
+**Spec sections touched.** Exactly HLD15, native tool preparation, CI stack routing and release provenance.
+
+**Tests.** Original native SVG controls pass under current Rust and1.93, the original animation golden passes, and executable tag positives and negatives plus policy mutation controls qualify the guard. The source-only native producer and all scoped checks retain actual receipts. Local seven-sample raster comparison and one-pixel rejection pass. Corrected primary CI38708235000: SUCCESS at 6d7c7da729e0ecb34252e821341f22844e37a9fd, receipt ad03f29ef28fe9a5174cdb7cb30a8811c4cb25fa237eac4df1b8a0d63d388792.
+
+**Hash harness.** All49 accepted product hashes remain unchanged. Exactly three external Poppler raster hashes propagate the existing reviewed F-X210 behavior whose original12 product hashes changed. No new product output delta is introduced.
+
+**Notes for future sessions.** Process trigger: a new workflow needed actual external CI before completion, while ordinary ordering withheld its source until completion. Separate process commit5cb79e0623ec000d76d2b1725b35eb5734ae1587 introduced the reviewed sprint-ref availability checkpoint. Features stayed approved and in-progress with external gates pending. It permitted no worker push, force push, main merge, tag or publication. Final reviewed-source full gate and clean sprint review remain due. Normal close, exact-main release verification, publication and acceptance-aware contributor reconciliation remain separate pending gates. Original failed attempts and producer identities remain unchanged.
+
+**Evidence references.** `.claude/reviews/F-X224-golden-pass-3.md`. Relevant source/artifact bridge b7890b384a31ad34d6e00107607ebf2dfe17176628666eec8b069edecc1e31a8 retains actual producer identities.
+
+### F-X225, Keep DrawingML text-style parsing within the default WASM stack
+
+**Sprint.** S91.1
+**Completed.** 2026-10-15, scoped completion
+**Size.** M, estimated2 days, actual not recorded
+
+**What was built.** Private list-style ownership and parser return storage, ordered master-record resolution and boxed master-style staging remove the measured parser peaks from the real PowerPoint WASM caller.
+
+**Non-obvious choices.** Public fields and signatures remain unchanged. Extensions followed genuine failures of the unchanged Node caller and were serialized with the unrelated shared-file owner. No stack flag, linker allowance or artificial padding enters accepted controls.
+
+**Deviations from the design plan.** Two approved bounded extensions cover the measured master resolver and private master-style parser temporaries. Original default-stack failures and unsuccessful partial repairs remain failed.
+
+**Spec sections touched.** Exactly HLD06 shape-tree ownership and HLD10 WASM facade default-stack operation.
+
+**Tests.** Pinned Node24.11.1 executes the original real facade and populated caller within the ordinary1048576-byte WASM stack. Native parse, clone, getter, mutation and serialization controls preserve opaque XML, namespaces, schema order and public source compatibility. Affected native/WASM/render checks, strict Clippy, MSRV, rustdoc, hash49, verified three archives and the source-qualified19-package bridge pass. Independent source and metadata reviews are clean. Scoped policy ran161 tests with two existing platform skips.
+
+**Hash harness.** All49 product outputs unchanged. No baseline update.
+
+**Notes for future sessions.** The measured frame reductions are implementation evidence, not a portable ABI size promise. Actual producers remain the recorded worker and b3b integrated sources. Final reviewed-source full gate and clean sprint review remain due. Normal close, exact-main release verification, publication and acceptance-aware contributor reconciliation remain separate pending gates. Original failed attempts and producer identities remain unchanged.
+
+**Evidence references.** `.claude/reviews/F-X225-metadata-pass-2.md`. Relevant source/artifact bridge b7890b384a31ad34d6e00107607ebf2dfe17176628666eec8b069edecc1e31a8 retains actual producer identities.
+
+### F-X226, Release superseded relationships after checked PowerPoint XML edits
+
+**Sprint.** S91.1
+**Completed.** 2026-10-15, scoped completion
+**Size.** M, estimated2 days, actual not recorded
+
+**What was built.** Checked XML replacement releases only known-role relationships owned by the original selected fragment and absent from the complete updated physical owner. Candidate pruning removes newly unreachable chart and workbook descendants while retaining shared targets, opaque references and producer orphans.
+
+**Non-obvious choices.** The existing debug save assertion and relationship validator remain enabled. Cleanup occurs in the cloned transaction before publication and preserves exact no-op and atomic refusal behavior.
+
+**Deviations from the design plan.** None.
+
+**Spec sections touched.** Exactly HLD04 checked PowerPoint XML transactions and targeted graph cleanup.
+
+**Tests.** The genuine Base native and original public debug triggers fail. The unchanged six public chart controls pass with both debug and optimized bindings. Native controls retain sibling, group, opaque and external references, shared targets, unrelated orphans, no-op bytes and atomic refusal. Scoped native suites, both WASM checks, strict Clippy, affected verified archive, hash49 and policy159 passes with two platform skips qualify their recorded sources. Independent source and metadata reviews are clean.
+
+**Hash harness.** All49 product outputs unchanged. The labelled behavioral repair is targeted owned-graph cleanup, not a rendering baseline change.
+
+**Notes for future sessions.** Actual debug and optimized results retain their separate artifacts. No optimized pass substitutes for debug validation. Final reviewed-source full gate and clean sprint review remain due. Normal close, exact-main release verification, publication and acceptance-aware contributor reconciliation remain separate pending gates. Original failed attempts and producer identities remain unchanged.
+
+**Evidence references.** `.claude/reviews/F-X226-metadata-pass-2.md`. Relevant source/artifact bridge b7890b384a31ad34d6e00107607ebf2dfe17176628666eec8b069edecc1e31a8 retains actual producer identities.
+
+### F-X227, Execute the unchanged first-draft compatibility corpus in owner CI
+
+**Sprint.** S91.1
+**Completed.** 2026-10-15, scoped completion
+**Size.** L, estimated4 days, actual not recorded
+
+**What was built.** An owner-only manual job executes the frozen100 original scripts with clean Git, paired artifact and complete input custody, finite first-attempt process groups and per-area correct-file reporting. The approved two-input revision preserves original missing hashes and separately qualifies the three affected saved packages.
+
+**Non-obvious choices.** The reviewed pre-Worker boundary validates exact server identity and literal script before the official Worker can prepare actions. It is trusted-job admission, not filesystem sandboxing. The ephemeral runner is removed after its single job. Hosted binding opt2 explicitly retains debug assertions and overflow checks.
+
+**Deviations from the design plan.** The approved native input revision changes runtime fixtures only, not the original corpus bodies, support, manifest, denominator or five non-successes. Earlier refused assignments ran no corpus cases and remain failed.
+
+**Spec sections touched.** Exactly HLD12 actual corpus qualification and HLD15 owner CI execution.
+
+**Tests.** Actual owner CI38702668217 at215715b3b733307832202147243738f5b7b6279d runs all100 once with safe cleanup, zero timeouts,96 assertion-zero exits and95 qualified files. Independent admissions cover42 hard gates and51 native clauses. BASE24/24, XML13/14, LIFE16/16 and AREA42/46 qualify, including24/24 documentation cases. Five approved non-successes receive no file credit. All114 unaffected saved outputs are byte-identical, while P12, P25 and P26 have fresh package observations. Current policy ran180 tests with two platform skips and reviews are clean. The source215 build-only rehearsal38696969789 passed27 jobs with publication jobs intentionally skipped. It authenticated12 wheels, two sdists and12 CLI archives, followed by156 installed priority checks across Python3.9/3.12 and four typing/stub checks.
+
+**Hash harness.** All49 accepted product outputs unchanged. No corpus score or baseline is stitched from different candidates.
+
+**Notes for future sessions.** The actual corpus and rehearsal producers remain source215. Earlier installed104/native8/full778/854 and original app witnesses keep their b3b or historical identities, with complete source-body, mode and artifact bridges to current unchanged consumers. The source215 archive bytes are separately retained before cache reuse. Skills PR37 remains an external upstream follow-up under the approved post-publication closure decision. Final reviewed-source full gate and clean sprint review remain due. Normal close, exact-main release verification, publication and acceptance-aware contributor reconciliation remain separate pending gates. Original failed attempts and producer identities remain unchanged.
+
+**Evidence references.** `.claude/reviews/F-X227-source-pass-1.md`. Relevant source/artifact bridge b7890b384a31ad34d6e00107607ebf2dfe17176628666eec8b069edecc1e31a8 retains actual producer identities.

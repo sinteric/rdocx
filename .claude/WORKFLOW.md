@@ -42,6 +42,18 @@ the orchestrator. It may enter a separate remediation phase and launch the next
 independent review pass in the same user invocation. The boundary separates
 review from remediation, not one agent session from the next.
 
+### External CI source availability
+
+When an approved feature requires actual external CI execution of its new
+workflow, that gate can require reviewed source on GitHub before feature
+completion. Use the source availability checkpoint in `/run-sprint`. Every
+local check, applicable local risk rider and independent microscope must pass
+first. Record the named external gates as pending. The feature remains
+approved and in-progress, without completion ledgers or dependency unblocking.
+Only the clean reviewed canonical sprint ref may be pushed at this checkpoint.
+No worker push, force push, main merge, tag or publication is permitted.
+Actual CI evidence must bind the pushed SHA before ordinary completion.
+
 ## Parallel work
 
 One F-ID at a time in one worktree is the normal case. When several independent

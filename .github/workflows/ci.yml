@@ -4,6 +4,32 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      owner_compatibility:
+        description: Execute the admitted owner-only frozen corpus
+        type: boolean
+        default: false
+      source_sha:
+        description: Exact reviewed source SHA
+        type: string
+        required: true
+      source_ref:
+        description: Exact reviewed branch ref
+        type: string
+        required: true
+      workflow_sha:
+        description: Exact reviewed workflow SHA
+        type: string
+        required: true
+      runner_label:
+        description: Root-admitted one-job runner label
+        type: string
+        required: true
+      config_sha:
+        description: Root-admitted external execution configuration SHA-256
+        type: string
+        required: true
   schedule:
     # A dependency can become vulnerable without any change to this repo, so the
     # supply-chain job also runs on a schedule rather than only on pushes.
@@ -18,7 +44,7 @@ env:
 jobs:
   changes:
     name: Detect changes
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -152,8 +178,23 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             cmake g++ ninja-build pkg-config \
             libfontconfig1-dev libfreetype-dev libjpeg-turbo8-dev \
-            libpng-dev libtiff-dev libopenjp2-7-dev liblcms2-dev zlib1g-dev
+            libpng-dev libtiff-dev libopenjp2-7-dev liblcms2-dev zlib1g-dev \
+            libcairo2-dev libglib2.0-dev
           python3 scripts/install_pinned_poppler.py
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12.9"
+      - name: Prepare independent native font tools
+        shell: bash
+        run: |
+          native_venv="${RUNNER_TEMP}/native-font-tools-venv"
+          python3 -m venv "$native_venv"
+          "$native_venv/bin/python" -m pip install pytest==9.1.1 meson==1.9.1
+          export PATH="$native_venv/bin:$PATH"
+          "$native_venv/bin/python" -I -B crates/rdocx-py/tests/test_rendering_threads.py \
+            --prepare-fx195-inputs "${RUNNER_TEMP}/native-font-tools" \
+            --native-tools-only
       - name: Install pinned LibreOffice 26.2.5.2
         run: python3 scripts/install_pinned_libreoffice.py
       - name: Install pinned Pandoc 3.10
@@ -203,6 +244,8 @@ jobs:
           cargo test --workspace --all-features
           --exclude rdocx-py --exclude rpptx-py
       - name: Run deterministic animation golden
+        env:
+          RUST_MIN_STACK: "8388608"
         run: >-
           cargo test --locked -p rpptx --test integration
           animated_gif_and_motion_jpeg_avi_match_the_reviewed_two_machine_manifest
@@ -215,6 +258,10 @@ jobs:
     if: needs.changes.outputs.python_bindings == 'true'
     name: Python bindings (${{ matrix.package.distribution }})
     runs-on: macos-26
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: "2"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -298,6 +345,7 @@ jobs:
         run: python3 -m unittest -v scripts.test_sprint_workflow.CompatibilityReportTests
 
   no-default-features:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
     name: No default features
     runs-on: ubuntu-latest
     steps:
@@ -405,6 +453,7 @@ jobs:
           verify_package "$package_root/rpptx-wasm" "@tensorbee/rpptx-wasm" "0.12.1" "rpptx_wasm"
 
   release-regressions:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
     name: Release regressions
     runs-on: ubuntu-latest
     steps:
@@ -464,6 +513,8 @@ jobs:
       - name: Fetch pinned presentation corpus
         run: python3 scripts/fetch_pptx_corpus.py
       - name: Run deterministic animation golden
+        env:
+          RUST_MIN_STACK: "8388608"
         run: >-
           cargo test --locked -p rpptx --test integration
           animated_gif_and_motion_jpeg_avi_match_the_reviewed_two_machine_manifest
@@ -524,6 +575,7 @@ jobs:
           if-no-files-found: error
 
   clippy:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
     name: Clippy
     runs-on: ubuntu-latest
     steps:
@@ -537,6 +589,7 @@ jobs:
           --exclude rdocx-py --exclude rpptx-py -- -D warnings
 
   fmt:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
@@ -547,6 +600,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   doc:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
     name: Docs
     runs-on: ubuntu-latest
     env:
@@ -562,6 +616,7 @@ jobs:
         run: python3 scripts/readme_doctests.py
 
   package-oxml-layout:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
     name: Package oxml-layout
     runs-on: ubuntu-latest
     steps:
@@ -675,8 +730,23 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             cmake g++ ninja-build pkg-config \
             libfontconfig1-dev libfreetype-dev libjpeg-turbo8-dev \
-            libpng-dev libtiff-dev libopenjp2-7-dev liblcms2-dev zlib1g-dev
+            libpng-dev libtiff-dev libopenjp2-7-dev liblcms2-dev zlib1g-dev \
+            libcairo2-dev libglib2.0-dev
           python3 scripts/install_pinned_poppler.py
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12.9"
+      - name: Prepare independent native font tools
+        shell: bash
+        run: |
+          native_venv="${RUNNER_TEMP}/native-font-tools-venv"
+          python3 -m venv "$native_venv"
+          "$native_venv/bin/python" -m pip install pytest==9.1.1 meson==1.9.1
+          export PATH="$native_venv/bin:$PATH"
+          "$native_venv/bin/python" -I -B crates/rdocx-py/tests/test_rendering_threads.py \
+            --prepare-fx195-inputs "${RUNNER_TEMP}/native-font-tools" \
+            --native-tools-only
       - name: Install pinned LibreOffice 26.2.5.2
         run: python3 scripts/install_pinned_libreoffice.py
       - name: Fetch pinned presentation corpus
@@ -711,11 +781,45 @@ jobs:
         with:
           command: check
 
+  owner-compatibility:
+    name: Owner unchanged compatibility corpus
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true &&
+      github.repository == 'tensorbee/rdocx' && github.actor == 'mantissaman' &&
+      github.triggering_actor == 'mantissaman' && github.sha == inputs.source_sha &&
+      github.ref == inputs.source_ref && startsWith(github.ref, 'refs/heads/') &&
+      github.workflow_sha == inputs.workflow_sha
+    runs-on: ["${{ inputs.runner_label }}"]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Execute and qualify the unchanged frozen corpus
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        working-directory: /private/tmp/S91.1-F-X227-owner-ci/source
+        env:
+          F_X227_CONFIG_SHA: ${{ inputs.config_sha }}
+        run: |
+          [[ "$F_X227_CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]]
+          test "$F_X227_CONFIG_SHA" = "$(/bin/cat /private/tmp/S91.1-F-X227-owner-ci/execution-config.sha256)"
+          /private/tmp/S91.1-F-X227-owner-ci/python/bin/python -I -B \
+            /private/tmp/S91.1-F-X227-owner-ci/source/scripts/sprint_workflow.py \
+            compatibility-execute /private/tmp/S91.1-F-X227-owner-ci/execution-config.json \
+            --config-sha "$F_X227_CONFIG_SHA" \
+            --qualification-wait-seconds 1800
+
   ci-gate:
     name: CI gate
     if: always()
     needs:
       - changes
+      - owner-compatibility
+      - no-default-features
+      - release-regressions
+      - clippy
+      - fmt
+      - doc
+      - package-oxml-layout
       - test
       - msrv
       - wasm
@@ -730,6 +834,14 @@ jobs:
       - name: Validate filtered jobs
         shell: bash
         env:
+          OWNER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true }}
+          OWNER_RESULT: ${{ needs['owner-compatibility'].result }}
+          NO_DEFAULT_FEATURES_RESULT: ${{ needs['no-default-features'].result }}
+          RELEASE_REGRESSIONS_RESULT: ${{ needs['release-regressions'].result }}
+          CLIPPY_RESULT: ${{ needs['clippy'].result }}
+          FMT_RESULT: ${{ needs['fmt'].result }}
+          DOC_RESULT: ${{ needs['doc'].result }}
+          PACKAGE_OXML_LAYOUT_RESULT: ${{ needs['package-oxml-layout'].result }}
           EVENT_NAME: ${{ github.event_name }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           TEST_SELECTED: ${{ needs.changes.outputs.test }}
@@ -764,6 +876,24 @@ jobs:
                 ;;
             esac
           }
+
+          if [ "$OWNER_MODE" = "true" ]; then
+            test "$OWNER_RESULT" = "success"
+            test "$CHANGES_RESULT" = "skipped"
+            test "$NO_DEFAULT_FEATURES_RESULT" = "skipped"
+            test "$RELEASE_REGRESSIONS_RESULT" = "skipped"
+            test "$CLIPPY_RESULT" = "skipped"
+            test "$FMT_RESULT" = "skipped"
+            test "$DOC_RESULT" = "skipped"
+            test "$PACKAGE_OXML_LAYOUT_RESULT" = "skipped"
+            for result in "$TEST_RESULT" "$MSRV_RESULT" "$WASM_RESULT" "$PYTHON_BINDINGS_RESULT" \
+              "$PRESENTATION_FIDELITY_RESULT" "$WORD_FIDELITY_RESULT" "$HASH_HARNESS_RESULT" \
+              "$SUPPLY_CHAIN_RESULT" "$PROSE_RESULT"; do
+              test "$result" = "skipped"
+            done
+            exit 0
+          fi
+          test "$OWNER_RESULT" = "skipped"
 
           if [ "$EVENT_NAME" = "schedule" ]; then
             test "$CHANGES_RESULT" = "skipped"

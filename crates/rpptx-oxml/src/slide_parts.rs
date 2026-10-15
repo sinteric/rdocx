@@ -1486,9 +1486,7 @@ impl ParsedRoot {
                 return Err(duplicate("txStyles"));
             }
             self.advance_modelled_child("txStyles", 6, 7)?;
-            self.text_styles = Some(Box::new(CT_MasterTextStyles::from_fragment(
-                &raw, namespaces,
-            )?));
+            self.text_styles = Some(CT_MasterTextStyles::from_fragment(&raw, namespaces)?);
             return Ok(());
         }
         if is_p && name == b"hf" && matches!(kind, RootKind::Layout | RootKind::Master) {
@@ -2296,7 +2294,7 @@ fn capture_override_choice(
 }
 
 impl CT_MasterTextStyles {
-    fn from_fragment(xml: &[u8], inherited: &NamespaceBindings) -> Result<Self> {
+    fn from_fragment(xml: &[u8], inherited: &NamespaceBindings) -> Result<Box<Self>> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         let start = loop {
@@ -2310,7 +2308,7 @@ impl CT_MasterTextStyles {
         let namespaces = inherited.with_start(&start)?;
         namespaces.reject_writer_conflicts(FIXED_MODEL_PREFIXES)?;
         let raw_attributes = root_attributes(&start, FIXED_MODEL_PREFIXES)?;
-        let mut styles: [Option<CT_TextListStyle>; 3] = [None, None, None];
+        let mut styles: [Option<Box<CT_TextListStyle>>; 3] = [None, None, None];
         let mut raw_children = OrderedRawChildren::default();
         let mut boundary = 0usize;
         loop {
@@ -2354,13 +2352,13 @@ impl CT_MasterTextStyles {
             }
         }
         let [title, body, other] = styles;
-        Ok(Self {
-            title_style: required(title, "p:titleStyle")?,
-            body_style: required(body, "p:bodyStyle")?,
-            other_style: required(other, "p:otherStyle")?,
+        Ok(Box::new(Self {
+            title_style: *required(title, "p:titleStyle")?,
+            body_style: *required(body, "p:bodyStyle")?,
+            other_style: *required(other, "p:otherStyle")?,
             raw_attributes,
             raw_children,
-        })
+        }))
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
@@ -2389,7 +2387,7 @@ fn capture_text_style(
     name: &[u8],
     is_p: bool,
     raw: Vec<u8>,
-    styles: &mut [Option<CT_TextListStyle>; 3],
+    styles: &mut [Option<Box<CT_TextListStyle>>; 3],
     children: &mut OrderedRawChildren,
     boundary: &mut usize,
     namespaces: &NamespaceBindings,
@@ -2409,10 +2407,10 @@ fn capture_text_style(
         if styles[index].is_some() {
             return Err(duplicate(std::str::from_utf8(name).unwrap_or("text style")));
         }
-        styles[index] = Some(
+        styles[index] = Some(Box::new(
             CT_TextListStyle::from_xml_with_inherited_namespaces(&raw, &namespaces.entries())
                 .map_err(map_drawing_error)?,
-        );
+        ));
         *boundary = (*boundary).max(index + 1);
     } else {
         children.push(*boundary, raw);

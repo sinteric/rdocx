@@ -3331,6 +3331,10 @@ extension names, while byte saves and WASM preserve the source main content
 type, and none of them gains a package-class selector in this milestone.
 Pull-request CI target-checks the default wrapper with the locked workspace
 graph and runs its package-preserving inline test in Node.
+The real constructor and byte round-trip operate within the pinned default
+WASM stack. Their complete package-graph and populated text-style controls use
+the ordinary facade without a test-only stack allowance. Private parser
+storage changes preserve native signatures and retained XML.
 
 The npm package names are `@tensorbee/rdocx-wasm` and
 `@tensorbee/rpptx-wasm`. Both use the bundler target, their Rust package

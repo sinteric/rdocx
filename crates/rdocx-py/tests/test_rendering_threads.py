@@ -2044,7 +2044,7 @@ def test_fx211c_word_unknown_symbol_source_and_same_pass_diagnostics(owner, tmp_
 
 # CI preparation runs explicitly before pytest. Both binding families consume
 # these independent controls. Importing this module never prepares or compiles.
-def _fx195_prepare_inputs(directory, family, harfbuzz_archive=None):
+def _fx195_prepare_inputs(directory, family=None, harfbuzz_archive=None, native_tools_only=False):
     import hashlib
     import json
     import os
@@ -2133,6 +2133,21 @@ def _fx195_prepare_inputs(directory, family, harfbuzz_archive=None):
         identities[name] = run([tool, '--version']).decode().splitlines()[0]
         assert identities[name] == name + ' (HarfBuzz) 14.4.0'
     tool_guards = {str(p): digest(p) for p in tools.values()}
+
+    if native_tools_only:
+        assert source_guard() == before
+        assert all(digest(p) == sha for p, sha in tool_guards.items())
+        receipt = {'status': 'actual-independent-native-tools-prepared',
+                   'sourceGuardsBeforeAfter': True, 'sourceInputs': before,
+                   'commands': commands, 'harfbuzzSourceURL': archive_url,
+                   'harfbuzzSourceSHA256': archive_sha, 'harfbuzzTools': tool_guards,
+                   'toolVersions': identities}
+        (directory / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+        if os.environ.get('GITHUB_PATH'):
+            with Path(os.environ['GITHUB_PATH']).open('a') as out:
+                out.write(str(build / 'util') + '\n')
+        print(json.dumps(receipt, indent=2))
+        return receipt
 
     fonts = root / 'crates/oxml-layout/fonts'
     pinned_fonts = {
@@ -2378,7 +2393,13 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Prepare independent font controls before binding pytest.')
     parser.add_argument('--prepare-fx195-inputs', required=True)
-    parser.add_argument('--family', required=True, choices=('rdocx', 'rpptx'))
+    parser.add_argument('--family', choices=('rdocx', 'rpptx'))
+    parser.add_argument('--native-tools-only', action='store_true')
     parser.add_argument('--harfbuzz-archive')
     args = parser.parse_args()
-    _fx195_prepare_inputs(args.prepare_fx195_inputs, args.family, args.harfbuzz_archive)
+    if args.native_tools_only and args.family is not None:
+        parser.error('--native-tools-only cannot be combined with --family')
+    if not args.native_tools_only and args.family is None:
+        parser.error('--family is required for binding input preparation')
+    _fx195_prepare_inputs(args.prepare_fx195_inputs, args.family, args.harfbuzz_archive,
+                          args.native_tools_only)

@@ -221,6 +221,31 @@ human.
 
 ## 6. Verify once, over the integrated result
 
+### External CI source availability checkpoint
+
+Use this checkpoint only when an approved feature's new workflow must be on
+GitHub before its named actual external CI gate can run. A validated
+`external-ci-source-availability` handoff must already be consumed by batch
+integration. Every implementation item, local check, applicable local risk
+rider, hash check and independent microscope must pass. The plan remains
+approved and the feature in-progress with its named external gates pending.
+Do not write completion ledgers or unblock dependencies.
+
+Review the integrated source and authenticate the clean canonical sprint
+branch, expected remote, exact ref and SHA, and ancestry. Record the local
+evidence, pending gates and intended CI routing in the existing plan, progress
+record and run state. The orchestrator may push this reviewed sprint ref
+without force solely to make the exact source available for acceptance.
+Never push a worker branch, merge main, tag or publish at this checkpoint.
+
+Run only the named reviewed CI jobs. Bind actual run and job identities,
+source SHA and outcomes to the existing records. Failed or incomplete gates
+remain failed or pending, keeping the feature in-progress and closure
+forbidden. Any source change invalidates affected CI evidence. After actual
+external gates pass, resume ordinary final verification, feature completion,
+sprint review and close preflight below. A source availability push is not a
+claim that the final sprint gate passed.
+
 For the ordinary final gate, only after every branch is integrated or consumed
 by a dependency-prefix checkpoint:
 

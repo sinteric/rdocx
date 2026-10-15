@@ -757,6 +757,11 @@ Both Python `pyproject.toml` versions and their Rust binding crate versions are
 exact release carriers. The Python preflight checks all four values instead of
 rewriting them during the release ceremony.
 
+Closed sprint release guards accept one annotated integer or fractional sprint
+tag, such as `s91` or `s91.1`, at the exact current `origin/main` SHA. The shape
+is `^s[0-9]+(\.[0-9]+)?$`. Exactly-one, annotated-object and main-SHA checks
+remain mandatory before publication archive validation.
+
 ## CI job matrix
 
 Listed in `12-testing-strategy.md`. The matrix carries these
@@ -813,7 +818,11 @@ unresolved-symbol link failure that is easy to misdiagnose as something else.
 **The golden-PNG gate in the test job.** After the full workspace suite, the
 same Ubuntu 24.04 job runs `python3 scripts/golden_png_harness.py --check` with
 the Poppler 26.01.0 installation already on `PATH`. The step is unconditional
-and propagates a decoded-pixel mismatch as a CI failure.
+and propagates a decoded-pixel mismatch as a CI failure. The external raster
+manifest is distinct from the product hash manifest. An approved bundled-font
+behavior change must propagate its measured affected samples to both under
+the exclusive baseline lease, with attributed review. Unrelated samples,
+dimensions, DPI and exact comparison remain unchanged.
 
 **The Pandoc texmath gate in the test job.** The Ubuntu 24.04 runner installs
 the exact SHA-256-pinned Pandoc 3.10 archive, verifies the executable identity,
@@ -924,7 +933,10 @@ CI, retaining their mandatory font, native and rendering controls.
 for each Python package. Every row creates an isolated Python 3.12.9 environment,
 installs exact maturin, pytest, and package-oracle versions, builds the current
 extension with `maturin develop --locked`, and runs the package's complete
-pytest directory. Before pytest, the existing Word rendering test carrier
+pytest directory. Job-local dev optimization is2, with debug assertions and
+overflow checks explicitly enabled. It retains the debug profile and all
+existing assertions. No measured speedup follows merely from that setting.
+Before pytest, the existing Word rendering test carrier
 prepares independent inputs for either family without importing either product.
 Pillow12.3.0 and Meson1.9.1 are explicit test and build tools. A SHA-pinned
 HarfBuzz14.4.0 source build shapes and subsets the licensed bundled Thai400/700
@@ -950,6 +962,26 @@ metadata read. No job grants an OIDC token. Checkout v6.0.2, setup-python
 v6.2.0, rust-cache v2.9.1, and the selected stable rust-toolchain revision use
 reviewed full commit SHAs and exact input maps.
 
+**An admitted owner-only compatibility job.** Manual dispatch selects a reviewed
+source SHA and one task-owned ephemeral macOS ARM64 runner. Both actor fields
+must name the owner. Existing public jobs and their gates remain mandatory.
+The private job has one literal shell step and no action, service, container,
+publication or credential API. Its pre-Worker admission layer checks the exact
+server identity and script before the official Worker can prepare any action.
+A bounded credential-redacted proposal and exact same-frame owner admission
+precede launch. This is a narrow trusted-job admission boundary, not a host
+filesystem sandbox. Runner registration waits for independent review and
+owned negative controls. The runner is removed after its one job.
+
+The existing sprint workflow script authenticates the frozen100 executable
+closure, a separately admitted two-input native revision, clean Git identity,
+the unchanged compiled provider graph and both installed distributions. A
+finite process group runs each unchanged specimen once. The job retains all
+saved files locally and waits for independent current-attempt qualification.
+Only bounded counts and source/run identities enter its summary. No Office
+font, media, saved document or captured specimen output is uploaded. A pending
+native fact cannot produce a final correct-file metric.
+
 **One checksum-pinned Poppler installer.**
 `scripts/install_pinned_poppler.py` downloads the official 26.01.0 source
 archive, verifies SHA-256
@@ -970,8 +1002,18 @@ itself.
 uses only its runner-temporary uv cache, fetches and verifies both pinned
 corpora, and runs the broad workspace suite with `RUST_MIN_STACK=8388608`. The
 pin makes the python-pptx oracle executable available on a clean Ubuntu host.
-The stack budget is scoped to these two corpus-heavy jobs and does not alter
-product runtime behavior.
+Both native jobs prepare HarfBuzz14.4.0 before their font consumers through
+`--native-tools-only` in the existing Word rendering test carrier. The exact
+source archive, bounded extraction, actual three-tool build, binary identities
+and tracked source guards use the same producer as full binding preparation.
+The early return requires no installed binding, font fixtures or current Rust
+compiler. Separate native environments pin pytest9.1.1 and Meson1.9.1.
+The authenticated utility directory is exported through `GITHUB_PATH`.
+Full binding preparation and its104 and native-eight controls remain mandatory.
+
+The Test and Presentation fidelity deterministic animation commands also use
+`RUST_MIN_STACK=8388608`. This is a native test-thread budget and does not alter
+product runtime behavior or the separate WASM runtime.
 
 The same two clean Ubuntu 24.04 jobs plus the Presentation and Word fidelity
 jobs install

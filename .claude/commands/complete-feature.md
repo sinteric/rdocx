@@ -134,6 +134,32 @@ Only then tick the remaining checklist items, set the plan to completed and
 write the delivery ledgers. This exception does not apply to a dry-run-only
 test gate or to any non-release F-ID.
 
+### External CI source availability preparation
+
+An approved feature whose new workflow must be available remotely to execute
+its actual external CI gate may prepare a source availability handoff. This
+is preparation for acceptance, not feature completion. All implementation,
+local checks, applicable local risk riders, hash checks and a zero-finding
+independent microscope must pass. Leave the plan approved, its external CI
+checklist items unticked and the feature in-progress. Do not write delivery
+ledgers or unblock dependent work.
+
+Use the ordinary handoff fields and add these exact fields:
+
+```
+**Checkpoint**: external-ci-source-availability
+**External gates**: <named actual external CI gates>, pending
+**Verify**: /verify --scoped F-XXX, local checks pass, external CI pending
+**Test gate**: <actual local regression checks>, pass, external CI pending
+```
+
+The validator and integrator must refuse pending external CI without this
+marker and named gates, an unknown checkpoint, or a claim that the complete
+scoped gate passed. Preserve exact local evidence and pending obligations in
+the existing plan, progress record and sprint run state. Follow the checkpoint
+in `/run-sprint` after batch integration. Only actual external evidence at the
+reviewed remote SHA permits ordinary feature completion.
+
 ## Refused situations
 
 - **Any precondition in step 1 fails.** Name it and stop.

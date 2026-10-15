@@ -106,6 +106,7 @@ defended.
 | S89 | M24, X | 5 | 5 | 0 | 21 | 2 | Completed note policy, cross-story ranges, deterministic fragment remapping and public glossary lifecycle, plus Changjoon's PR 269 fontdb feature-unification fix. Full verification passed with 49 unchanged hashes, 140 policy tests with two expected skips, 22 verified packages below 10 MiB and clean sprint review pass 1. M24 continues through S94. No stories carried |
 | S90 | M24, X | 20 | 18 | 2 | 55 | 3 | Completed 18 stories. The reconstructed 55-day estimate comprises 50 estimated days recorded for completed features plus F-X178 at 1 day and the chosen 4-day lower bound for F-283. Actual days are the three elapsed working dates from 2026-10-07 through 2026-10-09 inclusive, not person-days. F-X178 and F-283 carry to S91. F-X178 needs a separate scope decision and Issue264 remains excluded. New F-X192 owns the remaining bibliography catalogue in S91, and Issue281 remains open. Word0.16.0 and shared/PowerPoint0.14.0 are prepared for separately approved publication after close |
 | S91 | M24, X | 39 | 29 | 10 | 130 | 7 | Completed 29 top-level stories and four F-X211 delivery children. Child records are not counted twice. The reconstructed 130-day lower bound comprises 97 days for completed scope and 33 for carries, using S1/M2/L4. Actual days are seven worked dates, 2026-10-09 through 2026-10-15, including weekend work, not person-days. The frozen scope contains 40 issues and 30 PRs. Discussions264 and281 stay open. Bibliography, navigation and standalone authoring carry to S92. Local full verification and sprint review pass3 are clean. The exact reviewed-source build-only rehearsal38659673259 passed all27 build jobs, both seven-file Python sets and twelve CLI archives. Fresh hosted-wheel installs passed78 priority cases on each of Python3.9 and3.12 plus strict typing and stub checks. Word0.16.1 and shared/PowerPoint0.14.1 are prepared for publication after close |
+| S91.1 | M24, X | 4 | 4 | 0 | 10 | 1 | Four corrective stories completed with clean integrated review and actual final reviewed-commit full verification. Corrected primary CI38708235000 passed, separate owner CI38702668217 qualifies95/100 with42 hard gates,51 native clauses and five no-credit cases. All49 product hashes unchanged. Actual days count the single worked date2026-10-15, not person-effort. Exact-main verification, both prepared publications and acceptance-aware contributor reconciliation follow close. Future planning is preserved separately |
 
 ## Completed features
 
@@ -686,12 +687,16 @@ five working days.
 | S89 | 5 | 2 | 12.50 |
 | S90 | 18 | 3 | 30.00 |
 | S91 | 29 | 7 | 20.71 |
+| S91.1 | 4 | 1 | 20.00 |
 
 S90 velocity measures calendar throughput for a parallel team. It does not
 measure person effort or establish a sustainable single-developer forecast.
 Later per-feature effort was not recorded, and those actuals remain unchanged.
 
 S91 counts29 completed top-level contracts once. Four completed F-X211 delivery children remain separate records and add neither stories nor estimates to that total. Seven actual dates include worked Saturday10 and Sunday11 October. The20.71 stories per week measures calendar throughput for parallel work. Per-feature actual effort remains unrecorded.
+
+S91.1 records one worked date,2026-10-15. Its20.00 stories per week measures
+parallel calendar throughput. Per-feature person-effort remains unrecorded.
 
 ## Escalation record
 
@@ -784,6 +789,7 @@ was done about it. Empty is the expected state.
 | 2026-10-05 | Sprint estimate variance exceeded 30 percent | S89 | Record 2 elapsed workdays against 21 estimated. Dependency waves reused the completed related-story and package foundations, and PR 269 supplied a focused reproducer and fix. The resulting 12.50 stories per week is not a sustainable forecast, so retain the dependency-defined S90 boundary |
 | 2026-10-09 | Sprint estimate variance exceeded 30 percent | S90 | Record 3 elapsed working dates against the reconstructed 55-day planning estimate, including 50 estimated days for completed features. Nominal variance is 94.55 percent against 55 or 94.00 percent against 50. Parallel assistance, contribution reuse and exclusive implementation waves make elapsed time different from person effort. The resulting 30.00 stories per week is calendar throughput, not a sustainable forecast. Retain the S91 navigation and bibliography boundaries and recalibrate with measured effort |
 | 2026-10-15 | Sprint estimate and velocity variance exceeded30 percent | S91 | Record seven worked dates against the reconstructed130-day lower bound, comprising97 days for completed scope and33 carried. Nominal variance is94.62 percent against130 or92.78 percent against97. Throughput is20.71 stories per week,30.95 percent below S90. Rolling contributions and parallel workers make calendar dates different from person effort. Retain the ten S92 carries and recalibrate with measured effort |
+| 2026-10-15 | Sprint estimate variance exceeded30 percent | S91.1 | Record one worked date against the10-day lower-bound estimate, a90percent estimate variance. Isolated workers, existing provider repairs and parallel evidence preparation compressed elapsed delivery. Retain dependency and capacity review for future sprints. The20.00 stories per week is calendar throughput, not a sustained person-effort forecast |
 
 ## S79 contribution reconciliation
 
@@ -999,3 +1005,11 @@ Issues264 and281 remain excluded and open.
 | F-X211 | S91 | L | not recorded | not recorded | 2026-10-14 | Aggregate completion of a/b/c/d. Original Base17/100 and admitted final95/100 remain distinct. All42 hard gates,51 native clauses and24 documentation examples qualify. Independent aggregate review clean. Release preparation and final sprint gates remain due |
 
 | F-X221 | S91 | L | not recorded | not recorded | 2026-10-15 | Prepared Word0.16.1 and shared/PowerPoint0.14.1. Final local full gate passes: stable native core, Python778/854, font104/native-eight, policy158pass2skip,22 archives, README and deny. Admitted95of100 retains42hard51native/24documentation and five no-credit cases. Component reviews clean. Subsequent bare-wheel routing amendment passes exact37/41 priority runtime and policy159pass2skip with four strengthened controls. Final integrated successor review, hosted rehearsal, close, both publications and humanized remote reconciliation remain separate gates |
+
+| F-X224 | S91.1 | M | 2 | not recorded | 2026-10-15 | Pinned native HB/animation and fractional-tag routing, independently reviewed three-value F210 external raster propagation. Corrected hosted receiptad03f29ef28fe9a5174cdb7cb30a8811c4cb25fa237eac4df1b8a0d63d388792. Final sprint/main/release gates remain due |
+
+| F-X225 | S91.1 | M | 2 | not recorded | 2026-10-15 | Private parser storage preserves public/XML contracts and passes original plus populated default1MiB Node callers. Scoped native/WASM/archive/hash/policy and independent reviews qualified |
+
+| F-X226 | S91.1 | M | 2 | not recorded | 2026-10-15 | Targeted checked-owner relationship retirement preserves shared/opaque graphs, debug validation and atomicity. Actual debug and optimized public regression plus scoped gates qualified |
+
+| F-X227 | S91.1 | L | 4 | not recorded | 2026-10-15 | Actual ownerCI38702668217 qualifies95/100,42hard51native24docs and5no-credit with safe one-job cleanup. Exact source215 rehearsal artifacts and installed156/typing4 qualify their recorded source. Final gates/publication pending |
