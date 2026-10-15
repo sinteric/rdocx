@@ -19,7 +19,9 @@ pub struct LayoutResult { pages: Vec<Arc<PageFrame>>, fonts: Vec<FontData>,
                           diagnostics: Vec<Diagnostic>,
                           structure: Option<DocumentStructure> }
 pub struct FontData { id: FontId, family: String, data: Arc<[u8]>,
-                      face_index: u32, bold: bool, italic: bool }
+                      face_index: u32, bold: bool, italic: bool,
+                      variations: Vec<([u8; 4], f32)>,
+                      synthetic_bold: bool, synthetic_italic: bool }
 pub struct PageFrame { page_number: usize, width: f64, height: f64,
                        elements: Vec<PositionedElement>, background: Option<Paint> }
 pub struct SourceNodeId(NonZeroU32)
@@ -114,7 +116,11 @@ Notes-slide placeholder overlays that have no complete-key match on the notes
 master are skipped rather than aborting the page. The renderer reports each
 skipped key in source order. It still fails closed for ambiguous or duplicate
 matching, invalid relationship ownership, and a missing required slide-image
-placeholder.
+placeholder. With an actual notes owner, absent master placeholders are
+omitted. Matched local absent or empty text bodies stay empty, and actual
+local slide-number fields resolve on the render clone without changing the
+saved owner. Ordinary local text is preserved. Notes without a notes owner
+and handouts keep their separate master composition behavior.
 
 Raster notes and handout output accepts finite positive DPI up to 600 and
 rejects a decoded output estimate above 256 MiB before allocation. Deterministic
@@ -277,6 +283,29 @@ logo 200 times.
 
 ## The PDF backend
 
+Each owned font ID identifies exact source bytes, a selected collection face,
+variation coordinates and synthesis policy. Matching static style faces take
+priority. Variable bold selects weight700 within the declared limits. Regular
+preserves the declared default, including Thin CJK defaults. Genuine italic
+faces precede usable ital or slnt axes. Metrics, advances, shaping and backend
+outlines consume the same selected instance. These additional `FontData`
+fields require external pre-1.0 struct literals to name the instance metadata.
+
+`render_to_pdf_checked` prepares every contributing selected font before the
+writer allocates output. A missing font or failed selected instance returns
+`MissingEmbeddedFont`, without a partial PDF or a default-instance substitute.
+Unused loaded fonts do not cause refusal. The legacy byte-vector
+`render_to_pdf` signature remains and returns an empty vector on preparation
+failure. Archival preflight adds its profile restrictions and shares the
+prepared map. Normal output does not acquire archival paint restrictions.
+Variable subsetting instances the selected outlines and records matching
+widths and Unicode mappings while keeping font names truthful.
+
+Synthetic bold paints centered fill and stroke at1/24em with round joins and
+caps. Synthetic italic applies a12-degree shear about the run baseline.
+Synthetic painting preserves shaped advances and expands only the private ink
+bounds. PDF text matrices and scoped paint operators implement these shapes.
+
 **One global CTM instead of a per-element flip.** Emit `q 1 0 0 -1 0 H cm` once
 at the top of the content stream, then write everything in top-left, y-down
 coordinates so group transforms compose naturally.
@@ -408,6 +437,11 @@ unchanged group content above it. Resolved colour alpha is part of the shadow.
 Group opacity applies once to the shadow and content together. PDF group
 effects remain unsupported.
 
+Raster glyph outlines apply the selected face coordinates before painting.
+Stroke construction operates in point-space geometry, with the same synthesis
+width, round joins and caps and baseline shear as PDF. Independent outline and
+analytic rectangle controls distinguish paint geometry from advance metrics.
+
 ## The SVG backend
 
 The private `rdocx` SVG backend consumes one zero-based page from an immutable
@@ -427,11 +461,23 @@ reviewed `http`, `https`, and `mailto` schemes only. XML-invalid text or
 attribute scalars are diagnosed and cannot enter the document.
 
 Text remains searchable `<text>`. Each used layout `FontId` receives one stable
-synthetic family backed by its exact embedded bytes. Scalar positions use
-cumulative shaped advances when scalar and glyph counts agree. Complex shaping
-retains the Unicode text, constrains total advance, and emits one positioning
-approximation diagnostic. Missing fonts and TTC face selection are diagnosed
-at exact first use while deterministic definitions remain ordered.
+synthetic family backed by its exact selected font bytes. A selected TTC face
+is extracted as a bounded standalone SFNT with checked table spans and
+checksums. Invalid faces are diagnosed without parser arithmetic overflow.
+Scalar positions use cumulative shaped advances only when scalar and glyph
+counts agree and every supplied glyph matches that scalar's nominal selected
+cmap glyph. Complex shaping retains Unicode text, constrains total advance,
+and emits one positioning approximation diagnostic. Embedded definitions and
+text explicitly freeze the selected physical face's registered defaults for
+`wght`, `wdth`, `ital`, `slnt` and `opsz`, then overlay selected coordinates
+once. Other explicit selected axes remain. These declarations prevent CSS
+weight, width, style and optical sizing from changing the selected instance,
+including a default weight100 face with no nondefault coordinates. Static
+faces retain their original declarations, and layout font bytes and stored
+coordinates remain unchanged. Synthetic bold uses explicit stroke and
+synthetic italic uses baseline-relative geometry, preserving full
+precision for their paint constants. Missing fonts are diagnosed at exact
+first use while deterministic definitions remain ordered.
 
 Solid and gradient paint share the backend-neutral stop normalization rule.
 Tile paint remains diagnosed because its carrier has no media bytes. Outer
@@ -631,9 +677,21 @@ An empty paragraph shapes a zero-width metrics carrier from its resolved
 `a:endParaRPr` style. Its line height and font-relative paragraph spacing use
 that resolved font and size. Nonempty paragraphs continue to use their first
 effective run. `cap="all"` transforms run and field text to Unicode uppercase
-before script-specific font selection and shaping. `cap="small"` has no render
-projection and remains preserved as unmodelled XML. A paragraph with no visible
-text or field emits no bullet, but it retains its empty line metrics.
+before script-specific font selection and shaping. Small caps applies the
+selected physical face's `smcp` feature when an applicable substitution exists.
+Otherwise lowercase graphemes use an explicit 80 percent uppercase fallback
+with a diagnostic, while original logical text and cluster ownership remain
+available to selection and extraction. A paragraph with no visible text or
+field emits no bullet, but it retains its empty line metrics.
+
+Highlight paints the resolved owned colour behind its actual text spans.
+Caps projection preserves selected physical bytes, face index, variation
+coordinates, synthesis and contribution-aware font traces through both family
+caches. It changes neither source text nor the caller-font selection contract.
+Group paint applies child-coordinate scale, flips and rotation in DrawingML
+order to text, paths, pictures and connectors. Unsupported affine composition
+is diagnostic or a checked authoring refusal, never claimed native parity.
+
 
 `a:bodyPr/@spcFirstLastPara` controls only the text body's edge spacing. When
 false, including when absent, the first paragraph's `spcBef` and the last
@@ -855,7 +913,9 @@ direction.
 A table style's background (`a:tblBg`) fills the whole table box first. Each
 table origin draws its fill over it, before its text. The table's unique
 border segments draw after all cell fills and text so a neighbouring fill
-cannot cover them. Table cells do not use the shape autofit algorithm.
+cannot cover them. Table cells retain stored normal-autofit scale and line
+spacing reduction in their resolved text. Shape-to-fit cannot resize an
+independently owned cell extent and is not applied to cell rendering.
 
 **Vertical Word text.** `w:tcPr/w:textDirection` and `w:sectPr/w:textDirection`
 lower onto the same transposed box and `Group` rotation the shape path uses.
@@ -1172,7 +1232,75 @@ effective autofit mode. Layout and master shapes, SmartArt, table cells, and
 text bodies that draw no visible character are left out, since an empty
 paragraph taller than a thin divider would otherwise read as overflow.
 
+### Explicit stored text fitting
+
+Ordinary rendering and saving trust existing fractional stored normal-autofit
+values and do not publish new scales or bounds. Explicit authoring uses the
+same resolved text, selected caller font faces and line stacking, with a
+separate physical containment predicate. Each emitted line uses its actual
+baseline, selected-face descent and shifted spans. Bullets, empty-line end
+properties and enabled edge paragraph spacing contribute to the extent.
+Every line must fit its available width and the physical stack must fit the
+usable reading-frame height within 0.01 point.
+
+Authoring measures physical extent in a zero-origin reading frame while
+returning the original usable bounds. Changing an owner width must not change
+height merely through cancellation of absolute transformed coordinates.
+Allocated source shape height and painted baseline or glyph extent are
+separate quantities. Explicit authoring preserves the ordinary renderer's
+baseline policy and measures the last participating baseline plus the
+selected face descent, baseline shifts and source insets. Native allocation
+alone does not replace the physical containment predicate. A native allocated
+extent difference is classified separately only when original-source owner
+geometry, fonts, anchors and transforms establish the physical extent and
+independent PDF and native PNG comparisons establish painted containment.
+This distinction does not relax stored scale, reduction, refusal or owner
+preservation requirements.
+
+Normal refresh tests the approved fourteen scale/reduction pairs in order.
+For each pair it reshapes both Q, positive half-up whole-point run sizes, and
+S, original nominal sizes with the persisted fractional pair. Both trials
+must fit. An unfit final pair is an atomic error, not a successful floor.
+Uniform fit tests every integer point size from the caller maximum down to
+one. It retains run families unless a family is explicitly supplied, writes
+the chosen size to run, paragraph-default and end properties, enables wrapping
+and removes autofit. Empty frames are accounted for without fabricated lines.
+
+Refresh inventories physical slide, layout, master and notes text owners,
+including nested shapes and table cells. Shared owners must satisfy every
+instantiated context. Unused shared owners, unsupported opaque text owners,
+ambiguous IDs and unsupported transforms refuse before publication. A shape
+resize preserves its source top, centre or bottom anchor through its own
+rotation and flips and the checked parent affine scale. Vertical reading
+resizes the corresponding local dimension. Distributed and justified anchors
+have no single preserved anchor and refuse. Table-cell Normal refresh and
+uniform fit use the existing cell box. Shape-to-fit cells refuse atomically.
+
+Authoring preflight resolves source namespaces for body properties and autofit
+choices. Explicit foreign or rebound lookalikes refuse refresh and uniform fit
+before typed flag inventory. Ordinary import, unchanged save and rendering
+remain available. Known choices retain opaque lexical attributes and inherited
+wrapper scope through owned changes. A no-op planned result leaves its source
+part untouched.
+
+All changes are planned on a staged package before any owner is written.
+Successful publication invalidates native completed-layout caches once.
+Formatting and extent changes preserve existing logical Python handles.
+Reports carry the operation's owned font contribution diagnostics and separate
+accepted Q/S trial facts from the actual current persisted trial. A report is
+read-only and never refreshes an owner implicitly.
+
 ## Performance
+
+PresentationML parsing and supported authoring use
+`rpptx_oxml::MAX_PRESENTATION_NESTING`, currently32. Group lineage, flattening,
+timeline group geometry and renderer group lowering use explicit stacks in
+source order. Layout admission validates slide, layout and master trees, and
+render admission validates caller-created resolved group graphs before copying
+them. Named errors past the bound preserve the existing transform order,
+clip correspondence and staged authoring atomicity. Unchecked constructors
+do not guarantee arbitrary malformed graphs are safe.
+
 
 `Document` keeps normal-font and deterministic `WordLayoutResult` values in
 separate `Mutex<Option<Arc<_>>>` caches. `layout`, option-taking accepted
@@ -1181,12 +1309,14 @@ share the normal result. The normal path also retains one synchronized
 `rdocx-layout::Engine` after mutation invalidates that completed result. The
 deterministic renderers use their own bundle. Tracked layouts remain uncached
 and use the normal engine with a distinct revision-view paragraph identity.
-Caller-supplied font layouts construct an isolated engine, remain uncached, and
-cannot observe bundled or system fonts. Caller-font access returns an owned
-bundle. `to_pdf_with_fonts` instead lays out uncached in a fresh normal-font
-engine with the caller fonts loaded over it, so a family the caller does not
-supply resolves as `to_pdf` resolves it, from system fonts when the
-`system-fonts` feature is enabled and then from the bundled fonts. The separate
+Caller-only native font layouts construct an isolated engine, remain
+uncached, and cannot observe bundled or system fonts. Caller-font access
+returns an owned bundle. Normal Word additional-font layout and output use
+`layout_with_additional_fonts_and_options` in a fresh normal-font engine.
+Caller fonts override embedded and fallback faces. A family the caller does
+not supply resolves as `to_pdf` resolves it, from system fonts when the
+`system-fonts` feature is enabled and then from bundled fonts. PDF, PNG, SVG
+and selected raster pages consume that exact owned bundle. The separate
 bundled-fallback caller-font mode retains one reusable deterministic-base
 engine. Caller faces have highest priority, missing families
 resolve from bundled faces, and system fonts remain unavailable. Its owned
@@ -1195,11 +1325,16 @@ bundle. Every PDF and raster path borrows its `LayoutResult` field from the same
 bundle that owns the exact font data and Word source map. Cloning a completed
 result shares each immutable page frame and font byte buffer.
 
-The Python `Document.layout()` method always reads the bundled-font-only
-snapshot. It returns immutable main-body fragments with their zero-based body
+Without selected caller fonts, Python `Document.layout()` reads the
+bundled-font-only snapshot. Nonempty caller inputs use the normal additional
+font bundle. Empty sequences and valid empty directories retain each
+entrypoint's omission path after all supplied paths are validated. It returns immutable main-body fragments with their zero-based body
 index, one-based physical and displayed page numbers, and point-space bounds.
-`Document.layout_page()` uses the same deterministic cache and returns immutable
-page number and size metadata for one zero-based page index. Neither method
+`Document.layout_page()` uses the same font-selection rule. Omitted caller
+inputs, empty sequences and valid directories with no selected font retain
+the bundled deterministic cache after path validation. Nonempty selected fonts
+use a fresh normal additional-font bundle. It returns immutable page number
+and size metadata for one zero-based page index. Neither method
 exposes positioned renderer elements or permits mutation through a layout
 result.
 
@@ -1211,6 +1346,47 @@ slides in producer order. Both resolve the same staged package and layout as
 decoded-output ceiling, and call the shared PNG backend without introducing a
 binding-private render path. Python PDF, slide PNG, notes PDF, and notes PNG
 methods release the GIL around these native operations.
+
+Bundled Georgia fallback selects the original Gelasio upright or italic
+variable face at the requested selected weight. Segoe UI fallback selects
+Selawik Regular or Bold. Selawik has no genuine italic face, so missing styles
+use the provider's explicit synthesis policy. Authentic caller and embedded
+faces retain precedence. Unrelated family and CJK selection remain unchanged.
+These are approximate substitutes with bounded measured guarantees, not
+universal outline, wrapping or line-pitch equivalence.
+
+For pinned Georgia references, Gelasio matches the95 isolated printable ASCII
+advances in regular, bold and italic. Bold-italic differs on j by1/2048em.
+The21 measured string controls differ on two ligature-rich strings in each
+style, even with kerning disabled. Selected line extents differ by
+0.13330078125em. At12pt and180pt width, an independent greedy regular control
+wraps to35 versus36 lines. That algorithm is not native Word or product
+pagination authority. Pinned Selawik Regular and Segoe UI Regular5.31 match
+95 isolated ASCII and21 kern-disabled string advances. Kerning-enabled
+controls differ on19/21 strings, with a measured maximum0.39111328125em.
+Selected Word line totals agree, while generic HarfBuzz line extents differ.
+No measured Segoe UI Bold parity is established.
+
+Aptos and Aptos Display remain approximate fallbacks when the actual selected
+physical face is not the requested family. Caller aliases select faces but
+cannot authenticate their physical family. Successful nonempty final
+contributions produce an ordered, deduplicated diagnostic naming the request
+and actual selected face. Provisional probes and rejected scopes do not
+contribute warnings. Cache replay preserves committed request identity.
+Diagnostics are operation-owned facts copied into returned layouts, not a
+persistent last-render registry. They do not independently change paint bytes.
+
+Explicit Word symbol runs and qualified numbering bullets use a bounded
+original-family mapping when no authentic original face covers the stored
+code. SymbolB7 maps to U2022. WingdingsA7, D8, FC,76,71,6E and FE map to U25AA,
+U27A2, U2713, U2756, U2751, U25A0 and U2611 respectively. Low-byte and F000
+forms share the qualified interpretation. The existing PPT F0B7 bullet route
+remains compatible. Caller labels alone cannot claim original symbol identity.
+Unknown codes, Wingdings2/3, unrelated private-use text and ordinary text are
+not globally rewritten. Source XML and stored codes remain unchanged.
+Monochrome Unicode substitutes preserve the measured semantic symbol, not
+original Wingdings outlines, dimensions or advances. U2610 checkbox coverage
+is separate from the WingdingsA7 section-square mapping.
 
 Normal `FontManager` construction clones one process-lifetime snapshot of the
 bundled and system face table. Installing, removing, or replacing a system font
@@ -1255,10 +1431,23 @@ coverage misses, coverage fallbacks, and per-paragraph font traces also have
 explicit bounds. Loading a different additional font set rebuilds face
 identity and clears all dependent memo state.
 
+One bounded ordered trace carries legacy resolution events and successful
+nonempty final text contributions. A contribution retains the original
+requested family and exact selected instance. Word paragraph, table and story
+caches and PowerPoint text reuse replay this owned context, not a historical
+font-ID-to-request map. Constructor-owned faces retain their existing tie
+priority. Within the additional tier, later equal-ranked faces win after CSS
+style, weight and stretch ranking. Ordinary legacy trace APIs retain their
+selected-ID projection. Nested capture and replay validate owner, generation and selected
+instances before publication. Probe-only and empty shaping do not contribute.
+Owned string capacity is charged to cache budgets and overflow bypasses
+admission. Rich Word paths which cannot satisfy cache safety remain uncached.
+
+
 Caller font labels that differ from their embedded family names create
 label-derived aliases to the exact loaded faces. Native callers can also set
 explicit byte-free aliases from document-facing family names to loaded caller
-families. Resolution checks an exact embedded family first, then an explicit
+families. Within the caller tier, resolution checks an exact sfnt family first, then an explicit
 alias, then a label-derived alias, followed by the existing mapped alternatives
 and generic fallbacks. Candidate stretch, style, and directional weight choice
 uses the same CSS-like `fontdb` query as ordinary family resolution. Explicit
@@ -1296,9 +1485,22 @@ Roman, bullet, and `none` markers retain their established layout behavior.
 Other standard formats cross the package boundary without being collapsed to
 decimal. Until their visible formatter is implemented, layout and text exports
 emit no invented marker. One deterministic counter owner keys values by
-concrete `numId` and level. It applies configured starts, instance overrides,
-replacement levels, legal numbering, level restarts, and section restart
-policy while traversing body paragraphs and table cells in document order.
+abstract definition and level. Plain concrete instances of one definition
+continue its shared count. Distinct definitions remain independent, without
+coalescing matching nsid values. Concrete `numId` remains the source and display
+identity. Explicit startOverride consumption is tracked by concrete instance
+and level, separately from shared counts. First ordinary use applies it once.
+Replacement-level start and restart do not replace the definition's counter
+policy. An ancestor resets deeper shared counts according to the base restart
+owner, and rearms an override only for that ancestor's own concrete instance.
+A zero lvlRestart preserves the deeper count.
+
+An opted-in section event defers reinitialization until the definition's next
+numbered item. That item initializes the root from its base start, even when
+it is at a child level, and applies only the configured deeper resets. It
+preserves consumed override state and does not consume a previously unused
+override on this first section item. Subsequent items resume ordinary rules.
+Body paragraphs and accepted table cells share document-order traversal.
 `numId` zero suppresses only its paragraph and does not advance or corrupt a
 later sequence. Header and footer stories use independent counter state.
 
@@ -1306,9 +1508,14 @@ Each resolved marker carries its displayed level, complete displayed context,
 numeric forms with literal level text removed, source-derived punctuation
 between levels, and concrete instance identity. Numbered TOC sources and REF
 fields consume that result-local projection. They do not replay numbering or
-maintain a second counter implementation.
+maintain a second counter implementation. EPUB consumes the same selected
+counter context, including effective table styles and nested accepted owners.
+Its existing table writer retains visible flattening diagnostics. The ODT
+writer reports a selected shared-definition continuation loss when concrete
+list output cannot express it, without claiming unrestricted Word numbering
+parity in that format.
 
-Relationship-resolved embedded font faces enter `LayoutInput.fonts` under the
+Relationship-resolved embedded font faces enter `LayoutInput.embedded_fonts` under the
 font-table record name. Their OOXML font key deobfuscates the package bytes
 before shaping. This explicit document input has priority over bundled fallback
 and needs no system-font discovery. Authored major and minor theme typefaces
@@ -1852,7 +2059,7 @@ directions, or unsupported modes add diagnostics rather than executable
 fallbacks.
 
 `rpptx-render` lowers evaluated shapes through the same private page path used
-by static rendering. Cut, fade, wipe, push, and zoom compose complete
+by static rendering. Cut, fade, wipe, push, split, cover, uncover and zoom compose complete
 `PageFrame` groups without changing backend contracts. Fade uses source-over
 composition with the opaque outgoing page. Directional wipes clip in the
 oriented transition space. Morph correlates explicit `!!` names across stable
@@ -2060,6 +2267,11 @@ The inserted field therefore uses the same rebuild and pagination path as a
 producer-authored dynamic TOC after headings change. The generated right tab
 uses the section text width, falling back to the Letter default when the width
 is absent, non-positive, or outside the supported twip range.
+When field boundaries occupy TOC entries, rebuild places begin and separator
+in the first generated entry and end in the last, without adding blank entry
+paragraphs. One entry owns both boundaries. Zero entries retain balanced
+markers without obsolete entry styles and permit a later positive rebuild.
+Distinct marker-only boundary paragraphs retain their existing layout policy.
 Table-of-contents rebuild creates its provisional PAGEREF fields before
 calling the deterministic bundled-font layout. The existing post-pagination
 pass remains the only page-target authority. Rebuild reads those displayed
@@ -2339,3 +2551,168 @@ to points. Translation, fractional scale, alternating axis flips, nine-way
 alignment, source crop, and `rotate_with_shape` are applied in presentation
 lowering. Repeats use deterministic row-major order and are bounded by element
 and cloned-media byte limits before allocation.
+
+## PowerPoint displayed field assembly
+
+Static and timeline presentation paths pass the displayed start into their
+substantive layout assembly. Existing render entry points retain start one and
+RenderInput retains its existing fields. Uncached slide-number fields evaluate
+in that same layout pass. Physical page indices remain independent. Split uses
+centered incoming or outgoing clips. Cover moves the incoming page and uncover
+moves the outgoing page, with checked effect-specific directions. Invalid
+parameters remain diagnostic instead of silently selecting another effect.
+
+## Authored Word page appearance and note references
+
+Qualified Word2010 solid text fill projects an RGB colour and alpha while
+retaining its original extension source. Gradient representations remain opaque. Style merging transports this
+semantic fill with direct-property precedence, without copying arbitrary
+opaque extensions. Anchored DrawingML text rotates around its resolved local
+centre. Authored text watermarks use the standard `textPlain` text warp in
+DrawingML body properties while retaining real styled text and the VML
+fallback. A declared Word2018 capability choice retains solid text fill, with a
+native Word-compatible type136 textpath VML fallback in the same physical owner.
+Only the selected branch projects paint. The complete source owner is fingerprinted
+before publication. Text watermark authoring admits only opacity 0.5, with a named
+atomic unsupported error for other valid-range values before any owner allocation.
+Legacy VML authoring and image opacity retain their separate contracts. Full-range
+DrawingML text opacity is deferred to F-X219 in S92.
+Generic text boxes retain their existing representation. Picture
+alpha and rotation are projected only from the admitted picture chain, then use the existing image group opacity and affine paint
+path. Ordinary pictures with no effects retain their existing representation.
+
+Explicit superscript or subscript note references use the font size and
+baseline offset already resolved from effective run properties. A reference
+without those vertical styles receives default note superscripting once.
+Explicit half-point position shifts remain additive. Both note streams use
+the same rule for cold and cached layout.
+
+A selected page-border edge retains complete child source. Authoring an
+explicit literal colour removes only its qualified theme colour selectors.
+Foreign attributes and opaque children remain exact. Duplicate recognized
+edges refuse rather than silently selecting or adding another edge. Native
+print-background preferences and host font substitution do not establish
+repository paint parity.
+
+## PowerPoint sampled fills and script faces
+
+The concrete Grid paint carries finite bounds, column and row counts and a
+bounded owned RGBA palette. PDF emits coloured type1 tiling resources, raster
+uses a nearest-sampled repeat texture, and SVG emits an equivalent user-space
+pattern. Grid heap capacity is included in the shaping cache byte budget.
+PowerPoint's54 preset patterns use source-derived64-by64 palette weights and
+an8pt logical tile. Raster engines may differ in pixel phase and antialiasing,
+so program geometry, palette and mask ownership remain separately testable.
+
+Supported centred circle, rectangle and shape path fills sample source stops
+within the original fill geometry. PowerPoint two-endpoint gradients and
+mirrored three-stop endpoint gradients use channel-directed gamma1.875 with
+linear alpha. Other stop lists remain linear. This applies at PPT resolution,
+including linear fills, and leaves Word colour and shared Paint interpolation
+unchanged. Unsupported tile rectangles, flips and path geometries diagnose.
+
+Mixed-script text and fields select the resolved Latin, East Asian and
+complex-script faces at script boundaries before shared shaping and fallback.
+Ordinary character spacing survives directional and multilingual reshaping.
+JPEG quality applies only to JPEG, transparency only to PNG, and slide indices
+and DPI validate before layout. Caller fonts supply one deterministic bundle
+to slide, archival, notes and handout exports.
+
+## Word document-operation layout boundaries
+
+Calculated Python page_count uses deterministic native layout and the existing caller-font options. Producer app-properties page counts remain cached metadata. Word and character counts use accepted body content and exclude related-story presentation labels. Equation insertion converts before candidate publication. Inline and display snapshots preserve occurrence boundaries, and display conversion returns one ordered result per native equation child plus wrapper diagnostics. Conversion does not infer display intent from whitespace.
+
+Checkbox display runs bind the selected checkedState or uncheckedState scalar and font together. Genuine caller faces retain the qualified font provider precedence. Original source scalar and state-font facts remain unchanged by semantic font fallback. PDF and raster acceptance must distinguish actual painted glyph selection from mere resource presence.
+
+## Editable branding inheritance
+
+Rendering resolves current persisted master, layout and theme owners through
+the same inheritance chain as imported decks. Master pictures appear on linked
+slides unless layout or slide showMasterSp suppresses them. Layout pictures
+remain layout-owned. Master paragraph defaults and actual theme colour/font
+resources affect inherited properties without replacing explicit slide values.
+
+Background detachment preserves the current effective fill and its image scope.
+Explicit imported layout mapping can change inherited geometry or appearance,
+but does not rewrite direct slide coordinates or content. Imported resources
+remain bounded to the preflighted selected closure. Deterministic physical font
+registration and the pinned Word tint convention remain unchanged.
+
+Destination-formatting slide import uses destination inheritance by default.
+Opt-in source formatting resolves the copied actual layout, master and theme,
+including inherited fonts, colours, placeholder geometry and notes resources.
+Presentation-global source table styles and embedded font programs preserve
+the selected source appearance without changing unrelated destination owners.
+Caller-font precedence, checked embedded decoding and deterministic fallback
+rules remain shared with ordinary rendering. Source and imported render
+comparisons use the same actual geometry and font inputs with comparison
+criteria fixed before measuring output. A graph copy or nonblank image alone
+is not native appearance or pixel parity evidence.
+
+Qualified picture drawing properties with hidden=true or hidden=1 do not paint. Missing and false hidden flags retain ordinary picture rendering. The reader uses the actual qualified cNvPr owner and retains its raw bytes, including foreign attributes and children. LibreOffice may materialize master visibility as hidden layout pictures during save and reopen.
+
+## Word table topology and physical pictures
+
+Checked empty-row creation copies admitted last-row formatting and logical occupancy without copying content, related media or document-wide identities. New rows clear vertical-merge continuation. Column operations use logical grid coordinates and the selected reference column for widths and cell properties. Insertions expand crossing spans, preserve omitted cells and reject unsupported opaque-property cloning. Deletion retains consistent grid and cell widths and refuses the final column. Splitting restores the complete merge region and keeps each original member's content and producer identity at its leftmost resulting cell. Only admitted cell formatting is copied into newly materialized empty cells. An ordinary cell stays unchanged. Every structural operation stages the document and reopens before publication.
+
+Picture inventory identifies one physical DrawingML owner by its checked story, paragraph occurrence and unchanged source. Two drawings sharing media remain distinct. Inventory returns owned image bytes, content type, extent and metadata, while refusing ambiguous alternate representations. Resizing transports only qualified owner extent edits onto the original source and retains crop, metadata, relationships and unmodelled XML. The native relationship-wide compatibility method remains distinct. Supported configured imports allocate media on the actual body, cell or related-story part before one atomic publication.
+
+## Read-only fit and count consumers
+
+PowerPoint CLI fit and Python fit_report consume the common authoring solver's
+read-only FitReport. They retain owner contexts, admitted table cells, empty
+frames, measured/stored scale, hypothetical needed total scale/reduction,
+quantized and persisted trial containment and provider diagnostics. Trials
+report points, stored bounds EMU and integer solver scale/reduction values in
+hundred-thousandths. Unsupported mandatory owners refuse rather than vanish,
+and no permitted fitting trial retains a null needed scale. Caller fonts use
+the same strict preparation and deterministic bundled fallback as rendering.
+The report does not mutate autofit or save the presentation.
+
+Word inspect page counts and combined layout-backed field updates use the
+native deterministic layout provider. Accepted-main-body word and Unicode
+scalar counts remain distinct from layout page counts. Unsupported field
+switches and intentionally retained dynamic header/footer caches keep their
+provider diagnostics, and omitted explicit date context never reads a clock.
+
+## Embedded face selection across exports
+
+Caller faces form the highest selection tier, followed by document-embedded
+faces, then the existing bundled/system fallback policy of the entrypoint.
+Within each tier, exact family, explicit alias and label-derived alias lookup
+retain CSS stretch/style/directional weight selection. Embedded aliases retain
+regular, bold, italic and boldItalic face identity. Aliases share one physical
+immutable font body rather than copying bytes per reference.
+
+Word admits embedded faces when embedTrueTypeFonts is absent or true and
+skips them when explicitly false. PowerPoint requires embedTrueTypeFonts=true
+for its embedded rendering tier. Supported sfnt/EOT data enters the same font
+manager used for slides, notes, handouts, fitting and timelines. Compressed EOT
+or unsupported Word payload does not become a decoded font. Explicit caller
+faces still override a closer-style embedded match. Deterministic entrypoints
+resolve fallback from the bundled inventory without discovering system fonts.
+
+PDF, raster and supported SVG exports consume the selected layout font body
+and face instance. Read-only layout/render consumers keep source and retained
+physical owners unchanged. Word caches and reusable engines include exact
+embedded source identity, settings and aliases in their retained context.
+Equal/no-op updates preserve cached identity, and changed font input invalidates
+only through the existing native provider.
+
+### Native Office font consumption
+
+Own-renderer face selection remains distinct from native Office behavior.
+PowerPoint's positive regular and bold output uses separate actual font glyph
+streams whose outlines and advances agree with the prepared faces. Its
+pre-save, post-save and normal-reopened PDFs retain the same text geometry and
+raster output. Missing, disabled and raw-format controls use measured fallback
+faces. A changed-font control must differ in real glyphs and metrics, not just
+in a resource name.
+
+Native Word is bounded by the [documented one-font-per-name implementation](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/22da0d03-7202-4731-9518-b96bfbe4de61).
+A paired uninstalled family can paint the actual regular font with synthetic
+bold before any native save, and native saving can leave its bold part empty.
+A separate bold-body control proves that body can load, without proving
+multi-face family selection. Word multi-face interoperability belongs to
+F-X223. Neither that boundary nor native fallback weakens genuine regular,
+bold, italic and bold-italic selection in our renderer or caller overrides.

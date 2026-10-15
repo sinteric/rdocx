@@ -69,9 +69,16 @@ pub struct CT_Background {
     raw_xml: Vec<u8>,
     rendering: BackgroundRendering,
     fill_range: Option<(usize, usize)>,
+    reference_range: Option<(usize, usize)>,
+    reference_replaceable: bool,
 }
 
 impl CT_Background {
+    /// Parses a self-contained qualified background copied between physical owners.
+    pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        Self::from_fragment(xml, &NamespaceBindings::default())
+    }
+
     /// Builds a canonical direct-fill slide background.
     pub fn from_fill(fill: Fill) -> Result<Self> {
         let mut writer = Writer::new(Vec::new());
@@ -87,11 +94,57 @@ impl CT_Background {
             raw_xml: writer.into_inner(),
             rendering: BackgroundRendering::Properties(Some(Box::new(fill))),
             fill_range: Some((fill_start, fill_end)),
+            reference_range: None,
+            reference_replaceable: false,
         })
     }
 
     /// Replaces only an existing direct fill inside the preserved background.
-    fn replace_fill(&mut self, fill: Fill) -> Result<()> {
+    pub fn replace_fill(&mut self, fill: Fill) -> Result<()> {
+        if let Some((start, end)) = self.reference_range {
+            if !self.reference_replaceable {
+                return Err(OxmlError::InvalidValue(
+                    "background reference has opaque source that cannot move to a fill".to_owned(),
+                ));
+            }
+            let mut reader = Reader::from_reader(&self.raw_xml[start..end]);
+            let mut buffer = Vec::new();
+            let element = match reader.read_event_into(&mut buffer)? {
+                Event::Start(element) | Event::Empty(element) => element,
+                _ => {
+                    return Err(OxmlError::InvalidValue(
+                        "background reference source is absent".to_owned(),
+                    ));
+                }
+            };
+            for attribute in element.attributes() {
+                let attribute = attribute?;
+                if attribute.key.as_ref() != b"idx"
+                    && attribute.key.as_ref() != b"xmlns"
+                    && !attribute.key.as_ref().starts_with(b"xmlns:")
+                {
+                    return Err(OxmlError::InvalidValue(
+                        "background reference has opaque attributes that cannot move to a fill"
+                            .to_owned(),
+                    ));
+                }
+            }
+            let prefix = format!("<p:bgPr xmlns:p=\"{P_NS}\" xmlns:a=\"{A_NS}\">");
+            let replacement = fill
+                .to_xml()
+                .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
+            let mut wrapped = prefix.as_bytes().to_vec();
+            wrapped.extend_from_slice(&replacement);
+            wrapped.extend_from_slice(b"</p:bgPr>");
+            self.raw_xml.splice(start..end, wrapped);
+            self.fill_range = Some((
+                start + prefix.len(),
+                start + prefix.len() + replacement.len(),
+            ));
+            self.reference_range = None;
+            self.rendering = BackgroundRendering::Properties(Some(Box::new(fill)));
+            return Ok(());
+        }
         let Some((start, end)) = self.fill_range else {
             return Err(OxmlError::InvalidValue(
                 "cannot replace a background that has no safe direct fill range".to_owned(),
@@ -131,14 +184,27 @@ impl CT_Background {
                     let rendering = parse_background_rendering(&mut reader, &namespaces)?;
                     let fill_range =
                         if matches!(rendering, BackgroundRendering::Properties(Some(_))) {
-                            direct_background_fill_range(xml, inherited)?
+                            direct_background_fill_range(xml, inherited, false)?
                         } else {
                             None
                         };
+                    let reference_range =
+                        if matches!(rendering, BackgroundRendering::Reference { .. }) {
+                            direct_background_fill_range(xml, inherited, true)?
+                        } else {
+                            None
+                        };
+                    let reference_replaceable = if let Some((begin, end)) = reference_range {
+                        background_reference_replaceable(&xml[begin..end], &namespaces)?
+                    } else {
+                        false
+                    };
                     return Ok(Self {
                         raw_xml: xml.to_vec(),
                         rendering,
                         fill_range,
+                        reference_range,
+                        reference_replaceable,
                     });
                 }
                 Event::Empty(start) => {
@@ -178,6 +244,23 @@ pub struct CT_HeaderFooter {
 }
 
 impl CT_HeaderFooter {
+    /// Creates a container with these flags, `None` keeping the enabled default.
+    pub fn new(
+        slide_number: Option<bool>,
+        header: Option<bool>,
+        footer: Option<bool>,
+        date_time: Option<bool>,
+    ) -> Self {
+        Self {
+            slide_number,
+            header,
+            footer,
+            date_time,
+            raw_attributes: RawAttributes::new(),
+            raw_children: OrderedRawChildren::default(),
+        }
+    }
+
     pub fn slide_number_enabled(&self) -> bool {
         self.slide_number.unwrap_or(true)
     }
@@ -658,9 +741,111 @@ fn find_extension_list_closing(xml: &[u8]) -> Result<Option<(usize, usize)>> {
     }
 }
 
+fn background_reference_replaceable(xml: &[u8], inherited: &NamespaceBindings) -> Result<bool> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut scopes = vec![inherited.clone()];
+    let mut depth = 0usize;
+    let mut color_seen = false;
+    loop {
+        let event = reader.read_event_into(&mut buffer)?;
+        let empty = matches!(&event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let scope = scopes
+                    .last()
+                    .expect("reference scope")
+                    .with_start(&element)?;
+                let qualified_name = element.name();
+                let name = local_name(qualified_name.as_ref());
+                let known = if depth == 0 {
+                    scope.element_uri(element.name().as_ref()) == Some(P_NS) && name == b"bgRef"
+                } else if depth == 1 {
+                    let color = scope.element_uri(element.name().as_ref()) == Some(A_NS)
+                        && is_color_name(name)
+                        && !color_seen;
+                    color_seen |= color;
+                    color
+                } else {
+                    depth == 2
+                        && scope.element_uri(element.name().as_ref()) == Some(A_NS)
+                        && matches!(
+                            name,
+                            b"tint"
+                                | b"shade"
+                                | b"comp"
+                                | b"inv"
+                                | b"gray"
+                                | b"alpha"
+                                | b"alphaOff"
+                                | b"alphaMod"
+                                | b"hue"
+                                | b"hueOff"
+                                | b"hueMod"
+                                | b"sat"
+                                | b"satOff"
+                                | b"satMod"
+                                | b"lum"
+                                | b"lumOff"
+                                | b"lumMod"
+                                | b"red"
+                                | b"redOff"
+                                | b"redMod"
+                                | b"green"
+                                | b"greenOff"
+                                | b"greenMod"
+                                | b"blue"
+                                | b"blueOff"
+                                | b"blueMod"
+                                | b"gamma"
+                                | b"invGamma"
+                        )
+                };
+                if !known {
+                    return Ok(false);
+                }
+                for attribute in element.attributes() {
+                    let attribute = attribute?;
+                    let key = attribute.key.as_ref();
+                    if key == b"xmlns" || key.starts_with(b"xmlns:") {
+                        continue;
+                    }
+                    let allowed = if depth == 0 {
+                        key == b"idx"
+                    } else {
+                        match name {
+                            b"sysClr" => matches!(key, b"val" | b"lastClr"),
+                            b"scrgbClr" => matches!(key, b"r" | b"g" | b"b"),
+                            b"hslClr" => matches!(key, b"hue" | b"sat" | b"lum"),
+                            b"comp" | b"inv" | b"gray" | b"gamma" | b"invGamma" => false,
+                            _ => key == b"val",
+                        }
+                    };
+                    if !allowed {
+                        return Ok(false);
+                    }
+                }
+                if !empty {
+                    scopes.push(scope);
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                scopes.pop();
+                depth = depth.saturating_sub(1);
+            }
+            Event::Text(text) if text.iter().all(u8::is_ascii_whitespace) => {}
+            Event::Eof => return Ok(true),
+            _ => return Ok(false),
+        }
+        buffer.clear();
+    }
+}
+
 fn direct_background_fill_range(
     xml: &[u8],
     inherited: &NamespaceBindings,
+    reference: bool,
 ) -> Result<Option<(usize, usize)>> {
     let mut reader = Reader::from_reader(xml);
     let mut buffer = Vec::new();
@@ -675,6 +860,14 @@ fn direct_background_fill_range(
                     OxmlError::InvalidValue("missing background namespace scope".to_owned())
                 })?;
                 let scope = parent.with_start(&element)?;
+                if reference
+                    && depth == 1
+                    && scope.element_uri(element.name().as_ref()) == Some(P_NS)
+                    && local_name(element.name().as_ref()) == b"bgRef"
+                {
+                    reader.read_to_end(element.name())?;
+                    return Ok(Some((event_start, reader.buffer_position() as usize)));
+                }
                 if properties_depth == Some(depth)
                     && scope.element_uri(element.name().as_ref()) == Some(A_NS)
                     && is_fill_name(local_name(element.name().as_ref()))
@@ -696,6 +889,13 @@ fn direct_background_fill_range(
                     OxmlError::InvalidValue("missing background namespace scope".to_owned())
                 })?;
                 let scope = parent.with_start(&element)?;
+                if reference
+                    && depth == 1
+                    && scope.element_uri(element.name().as_ref()) == Some(P_NS)
+                    && local_name(element.name().as_ref()) == b"bgRef"
+                {
+                    return Ok(Some((event_start, reader.buffer_position() as usize)));
+                }
                 if properties_depth == Some(depth)
                     && scope.element_uri(element.name().as_ref()) == Some(A_NS)
                     && is_fill_name(local_name(element.name().as_ref()))
@@ -738,6 +938,14 @@ impl CT_SlideLayout {
         })
     }
 
+    /// Returns the `type` attribute, such as `title` for a title slide layout.
+    pub fn layout_type(&self) -> Option<&str> {
+        self.raw_attributes
+            .iter()
+            .find(|(name, _)| name == "type")
+            .map(|(_, value)| value.as_str())
+    }
+
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         write_slide_like(
             RootKind::Layout,
@@ -755,6 +963,46 @@ impl CT_SlideLayout {
 }
 
 impl CT_SlideMaster {
+    /// Makes presentation text defaults explicit on this source-owned master.
+    pub fn inherit_presentation_text_defaults(
+        &mut self,
+        defaults: &CT_TextListStyle,
+    ) -> Result<()> {
+        let styles = match &self.text_styles {
+            Some(styles) => CT_MasterTextStyles {
+                title_style: styles
+                    .title_style
+                    .with_inherited_defaults(defaults)
+                    .map_err(map_drawing_error)?,
+                body_style: styles
+                    .body_style
+                    .with_inherited_defaults(defaults)
+                    .map_err(map_drawing_error)?,
+                other_style: styles
+                    .other_style
+                    .with_inherited_defaults(defaults)
+                    .map_err(map_drawing_error)?,
+                raw_attributes: styles.raw_attributes.clone(),
+                raw_children: styles.raw_children.clone(),
+            },
+            None => CT_MasterTextStyles {
+                title_style: CT_TextListStyle::default()
+                    .with_inherited_defaults(defaults)
+                    .map_err(map_drawing_error)?,
+                body_style: CT_TextListStyle::default()
+                    .with_inherited_defaults(defaults)
+                    .map_err(map_drawing_error)?,
+                other_style: CT_TextListStyle::default()
+                    .with_inherited_defaults(defaults)
+                    .map_err(map_drawing_error)?,
+                raw_attributes: Vec::new(),
+                raw_children: OrderedRawChildren::default(),
+            },
+        };
+        self.text_styles = Some(styles);
+        Ok(())
+    }
+
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
         let parsed = parse_root(xml, RootKind::Master)?;
         let color_map = required(parsed.color_map, "p:clrMap")?;
@@ -770,6 +1018,277 @@ impl CT_SlideMaster {
             color_map_children: color_map.raw_children,
             raw_children: parsed.raw_children,
         })
+    }
+
+    /// Inserts a newly allocated qualified layout ID while retaining the existing raw list and siblings.
+    pub fn append_slide_layout_id(
+        &mut self,
+        source: &[u8],
+        id: u32,
+        relationship_id: &str,
+    ) -> Result<Vec<u8>> {
+        if id < 2_147_483_648 || relationship_id.is_empty() {
+            return Err(OxmlError::InvalidValue(
+                "invalid newly allocated master layout ID".into(),
+            ));
+        }
+        oxml_core::xml::reject_non_xml_characters("layout relationship ID", relationship_id)?;
+        let current = self.slide_layout_ids()?;
+        if current
+            .iter()
+            .any(|(old_id, old_relationship)| *old_id == id || old_relationship == relationship_id)
+        {
+            return Err(OxmlError::InvalidValue(
+                "duplicate master layout ID or relationship".into(),
+            ));
+        }
+        self.edit_slide_layout_list(source, None, Some((id, relationship_id)))
+    }
+
+    /// Removes exactly the selected qualified entry, retaining all other list source bytes.
+    pub fn remove_slide_layout_id(
+        &mut self,
+        source: &[u8],
+        relationship_id: &str,
+    ) -> Result<Vec<u8>> {
+        let ids = self.slide_layout_ids()?;
+        if !ids.iter().any(|(_, old)| old == relationship_id) {
+            return Err(OxmlError::InvalidValue(
+                "master layout relationship is absent".into(),
+            ));
+        }
+        self.edit_slide_layout_list(source, Some(relationship_id), None)
+    }
+
+    fn edit_slide_layout_list(
+        &mut self,
+        source: &[u8],
+        remove: Option<&str>,
+        append: Option<(u32, &str)>,
+    ) -> Result<Vec<u8>> {
+        if Self::from_xml(source)? != *self {
+            return Err(OxmlError::InvalidValue(
+                "master source does not match current owned model".into(),
+            ));
+        }
+        let xml = source;
+        let mut reader = NsReader::from_reader(xml);
+        let mut buffer = Vec::new();
+        let mut depth = 0usize;
+        let mut list = None;
+        let mut list_depth = None;
+        let mut pending_entry = None;
+        let mut entries = Vec::new();
+        loop {
+            let begin = reader.buffer_position() as usize;
+            let (qualified, event) = {
+                let (namespace, event) = reader.read_resolved_event_into(&mut buffer)?;
+                (
+                    matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == P_NS.as_bytes()),
+                    event,
+                )
+            };
+            let finish = reader.buffer_position() as usize;
+            let empty = matches!(&event, Event::Empty(_));
+            match event {
+                Event::Start(start) | Event::Empty(start) => {
+                    if qualified && depth == 1 && start.local_name().as_ref() == b"sldLayoutIdLst" {
+                        if list.is_some() {
+                            return Err(duplicate("sldLayoutIdLst"));
+                        }
+                        list = Some((
+                            begin,
+                            finish,
+                            finish,
+                            empty,
+                            String::from_utf8_lossy(start.name().as_ref()).into_owned(),
+                        ));
+                        if !empty {
+                            list_depth = Some(depth + 1);
+                        }
+                    } else if qualified
+                        && list_depth == Some(depth)
+                        && start.local_name().as_ref() == b"sldLayoutId"
+                    {
+                        let mut relationship = None;
+                        for attribute in start.attributes() {
+                            let attribute = attribute?;
+                            if attribute.key.local_name().as_ref() == b"id"
+                                && matches!(reader.resolver().resolve_attribute(attribute.key).0, ResolveResult::Bound(Namespace(uri)) if uri == R_NS.as_bytes())
+                            {
+                                relationship = Some(
+                                    attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            start.decoder(),
+                                        )?
+                                        .into_owned(),
+                                );
+                            }
+                        }
+                        let relationship = relationship.ok_or_else(|| {
+                            OxmlError::InvalidValue(
+                                "layout entry lacks qualified relationship".into(),
+                            )
+                        })?;
+                        if empty {
+                            entries.push((begin, finish, relationship));
+                        } else {
+                            pending_entry = Some((depth + 1, begin, relationship));
+                        }
+                    }
+                    if !empty {
+                        depth += 1;
+                    }
+                }
+                Event::End(_) => {
+                    if pending_entry
+                        .as_ref()
+                        .is_some_and(|(entry_depth, _, _)| *entry_depth == depth)
+                    {
+                        let (_, begin, relationship) =
+                            pending_entry.take().expect("entry depth exists");
+                        entries.push((begin, finish, relationship));
+                    }
+                    if list_depth == Some(depth) {
+                        list.as_mut().expect("list depth exists").2 = begin;
+                        list_depth = None;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        let (start, head_end, close, empty, name) = list.ok_or_else(|| {
+            OxmlError::InvalidValue("qualified master layout list is absent".into())
+        })?;
+        let generated = append.map(|(id, relationship)| format!("<p:sldLayoutId xmlns:p=\"{P_NS}\" xmlns:r=\"{R_NS}\" id=\"{id}\" r:id=\"{}\"/>", quick_xml::escape::escape(relationship))).unwrap_or_default();
+        let mut result = Vec::new();
+        if empty {
+            if remove.is_some() {
+                return Err(OxmlError::InvalidValue("empty master layout list".into()));
+            }
+            result.extend_from_slice(&xml[..head_end - 2]);
+            result.push(b'>');
+            result.extend_from_slice(generated.as_bytes());
+            result.extend_from_slice(format!("</{name}>").as_bytes());
+            result.extend_from_slice(&xml[head_end..]);
+        } else {
+            let insertion = entries
+                .last()
+                .map(|(_, finish, _)| *finish)
+                .unwrap_or(head_end);
+            let removal = remove.and_then(|id| {
+                entries
+                    .iter()
+                    .find(|(_, _, relationship)| relationship == id)
+            });
+            if remove.is_some() && removal.is_none() {
+                return Err(OxmlError::InvalidValue(
+                    "selected master layout entry is absent".into(),
+                ));
+            }
+            let mut cursor = 0;
+            if let Some((begin, finish, _)) = removal {
+                result.extend_from_slice(&xml[..*begin]);
+                cursor = *finish;
+            }
+            result.extend_from_slice(&xml[cursor..insertion]);
+            result.extend_from_slice(generated.as_bytes());
+            result.extend_from_slice(&xml[insertion..]);
+        }
+        let _ = (start, close);
+        *self = Self::from_xml(&result)?;
+        Ok(result)
+    }
+
+    /// Reads qualified layout IDs in producer order. Foreign lookalikes remain opaque.
+    pub fn slide_layout_ids(&self) -> Result<Vec<(u32, String)>> {
+        let xml = self.to_xml()?;
+        let mut reader = NsReader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        let mut depth = 0usize;
+        let mut list_depth = None;
+        let mut seen_list = false;
+        let mut ids = Vec::new();
+        loop {
+            let (namespace, event) = reader.read_resolved_event_into(&mut buffer)?;
+            let qualified =
+                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == P_NS.as_bytes());
+            let empty = matches!(&event, Event::Empty(_));
+            match event {
+                Event::Start(start) | Event::Empty(start) => {
+                    let local = start.local_name();
+                    if qualified && depth == 1 && local.as_ref() == b"sldLayoutIdLst" {
+                        if seen_list {
+                            return Err(duplicate("sldLayoutIdLst"));
+                        }
+                        seen_list = true;
+                        if !empty {
+                            list_depth = Some(depth + 1);
+                        }
+                    } else if qualified
+                        && list_depth == Some(depth)
+                        && local.as_ref() == b"sldLayoutId"
+                    {
+                        let mut id = None;
+                        let mut relationship = None;
+                        for attribute in start.attributes() {
+                            let attribute = attribute?;
+                            let value = attribute
+                                .decoded_and_normalized_value(
+                                    quick_xml::XmlVersion::Implicit1_0,
+                                    start.decoder(),
+                                )?
+                                .into_owned();
+                            if attribute.key.as_ref() == b"id" {
+                                id = Some(value.parse::<u32>().map_err(|_| {
+                                    OxmlError::InvalidValue("invalid master layout ID".into())
+                                })?);
+                            } else if attribute.key.local_name().as_ref() == b"id"
+                                && matches!(reader.resolver().resolve_attribute(attribute.key).0, ResolveResult::Bound(Namespace(uri)) if uri == R_NS.as_bytes())
+                            {
+                                relationship = Some(value);
+                            }
+                        }
+                        let pair = (
+                            id.ok_or_else(|| {
+                                OxmlError::InvalidValue("master layout entry lacks ID".into())
+                            })?,
+                            relationship.ok_or_else(|| {
+                                OxmlError::InvalidValue(
+                                    "master layout entry lacks qualified relationship ID".into(),
+                                )
+                            })?,
+                        );
+                        if ids
+                            .iter()
+                            .any(|(id, relationship)| *id == pair.0 || *relationship == pair.1)
+                        {
+                            return Err(OxmlError::InvalidValue(
+                                "duplicate master layout ID or relationship".into(),
+                            ));
+                        }
+                        ids.push(pair);
+                    }
+                    if !empty {
+                        depth += 1;
+                    }
+                }
+                Event::End(_) => {
+                    if list_depth == Some(depth) {
+                        list_depth = None;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        Ok(ids)
     }
 
     pub fn to_xml(&self) -> Result<Vec<u8>> {
@@ -828,7 +1347,19 @@ fn parse_root(xml: &[u8], kind: RootKind) -> Result<ParsedRoot> {
                     return Err(unexpected(&start));
                 }
                 namespaces.reject_writer_conflicts(FIXED_MODEL_PREFIXES)?;
-                return parse_root_children(&mut reader, &start, &namespaces, kind);
+                let parsed = parse_root_children(&mut reader, &start, &namespaces, kind)?;
+                loop {
+                    match reader.read_event()? {
+                        Event::Eof => return Ok(parsed),
+                        Event::Comment(_) | Event::PI(_) => {}
+                        Event::Text(text) if text.iter().all(u8::is_ascii_whitespace) => {}
+                        _ => {
+                            return Err(OxmlError::InvalidValue(
+                                "trailing presentation part XML content".to_owned(),
+                            ));
+                        }
+                    }
+                }
             }
             Event::Empty(start) => {
                 let namespaces = NamespaceBindings::default().with_start(&start)?;
@@ -1878,7 +2409,10 @@ fn capture_text_style(
         if styles[index].is_some() {
             return Err(duplicate(std::str::from_utf8(name).unwrap_or("text style")));
         }
-        styles[index] = Some(CT_TextListStyle::from_xml(&raw).map_err(map_drawing_error)?);
+        styles[index] = Some(
+            CT_TextListStyle::from_xml_with_inherited_namespaces(&raw, &namespaces.entries())
+                .map_err(map_drawing_error)?,
+        );
         *boundary = (*boundary).max(index + 1);
     } else {
         children.push(*boundary, raw);

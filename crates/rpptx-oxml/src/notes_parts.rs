@@ -123,6 +123,30 @@ impl CT_NotesSlide {
         Ok(writer.into_inner())
     }
 
+    /// Returns the notes owner's optional policy for inherited master decorations.
+    pub fn show_master_shapes(&self) -> Result<Option<bool>> {
+        self.raw_attributes
+            .iter()
+            .find(|(key, _)| key == "showMasterSp")
+            .map(|(_, value)| match value.trim() {
+                "1" | "true" => Ok(true),
+                "0" | "false" => Ok(false),
+                _ => Err(OxmlError::InvalidValue(
+                    "invalid notes showMasterSp Boolean".into(),
+                )),
+            })
+            .transpose()
+    }
+
+    /// Changes only the known unqualified notes decoration policy.
+    pub fn set_show_master_shapes(&mut self, value: Option<bool>) {
+        self.raw_attributes.retain(|(key, _)| key != "showMasterSp");
+        if let Some(value) = value {
+            self.raw_attributes
+                .push(("showMasterSp".into(), if value { "1" } else { "0" }.into()));
+        }
+    }
+
     /// Returns text from effective body placeholders in shape-tree order.
     pub fn notes_text(&self) -> String {
         let mut bodies = Vec::new();
@@ -350,8 +374,11 @@ impl ParsedRoot {
                 }
                 namespaces.reject_writer_conflicts(FIXED_MODEL_PREFIXES)?;
                 self.notes_style = Some(
-                    CT_TextListStyle::from_xml(&raw)
-                        .map_err(|error| OxmlError::InvalidValue(error.to_string()))?,
+                    CT_TextListStyle::from_xml_with_inherited_namespaces(
+                        &raw,
+                        &namespaces.entries(),
+                    )
+                    .map_err(|error| OxmlError::InvalidValue(error.to_string()))?,
                 );
                 self.boundary = 4;
             }

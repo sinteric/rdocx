@@ -16,9 +16,10 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 use rdocx::{
-    BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, Document,
-    HdrFtrType, HeaderFooterKind, RasterFormat, RasterOptions, RasterOutput, RevisionKind,
-    RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
+    BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, CoreProperties,
+    CustomProperty, CustomPropertyValue, Document, FieldDateTime, FieldEvaluationContext,
+    HdrFtrType, HeaderFooterKind, PictureOccurrence, RasterFormat, RasterOptions, RasterOutput,
+    RevisionKind, RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
 };
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
@@ -36,6 +37,7 @@ pub struct ImageOptions<'a> {
 }
 
 pub struct RenderOptions<'a> {
+    pub font_dir: Option<&'a Path>,
     pub page: Option<usize>,
     pub pages: Option<&'a str>,
     pub format: &'a str,
@@ -90,6 +92,18 @@ pub fn inspect(file: &Path, json: bool) -> Result<()> {
         writeln!(stdout, "Paragraphs: {paragraph_count}")?;
         writeln!(stdout, "Tables: {table_count}")?;
         writeln!(stdout, "Content elements: {content_count}")?;
+        writeln!(stdout, "Words (accepted main body): {}", doc.word_count())?;
+        writeln!(
+            stdout,
+            "Characters (including spaces): {}",
+            doc.character_count(true)
+        )?;
+        writeln!(
+            stdout,
+            "Pages (deterministic layout): {}",
+            doc.layout_deterministic()?.layout.pages.len()
+        )?;
+        writeln!(stdout, "Pictures: {}", doc.pictures()?.len())?;
         writeln!(stdout)?;
         writeln!(stdout, "Metadata:")?;
         if let Some(t) = &title {
@@ -122,6 +136,8 @@ pub fn inspect(file: &Path, json: bool) -> Result<()> {
 }
 
 fn inspect_json(file: &Path, doc: &Document, style_ids: Vec<String>) -> Result<Value> {
+    let layout = doc.layout_deterministic()?;
+    let pictures = doc.pictures()?;
     Ok(json_envelope(json!({
         "file": file.display().to_string(),
         "paragraphs": doc.paragraph_count(),
@@ -134,6 +150,10 @@ fn inspect_json(file: &Path, doc: &Document, style_ids: Vec<String>) -> Result<V
             "keywords": doc.keywords(),
         },
         "styles_used": style_ids,
+        "word_count":doc.word_count(),"character_count":doc.character_count(true),"page_count":layout.layout.pages.len(),
+        "count_scope":"accepted-main-body","character_include_spaces":true,"page_count_source":"deterministic-layout",
+        "diagnostics":layout.layout.diagnostics.iter().map(|d|d.message.clone()).collect::<Vec<_>>(),
+        "pictures":pictures.iter().map(|p|picture_json(p,None)).collect::<Vec<_>>(),
     }))?)
 }
 
@@ -200,15 +220,11 @@ pub fn text(file: &Path, json_output: bool) -> Result<()> {
             "stories": stories,
         }))?;
     } else {
-        let mut stdout = io::stdout().lock();
-        write!(stdout, "{}", doc.text())?;
-        let stories = readable_stories(file, &doc).unwrap_or_default();
-        for (kind, part_name, texts) in story_parts(&stories) {
-            writeln!(stdout, "--- {} ({part_name}) ---", story_kind_name(kind))?;
-            for text in texts {
-                writeln!(stdout, "{text}")?;
-            }
+        let report = doc.text_report();
+        for diagnostic in &report.diagnostics {
+            eprintln!("Warning: {}", diagnostic.message);
         }
+        write!(io::stdout().lock(), "{}", report.text)?;
     }
     Ok(())
 }
@@ -407,9 +423,17 @@ fn push_html_stories(html: &mut String, stories: &[StoryText]) {
 }
 
 /// Emit deterministic point-space extents for every direct body item.
-pub fn layout(file: &Path, json_output: bool) -> Result<()> {
+pub fn layout(file: &Path, json_output: bool, font_dir: Option<&Path>) -> Result<()> {
     let doc = Document::open(file)?;
-    let layout = doc.layout_deterministic()?;
+    let fonts = font_dir
+        .map(oxml_layout::FontFile::from_dir)
+        .transpose()?
+        .unwrap_or_default();
+    let refs = fonts
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
+    let layout = doc.layout_with_fonts_and_bundled_fallback(&refs)?;
     let body_items = doc
         .body_items()
         .enumerate()
@@ -664,6 +688,80 @@ fn collect_control_paragraphs(
     }
 }
 
+/// Import text into DOCX or retain the existing DOCX conversion routes.
+#[allow(clippy::too_many_arguments)]
+pub fn convert_input(
+    file: &Path,
+    to: Option<&str>,
+    template: Option<&Path>,
+    rendering_options: bool,
+    output: Option<&Path>,
+    force: bool,
+    dpi: u32,
+    font_dir: Option<&Path>,
+    revision_view: RevisionView,
+    image: ImageOptions<'_>,
+) -> Result<()> {
+    let extension = file
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "html" | "htm" | "md" | "markdown") {
+        if template.is_some() {
+            return Err("--template requires HTML or Markdown input".into());
+        }
+        return convert(
+            file,
+            to.ok_or("--to is required for DOCX input")?,
+            output,
+            force,
+            dpi,
+            font_dir,
+            revision_view,
+            image,
+        );
+    }
+    if to.unwrap_or("docx") != "docx" {
+        return Err("HTML and Markdown input supports only --to docx".into());
+    }
+    if rendering_options
+        || font_dir.is_some()
+        || revision_view != RevisionView::Accepted
+        || image.pages.is_some()
+        || image.transparent
+        || dpi != 150
+        || image.quality != 90
+    {
+        return Err("rendering options do not apply to HTML or Markdown input".into());
+    }
+    let destination = output.map_or_else(|| default_output_path(file, "docx"), Path::to_path_buf);
+    ensure_output_paths_allowed(std::slice::from_ref(&destination), file, force)?;
+    let loaded = template.map(Document::open).transpose()?;
+    if let Some(path) = template {
+        ensure_output_paths_allowed(std::slice::from_ref(&destination), path, force)?;
+    }
+    let mut imported = if matches!(extension.as_str(), "md" | "markdown") {
+        Document::open_markdown_with_local_images(file, loaded.as_ref())?
+    } else {
+        Document::open_html_with_local_images(file, loaded.as_ref())?
+    };
+    for diagnostic in &imported.diagnostics {
+        eprintln!(
+            "{}{}: {}",
+            diagnostic.location,
+            diagnostic
+                .property
+                .as_ref()
+                .map(|p| format!(" ({p})"))
+                .unwrap_or_default(),
+            diagnostic.message
+        );
+    }
+    let bytes = imported.document.to_bytes()?;
+    stage_and_publish(&[(destination, bytes)], force)
+}
+
 /// Convert a DOCX file to another format.
 #[allow(clippy::too_many_arguments)]
 pub fn convert(
@@ -698,6 +796,17 @@ pub fn convert(
         return Err("--revision-view tracked applies only to PDF and image output".into());
     }
 
+    if font_dir.is_some() && matches!(default_ext, "html" | "md") {
+        return Err("--font-dir applies only to PDF and image output".into());
+    }
+    let fonts = font_dir
+        .map(oxml_layout::FontFile::from_dir)
+        .transpose()?
+        .unwrap_or_default();
+    let font_refs = fonts
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
     let output_path = match output {
         Some(p) => p.to_path_buf(),
         None => default_output_path(file, default_ext),
@@ -711,17 +820,13 @@ pub fn convert(
     let mut stdout = io::stdout().lock();
     match to {
         "pdf" => {
-            let bytes = if let Some(dir) = font_dir {
-                let font_files = Document::load_fonts_from_dir(dir);
-                let font_refs: Vec<(&str, &[u8])> = font_files
-                    .iter()
-                    .map(|f| (f.family.as_str(), f.data.as_slice()))
-                    .collect();
-                doc.to_pdf_with_fonts_and_options(&font_refs, render_options)?
-            } else {
-                doc.to_pdf_with_options(render_options)?
-            };
+            let layout =
+                doc.layout_with_fonts_and_bundled_fallback_and_options(&font_refs, render_options)?;
+            let bytes = oxml_pdf::render_to_pdf_checked(&layout.layout)?;
             stage_and_publish(&[(output_path.clone(), bytes)], force)?;
+            for diagnostic in &layout.layout.diagnostics {
+                eprintln!("{}", diagnostic.message);
+            }
         }
         "html" => {
             let mut html = doc.to_html();
@@ -739,7 +844,8 @@ pub fn convert(
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             let (format, extension) = parse_image_format(to, image.quality, image.transparent)?;
-            let layout = doc.layout_deterministic_with_options(render_options)?;
+            let layout =
+                doc.layout_with_fonts_and_bundled_fallback_and_options(&font_refs, render_options)?;
             let selected = selected_zero_based_pages(layout.layout.pages.len(), image.pages)?;
             match format {
                 RasterFormat::Tiff => {
@@ -790,6 +896,9 @@ pub fn convert(
                         )?;
                     }
                 }
+            }
+            for diagnostic in &layout.layout.diagnostics {
+                eprintln!("{}", diagnostic.message);
             }
             return Ok(());
         }
@@ -1944,30 +2053,76 @@ fn print_json(payload: Value) -> Result<()> {
     Ok(())
 }
 
-/// Replace a placeholder in a DOCX file and save to output.
+pub struct ReplaceInput<'a> {
+    pub pair: Option<(String, String)>,
+    pub map: Option<&'a Path>,
+    pub expect: Option<usize>,
+    pub regex: bool,
+}
+
+/// Replace one pair or an ordered map through the shared checked transaction.
 pub fn replace(
     file: &Path,
-    placeholder: &str,
-    value: &str,
-    expect: Option<usize>,
+    input: ReplaceInput<'_>,
     output: &Path,
+    json_output: bool,
 ) -> Result<()> {
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_available(&[output.to_path_buf()])?;
+    let pairs = if let Some(map) = input.map {
+        oxml_cli_support::parse_replacement_map(&std::fs::read_to_string(map)?)?
+    } else {
+        let (placeholder, value) = input.pair.ok_or("replace requires a pair or --map")?;
+        vec![oxml_cli_support::ReplacementPair {
+            placeholder,
+            value,
+            expect: input.expect,
+        }]
+    };
+    let borrowed = pairs
+        .iter()
+        .map(|pair| (pair.placeholder.as_str(), pair.value.as_str(), pair.expect))
+        .collect::<Vec<_>>();
     let mut doc = Document::open(file)?;
-    let count = doc.try_replace_text(placeholder, value)?;
-    if let Some(expected) = expect
-        && count != expected
-    {
-        return Err(format!(
-            "expected {expected} replacement(s) of \"{placeholder}\", found {count}"
-        )
-        .into());
+    let counts = if input.regex {
+        doc.try_replace_all_regex_expected(&borrowed)?
+    } else {
+        doc.try_replace_all_expected(&borrowed)?
     }
+    .map_err(|mismatch| {
+        format!(
+            "pair {}: expected {} replacement(s) of {:?}, found {}",
+            mismatch.index, mismatch.expected, mismatch.placeholder, mismatch.found
+        )
+    })?;
+    let total = counts
+        .iter()
+        .try_fold(0usize, |sum, count| sum.checked_add(*count))
+        .ok_or("replacement total overflow")?;
     publish_document(&mut doc, output)?;
+    if json_output {
+        return print_json(
+            json!({"operation":"replace","mode":if input.regex {"regex"} else {"literal"},
+            "pairs":pairs.iter().zip(&counts).enumerate().map(|(index,(pair,count))|json!({"index":index,"placeholder":pair.placeholder,"value":pair.value,"count":count,"expected":pair.expect})).collect::<Vec<_>>(),
+            "total_count":total,"output":output.display().to_string()}),
+        );
+    }
     let mut stdout = io::stdout().lock();
-    writeln!(
-        stdout,
-        "Replaced {count} occurrence(s) of \"{placeholder}\" -> \"{value}\""
-    )?;
+    for (pair, count) in pairs.iter().zip(counts) {
+        if input.regex {
+            writeln!(
+                stdout,
+                "Replaced {count} occurrence(s) of pattern {:?} -> {:?}",
+                pair.placeholder, pair.value
+            )?;
+        } else {
+            writeln!(
+                stdout,
+                "Replaced {count} occurrence(s) of \"{}\" -> \"{}\"",
+                pair.placeholder, pair.value
+            )?;
+        }
+    }
     writeln!(stdout, "Written to {}", output.display())?;
     Ok(())
 }
@@ -1985,9 +2140,21 @@ pub fn render(
     let out_dir = output_dir.unwrap_or_else(|| Path::new("."));
     let (format, extension) =
         parse_image_format(options.format, options.quality, options.transparent)?;
-    let layout = doc.layout_deterministic_with_options(rdocx::RenderOptions {
-        revision_view: options.revision_view,
-    })?;
+    let fonts = options
+        .font_dir
+        .map(oxml_layout::FontFile::from_dir)
+        .transpose()?
+        .unwrap_or_default();
+    let font_refs = fonts
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
+    let layout = doc.layout_with_fonts_and_bundled_fallback_and_options(
+        &font_refs,
+        rdocx::RenderOptions {
+            revision_view: options.revision_view,
+        },
+    )?;
     let selected = selected_render_pages(layout.layout.pages.len(), options.page, options.pages)?;
     let stem = file.file_stem().unwrap_or_default().to_string_lossy();
     let legacy_single_page = options.page.is_some();
@@ -2054,6 +2221,10 @@ pub fn render(
                 writeln!(stdout, "Rendered {} page(s) at {dpi} DPI", selected.len())?;
             }
         }
+    }
+
+    for diagnostic in &layout.layout.diagnostics {
+        eprintln!("{}", diagnostic.message);
     }
 
     Ok(())
@@ -2179,170 +2350,15 @@ fn validate_dpi(dpi: f64) -> Result<()> {
 /// Advisory findings (empty paragraphs, missing metadata) are reported but do
 /// not affect the exit status.
 pub fn validate(file: &Path) -> Result<bool> {
-    let mut errors: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-
-    // --- Structural errors ---
-
-    // Every relationship must point at a part that is actually in the package.
-    let package = oxml_opc::OpcPackage::open(file)?;
-    if let Some(doc_part) = package.main_document_part() {
-        if package.get_part(&doc_part).is_none() {
-            errors.push(format!("main document part {doc_part} is missing"));
-        }
-        if let Some(rels) = package.get_part_rels(&doc_part) {
-            for rel in &rels.items {
-                // External targets live outside the package by definition.
-                if rel.target_mode.as_deref() == Some("External") {
-                    continue;
-                }
-                let target = oxml_opc::OpcPackage::resolve_rel_target(&doc_part, &rel.target);
-                if package.get_part(&target).is_none() {
-                    errors.push(format!(
-                        "relationship {} points at missing part {target}",
-                        rel.id
-                    ));
-                }
-            }
-        }
-    } else {
-        errors.push("package declares no main document relationship".to_string());
-    }
-
-    // Every part needs a declared content type.
-    for part_name in package.parts.keys() {
-        if package.content_types.content_type_for(part_name).is_none() {
-            errors.push(format!("part {part_name} has no declared content type"));
+    let report = rdocx::validate_document_file(file)?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    for finding in report.findings {
+        match finding.severity {
+            rdocx::ValidationSeverity::Error => errors.push(finding.message),
+            rdocx::ValidationSeverity::Warning => warnings.push(finding.message),
         }
     }
-
-    // Markup Compatibility requires every prefix that `mc:Ignorable` or
-    // `mc:MustUnderstand` lists to be declared, and a consumer may reject a
-    // part that breaks the rule. A part that does not parse as XML is
-    // outside this check.
-    let mut xml_parts = package
-        .parts
-        .iter()
-        .filter(|(part_name, _)| {
-            package
-                .content_types
-                .content_type_for(part_name)
-                .is_some_and(|content_type| content_type.ends_with("xml"))
-        })
-        .collect::<Vec<_>>();
-    xml_parts.sort();
-    for (part_name, xml) in xml_parts {
-        let Ok(findings) = rdocx_oxml::namespace::undeclared_compatibility_prefixes(xml) else {
-            continue;
-        };
-        for (attribute, prefix) in findings {
-            errors.push(format!(
-                "part {part_name} lists undeclared prefix `{prefix}` in mc:{attribute}"
-            ));
-        }
-    }
-
-    // Every XML part the main document relates to must be well formed. The
-    // style ids that its story parts name are checked once the document opens.
-    let mut style_references = Vec::new();
-    if let Some(doc_part) = package.main_document_part() {
-        let mut parts = vec![(doc_part.clone(), true)];
-        for rel in package
-            .get_part_rels(&doc_part)
-            .iter()
-            .flat_map(|rels| &rels.items)
-        {
-            if rel.target_mode.as_deref() == Some("External") {
-                continue;
-            }
-            let target = oxml_opc::OpcPackage::resolve_rel_target(&doc_part, &rel.target);
-            let story = STORY_RELATIONSHIPS.contains(&rel.rel_type.as_str());
-            if !parts.iter().any(|(known, _)| *known == target) {
-                parts.push((target, story));
-            }
-        }
-        for (part_name, story) in parts {
-            let is_xml = package
-                .content_types
-                .content_type_for(&part_name)
-                .is_some_and(|content_type| {
-                    content_type.ends_with("+xml") || content_type.ends_with("/xml")
-                });
-            let Some(xml) = package.get_part(&part_name).filter(|_| is_xml) else {
-                continue;
-            };
-            match xml_style_references(xml) {
-                Err(detail) => {
-                    errors.push(format!("part {part_name} is not well-formed XML: {detail}"));
-                }
-                Ok(references) if story => style_references.extend(
-                    references
-                        .into_iter()
-                        .map(|(kind, style_id)| (kind, style_id, part_name.clone())),
-                ),
-                Ok(_) => {}
-            }
-        }
-    }
-
-    // A malformed part can keep the document from opening. The errors found
-    // so far explain why, so they are reported together with the failure.
-    let doc = match Document::open(file) {
-        Ok(doc) => doc,
-        Err(error) if !errors.is_empty() => {
-            errors.push(format!("the document does not open: {error}"));
-            return report_validation(file, &errors, &warnings);
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    // Word falls back to the default style for a style id that no style
-    // defines, so the style that the document names is silently lost.
-    for (kind, style_id, part_name) in style_references {
-        let issue = format!("{kind} style {style_id:?} used in {part_name} is not defined");
-        if doc.style(&style_id).is_none() && !errors.contains(&issue) {
-            errors.push(issue);
-        }
-    }
-
-    if let Err(error) = doc.validate_comment_ownership() {
-        errors.push(format!("invalid comment ownership: {error}"));
-    }
-
-    // --- Advisory findings ---
-
-    if doc.content_count() == 0 {
-        warnings.push("Document has no content (no paragraphs or tables)".to_string());
-    }
-
-    let empty_count = doc
-        .paragraphs()
-        .iter()
-        .filter(|p| p.text().trim().is_empty())
-        .count();
-    if empty_count > 0 {
-        warnings.push(format!("{empty_count} empty paragraph(s) found"));
-    }
-
-    let mut prev_level: Option<u32> = None;
-    for (level, _) in doc.headings() {
-        if let Some(prev) = prev_level
-            && level > prev + 1
-        {
-            warnings.push(format!(
-                "Heading level gap: Heading{prev} -> Heading{level} (skipped level(s))"
-            ));
-        }
-        prev_level = Some(level);
-    }
-
-    if doc.title().is_none() {
-        warnings.push("Missing document title".to_string());
-    }
-    if doc.author().is_none() {
-        warnings.push("Missing document author".to_string());
-    }
-
     report_validation(file, &errors, &warnings)
 }
 
@@ -2471,6 +2487,789 @@ fn word_value(
     Ok(None)
 }
 
+/// Parse a `NAME=VALUE` assignment, splitting at the first `=`.
+pub fn parse_assignment(text: &str) -> std::result::Result<(String, String), String> {
+    match text.split_once('=') {
+        Some((name, value)) if !name.is_empty() => Ok((name.to_owned(), value.to_owned())),
+        _ => Err(format!("expected NAME=VALUE, found {text:?}")),
+    }
+}
+
+/// A date and time read from the command line, with the offset from UTC in
+/// minutes that it names, if any.
+struct ParsedDateTime {
+    value: FieldDateTime,
+    offset_minutes: Option<i32>,
+}
+
+/// Parse `YYYY-MM-DD`, optionally followed by `THH:MM`, `THH:MM:SS` or
+/// `THH:MM:SS.fff`, and by `Z` or an offset such as `+02:00` or `-0500`.
+fn parse_date_time(text: &str) -> std::result::Result<ParsedDateTime, String> {
+    let invalid = || {
+        format!(
+            "expected a date such as 2026-10-10, 2026-10-10T08:30:00, \
+             2026-10-10T08:30:00Z or 2026-10-10T08:30:00+02:00, found {text:?}"
+        )
+    };
+    let digits = |part: &str, count: usize| {
+        (part.len() == count && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    };
+    let (rest, offset_minutes) = if let Some(rest) = text.strip_suffix('Z') {
+        (rest, Some(0))
+    } else {
+        // An offset follows the date, or the time when there is one.
+        let search_from = text.find('T').unwrap_or(text.len().min(10));
+        if !text.is_char_boundary(search_from) {
+            return Err(invalid());
+        }
+        match text[search_from..].rfind(['+', '-']) {
+            Some(position) => {
+                let (rest, offset) = text.split_at(search_from + position);
+                let sign = if offset.starts_with('-') { -1 } else { 1 };
+                let offset = offset[1..].replace(':', "");
+                let (hours, minutes) = (
+                    digits(offset.get(0..2).unwrap_or_default(), 2),
+                    digits(offset.get(2..).unwrap_or_default(), 2),
+                );
+                let (Some(hours), Some(minutes)) = (hours, minutes) else {
+                    return Err(invalid());
+                };
+                if hours > 23 || minutes > 59 {
+                    return Err(invalid());
+                }
+                (rest, Some(sign * (hours * 60 + minutes) as i32))
+            }
+            None => (text, None),
+        }
+    };
+    let (date, time) = rest.split_once('T').unwrap_or((rest, "00:00:00"));
+    let time = time.split_once('.').map_or(time, |(whole, fraction)| {
+        if fraction.bytes().all(|byte| byte.is_ascii_digit()) && !fraction.is_empty() {
+            whole
+        } else {
+            ""
+        }
+    });
+    let date = date.split('-').collect::<Vec<_>>();
+    let time = time.split(':').collect::<Vec<_>>();
+    let [year, month, day] = date.as_slice() else {
+        return Err(invalid());
+    };
+    let (hour, minute, second) = match time.as_slice() {
+        [hour, minute] => (*hour, *minute, "00"),
+        [hour, minute, second] => (*hour, *minute, *second),
+        _ => return Err(invalid()),
+    };
+    let year = digits(year, 4).ok_or_else(invalid)?;
+    let month = digits(month, 2).filter(|month| (1..=12).contains(month));
+    let month = month.ok_or_else(invalid)? as u8;
+    let day = digits(day, 2).ok_or_else(invalid)? as u8;
+    let year = i32::try_from(year).map_err(|_| invalid())?;
+    if year == 0 {
+        return Err(invalid());
+    }
+    if day == 0 || day > days_in_month(year, month) {
+        return Err(invalid());
+    }
+    let hour = digits(hour, 2)
+        .filter(|hour| *hour < 24)
+        .ok_or_else(invalid)?;
+    let minute = digits(minute, 2).filter(|minute| *minute < 60);
+    let second = digits(second, 2).filter(|second| *second < 60);
+    Ok(ParsedDateTime {
+        value: FieldDateTime {
+            year,
+            month,
+            day,
+            hour: hour as u8,
+            minute: minute.ok_or_else(invalid)? as u8,
+            second: second.ok_or_else(invalid)? as u8,
+        },
+        offset_minutes,
+    })
+}
+
+/// Parse the wall-clock `--now` of a DATE or TIME field, which names no
+/// time zone.
+pub fn parse_field_date_time(text: &str) -> std::result::Result<FieldDateTime, String> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 19
+        || !bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            10 => *byte == b'T',
+            13 | 16 => *byte == b':',
+            _ => byte.is_ascii_digit(),
+        })
+    {
+        return Err(format!(
+            "--now requires YYYY-MM-DDTHH:MM:SS civil time without fractions or offsets, found {text:?}"
+        ));
+    }
+    let parsed = parse_date_time(text)?;
+    if parsed.offset_minutes.is_some() {
+        return Err(format!(
+            "--now is the wall-clock time the fields show, give it without Z or an offset, \
+             found {text:?}"
+        ));
+    }
+    Ok(parsed.value)
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 31,
+    }
+}
+
+/// Update supported caches through one native outer transaction.
+pub fn fields_update(
+    file: &Path,
+    now: Option<FieldDateTime>,
+    output: &Path,
+    json_output: bool,
+) -> Result<()> {
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_available(&[output.to_path_buf()])?;
+    let source_path = std::fs::canonicalize(file)?;
+    let file_name = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("field input filename must be valid Unicode")?
+        .to_owned();
+    let file_path = source_path
+        .to_str()
+        .ok_or("field input path must be valid Unicode")?
+        .to_owned();
+    let mut doc = Document::open(file)?;
+    let report = doc.update_all_fields(&FieldEvaluationContext {
+        now,
+        file_name: Some(file_name),
+        file_path: Some(file_path),
+        ..Default::default()
+    })?;
+    publish_document(&mut doc, output)?;
+    mutation_record(
+        json_output,
+        "all-supported-stories",
+        "update",
+        json!({"ordinary_fields":report.ordinary_updated,"ordinary_updated":report.ordinary_updated,
+        "now":now.map(|n| format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",n.year,n.month,n.day,n.hour,n.minute,n.second)),
+        "page_fields":report.layout.page_fields,"num_pages_fields":report.layout.num_pages_fields,"page_reference_fields":report.layout.page_reference_fields,
+        "section_fields":report.layout.section_fields,"section_pages_fields":report.layout.section_pages_fields,
+        "layout":{"page_fields":report.layout.page_fields,"num_pages_fields":report.layout.num_pages_fields,
+            "page_reference_fields":report.layout.page_reference_fields,"section_fields":report.layout.section_fields,
+            "section_pages_fields":report.layout.section_pages_fields,"diagnostics":report.layout.diagnostics},
+        "evaluations":report.evaluations.iter().map(rdocx::FieldEvaluation::to_json_value).collect::<Vec<_>>(),
+        "diagnostics":report.diagnostics,"total_updated":report.total_updated,"saved_cache_scope":report.saved_cache_scope}),
+        output,
+    )
+}
+
+pub fn fill(
+    file: &Path,
+    pairs: &[(String, String)],
+    output: &Path,
+    json_output: bool,
+) -> Result<()> {
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_available(&[output.to_path_buf()])?;
+    if pairs.is_empty() {
+        return Err("fill requires at least one --tag".into());
+    }
+    let borrowed = pairs
+        .iter()
+        .map(|(tag, value)| (tag.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let mut doc = Document::open(file)?;
+    let counts = doc.fill_content_control_tags(&borrowed)?;
+    publish_document(&mut doc, output)?;
+    mutation_record(
+        json_output,
+        "accepted-main-body",
+        "fill",
+        json!({"tags":pairs.iter().zip(counts).map(|((tag,value),count)|json!({"tag":tag,"value":value,"count":count})).collect::<Vec<_>>()}),
+        output,
+    )
+}
+
+fn core_properties_json(core: Option<&CoreProperties>) -> Value {
+    let field = |value: fn(&CoreProperties) -> &Option<String>| {
+        core.and_then(|core| value(core).as_deref())
+    };
+    json!({
+        "title": field(|core| &core.title),
+        "author": field(|core| &core.creator),
+        "subject": field(|core| &core.subject),
+        "keywords": field(|core| &core.keywords),
+        "description": field(|core| &core.description),
+        "category": field(|core| &core.category),
+        "last_modified_by": field(|core| &core.last_modified_by),
+        "created": field(|core| &core.created),
+        "modified": field(|core| &core.modified),
+        "content_status": field(|core| &core.content_status),
+        "identifier": field(|core| &core.identifier),
+        "language": field(|core| &core.language),
+        "last_printed": field(|core| &core.last_printed),
+        "revision": field(|core| &core.revision),
+        "version": field(|core| &core.version),
+    })
+}
+
+fn custom_property_json(property: &CustomProperty) -> Value {
+    let (kind, value) = match &property.value {
+        CustomPropertyValue::Lpstr(text) => ("lpstr", json!(text)),
+        CustomPropertyValue::Lpwstr(text) => ("lpwstr", json!(text)),
+        CustomPropertyValue::I4(value) => ("integer", json!(value)),
+        CustomPropertyValue::R8(value) => ("number", json!(value)),
+        CustomPropertyValue::Bool(value) => ("boolean", json!(value)),
+        CustomPropertyValue::FileTime(value) => ("date", json!(value)),
+        CustomPropertyValue::Empty => ("empty", Value::Null),
+        CustomPropertyValue::Raw(_) => ("other", Value::Null),
+    };
+    json!({ "name": property.name, "type": kind, "value": value, "pid": property.pid, "fmtid":property.fmtid, "raw_xml":match &property.value { CustomPropertyValue::Raw(raw)=>Some(raw), _=>None } })
+}
+
+/// Print the core and custom properties.
+pub fn meta_get(file: &Path, json_output: bool) -> Result<()> {
+    let doc = Document::open(file)?;
+    let core = core_properties_json(doc.core_properties());
+    let custom = doc
+        .custom_properties()
+        .iter()
+        .map(custom_property_json)
+        .collect::<Vec<_>>();
+    if json_output {
+        return print_json(json!({ "core": core, "custom": custom }));
+    }
+    let mut stdout = io::stdout().lock();
+    if let Value::Object(fields) = &core {
+        for (name, value) in fields {
+            if let Some(value) = value.as_str() {
+                writeln!(stdout, "{name}: {value}")?;
+            }
+        }
+    }
+    for property in &custom {
+        writeln!(
+            stdout,
+            "custom {} ({}): {}",
+            property["name"].as_str().unwrap_or_default(),
+            property["type"].as_str().unwrap_or_default(),
+            match &property["value"] {
+                Value::String(text) => text.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            }
+        )?;
+    }
+    Ok(())
+}
+
+/// The property changes of one `meta set` command.
+pub struct MetaChanges {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub subject: Option<String>,
+    pub keywords: Option<String>,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub custom: Vec<(String, String)>,
+    pub remove_custom: Vec<String>,
+}
+
+pub fn meta_set(
+    file: &Path,
+    changes: &MetaChanges,
+    output: &Path,
+    json_output: bool,
+) -> Result<()> {
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_available(&[output.to_path_buf()])?;
+    let values = [
+        &changes.title,
+        &changes.author,
+        &changes.subject,
+        &changes.keywords,
+        &changes.description,
+        &changes.category,
+    ];
+    if values.iter().all(|v| v.is_none())
+        && changes.custom.is_empty()
+        && changes.remove_custom.is_empty()
+    {
+        return Err("meta set requires an assignment".into());
+    }
+    let mut named = std::collections::HashSet::new();
+    for name in changes
+        .custom
+        .iter()
+        .map(|(name, _)| name)
+        .chain(&changes.remove_custom)
+    {
+        if !named.insert(name) {
+            return Err(format!("custom property {name:?} is named twice").into());
+        }
+    }
+    let parsed = changes
+        .custom
+        .iter()
+        .map(|(name, text)| Ok((name, parse_custom_value(text)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let mut doc = Document::open(file)?;
+    if values.iter().any(|v| v.is_some()) {
+        let mut core = doc.core_properties().cloned().unwrap_or_default();
+        let slots = [
+            &mut core.title,
+            &mut core.creator,
+            &mut core.subject,
+            &mut core.keywords,
+            &mut core.description,
+            &mut core.category,
+        ];
+        for (value, slot) in values.into_iter().zip(slots) {
+            if let Some(value) = value {
+                *slot = (!value.is_empty()).then(|| value.clone());
+            }
+        }
+        doc.set_core_properties(core)?;
+    }
+    for (name, mut value) in parsed {
+        let existing = doc.custom_property(name);
+        let (pid, fmtid) = if let Some(property) = existing {
+            if matches!(property.value, CustomPropertyValue::Lpstr(_))
+                && let CustomPropertyValue::Lpwstr(text) = value
+            {
+                value = CustomPropertyValue::Lpstr(text);
+            }
+            (property.pid, property.fmtid.clone())
+        } else {
+            let pid = doc
+                .custom_properties()
+                .iter()
+                .map(|p| p.pid)
+                .max()
+                .unwrap_or(1)
+                .max(1)
+                .checked_add(1)
+                .ok_or("custom property PID overflow")?;
+            (pid, "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}".to_owned())
+        };
+        doc.set_custom_property(CustomProperty {
+            pid,
+            fmtid,
+            name: Some(name.clone()),
+            value,
+        })?;
+    }
+    for name in &changes.remove_custom {
+        doc.remove_custom_property(name)?;
+    }
+    publish_document(&mut doc, output)?;
+    mutation_record(
+        json_output,
+        "document",
+        "set",
+        json!({"core":core_properties_json(doc.core_properties()),"custom":doc.custom_properties().iter().map(custom_property_json).collect::<Vec<_>>()}),
+        output,
+    )
+}
+
+fn parse_custom_value(text: &str) -> Result<CustomPropertyValue> {
+    let (kind, value) = text
+        .split_once(':')
+        .ok_or("custom value requires TYPE:VALUE")?;
+    Ok(match kind {
+        "str" => CustomPropertyValue::Lpwstr(value.to_owned()),
+        "int" => CustomPropertyValue::I4(value.parse()?),
+        "float" => {
+            let number = value.parse::<f64>()?;
+            if !number.is_finite() {
+                return Err("custom float must be finite".into());
+            }
+            CustomPropertyValue::R8(number)
+        }
+        "bool" => CustomPropertyValue::Bool(match value {
+            "true" => true,
+            "false" => false,
+            _ => return Err("custom bool requires true or false".into()),
+        }),
+        "filetime" if valid_custom_filetime(value) => {
+            CustomPropertyValue::FileTime(value.to_owned())
+        }
+        "empty" if value.is_empty() => CustomPropertyValue::Empty,
+        _ => return Err(format!("invalid custom property type or value {kind:?}").into()),
+    })
+}
+
+fn valid_custom_filetime(value: &str) -> bool {
+    let b = value.as_bytes();
+    if b.len() < 20
+        || !b.is_ascii()
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return false;
+    }
+    let number = |start: usize, end: usize| -> Option<u32> {
+        b[start..end]
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| value[start..end].parse().ok())
+            .flatten()
+    };
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        number(0, 4),
+        number(5, 7),
+        number(8, 10),
+        number(11, 13),
+        number(14, 16),
+        number(17, 19),
+    ) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return false,
+    };
+    if year == 0 || day == 0 || day > days || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+    let mut at = 19;
+    if b.get(at) == Some(&b'.') {
+        at += 1;
+        let start = at;
+        while b.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        if at == start {
+            return false;
+        }
+    }
+    if b.get(at) == Some(&b'Z') {
+        return at + 1 == b.len();
+    }
+    if !matches!(b.get(at), Some(b'+') | Some(b'-')) || at + 6 != b.len() || b[at + 3] != b':' {
+        return false;
+    }
+    number(at + 1, at + 3).is_some_and(|n| n <= 23)
+        && number(at + 4, at + 6).is_some_and(|n| n <= 59)
+}
+
+fn picture_json(picture: &PictureOccurrence, file: Option<&str>) -> Value {
+    json!({"story":story_json(picture.location.story()),"index_path":picture.location.index_path(),
+        "ordinal":picture.ordinal,"relationship_id":picture.relationship_id,"media_part_name":picture.media_part_name,
+        "content_type":picture.content_type,"width_emu":picture.width,"height_emu":picture.height,"description":picture.description,
+        "title":picture.title,"name":picture.name,"decorative":picture.decorative,"anchored":picture.anchored,
+        "status":if picture.external_url.is_some(){"external"}else{"internal"},"url":picture.external_url,"file":file})
+}
+
+/// Extract each internal media part once using generated safe names and rollback-capable publication.
+pub fn images_extract(file: &Path, dir: &Path, json_output: bool) -> Result<()> {
+    let doc = Document::open(file)?;
+    let pictures = doc.pictures()?;
+    let mut outputs = Vec::new();
+    let mut names = HashMap::new();
+    let mut listing = Vec::new();
+    for picture in &pictures {
+        let name = if let Some(part) = &picture.media_part_name {
+            if !names.contains_key(part) {
+                let ext = match picture.content_type.as_str() {
+                    "image/png" => "png",
+                    "image/jpeg" => "jpg",
+                    "image/gif" => "gif",
+                    "image/tiff" => "tiff",
+                    "image/bmp" => "bmp",
+                    "image/svg+xml" => "svg",
+                    "image/x-emf" => "emf",
+                    "image/x-wmf" => "wmf",
+                    _ => "bin",
+                };
+                let name = format!("image-{:06}.{ext}", names.len() + 1);
+                outputs.push((dir.join(&name), picture.bytes.clone()));
+                names.insert(part.clone(), name);
+            }
+            names.get(part).map(String::as_str)
+        } else {
+            None
+        };
+        listing.push(picture_json(picture, name));
+    }
+    let destinations = outputs
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    ensure_output_paths_allowed(&destinations, file, false)?;
+    ensure_output_paths_available(&destinations)?;
+    let existed = match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err("image destination must be a real directory".into());
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !outputs.is_empty() {
+        if !existed {
+            std::fs::create_dir(dir)?;
+        }
+        if let Err(error) = stage_and_publish(&outputs, false) {
+            if !existed {
+                let _ = std::fs::remove_dir(dir);
+            }
+            return Err(error);
+        }
+    }
+    if json_output {
+        print_json(
+            json!({"operation":"images-extract","pictures":listing,"extracted_parts":outputs.len(),"directory":dir.display().to_string()}),
+        )
+    } else {
+        writeln!(
+            io::stdout(),
+            "Extracted {} media part(s), {} picture occurrence(s)",
+            outputs.len(),
+            pictures.len()
+        )?;
+        Ok(())
+    }
+}
+
+/// Inputs for one explicitly licensed embedded font face.
+pub struct FontEmbedOptions<'a> {
+    pub name: &'a str,
+    pub font: &'a Path,
+    pub kind: &'a str,
+    pub license_authorized: bool,
+    pub license_identity: &'a str,
+    pub font_key: Option<&'a str>,
+    pub subsetted: bool,
+    pub output: &'a Path,
+    pub json: bool,
+}
+
+fn font_kind(value: &str) -> Result<rdocx::EmbeddedFontKind> {
+    match value {
+        "regular" => Ok(rdocx::EmbeddedFontKind::Regular),
+        "bold" => Ok(rdocx::EmbeddedFontKind::Bold),
+        "italic" => Ok(rdocx::EmbeddedFontKind::Italic),
+        "bold-italic" => Ok(rdocx::EmbeddedFontKind::BoldItalic),
+        _ => Err("font kind must be regular, bold, italic or bold-italic".into()),
+    }
+}
+fn font_kind_name(kind: rdocx::EmbeddedFontKind) -> &'static str {
+    match kind {
+        rdocx::EmbeddedFontKind::Regular => "regular",
+        rdocx::EmbeddedFontKind::Bold => "bold",
+        rdocx::EmbeddedFontKind::Italic => "italic",
+        rdocx::EmbeddedFontKind::BoldItalic => "bold-italic",
+    }
+}
+fn font_setting(value: Option<&str>) -> Result<Option<Option<bool>>> {
+    value
+        .map(|value| match value {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            "none" => Ok(None),
+            _ => Err("font setting must be true, false or none".into()),
+        })
+        .transpose()
+}
+fn read_font_file(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    const LIMIT: usize = 64 * 1024 * 1024;
+    if !std::fs::metadata(path)?.is_file() {
+        return Err("font input must be a local regular file".into());
+    }
+    let mut file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err("font input must be a local regular file".into());
+    }
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let request = chunk.len().min(LIMIT - bytes.len() + 1);
+        let count = file.read(&mut chunk[..request])?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if count > LIMIT - bytes.len() {
+            return Err("font input exceeds 64 MiB".into());
+        }
+        bytes.try_reserve(count)?;
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+}
+pub fn font_embed(file: &Path, options: &FontEmbedOptions<'_>) -> Result<()> {
+    ensure_output_paths_allowed(&[options.output.to_path_buf()], file, false)?;
+    ensure_output_paths_allowed(&[options.output.to_path_buf()], options.font, false)?;
+    ensure_output_paths_available(&[options.output.to_path_buf()])?;
+    if !options.license_authorized || options.license_identity.trim().is_empty() {
+        return Err(
+            "font embedding needs explicit authorization and a nonempty license identity".into(),
+        );
+    }
+    let data = read_font_file(options.font)?;
+    let kind = font_kind(options.kind)?;
+    let mut document = Document::open(file)?;
+    let key = match options.font_key {
+        Some(key) => key.to_owned(),
+        None => rdocx::derive_font_key(&data)?,
+    };
+    document.embed_font(
+        options.name,
+        rdocx::EmbeddedFont {
+            kind,
+            data,
+            font_key: key,
+            subsetted: options.subsetted,
+            license: rdocx::FontEmbeddingLicense::new(
+                options.license_authorized,
+                options.license_identity,
+            ),
+        },
+    )?;
+    let bytes = document.to_bytes_for_path(options.output)?;
+    stage_and_publish(&[(options.output.to_path_buf(), bytes)], false)?;
+    font_mutation_record("embed", options.name, options.output, options.json)
+}
+pub fn font_remove(
+    file: &Path,
+    name: &str,
+    kind: Option<&str>,
+    output: &Path,
+    as_json: bool,
+) -> Result<()> {
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_available(&[output.to_path_buf()])?;
+    let mut document = Document::open(file)?;
+    let removed = if let Some(kind) = kind {
+        document
+            .remove_embedded_font(name, font_kind(kind)?)?
+            .is_some()
+    } else {
+        document.remove_font(name)?.is_some()
+    };
+    let bytes = document.to_bytes_for_path(output)?;
+    stage_and_publish(&[(output.to_path_buf(), bytes)], false)?;
+    if as_json {
+        print_json(json!({"scope": "font", "action": "remove", "name": name,
+        "kind": kind, "removed": removed, "output": output.display().to_string()}))
+    } else {
+        writeln!(io::stdout(), "Removed: {removed}")?;
+        Ok(())
+    }
+}
+fn font_mutation_record(action: &str, name: &str, output: &Path, as_json: bool) -> Result<()> {
+    if as_json {
+        print_json(json!({"scope": "font", "action": action, "name": name,
+        "output": output.display().to_string()}))
+    } else {
+        writeln!(
+            io::stdout(),
+            "{action}: {name}\nWritten to {}",
+            output.display()
+        )?;
+        Ok(())
+    }
+}
+pub fn font_settings(
+    file: &Path,
+    embed: Option<&str>,
+    system: Option<&str>,
+    subset: Option<&str>,
+    output: Option<&Path>,
+    as_json: bool,
+) -> Result<()> {
+    let embed = font_setting(embed)?;
+    let system = font_setting(system)?;
+    let subset = font_setting(subset)?;
+    let changed = embed.is_some() || system.is_some() || subset.is_some();
+    if changed != output.is_some() {
+        return Err(
+            "font settings mutations require --output and at least one explicit setting".into(),
+        );
+    }
+    if let Some(output) = output {
+        ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+        ensure_output_paths_available(&[output.to_path_buf()])?;
+    }
+    let mut document = Document::open(file)?;
+    if let Some(value) = embed {
+        document.set_embed_true_type_fonts(value)?;
+    }
+    if let Some(value) = system {
+        document.set_embed_system_fonts(value)?;
+    }
+    if let Some(value) = subset {
+        document.set_save_subset_fonts(value)?;
+    }
+    let flags = json!({"embed_true_type_fonts": document.embed_true_type_fonts()?,
+        "embed_system_fonts": document.embed_system_fonts()?,
+        "save_subset_fonts": document.save_subset_fonts()?});
+    if let Some(output) = output {
+        let bytes = document.to_bytes_for_path(output)?;
+        stage_and_publish(&[(output.to_path_buf(), bytes)], false)?;
+    }
+    if as_json {
+        print_json(json!({"scope": "font", "settings": flags,
+        "output": output.map(|path| path.display().to_string())}))
+    } else {
+        writeln!(io::stdout(), "{}", serde_json::to_string_pretty(&flags)?)?;
+        Ok(())
+    }
+}
+
+pub fn font_list(file: &Path, as_json: bool) -> Result<()> {
+    let document = Document::open(file)?;
+    let fonts = document
+        .try_fonts()?
+        .iter()
+        .enumerate()
+        .map(|(record_index, font)| {
+            let faces = font.embedded_fonts.iter().enumerate().map(|(face_index, face)| {
+            let (part_name, stored_len) = document.font_part_metadata(record_index, face_index)?;
+            Ok(json!({"kind": font_kind_name(face.kind), "format": "odttf", "part_name": part_name,
+                "stored_len": stored_len, "decoded_len": face.data.len(), "font_key": face.font_key,
+                "subsetted": face.subsetted}))
+        }).collect::<Result<Vec<_>>>()?;
+            Ok(
+                json!({"name": font.name, "alternate_name": font.alternate_name,
+            "family": font.family, "pitch": font.pitch, "faces": faces}),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if as_json {
+        print_json(json!({"fonts": fonts}))
+    } else {
+        for font in fonts {
+            writeln!(
+                io::stdout(),
+                "{}: {} face(s)",
+                font["name"].as_str().unwrap_or(""),
+                font["faces"].as_array().map_or(0, Vec::len)
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2533,6 +3332,14 @@ mod tests {
                     "keywords": document.keywords(),
                 },
                 "styles_used": styles,
+                "word_count": 0,
+                "character_count": 0,
+                "page_count": 1,
+                "count_scope": "accepted-main-body",
+                "character_include_spaces": true,
+                "page_count_source": "deterministic-layout",
+                "diagnostics": [],
+                "pictures": [],
             })
         );
     }

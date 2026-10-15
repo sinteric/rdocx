@@ -39,7 +39,7 @@ rows are the enforced release-mode bounds plus one dated observation.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx | 3,524,795 compressed bytes, 50,764,076 member bytes, 37 members | 0.16.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: rdocx | 3,702,785 compressed bytes, 51,779,094 member bytes, 37 members | 0.16.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 | Large-document layout throughput | minimum 250 pages/s, observed 31,019.1 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
 | Large-document layout peak allocation | maximum 64 MiB, observed 29.03 MiB | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | peak live allocation | 2026-09-19 |
 | Large-document PDF throughput | minimum 1,000 pages/s, observed 60,058.0 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 deterministic layout pages | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
@@ -142,7 +142,7 @@ Most Rust applications need only the facade:
 
 ```toml
 [dependencies]
-rdocx = "0.16.0"
+rdocx = "0.16.1"
 ```
 
 Bundled metric-compatible fonts are always available through deterministic
@@ -151,14 +151,14 @@ features when an application must use only the bundled set:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.16.0", default-features = false }
+rdocx = { version = "0.16.1", default-features = false }
 ```
 
 Native encryption and signing APIs are opt-in:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.16.0", features = ["agile-encryption", "digital-signatures"] }
+rdocx = { version = "0.16.1", features = ["agile-encryption", "digital-signatures"] }
 ```
 
 The workspace requires Rust 1.93 or newer and uses edition 2024.
@@ -168,7 +168,7 @@ The workspace requires Rust 1.93 or newer and uses edition 2024.
 Install the CLI version from the same stable family:
 
 ```sh
-cargo install rdocx-cli --version '^0.16.0'
+cargo install rdocx-cli --version '^0.16.1'
 ```
 
 Common commands:
@@ -198,6 +198,43 @@ rdocx diff before.docx after.docx
 The [binding specification](https://github.com/tensorbee/rdocx/blob/main/docs/hld/10-bindings-spec.md#native-word-facade-stability)
 defines where Python, WebAssembly, and CLI intentionally expose less than
 native Rust.
+
+### One-shot CLI editing
+
+```sh
+rdocx replace template.docx --map pairs.json --json -o filled.docx
+rdocx fields update filled.docx --now 2026-10-10T08:30:00 -o cached.docx
+rdocx images extract cached.docx extracted-images --json
+rpptx slide add deck.pptx --layout 7 --at 1 -o updated.pptx
+rpptx notes set updated.pptx 1 --from-file notes.txt -o noted.pptx
+rpptx fit noted.pptx --json
+```
+
+Ordered replacement maps and one-shot mutations use checked native candidates
+and refuse input overwrite. The family CLI references define exact scopes,
+JSON records, field cache limits and fit exit codes.
+
+### Embed a licensed font
+
+```rust,no_run
+use rdocx::{Document, EmbeddedFont, EmbeddedFontKind, FontEmbeddingLicense, derive_font_key};
+
+let mut doc = Document::new();
+let bytes = std::fs::read("MyFace-Regular.ttf")?;
+let key = derive_font_key(&bytes)?;
+doc.embed_font("My Face", EmbeddedFont::new(
+    EmbeddedFontKind::Regular, bytes, key,
+    FontEmbeddingLicense::new(true, "SIL Open Font License 1.1"),
+))?;
+doc.save("embedded.docx")?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Confirm the caller font's embedding permission before passing explicit
+authorization and identity. Both Python packages and CLIs expose licensed font
+embedding, listing, removal and presence-sensitive flags. Explicit caller render
+fonts override document-embedded faces. Imported unsupported formats remain
+preserved. These local recipes do not update the separate rdocx-skills repository.
 
 ### Community Claude plugin
 

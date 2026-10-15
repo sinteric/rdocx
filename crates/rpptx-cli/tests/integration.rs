@@ -1553,7 +1553,7 @@ fn inspect_json_adds_shape_details_without_changing_existing_slide_keys() {
                     {
                         "index": 0,
                         "id": 2,
-                        "name": "Placeholder 2",
+                        "name": "Title 1",
                         "kind": "shape",
                         "placeholder": { "type": "title", "idx": 0 },
                         "position": null,
@@ -1567,7 +1567,7 @@ fn inspect_json_adds_shape_details_without_changing_existing_slide_keys() {
                     {
                         "index": 1,
                         "id": 3,
-                        "name": "Placeholder 3",
+                        "name": "Content Placeholder 2",
                         "kind": "shape",
                         "placeholder": { "type": null, "idx": 1 },
                         "position": null,
@@ -2092,4 +2092,1553 @@ fn comment_mutations_fail_without_creating_output() {
     assert_eq!(result.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&result.stderr).contains("output already exists"));
     assert_eq!(fs::read(&output).unwrap(), b"keep me");
+}
+
+#[test]
+fn fx195_font_directory_validation_precedes_publication() {
+    let workspace = TempWorkspace::new("fx195-font-dir");
+    let input = workspace.path.join("input.pptx");
+    write_deck(&input, &["caller directory atomicity"]);
+    let original = fs::read(&input).unwrap();
+    let fonts = workspace.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+    let output = workspace.path.join("out.png");
+    for bad in [fonts.clone(), workspace.path.join("missing"), input.clone()] {
+        for mode in ["convert", "render"] {
+            fs::write(&output, b"sentinel").unwrap();
+            let result = cli(&[
+                mode,
+                input.to_str().unwrap(),
+                "--font-dir",
+                bad.to_str().unwrap(),
+                if mode == "convert" {
+                    "--to"
+                } else {
+                    "--format"
+                },
+                "png",
+                "--output",
+                output.to_str().unwrap(),
+                "--force",
+            ]);
+            assert!(
+                !result.status.success(),
+                "{mode} accepted invalid font input"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("font"),
+                "font validation, not argument parsing: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+            assert_eq!(fs::read(&input).unwrap(), original);
+        }
+    }
+    fs::remove_file(fonts.join("bad.ttf")).unwrap();
+    fs::write(
+        fonts.join("Carlito.ttf"),
+        include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf"),
+    )
+    .unwrap();
+    let result = cli(&[
+        "convert",
+        input.to_str().unwrap(),
+        "--font-dir",
+        fonts.to_str().unwrap(),
+        "--to",
+        "png",
+        "--output",
+        output.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fs::read(&output).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(fs::read(&input).unwrap(), original);
+}
+
+fn fx195_caller_only_monospace() -> Vec<u8> {
+    let mut bytes = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf").to_vec();
+    for (from, to) in [
+        (b"Liberation Mono".to_vec(), b"FX195CallerOnly".to_vec()),
+        (
+            "Liberation Mono"
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect(),
+            "FX195CallerOnly"
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect(),
+        ),
+    ] {
+        assert_eq!(from.len(), to.len());
+        let mut count = 0;
+        let mut position = 0;
+        while let Some(relative) = bytes[position..]
+            .windows(from.len())
+            .position(|value| value == from)
+        {
+            let offset = position + relative;
+            bytes[offset..offset + from.len()].copy_from_slice(&to);
+            position = offset + from.len();
+            count += 1;
+        }
+        assert!(count > 0);
+    }
+    assert!(
+        oxml_layout::bundled_fonts::bundled_font_data()
+            .iter()
+            .all(|(name, data)| *name != "FX195CallerOnly" && *data != bytes)
+    );
+    bytes
+}
+
+#[test]
+fn fx195_every_ppt_cli_entrypoint_uses_caller_only_face() {
+    let workspace = TempWorkspace::new("fx195-caller-matrix");
+    let input = workspace.path.join("caller.pptx");
+    let fonts = workspace.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    let bytes = fx195_caller_only_monospace();
+    fs::write(fonts.join("FilenameAlias.ttf"), &bytes).unwrap();
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide
+            .add_textbox(Emu(100_000), Emu(100_000), Emu(3_000_000), Emu(800_000))
+            .unwrap();
+        shape.set_text("iiiiWWWW caller matrix").unwrap();
+        shape
+            .text_frame()
+            .unwrap()
+            .paragraph_mut(0)
+            .unwrap()
+            .run_mut(0)
+            .unwrap()
+            .set_font(Some(rpptx::TextFont::new("FX195CallerOnly").unwrap()));
+    }
+    presentation.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let refs = [("FilenameAlias", bytes.as_slice())];
+    let layout = presentation
+        .render_deterministic_with_fonts(&refs)
+        .unwrap()
+        .1;
+    assert!(
+        layout
+            .fonts
+            .iter()
+            .any(|font| font.data.as_ref() == bytes.as_slice() && font.face_index == 0)
+    );
+    let ordinary = presentation.render_deterministic().unwrap().1;
+    assert_ne!(
+        format!("{:?}", ordinary.pages),
+        format!("{:?}", layout.pages)
+    );
+    for format in ["pdf", "png", "jpeg", "tiff"] {
+        let out = workspace.path.join(format!("converted.{format}"));
+        let converted = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--font-dir",
+            fonts.to_str().unwrap(),
+            "--dpi",
+            "72",
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        assert!(
+            converted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&converted.stderr)
+        );
+        let expected = if format == "pdf" {
+            oxml_pdf::render_to_pdf_checked(&layout).unwrap()
+        } else {
+            let raster_format = match format {
+                "png" => oxml_pdf::RasterFormat::Png {
+                    transparent_background: false,
+                },
+                "jpeg" => oxml_pdf::RasterFormat::Jpeg { quality: 90 },
+                _ => oxml_pdf::RasterFormat::Tiff,
+            };
+            match oxml_pdf::render_pages(
+                &layout,
+                &[0],
+                oxml_pdf::RasterOptions {
+                    dpi: 72.0,
+                    format: raster_format,
+                },
+            )
+            .unwrap()
+            {
+                oxml_pdf::RasterOutput::SeparatePages(mut pages) => pages.remove(0),
+                oxml_pdf::RasterOutput::MultiPageTiff(data) => data,
+            }
+        };
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            expected,
+            "{format} selected caller paint"
+        );
+        if format != "pdf" {
+            let directory = workspace.path.join(format!("render-{format}"));
+            let rendered = cli(&[
+                "render",
+                input.to_str().unwrap(),
+                "--format",
+                format,
+                "--font-dir",
+                fonts.to_str().unwrap(),
+                "--dpi",
+                "72",
+                "--slide",
+                "1",
+                "--output",
+                directory.to_str().unwrap(),
+            ]);
+            assert!(
+                rendered.status.success(),
+                "{}",
+                String::from_utf8_lossy(&rendered.stderr)
+            );
+            let filename = match format {
+                "tiff" => "caller.tiff",
+                "jpeg" => "caller_slide1.jpg",
+                _ => "caller_slide1.png",
+            };
+            assert_eq!(fs::read(directory.join(filename)).unwrap(), expected);
+        }
+    }
+    let thumbnail = workspace.path.join("thumb.png");
+    let result = cli(&[
+        "thumbnail",
+        input.to_str().unwrap(),
+        "--font-dir",
+        fonts.to_str().unwrap(),
+        "--output",
+        thumbnail.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let dpi = (320.0 - 1e-9) * 72.0 / layout.pages[0].width;
+    assert_eq!(
+        fs::read(&thumbnail).unwrap(),
+        oxml_pdf::render_page_to_png(&layout, 0, dpi).unwrap()
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+fn fx206_member_scene(placed: bool, reason: usize) -> String {
+    let member = |id: u32, x: i64, width: i64, properties: &str, style: &str, positioned: bool| {
+        let transform = if positioned {
+            format!(
+                r#"<a:xfrm><a:off x="{x}" y="127000"/><a:ext cx="{width}" cy="254000"/></a:xfrm>"#
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="owner{id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{transform}<a:prstGeom prst="rect"/>{properties}<f:opaque xmlns:f="urn:f206:member" literal="&#x41;"/></p:spPr>{style}</p:sp>"#
+        )
+    };
+    let (properties, style) = match reason {
+        0 => (
+            "",
+            r#"<p:style><a:lnRef idx="0"/><a:fillRef idx="999"/><a:effectRef idx="0"/><a:fontRef idx="minor"/></p:style>"#,
+        ),
+        1 => (
+            r#"<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>"#,
+            "",
+        ),
+        _ => (
+            r#"<a:solidFill><a:prstClr val="futureColour"/></a:solidFill>"#,
+            "",
+        ),
+    };
+    let children = [
+        member(
+            1,
+            127000,
+            254000,
+            r#"<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>"#,
+            "",
+            true,
+        ),
+        member(2, 127000, 254000, properties, style, placed),
+        member(
+            3,
+            127000,
+            50800,
+            r#"<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>"#,
+            "",
+            true,
+        ),
+    ]
+    .join("");
+    format!(
+        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" showMasterSp="0"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="10" name="root"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:grpSp><p:nvGrpSpPr><p:cNvPr id="11" name="parent"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="63500" y="63500"/><a:ext cx="2540000" cy="2540000"/><a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="1270000"/></a:xfrm></p:grpSpPr>{children}</p:grpSp></p:spTree></p:cSld></p:sld>"#
+    )
+}
+
+#[test]
+fn fx206_cli_recovery_reports_fallback_omission_and_keeps_fatal_output_atomic() {
+    let temp = TempWorkspace::new("member-recovery");
+    let path = temp.path.join("input.pptx");
+    for placed in [false, true] {
+        write_deck(&path, &["seed"]);
+        let mut package = OpcPackage::open(&path).unwrap();
+        package.set_part(
+            "/ppt/slides/slide1.xml",
+            fx206_member_scene(placed, 0).into_bytes(),
+        );
+        package.save(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let pdf = temp.path.join(if placed {
+            "fallback.pdf"
+        } else {
+            "omission.pdf"
+        });
+        let output = cli(&[
+            "convert",
+            path.to_str().unwrap(),
+            "--to",
+            "pdf",
+            "--output",
+            pdf.to_str().unwrap(),
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.matches("Warning: unresolved member ").count(), 1);
+        assert!(stderr.contains("slide 1 incomplete: 1 unresolved members"));
+        assert!(stderr.contains(if placed {
+            "retained as bounds"
+        } else {
+            "omitted without trustworthy finite bounds"
+        }));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    let bad = temp.path.join("fatal.pptx");
+    fs::write(&bad, b"not a package").unwrap();
+    let target = temp.path.join("preserved.pdf");
+    fs::write(&target, b"original").unwrap();
+    let output = cli(&[
+        "convert",
+        bad.to_str().unwrap(),
+        "--to",
+        "pdf",
+        "--output",
+        target.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+}
+
+#[test]
+fn fx208_footer_cli_safe_publication_and_inspection() {
+    let temp = TempWorkspace::new("fx208-footer");
+    let input = temp.path.join("input.pptx");
+    let output = temp.path.join("footer.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(1).unwrap();
+    std::fs::write(&input, presentation.to_bytes().unwrap()).unwrap();
+    let before = std::fs::read(&input).unwrap();
+    let help = cli(&["footer", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for option in [
+        "--date-cache",
+        "--date-format",
+        "--skip-title",
+        "--slide-number",
+        "--footer",
+    ] {
+        assert!(help.contains(option), "missing {option}");
+    }
+    let result = cli(&[
+        "footer",
+        input.to_str().unwrap(),
+        "--footer",
+        "CLI footer",
+        "--date",
+        "auto",
+        "--date-cache",
+        "cached",
+        "--slide-number",
+        "--output",
+        output.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let reopened = Presentation::open(&output).unwrap();
+    assert_eq!(
+        reopened.slide_header_footer(0).unwrap().footer.as_deref(),
+        Some("CLI footer")
+    );
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+    let inspect = cli(&["inspect", output.to_str().unwrap(), "--json"]);
+    assert!(inspect.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert!(value.get("masters").is_some());
+    assert!(value["masters"][0].get("header_footer").is_some());
+    let invalid = cli(&[
+        "footer",
+        input.to_str().unwrap(),
+        "--date",
+        "off",
+        "--date-cache",
+        "cached",
+        "--output",
+        input.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(!invalid.status.success());
+    assert_eq!(std::fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn powerpoint_replace_map_is_ordered_and_includes_notes() {
+    let temp = TempWorkspace::new("fx204-base-map");
+    let input = temp.path.join("input.pptx");
+    let output = temp.path.join("output.pptx");
+    let map = temp.path.join("map.json");
+    write_deck(&input, &["A A"]);
+    add_speaker_notes(&input, "A");
+    fs::write(&map, r#"[{"placeholder":"A","value":"B","expect":3},{"placeholder":"B","value":"C","expect":3}]"#).unwrap();
+    let result = cli(&[
+        "replace",
+        input.to_str().unwrap(),
+        "--map",
+        map.to_str().unwrap(),
+        "--json",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["pairs"][0]["count"], 3);
+    assert_eq!(report["pairs"][1]["count"], 3);
+    assert_eq!(
+        Presentation::open(&output)
+            .unwrap()
+            .slide(0)
+            .unwrap()
+            .text(),
+        "C C"
+    );
+    let reopened = Presentation::open(&output).unwrap();
+    assert_eq!(
+        reopened.slide(0).unwrap().notes_text().as_deref(),
+        Some("C")
+    );
+    assert!(
+        OpcPackage::open(&output).unwrap().parts["/ppt/notesSlides/notesSlide1.xml"]
+            .windows(b"urn:rdocx:test".len())
+            .any(|w| w == b"urn:rdocx:test")
+    );
+    let before = fs::read(&input).unwrap();
+    let rejected = temp.path.join("rejected.pptx");
+    fs::write(&map, r#"[{"placeholder":"A","value":"B","expect":3},{"placeholder":"B","value":"C","expect":4}]"#).unwrap();
+    let refused = cli(&[
+        "replace",
+        input.to_str().unwrap(),
+        "--map",
+        map.to_str().unwrap(),
+        "--output",
+        rejected.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(!rejected.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn slide_add_resolves_layout_and_insertion_atomically() {
+    let temp = TempWorkspace::new("fx204-add");
+    let input = temp.path.join("input.pptx");
+    write_deck(&input, &["first", "last"]);
+    let before = fs::read(&input).unwrap();
+    let layout_name = Presentation::open(&input)
+        .unwrap()
+        .layout_name(6)
+        .unwrap()
+        .to_owned();
+    for (n, layout) in [(1, "7"), (2, layout_name.as_str()), (3, "7")] {
+        let output = temp.path.join(format!("add-{n}.pptx"));
+        let result = cli(&[
+            "slide",
+            "add",
+            input.to_str().unwrap(),
+            "--layout",
+            layout,
+            "--at",
+            &n.to_string(),
+            "--json",
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["slide"], n);
+        let deck = Presentation::open(&output).unwrap();
+        assert_eq!(deck.len(), 3);
+        assert_eq!(deck.slide(n as usize - 1).unwrap().text(), "");
+    }
+    for layout in [
+        "0",
+        "999",
+        "blank",
+        "unknown",
+        "999999999999999999999999999999999999",
+    ] {
+        let output = temp.path.join("refused.pptx");
+        let result = cli(&[
+            "slide",
+            "add",
+            input.to_str().unwrap(),
+            "--layout",
+            layout,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(!result.status.success());
+        assert!(!output.exists());
+    }
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn slide_duplicate_preserves_native_slide_and_notes_ownership() {
+    let temp = TempWorkspace::new("fx204-duplicate");
+    let input = temp.path.join("input.pptx");
+    let output = temp.path.join("output.pptx");
+    write_deck(&input, &["first", "last"]);
+    add_speaker_notes(&input, "speaker");
+    let result = cli(&[
+        "slide",
+        "duplicate",
+        input.to_str().unwrap(),
+        "1",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let deck = Presentation::open(&output).unwrap();
+    assert_eq!(deck.len(), 3);
+    assert_eq!(deck.slide(0).unwrap().text(), "first");
+    assert_eq!(deck.slide(1).unwrap().text(), "first");
+    assert_eq!(deck.slide(2).unwrap().text(), "last");
+    assert_eq!(
+        deck.slide(0).unwrap().notes_text().as_deref(),
+        Some("speaker")
+    );
+    assert_eq!(
+        deck.slide(1).unwrap().notes_text().as_deref(),
+        Some("speaker")
+    );
+    let package = OpcPackage::open(&output).unwrap();
+    let notes = package
+        .parts
+        .iter()
+        .filter(|(name, _)| {
+            name.starts_with("/ppt/notesSlides/notesSlide") && name.ends_with(".xml")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().all(|(_, bytes)| {
+        bytes
+            .windows(b"urn:rdocx:test".len())
+            .any(|w| w == b"urn:rdocx:test")
+    }));
+}
+
+#[test]
+fn slide_remove_preserves_native_relationship_lifecycle() {
+    let temp = TempWorkspace::new("fx204-remove");
+    let input = temp.path.join("input.pptx");
+    let output = temp.path.join("output.pptx");
+    write_deck(&input, &["first", "last"]);
+    add_speaker_notes(&input, "speaker");
+    let result = cli(&[
+        "slide",
+        "remove",
+        input.to_str().unwrap(),
+        "1",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let deck = Presentation::open(&output).unwrap();
+    assert_eq!(deck.len(), 1);
+    assert_eq!(deck.slide(0).unwrap().text(), "last");
+    assert!(
+        !OpcPackage::open(&output)
+            .unwrap()
+            .parts
+            .contains_key("/ppt/notesSlides/notesSlide1.xml")
+    );
+    let rejected = temp.path.join("rejected.pptx");
+    let result = cli(&[
+        "slide",
+        "remove",
+        input.to_str().unwrap(),
+        "0",
+        "--output",
+        rejected.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!rejected.exists());
+}
+
+#[test]
+fn slide_move_uses_one_based_cli_positions() {
+    let temp = TempWorkspace::new("fx204-move");
+    let input = temp.path.join("input.pptx");
+    write_deck(&input, &["first", "middle", "last"]);
+    for (from, to, texts) in [
+        (1, 3, ["middle", "last", "first"]),
+        (3, 1, ["last", "first", "middle"]),
+        (2, 2, ["first", "middle", "last"]),
+    ] {
+        let output = temp.path.join(format!("move-{from}-{to}.pptx"));
+        let result = cli(&[
+            "slide",
+            "move",
+            input.to_str().unwrap(),
+            &from.to_string(),
+            "--to",
+            &to.to_string(),
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let deck = Presentation::open(&output).unwrap();
+        for (i, text) in texts.iter().enumerate() {
+            assert_eq!(deck.slide(i).unwrap().text(), *text);
+        }
+    }
+    for (from, to) in [(0, 1), (1, 0), (4, 1), (1, 4)] {
+        let output = temp.path.join("refused.pptx");
+        let result = cli(&[
+            "slide",
+            "move",
+            input.to_str().unwrap(),
+            &from.to_string(),
+            "--to",
+            &to.to_string(),
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(!result.status.success());
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn slide_hide_and_show_round_trip() {
+    let temp = TempWorkspace::new("fx204-hidden");
+    let mut input = temp.path.join("input.pptx");
+    write_deck(&input, &["text"]);
+    for (i, action, hidden) in [
+        (0, "hide", true),
+        (1, "hide", true),
+        (2, "show", false),
+        (3, "show", false),
+    ] {
+        let output = temp.path.join(format!("hidden-{i}.pptx"));
+        let result = cli(&[
+            "slide",
+            action,
+            input.to_str().unwrap(),
+            "1",
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let deck = Presentation::open(&output).unwrap();
+        assert_eq!(deck.slide(0).unwrap().hidden(), hidden);
+        assert_eq!(deck.slide(0).unwrap().text(), "text");
+        input = output;
+    }
+}
+
+#[test]
+fn notes_set_text_or_file_preserves_exact_text() {
+    let temp = TempWorkspace::new("fx204-notes");
+    let input = temp.path.join("input.pptx");
+    write_deck(&input, &["text"]);
+    add_speaker_notes(&input, "old");
+    let source = temp.path.join("notes.txt");
+    for (case, text) in [
+        "  leading\r\nnext\n\n",
+        "first\nsecond\n",
+        "first\rsecond",
+        "  π 日本語\n尾  ",
+        "",
+    ]
+    .iter()
+    .enumerate()
+    {
+        fs::write(&source, text).unwrap();
+        for (mode, args) in [
+            (0, vec!["--text", *text]),
+            (1, vec!["--from-file", source.to_str().unwrap()]),
+        ] {
+            let output = temp.path.join(format!("notes-{case}-{mode}.pptx"));
+            let mut args2 = vec!["notes", "set", input.to_str().unwrap(), "1"];
+            args2.extend(args);
+            args2.extend(["--output", output.to_str().unwrap()]);
+            let result = cli(&args2);
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                Presentation::open(&output)
+                    .unwrap()
+                    .slide(0)
+                    .unwrap()
+                    .notes_text()
+                    .as_deref(),
+                Some(*text)
+            );
+            let package = OpcPackage::open(&output).unwrap();
+            let xml = String::from_utf8(package.parts["/ppt/notesSlides/notesSlide1.xml"].clone())
+                .unwrap();
+            assert!(xml.contains("urn:rdocx:test"));
+            assert!(xml.contains("b=\"1\""));
+        }
+    }
+    let rejected = temp.path.join("refused.pptx");
+    let result = cli(&[
+        "notes",
+        "set",
+        input.to_str().unwrap(),
+        "1",
+        "--text",
+        "x",
+        "--from-file",
+        source.to_str().unwrap(),
+        "--output",
+        rejected.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!rejected.exists());
+    fs::write(&source, [0xff]).unwrap();
+    let result = cli(&[
+        "notes",
+        "set",
+        input.to_str().unwrap(),
+        "1",
+        "--from-file",
+        source.to_str().unwrap(),
+        "--output",
+        rejected.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!rejected.exists());
+}
+
+#[test]
+fn powerpoint_meta_get_set_matches_python_core_properties() {
+    let temp = TempWorkspace::new("fx204-meta");
+    let input = temp.path.join("input.pptx");
+    let output = temp.path.join("output.pptx");
+    write_deck(&input, &["text"]);
+    let mut original = Presentation::open(&input).unwrap();
+    let mut core = original.core_properties().cloned().unwrap_or_default();
+    core.language = Some("en-GB".into());
+    core.identifier = Some("preserved".into());
+    original.set_core_properties(core).unwrap();
+    original.save(&input).unwrap();
+    let result = cli(&[
+        "meta",
+        "set",
+        input.to_str().unwrap(),
+        "--title",
+        "title",
+        "--author",
+        "author",
+        "--subject",
+        "subject",
+        "--keywords",
+        "keywords",
+        "--description",
+        "description",
+        "--category",
+        "category",
+        "--json",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let deck = Presentation::open(&output).unwrap();
+    let core = deck.core_properties().unwrap();
+    assert_eq!(core.title.as_deref(), Some("title"));
+    assert_eq!(core.creator.as_deref(), Some("author"));
+    assert_eq!(core.subject.as_deref(), Some("subject"));
+    assert_eq!(core.keywords.as_deref(), Some("keywords"));
+    assert_eq!(core.description.as_deref(), Some("description"));
+    assert_eq!(core.category.as_deref(), Some("category"));
+    assert_eq!(core.language.as_deref(), Some("en-GB"));
+    assert_eq!(core.identifier.as_deref(), Some("preserved"));
+    let result = cli(&["meta", "get", output.to_str().unwrap(), "--json"]);
+    assert!(result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["core"]["language"], "en-GB");
+}
+
+#[test]
+fn fit_reports_every_supported_overflow_and_needed_scale() {
+    let temp = TempWorkspace::new("fx204-fit");
+    for (name, text, expected) in [
+        ("fit", "short".to_owned(), 0),
+        ("overflow", "long overflow text ".repeat(100), 1),
+    ] {
+        let input = temp.path.join(format!("{name}.pptx"));
+        write_deck(&input, &[&text]);
+        let before = fs::read(&input).unwrap();
+        let native = Presentation::open(&input).unwrap().fit_report(&[]).unwrap();
+        let result = cli(&["fit", input.to_str().unwrap(), "--json"]);
+        assert_eq!(
+            result.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["schema"], 1);
+        assert_eq!(
+            report["frames"].as_array().unwrap().len(),
+            native.frames.len()
+        );
+        assert!(!native.frames.is_empty());
+        for (json, frame) in report["frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&native.frames)
+        {
+            assert_eq!(json["owner_part"], frame.update.location.owner_part);
+            assert_eq!(json["overflow"], frame.overflow);
+            assert_eq!(json["needed_scale"], serde_json::json!(frame.needed_scale));
+            assert_eq!(
+                json["needed_reduction"],
+                serde_json::json!(frame.needed_reduction)
+            );
+            assert_eq!(json["status"], frame.update.status);
+            assert_eq!(
+                json["quantized_trial"].is_null(),
+                frame.quantized_trial.is_none()
+            );
+            assert_eq!(
+                json["persisted_trial"].is_null(),
+                frame.persisted_trial.is_none()
+            );
+        }
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn every_new_command_has_help_and_reference_contract() {
+    for command in [
+        vec!["replace"],
+        vec!["slide", "add"],
+        vec!["slide", "duplicate"],
+        vec!["slide", "remove"],
+        vec!["slide", "move"],
+        vec!["slide", "hide"],
+        vec!["slide", "show"],
+        vec!["notes", "set"],
+        vec!["fit"],
+        vec!["meta", "get"],
+        vec!["meta", "set"],
+    ] {
+        let mut args = command.clone();
+        args.push("--help");
+        let result = cli(&args);
+        assert!(
+            result.status.success(),
+            "{:?}: {}",
+            command,
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!result.stdout.is_empty());
+    }
+}
+
+#[test]
+fn new_mutations_reject_input_aliases_and_output_collisions() {
+    let temp = TempWorkspace::new("fx204-identity");
+    let input = temp.path.join("input.pptx");
+    write_deck(&input, &["text"]);
+    let original = fs::read(&input).unwrap();
+    let existing = temp.path.join("existing.pptx");
+    fs::write(&existing, b"unrelated").unwrap();
+    let commands = vec![
+        vec![
+            "replace",
+            input.to_str().unwrap(),
+            "-p",
+            "text",
+            "-v",
+            "new",
+        ],
+        vec!["slide", "add", input.to_str().unwrap(), "--layout", "7"],
+        vec!["slide", "duplicate", input.to_str().unwrap(), "1"],
+        vec!["slide", "remove", input.to_str().unwrap(), "1"],
+        vec!["slide", "move", input.to_str().unwrap(), "1", "--to", "1"],
+        vec!["slide", "hide", input.to_str().unwrap(), "1"],
+        vec!["slide", "show", input.to_str().unwrap(), "1"],
+        vec![
+            "notes",
+            "set",
+            input.to_str().unwrap(),
+            "1",
+            "--text",
+            "notes",
+        ],
+        vec!["meta", "set", input.to_str().unwrap(), "--title", "title"],
+    ];
+    let hardlink = temp.path.join("hardlink.pptx");
+    fs::hard_link(&input, &hardlink).unwrap();
+    let mut aliases = vec![input.clone(), hardlink];
+    #[cfg(unix)]
+    {
+        let symlink = temp.path.join("symlink.pptx");
+        std::os::unix::fs::symlink(&input, &symlink).unwrap();
+        aliases.push(symlink);
+    }
+    aliases.push(existing.clone());
+    for command in commands {
+        for alias in &aliases {
+            let mut args = command.clone();
+            args.extend(["--output", alias.to_str().unwrap()]);
+            let result = cli(&args);
+            assert!(!result.status.success(), "{:?}", args);
+            assert_eq!(fs::read(&input).unwrap(), original);
+            assert_eq!(fs::read(&existing).unwrap(), b"unrelated");
+        }
+    }
+}
+
+#[test]
+fn fx220_cli_fonts_embed_all_faces_list_actual_parts_and_remove() {
+    let workspace = TempWorkspace::new("fx220-faces");
+    let source = workspace.path.join("source.pptx");
+    fs::write(&source, include_bytes!("../../rpptx/assets/default.pptx")).unwrap();
+    let original = fs::read(&source).unwrap();
+    let font = workspace.path.join("font.ttf");
+    let data = include_bytes!("../../oxml-layout/fonts/Gelasio-Regular.ttf");
+    fs::write(&font, data).unwrap();
+    let mut current = source.clone();
+    for (index, kind) in ["regular", "bold", "italic", "bold-italic"]
+        .iter()
+        .enumerate()
+    {
+        let output = workspace.path.join(format!("face{index}.pptx"));
+        let result = cli(&[
+            "font",
+            "embed",
+            current.to_str().unwrap(),
+            "--name",
+            "FX220 CLI",
+            "--font",
+            font.to_str().unwrap(),
+            "--kind",
+            kind,
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(record["schema"], 1);
+        current = output;
+    }
+    let result = cli(&["font", "list", current.to_str().unwrap(), "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(record["schema"], 1);
+    let entry = record["fonts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|font| font["name"] == "FX220 CLI")
+        .unwrap();
+    let faces = entry["faces"].as_array().unwrap();
+    assert_eq!(faces.len(), 4);
+    let package = oxml_opc::OpcPackage::open(&current).unwrap();
+    for (face, kind) in faces
+        .iter()
+        .zip(["regular", "bold", "italic", "bold-italic"])
+    {
+        assert_eq!(face["kind"], kind);
+        assert_eq!(face["format"], "eot");
+        let body = package
+            .get_part(face["part_name"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(face["stored_len"].as_u64().unwrap() as usize, body.len());
+        assert_eq!(face["decoded_len"].as_u64().unwrap() as usize, data.len());
+    }
+    let removed = workspace.path.join("removed.pptx");
+    let result = cli(&[
+        "font",
+        "remove",
+        current.to_str().unwrap(),
+        "--name",
+        "FX220 CLI",
+        "--kind",
+        "bold",
+        "--output",
+        removed.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(record["removed"], true);
+    let result = cli(&["font", "list", removed.to_str().unwrap(), "--json"]);
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let entry = record["fonts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|font| font["name"] == "FX220 CLI")
+        .unwrap();
+    assert_eq!(entry["faces"].as_array().unwrap().len(), 3);
+    let all_removed = workspace.path.join("all-removed.pptx");
+    let result = cli(&[
+        "font",
+        "remove",
+        removed.to_str().unwrap(),
+        "--name",
+        "FX220 CLI",
+        "--output",
+        all_removed.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(result.status.success());
+    let result = cli(&["font", "list", all_removed.to_str().unwrap(), "--json"]);
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(
+        record["fonts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|font| font["name"] != "FX220 CLI")
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(&font).unwrap(), data);
+}
+
+#[test]
+fn fx220_cli_font_settings_keep_absence_and_false_distinct() {
+    let workspace = TempWorkspace::new("fx220-settings");
+    let source = workspace.path.join("source.pptx");
+    fs::write(&source, include_bytes!("../../rpptx/assets/default.pptx")).unwrap();
+    let original = fs::read(&source).unwrap();
+    let mut current = source.clone();
+    for (index, setting) in ["true", "false", "none"].iter().enumerate() {
+        let output = workspace.path.join(format!("settings{index}.pptx"));
+        let result = cli(&[
+            "font",
+            "settings",
+            current.to_str().unwrap(),
+            "--embed-true-type-fonts",
+            setting,
+            "--save-subset-fonts",
+            setting,
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let expected = match *setting {
+            "true" => json!(true),
+            "false" => json!(false),
+            _ => serde_json::Value::Null,
+        };
+        assert_eq!(record["settings"]["embed_true_type_fonts"], expected);
+        assert_eq!(record["settings"]["save_subset_fonts"], expected);
+        let reread = cli(&["font", "settings", output.to_str().unwrap(), "--json"]);
+        assert!(reread.status.success());
+        let reread: serde_json::Value = serde_json::from_slice(&reread.stdout).unwrap();
+        assert_eq!(reread["settings"], record["settings"]);
+        current = output;
+    }
+    for args in [
+        vec!["--embed-true-type-fonts", "false"],
+        vec!["--output", current.to_str().unwrap()],
+    ] {
+        let result = cli(&[&["font", "settings", source.to_str().unwrap()][..], &args].concat());
+        assert!(!result.status.success());
+    }
+    assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn fx220_cli_font_refusals_preserve_inputs_and_existing_outputs() {
+    let workspace = TempWorkspace::new("fx220-refusals");
+    let source = workspace.path.join("source.pptx");
+    fs::write(&source, include_bytes!("../../rpptx/assets/default.pptx")).unwrap();
+    let original = fs::read(&source).unwrap();
+    let font = workspace.path.join("font.ttf");
+    let data = include_bytes!("../../oxml-layout/fonts/Gelasio-Regular.ttf");
+    fs::write(&font, data).unwrap();
+    let output = workspace.path.join("output.pptx");
+    let common = [
+        "font",
+        "embed",
+        source.to_str().unwrap(),
+        "--name",
+        "FX220 CLI",
+        "--font",
+        font.to_str().unwrap(),
+    ];
+    for extra in [
+        vec!["--license-identity", "OFL-1.1"],
+        vec!["--license-authorized", "--license-identity", " "],
+        vec![
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--kind",
+            "invalid",
+        ],
+    ] {
+        let result = cli(&[&common[..], &extra, &["--output", output.to_str().unwrap()]].concat());
+        assert!(!result.status.success());
+        assert!(!output.exists());
+    }
+    let license = ["--license-authorized", "--license-identity", "OFL-1.1"];
+    for collision in [&source, &font, &output] {
+        if collision == &output {
+            fs::write(collision, b"keep existing output").unwrap();
+        }
+        let before = fs::read(collision).unwrap();
+        let result = cli(&[
+            &common[..],
+            &license,
+            &["--output", collision.to_str().unwrap()],
+        ]
+        .concat());
+        assert!(!result.status.success());
+        assert_eq!(fs::read(collision).unwrap(), before);
+    }
+    let invalid = workspace.path.join("invalid.ttf");
+    fs::write(&invalid, b"not a font").unwrap();
+    let oversized = workspace.path.join("oversized.ttf");
+    fs::File::create(&oversized)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+    let absent_output = workspace.path.join("absent.pptx");
+    for bad_font in [&invalid, &oversized, &workspace.path] {
+        let result = cli(&[
+            "font",
+            "embed",
+            source.to_str().unwrap(),
+            "--name",
+            "FX220 CLI",
+            "--font",
+            bad_font.to_str().unwrap(),
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--output",
+            absent_output.to_str().unwrap(),
+        ]);
+        assert!(!result.status.success());
+        assert!(!absent_output.exists());
+    }
+    #[cfg(unix)]
+    {
+        let alias = workspace.path.join("source-alias.pptx");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let hard_alias = workspace.path.join("font-hard-alias.pptx");
+        fs::hard_link(&font, &hard_alias).unwrap();
+        for collision in [&alias, &hard_alias] {
+            let result = cli(&[
+                &common[..],
+                &license,
+                &["--output", collision.to_str().unwrap()],
+            ]
+            .concat());
+            assert!(!result.status.success());
+        }
+    }
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(&font).unwrap(), data);
+    assert!(fs::read_dir(&workspace.path).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
+    let help = cli(&["font", "embed", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for flag in [
+        "--license-authorized",
+        "--license-identity",
+        "--font",
+        "--kind",
+        "--output",
+    ] {
+        assert!(help.contains(flag));
+    }
+}
+
+fn fx218_cli_png() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xf7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ]
+}
+
+#[test]
+fn fx218_installed_and_cli_semantic_exports() {
+    let workspace = TempWorkspace::new("fx218-semantic");
+    let input = workspace.path.join("source.pptx");
+    write_deck(&input, &["Visible & literal <text>", "Hidden content"]);
+    let mut deck = Presentation::open(&input).unwrap();
+    deck.set_notes_text(0, "Private speaker note").unwrap();
+    deck.slide_mut(1).unwrap().set_hidden(true);
+    let png = fx218_cli_png();
+    deck.add_picture(0, &png, "pixel.png", Emu(1), Emu(1), None, None)
+        .unwrap();
+    deck.save(&input).unwrap();
+    let source = fs::read(&input).unwrap();
+    let input_arg = input.to_str().unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("result.{format}"));
+        let output_arg = output.to_str().unwrap();
+        let args = ["convert", input_arg, "--to", format, "--output", output_arg];
+        for rendering in [
+            vec!["--dpi", "150"],
+            vec!["--quality", "90"],
+            vec!["--slides", "1"],
+            vec!["--font-dir", "missing"],
+            vec!["--transparent"],
+        ] {
+            let refusal = cli(&[args.as_slice(), rendering.as_slice()].concat());
+            assert!(!refusal.status.success());
+            assert!(
+                String::from_utf8_lossy(&refusal.stderr)
+                    .contains("do not accept rendering options")
+            );
+            assert!(!output.exists());
+        }
+        let success = cli(&[args.as_slice(), &["--notes", "--skip-hidden"]].concat());
+        assert!(
+            success.status.success(),
+            "{}",
+            String::from_utf8_lossy(&success.stderr)
+        );
+        let text = fs::read_to_string(&output).unwrap().replace("&#32;", " ");
+        assert!(
+            text.contains(if format == "html" {
+                "Visible &amp; literal &lt;text&gt;"
+            } else {
+                r"Visible \& literal \<text\>"
+            }),
+            "{format}: {text}"
+        );
+        assert!(text.contains("Private speaker note"));
+        assert!(!text.contains("Hidden content"));
+        assert!(text.contains("data:image/png;base64,"));
+        fs::remove_file(&output).unwrap();
+        let options = rpptx::PresentationTextExportOptions {
+            inline_images: false,
+            ..Default::default()
+        };
+        let detached = deck.to_html_with_options(&options).unwrap();
+        let asset = workspace.path.join(&detached.assets[0].0);
+        fs::write(&asset, b"keep asset").unwrap();
+        let failure = cli(&[args.as_slice(), &["--embed-images=false"]].concat());
+        assert!(!failure.status.success());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&asset).unwrap(), b"keep asset");
+        fs::remove_file(&asset).unwrap();
+        let success = cli(&[args.as_slice(), &["--embed-images=false"]].concat());
+        assert!(
+            success.status.success(),
+            "{}",
+            String::from_utf8_lossy(&success.stderr)
+        );
+        assert_eq!(fs::read(&asset).unwrap(), png);
+        assert!(
+            fs::read_to_string(&output)
+                .unwrap()
+                .contains(&detached.assets[0].0)
+        );
+        fs::remove_file(&asset).unwrap();
+        fs::remove_file(&output).unwrap();
+        let refusal = cli(&[
+            "convert", input_arg, "--to", format, "--output", input_arg, "--force",
+        ]);
+        assert!(!refusal.status.success());
+        assert_eq!(fs::read(&input).unwrap(), source);
+    }
+    let refusal = cli(&["convert", input_arg, "--to", "pdf", "--notes"]);
+    assert!(!refusal.status.success());
+    assert!(String::from_utf8_lossy(&refusal.stderr).contains("require --to html or --to md"));
+    assert_eq!(fs::read(&input).unwrap(), source);
+}
+
+#[test]
+fn fx216_import_output_extension_selects_package_class_without_touching_inputs() {
+    let temp = TempWorkspace::new("import-class");
+    let destination = temp.path.join("destination.potx");
+    let source = temp.path.join("source.pptx");
+    let output = temp.path.join("output.pptx");
+    write_deck(&destination, &["destination"]);
+    write_deck(&source, &["source"]);
+    let before_destination = fs::read(&destination).unwrap();
+    let before_source = fs::read(&source).unwrap();
+    assert_eq!(
+        Presentation::open(&destination)
+            .unwrap()
+            .package_class()
+            .unwrap(),
+        PresentationPackageClass::Template
+    );
+    let result = cli(&[
+        "slide",
+        "import",
+        destination.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--slides",
+        "1",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let reopened = Presentation::open(&output).unwrap();
+    assert_eq!(reopened.len(), 2);
+    assert_eq!(
+        reopened.package_class().unwrap(),
+        PresentationPackageClass::Presentation
+    );
+    assert_eq!(fs::read(&destination).unwrap(), before_destination);
+    assert_eq!(fs::read(&source).unwrap(), before_source);
+}
+
+#[test]
+fn fx216_import_refuses_macro_free_vba_output_before_publication() {
+    let temp = TempWorkspace::new("import-vba");
+    let fixture = temp.path.join("fixture.pptx");
+    let destination = temp.path.join("destination.pptm");
+    let source = temp.path.join("source.pptx");
+    let output = temp.path.join("output.pptx");
+    write_deck(&fixture, &["destination"]);
+    write_deck(&source, &["source"]);
+    let mut package = OpcPackage::open(&fixture).unwrap();
+    fs::remove_file(&fixture).unwrap();
+    package
+        .get_or_create_part_rels("/ppt/presentation.xml")
+        .add(rel_types::VBA_PROJECT, "vbaProject.bin");
+    package.set_part("/ppt/vbaProject.bin", b"vba-project".to_vec());
+    package.content_types.add_override(
+        "/ppt/vbaProject.bin",
+        "application/vnd.ms-office.vbaProject",
+    );
+    package.content_types.add_override(
+        "/ppt/presentation.xml",
+        content_types::PRESENTATION_MACRO_ENABLED,
+    );
+    package.save(&destination).unwrap();
+    let before_destination = fs::read(&destination).unwrap();
+    let before_source = fs::read(&source).unwrap();
+    let result = cli(&[
+        "slide",
+        "import",
+        destination.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--slides",
+        "1",
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("VBA project"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!output.exists());
+    assert_eq!(fs::read(&destination).unwrap(), before_destination);
+    assert_eq!(fs::read(&source).unwrap(), before_source);
+    assert_eq!(fs::read_dir(&temp.path).unwrap().count(), 2);
+}
+
+#[test]
+fn fx216_cli_ranges_insertion_and_atomic_errors_preserve_inputs() {
+    let temp = TempWorkspace::new("import-range");
+    let destination = temp.path.join("destination.pptx");
+    let source = temp.path.join("source.pptx");
+    let output = temp.path.join("merged.pptx");
+    write_deck(&destination, &["destination one", "destination two"]);
+    write_deck(
+        &source,
+        &[
+            "source one",
+            "source two",
+            "source three",
+            "source four",
+            "source five",
+        ],
+    );
+    let inputs = (fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+    let result = cli(&[
+        "slide",
+        "import",
+        destination.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--slides",
+        "1,3-5",
+        "--at",
+        "2",
+        "--keep-source-formatting",
+        "--output",
+        output.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let merged = Presentation::open(&output).unwrap();
+    let texts: Vec<_> = (0..merged.len())
+        .map(|index| merged.slide(index).unwrap().text())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "destination one",
+            "source one",
+            "source three",
+            "source four",
+            "source five",
+            "destination two"
+        ]
+    );
+    assert!(merged.validate().is_empty());
+    for selection in ["0", "3-2", "1,1", "6", "18446744073709551616"] {
+        let invalid = temp.path.join("invalid.pptx");
+        let result = cli(&[
+            "slide",
+            "import",
+            destination.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--slides",
+            selection,
+            "--output",
+            invalid.to_str().unwrap(),
+        ]);
+        assert!(
+            !result.status.success(),
+            "selection {selection} must refuse"
+        );
+        assert!(!invalid.exists());
+        assert_eq!(
+            (fs::read(&destination).unwrap(), fs::read(&source).unwrap()),
+            inputs
+        );
+    }
+    for alias in [&destination, &source] {
+        let result = cli(&[
+            "slide",
+            "import",
+            destination.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--output",
+            alias.to_str().unwrap(),
+        ]);
+        assert!(!result.status.success());
+        assert_eq!(
+            (fs::read(&destination).unwrap(), fs::read(&source).unwrap()),
+            inputs
+        );
+    }
 }

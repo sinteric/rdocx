@@ -19,11 +19,11 @@ use crate::numbering::{
 };
 use crate::properties::{
     CT_Shd, append_modeled_toggle_attributes, get_word_val_attr, is_word_attribute,
-    is_word_element, parse_integer_measurement, parse_word_toggle,
-    raw_is_modeled_attribute_carrier, raw_occurrence, record_modeled_toggle_candidate,
-    remove_redundant_modeled_toggle_candidate, replay_modeled_toggle_raw,
-    toggle_element_is_explicitly_empty, toggle_has_unsupported_attributes, word_prefixes_at,
-    write_toggle,
+    is_word_element, modeled_attribute_carrier_occurrence, parse_integer_measurement,
+    parse_word_toggle, raw_is_modeled_attribute_carrier, raw_occurrence,
+    record_modeled_toggle_candidate, remove_redundant_modeled_toggle_candidate,
+    replay_modeled_toggle_raw, toggle_element_is_explicitly_empty,
+    toggle_has_unsupported_attributes, word_prefixes_at, write_toggle,
 };
 use crate::raw_xml::{capture_element, capture_empty_element};
 use crate::revision::CT_Revision;
@@ -585,6 +585,12 @@ impl CT_PPr {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        let word_bindings = word_prefixes
+            .iter()
+            .filter(|prefix| !prefix.contains('\0'))
+            .map(|prefix| (prefix.clone(), W_NS.to_owned()))
+            .collect::<Vec<_>>();
+        let tabs_bindings = merged_owner_bindings(&word_bindings, owner_bindings);
         let mut ppr = CT_PPr::default();
         let mut change_raw_index = 0usize;
         let mut numbering_change_raw_index = 0usize;
@@ -621,11 +627,35 @@ impl CT_PPr {
                             &mut numbering_change_raw_index,
                         )?;
                     } else if is_word_element(name.as_ref(), b"pBdr", &prefixes) {
-                        ppr.borders = Some(Box::new(CT_PBdr::from_xml_with_prefixes(
-                            reader, &prefixes,
-                        )?));
+                        let trim_start = reader.config().trim_text_start;
+                        let trim_end = reader.config().trim_text_end;
+                        reader.config_mut().trim_text(false);
+                        let captured = capture_element(reader, e);
+                        reader.config_mut().trim_text_start = trim_start;
+                        reader.config_mut().trim_text_end = trim_end;
+                        let raw =
+                            crate::text::raw_with_external_bindings(&captured?, &tabs_bindings)?;
+                        ppr.borders = Some(Box::new(CT_PBdr::from_source_xml(&raw)?));
+                        let occurrence = occurrences[PPR_BORDER_SLOT as usize] - 1;
+                        record_ppr_raw_at(
+                            &mut ppr,
+                            raw,
+                            PPR_BORDER_SLOT,
+                            modeled_attribute_carrier_occurrence(occurrence),
+                        );
                     } else if is_word_element(name.as_ref(), b"tabs", &prefixes) {
-                        ppr.tabs = Some(CT_Tabs::from_xml_with_prefixes(reader, &prefixes)?);
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_element(reader, e)?,
+                            &tabs_bindings,
+                        )?;
+                        ppr.tabs = Some(CT_Tabs::from_source_xml(&raw)?);
+                        let occurrence = occurrences[PPR_TABS_SLOT as usize] - 1;
+                        record_ppr_raw_at(
+                            &mut ppr,
+                            raw,
+                            PPR_TABS_SLOT,
+                            modeled_attribute_carrier_occurrence(occurrence),
+                        );
                     } else if is_word_element(name.as_ref(), b"sectPr", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let sect_pr_bindings =
@@ -699,7 +729,33 @@ impl CT_PPr {
                     if let Some(slot) = ppr_modeled_slot(name.as_ref(), &prefixes) {
                         record_ppr_modeled(&mut ppr, &mut pending_raw, &mut occurrences, slot);
                     }
-                    if is_word_element(name.as_ref(), b"pStyle", &prefixes) {
+                    if is_word_element(name.as_ref(), b"pBdr", &prefixes) {
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_empty_element(e)?,
+                            &tabs_bindings,
+                        )?;
+                        ppr.borders = Some(Box::new(CT_PBdr::from_source_xml(&raw)?));
+                        let occurrence = occurrences[PPR_BORDER_SLOT as usize] - 1;
+                        record_ppr_raw_at(
+                            &mut ppr,
+                            raw,
+                            PPR_BORDER_SLOT,
+                            modeled_attribute_carrier_occurrence(occurrence),
+                        );
+                    } else if is_word_element(name.as_ref(), b"tabs", &prefixes) {
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_empty_element(e)?,
+                            &tabs_bindings,
+                        )?;
+                        ppr.tabs = Some(CT_Tabs::from_source_xml(&raw)?);
+                        let occurrence = occurrences[PPR_TABS_SLOT as usize] - 1;
+                        record_ppr_raw_at(
+                            &mut ppr,
+                            raw,
+                            PPR_TABS_SLOT,
+                            modeled_attribute_carrier_occurrence(occurrence),
+                        );
+                    } else if is_word_element(name.as_ref(), b"pStyle", &prefixes) {
                         ppr.style_id = get_word_val_attr(e, &prefixes)?;
                     } else if is_word_element(name.as_ref(), b"jc", &prefixes) {
                         if let Some(val) = get_word_val_attr(e, &prefixes)? {
@@ -1099,6 +1155,39 @@ impl CT_PPr {
         Ok(())
     }
 
+    fn modeled_source_index(&self, slot: u8) -> Option<usize> {
+        self.revision_xml_positions
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, position)| {
+                (position.0 == slot && raw_is_modeled_attribute_carrier(*position)).then_some(index)
+            })
+    }
+
+    /// The selected tabs container, carrying its actual inherited namespaces.
+    pub fn tab_source(&self) -> Option<&[u8]> {
+        self.revision_xml
+            .get(self.modeled_source_index(PPR_TABS_SLOT)?)
+            .map(Vec::as_slice)
+    }
+
+    /// Stage an occurrence-aware tabs source merge before native publication.
+    pub fn refresh_tabs_source(&mut self, forced_occurrence: Option<usize>) -> Result<()> {
+        let Some(index) = self.modeled_source_index(PPR_TABS_SLOT) else {
+            return Ok(());
+        };
+        let raw = crate::numbering::merge_tabs_source(
+            &self.revision_xml[index],
+            self.tabs.as_ref(),
+            forced_occurrence,
+        )?;
+        let tabs = CT_Tabs::from_source_xml(&raw)?;
+        self.revision_xml[index] = raw;
+        self.tabs = (!tabs.tabs.is_empty()).then_some(tabs);
+        Ok(())
+    }
+
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         if self.is_empty() {
             return Ok(());
@@ -1110,9 +1199,21 @@ impl CT_PPr {
             let mut modeled = self.clone();
             modeled.revision_xml.clear();
             modeled.revision_xml_positions.clear();
+            if self.modeled_source_index(PPR_TABS_SLOT).is_some() {
+                modeled.tabs = None;
+            }
+            if self.modeled_source_index(PPR_BORDER_SLOT).is_some() {
+                modeled.borders = None;
+            }
             let mut generated = Writer::new(Vec::new());
             modeled.to_xml(&mut generated)?;
-            return write_ppr_with_positioned_raw(writer, &generated.into_inner(), self);
+            let generated = generated.into_inner();
+            let generated = if generated.is_empty() {
+                b"<w:pPr></w:pPr>".to_vec()
+            } else {
+                generated
+            };
+            return write_ppr_with_positioned_raw(writer, &generated, self);
         }
 
         let mut buf = itoa::Buffer::new();
@@ -1620,6 +1721,38 @@ impl CT_PPr {
         if other.tabs.is_some() {
             self.tabs = other.tabs.clone();
         }
+        for (slot, overrides) in [
+            (PPR_BORDER_SLOT, other.borders.is_some()),
+            (PPR_TABS_SLOT, other.tabs.is_some()),
+        ] {
+            if !overrides {
+                continue;
+            }
+            // A source occurrence belongs to the overriding container, never the old owner.
+            let retained = self
+                .revision_xml_positions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, position)| {
+                    (!(position.0 == slot && raw_is_modeled_attribute_carrier(*position)))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            self.revision_xml = retained
+                .iter()
+                .map(|index| self.revision_xml[*index].clone())
+                .collect();
+            self.revision_xml_positions = retained
+                .iter()
+                .map(|index| self.revision_xml_positions[*index])
+                .collect();
+            for (raw, position) in other.revision_xml.iter().zip(&other.revision_xml_positions) {
+                if position.0 == slot && raw_is_modeled_attribute_carrier(*position) {
+                    self.revision_xml.push(raw.clone());
+                    self.revision_xml_positions.push(*position);
+                }
+            }
+        }
         if other.shading.is_some() {
             self.shading = other.shading.clone();
         }
@@ -1640,7 +1773,9 @@ fn write_ppr_with_positioned_raw<W: std::io::Write>(
     let mut raw_order = (0..ppr.revision_xml.len())
         .filter(|index| {
             let position = ppr.revision_xml_positions[*index];
-            replay_modeled_toggle_raw(position, ppr_modeled_toggle_present(ppr, position.0))
+            (matches!(position.0, PPR_TABS_SLOT | PPR_BORDER_SLOT)
+                && raw_is_modeled_attribute_carrier(position))
+                || replay_modeled_toggle_raw(position, ppr_modeled_toggle_present(ppr, position.0))
         })
         .collect::<Vec<_>>();
     raw_order.sort_by_key(|index| {
@@ -1722,7 +1857,33 @@ fn write_ppr_raw_before<W: std::io::Write>(
         if position.0 > slot || (position.0 == slot && position.1 > occurrence) {
             break;
         }
-        writer.get_mut().write_all(&ppr.revision_xml[index])?;
+        if ppr.revision_xml_positions[index].0 == PPR_BORDER_SLOT
+            && raw_is_modeled_attribute_carrier(ppr.revision_xml_positions[index])
+        {
+            let selected_index = ppr.modeled_source_index(PPR_BORDER_SLOT).unwrap();
+            let raw = CT_PBdr::merge_source(
+                &ppr.revision_xml[index],
+                &ppr.revision_xml[selected_index],
+                ppr.borders.as_deref(),
+                selected_index == index,
+            )?;
+            writer.get_mut().write_all(&raw)?;
+        } else if ppr.revision_xml_positions[index].0 == PPR_TABS_SLOT
+            && raw_is_modeled_attribute_carrier(ppr.revision_xml_positions[index])
+        {
+            if ppr.modeled_source_index(PPR_TABS_SLOT) == Some(index) || ppr.tabs.is_none() {
+                let raw = crate::numbering::merge_tabs_source(
+                    &ppr.revision_xml[index],
+                    ppr.tabs.as_ref(),
+                    None,
+                )?;
+                writer.get_mut().write_all(&raw)?;
+            } else {
+                writer.get_mut().write_all(&ppr.revision_xml[index])?;
+            }
+        } else {
+            writer.get_mut().write_all(&ppr.revision_xml[index])?;
+        }
         *raw_index += 1;
     }
     Ok(())
@@ -1797,7 +1958,140 @@ fn ppr_slot_for_name(local: &[u8]) -> u8 {
     }
 }
 
-fn ppr_schema_slot(name: &[u8], word_prefixes: &[String]) -> Option<u8> {
+/// Validate known leaf attributes only for checked owner replacement.
+/// Ordinary source parsing retains its permissive preservation contract.
+pub(crate) fn validate_checked_property_child(
+    element: &BytesStart<'_>,
+    prefixes: &[String],
+) -> Result<()> {
+    let local = element.local_name();
+    let name = local.as_ref();
+    let value = get_word_val_attr(element, prefixes)?;
+    if matches!(
+        name,
+        b"keepNext"
+            | b"keepLines"
+            | b"pageBreakBefore"
+            | b"widowControl"
+            | b"suppressLineNumbers"
+            | b"suppressAutoHyphens"
+            | b"kinsoku"
+            | b"wordWrap"
+            | b"overflowPunct"
+            | b"topLinePunct"
+            | b"autoSpaceDE"
+            | b"autoSpaceDN"
+            | b"bidi"
+            | b"adjustRightInd"
+            | b"snapToGrid"
+            | b"contextualSpacing"
+            | b"mirrorIndents"
+            | b"suppressOverlap"
+    ) {
+        if value
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "true" | "false" | "on" | "off" | "1" | "0"))
+        {
+            return Err(crate::error::OxmlError::InvalidValue(
+                "element XML paragraph toggle has an invalid Word boolean".into(),
+            ));
+        }
+    } else if matches!(
+        name,
+        b"pStyle"
+            | b"jc"
+            | b"outlineLvl"
+            | b"divId"
+            | b"cnfStyle"
+            | b"textDirection"
+            | b"textAlignment"
+            | b"textboxTightWrap"
+    ) {
+        let value = value.as_ref().ok_or_else(|| {
+            crate::error::OxmlError::InvalidValue(format!(
+                "element XML {} requires w:val",
+                String::from_utf8_lossy(name)
+            ))
+        })?;
+        let valid = match name {
+            b"jc" => ST_Jc::from_str(value).is_ok(),
+            b"outlineLvl" | b"divId" => value.parse::<u32>().is_ok(),
+            b"cnfStyle" => {
+                value.len() == 12 && value.bytes().all(|byte| matches!(byte, b'0' | b'1'))
+            }
+            b"textDirection" => matches!(
+                value.as_str(),
+                "lrTb" | "tbRl" | "btLr" | "lrTbV" | "tbRlV" | "tbLrV"
+            ),
+            b"textAlignment" => matches!(
+                value.as_str(),
+                "top" | "center" | "baseline" | "bottom" | "auto"
+            ),
+            b"textboxTightWrap" => matches!(
+                value.as_str(),
+                "none" | "allLines" | "firstAndLastLine" | "firstLineOnly" | "lastLineOnly"
+            ),
+            _ => !value.is_empty(),
+        };
+        if !valid {
+            return Err(crate::error::OxmlError::InvalidValue(format!(
+                "element XML {} has an invalid w:val",
+                String::from_utf8_lossy(name)
+            )));
+        }
+    }
+    if name == b"spacing" {
+        for attribute in element.attributes() {
+            let attribute = attribute?;
+            let key = attribute.key.as_ref();
+            let value = attribute.decoded_and_normalized_value(
+                quick_xml::XmlVersion::Implicit1_0,
+                element.decoder(),
+            )?;
+            let valid = if is_word_attribute(key, b"lineRule", prefixes) {
+                matches!(value.as_ref(), "auto" | "exact" | "atLeast")
+            } else if is_word_attribute(key, b"beforeAutospacing", prefixes)
+                || is_word_attribute(key, b"afterAutospacing", prefixes)
+            {
+                // The owning reader models only true/1 as enabled. Do not
+                // promise the valid on token while that reader treats it as false.
+                if value == "on" {
+                    return Err(crate::error::OxmlError::InvalidValue(
+                        "element XML spacing on boolean token is unsupported".into(),
+                    ));
+                }
+                matches!(value.as_ref(), "true" | "false" | "1" | "0" | "off")
+            } else {
+                true
+            };
+            if !valid {
+                return Err(crate::error::OxmlError::InvalidValue(
+                    "element XML spacing has an invalid modeled attribute".into(),
+                ));
+            }
+        }
+    }
+    if matches!(name, b"ilvl" | b"numId") {
+        let value = value.as_ref().ok_or_else(|| {
+            crate::error::OxmlError::InvalidValue(
+                "element XML numbering property requires w:val".into(),
+            )
+        })?;
+        let number = value.parse::<u32>().map_err(|_| {
+            crate::error::OxmlError::InvalidValue(
+                "element XML numbering property has an invalid integer".into(),
+            )
+        })?;
+        if name == b"ilvl" && number > 8 {
+            return Err(crate::error::OxmlError::InvalidValue(
+                "element XML numbering level above eight is unsupported".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ppr_schema_slot(name: &[u8], word_prefixes: &[String]) -> Option<u8> {
     let local = name.rsplit(|byte| *byte == b':').next().unwrap_or(name);
     let slot = ppr_slot_for_name(local);
     (slot != PPR_END_SLOT && is_word_element(name, local, word_prefixes)).then_some(slot)
@@ -1945,6 +2239,82 @@ mod tests {
 
     fn parse_ppr(xml: &str) -> CT_PPr {
         try_parse_ppr(xml).unwrap()
+    }
+
+    #[test]
+    fn fx200_tabs_exact_alignment_leader_vocabulary_survives_two_round_trips() {
+        let alignments = [
+            "left", "center", "right", "decimal", "bar", "clear", "num", "list", "start", "end",
+        ];
+        let leaders = ["none", "dot", "hyphen", "underscore", "heavy", "middleDot"];
+        let xml = format!(
+            "<w:tabs>{}</w:tabs>",
+            alignments
+                .iter()
+                .enumerate()
+                .map(|(index, alignment)| format!(
+                    "<w:tab w:val='{alignment}' w:pos='{}' w:leader='{}'/>",
+                    index as i32 * 100,
+                    leaders[index % leaders.len()]
+                ))
+                .collect::<String>()
+        );
+        let mut ppr = parse_ppr(&xml);
+        for _ in 0..2 {
+            for (index, expected) in alignments.iter().enumerate() {
+                let (alignment, leader) =
+                    CT_Tabs::source_tokens(ppr.tab_source().unwrap(), index).unwrap();
+                assert_eq!(alignment.to_str(), *expected);
+                assert_eq!(leader.unwrap().to_str(), leaders[index % leaders.len()]);
+            }
+            let mut writer = Writer::new(Vec::new());
+            ppr.to_xml(&mut writer).unwrap();
+            let raw = writer.into_inner();
+            let mut reader = Reader::from_reader(raw.as_slice());
+            reader.read_event().unwrap();
+            ppr = CT_PPr::from_xml(&mut reader).unwrap();
+        }
+    }
+
+    #[test]
+    fn fx200_tabs_projection_distinguishes_absent_unknown_and_foreign_leaders() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let raw = format!(
+            "<q:tabs xmlns:q='{word}' xmlns:f='urn:foreign'><q:tab q:val='left' q:pos='1'/><q:tab q:val='left' q:pos='1' q:leader='future'/><f:tab q:val='right' q:pos='2'/><q:tab q:val='left' q:pos='3' f:leader='future'/></q:tabs>"
+        );
+        let parsed = CT_Tabs::from_source_xml(raw.as_bytes()).unwrap();
+        assert_eq!(parsed.tabs.len(), 3);
+        assert_eq!(CT_Tabs::source_tokens(raw.as_bytes(), 0).unwrap().1, None);
+        assert!(CT_Tabs::source_tokens(raw.as_bytes(), 1).is_err());
+        assert_eq!(CT_Tabs::source_tokens(raw.as_bytes(), 2).unwrap().1, None);
+        let unchanged =
+            crate::numbering::merge_tabs_source(raw.as_bytes(), Some(&parsed), None).unwrap();
+        assert_eq!(unchanged, raw.as_bytes());
+        let duplicate = format!(
+            "<q:tabs xmlns:q='{word}' xmlns:a='{word}'><q:tab q:val='left' a:val='right' q:pos='1'/></q:tabs>"
+        );
+        assert!(CT_Tabs::source_tokens(duplicate.as_bytes(), 0).is_err());
+        let rebound = "<q:tabs xmlns:q='urn:foreign'><q:tab q:val='left' q:pos='1'/></q:tabs>";
+        assert!(CT_Tabs::from_source_xml(rebound.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn fx200_overriding_tabs_carries_its_own_source_occurrences() {
+        let mut inherited =
+            parse_ppr("<w:tabs><w:tab w:val='futureInherited' w:pos='100'/></w:tabs>");
+        let overriding = parse_ppr("<w:tabs><w:tab w:val='end' w:pos='200'/></w:tabs>");
+        inherited.merge_from(&overriding);
+        assert_eq!(
+            CT_Tabs::source_tokens(inherited.tab_source().unwrap(), 0)
+                .unwrap()
+                .0,
+            crate::shared::ST_TabJc::End
+        );
+        let mut writer = Writer::new(Vec::new());
+        inherited.to_xml(&mut writer).unwrap();
+        let saved = String::from_utf8(writer.into_inner()).unwrap();
+        assert!(!saved.contains("futureInherited"));
+        assert!(saved.contains("end"));
     }
 
     #[test]
@@ -2499,5 +2869,130 @@ mod tests {
         let change = output.find("<w:numberingChange").unwrap();
         assert!(ilvl < num_id && num_id < change, "{output}");
         assert!(output.contains(r#"<w:original w:val="kept"/>"#), "{output}");
+    }
+
+    #[test]
+    fn fx200_ordinary_border_source_preserves_root_siblings_and_retained_edge_body() {
+        let source = format!(
+            r#"<w:pPr xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:f"><q:pBdr f:root='&#65;'><q:top q:val='single' f:gone='yes'/><q:bottom q:val='single' f:stay='&#66;'><f:stay>  body  </f:stay></q:bottom><!--keep--><f:opaque>  sibling  </f:opaque><f:top f:val='foreign'/></q:pBdr><w:keepNext/></w:pPr>"#
+        );
+        let mut ppr =
+            crate::numbering::parse_scoped_ppr(source.as_bytes(), &["w".to_owned()]).unwrap();
+        let borders = ppr.borders.as_mut().unwrap();
+        borders.top = None;
+        borders.bottom.as_mut().unwrap().val = crate::shared::ST_Border::Double;
+        let mut saved_writer = Writer::new(Vec::new());
+        ppr.to_xml(&mut saved_writer).unwrap();
+        let saved = saved_writer.into_inner();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(!text.contains("<q:top"));
+        for exact in [
+            "f:root='&#65;'",
+            "f:stay='&#66;'",
+            "<f:stay>  body  </f:stay>",
+            "<!--keep-->",
+            "<f:opaque>  sibling  </f:opaque>",
+            "<f:top f:val='foreign'/>",
+        ] {
+            assert!(text.contains(exact), "{text}");
+        }
+        let reopened = crate::numbering::parse_scoped_ppr(&saved, &["w".to_owned()]).unwrap();
+        let borders = reopened.borders.as_ref().unwrap();
+        assert!(borders.top.is_none());
+        assert_eq!(
+            borders.bottom.as_ref().unwrap().val,
+            crate::shared::ST_Border::Double
+        );
+        assert_eq!(reopened.keep_next, Some(true));
+        let mut repeated = Writer::new(Vec::new());
+        reopened.to_xml(&mut repeated).unwrap();
+        assert_eq!(repeated.into_inner(), saved);
+    }
+
+    #[test]
+    fn fx200_ordinary_duplicate_border_clear_removes_owned_edges_and_keeps_opaque_containers() {
+        let source = format!(
+            r#"<w:pPr xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:f"><q:pBdr f:first='yes'><q:top q:val='single'/><f:first/></q:pBdr><q:pBdr f:last='yes'><q:start q:val='double'/><q:left q:val='single'/><q:bottom q:val='single'/><f:last/></q:pBdr></w:pPr>"#
+        );
+        for all in [false, true] {
+            let mut ppr =
+                crate::numbering::parse_scoped_ppr(source.as_bytes(), &["w".to_owned()]).unwrap();
+            if all {
+                ppr.borders = None;
+            } else {
+                ppr.borders.as_mut().unwrap().left = None;
+            }
+            let mut writer = Writer::new(Vec::new());
+            ppr.to_xml(&mut writer).unwrap();
+            let saved = writer.into_inner();
+            let text = std::str::from_utf8(&saved).unwrap();
+            for exact in ["f:first='yes'", "<f:first/>", "f:last='yes'", "<f:last/>"] {
+                assert!(text.contains(exact), "{text}");
+            }
+            assert!(!text.contains("<q:start") && !text.contains("<q:left"));
+            if all {
+                assert!(!text.contains("<q:top") && !text.contains("<q:bottom"));
+            }
+            let reopened = crate::numbering::parse_scoped_ppr(&saved, &["w".to_owned()]).unwrap();
+            let borders = reopened.borders.as_ref().unwrap();
+            assert!(borders.left.is_none());
+            assert_eq!(borders.bottom.is_some(), !all);
+            let mut repeat = Writer::new(Vec::new());
+            reopened.to_xml(&mut repeat).unwrap();
+            assert_eq!(repeat.into_inner(), saved);
+        }
+    }
+
+    #[test]
+    fn fx200_imported_missing_val_border_is_unchanged_on_unrelated_paragraph_edit() {
+        let source = format!(
+            r#"<w:pPr xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:f"><q:pBdr f:root='&#65;'><q:top f:opaque='&#66;'><f:payload>  keep  </f:payload></q:top></q:pBdr></w:pPr>"#
+        );
+        let mut ppr =
+            crate::numbering::parse_scoped_ppr(source.as_bytes(), &["w".to_owned()]).unwrap();
+        ppr.keep_next = Some(true);
+        let mut writer = Writer::new(Vec::new());
+        ppr.to_xml(&mut writer).unwrap();
+        let saved = writer.into_inner();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(
+            text.contains("<q:top f:opaque='&#66;'><f:payload>  keep  </f:payload></q:top>"),
+            "{text}"
+        );
+        let reopened = crate::numbering::parse_scoped_ppr(&saved, &["w".to_owned()]).unwrap();
+        let mut repeat = Writer::new(Vec::new());
+        reopened.to_xml(&mut repeat).unwrap();
+        assert_eq!(repeat.into_inner(), saved);
+    }
+    #[test]
+    fn fx200_border_source_merge_from_uses_overriding_owner_instead_of_prior_owner() {
+        let source = |name: &str, edge: &str| {
+            format!(
+                r#"<w:pPr xmlns:w="{W_NS}" xmlns:f="urn:f"><w:pBdr f:owner='{name}'><w:{edge} w:val='single'/><f:payload owner='{name}'/></w:pBdr></w:pPr>"#
+            )
+        };
+        let mut base =
+            crate::numbering::parse_scoped_ppr(source("base", "top").as_bytes(), &["w".to_owned()])
+                .unwrap();
+        let overriding = crate::numbering::parse_scoped_ppr(
+            source("override", "bottom").as_bytes(),
+            &["w".to_owned()],
+        )
+        .unwrap();
+        base.merge_from(&overriding);
+        let mut writer = Writer::new(Vec::new());
+        base.to_xml(&mut writer).unwrap();
+        let saved = writer.into_inner();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(
+            text.contains("f:owner='override'") && text.contains("<f:payload owner='override'/>")
+        );
+        assert!(!text.contains("f:owner='base'") && !text.contains("<w:top"));
+        let reopened = crate::numbering::parse_scoped_ppr(&saved, &["w".to_owned()]).unwrap();
+        assert!(reopened.borders.as_ref().unwrap().top.is_none());
+        assert!(reopened.borders.as_ref().unwrap().bottom.is_some());
+        let mut repeated = Writer::new(Vec::new());
+        reopened.to_xml(&mut repeated).unwrap();
+        assert_eq!(repeated.into_inner(), saved);
     }
 }

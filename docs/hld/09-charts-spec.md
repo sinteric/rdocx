@@ -38,8 +38,9 @@ why the minimal SpreadsheetML writer is not optional.
 
 ## `oxml-sml`, deliberately minimal
 
-A **writer only**, and never a general SpreadsheetML implementation. The
-implemented `Workbook` accepts one validated worksheet name and one or more
+A bounded chart-workbook writer and formula-owned cell merger, never a general
+SpreadsheetML implementation. The implemented `Workbook` accepts one
+validated worksheet name and one or more
 directly constructed `Column::Text` or `Column::Number` values. It rejects names
 outside Excel's 31 UTF-16-code-unit and forbidden-character boundary, more than
 16,384 columns, more than 1,048,575 data values in any column, and nonfinite
@@ -82,6 +83,15 @@ Microsoft Excel 16.104, Info.plist build 16.104.25121423, opened its one
 cells. LibreOffice Calc 26.2.5.2, build
 `cd7284b4cbbfeb507e630c1aac019f4157393acb`, imported and re-exported the same
 workbook without a conversion error, preserving that worksheet and cell range.
+
+Imported replacement targets only qualified embedded workbook ranges named by
+chart formulas. It preserves unrelated ZIP members, worksheets, names,
+comments and existing styles. Removed series clear their data cells and ordinary
+headers, while table-owned headers remain byte-exact to keep the retained table
+metadata consistent. Table ownership resolves qualified worksheet references
+through their actual internal relationships. Number-format additions append
+styles rather than replacing them. External or computed formulas and writes into populated
+unowned cells fail before either chart or workbook publication.
 
 ## The ChartML model
 
@@ -724,3 +734,30 @@ Roughly six to eight weeks, which is why this is its own milestone and why
 `00-vision.md` records it as the dominant term in the overall estimate. It is
 self-contained: nothing else in the plan depends on it, so it can move without
 reshaping the rest.
+
+
+## Python authoring and owned replacement
+
+Both package roots export `CategoryChartData`, `XyChartData` and
+`XL_CHART_TYPE` for the seven native kinds. Ordered category series use one
+shared number format. XY series require identical ordered finite X vectors.
+Heterogeneous vectors refuse before mutation rather than discarding X data.
+
+Word `Document.add_chart(chart_type, chart_data, width, height, after=None)`
+returns the actual paragraph. The optional keyword-only owner must be a live
+direct body paragraph of the same document. Native `add_chart_after` validates
+its physical body position before candidate assembly. Cell, related-story,
+foreign and retired owners refuse without changing the document.
+
+PowerPoint `slide.shapes.add_chart(chart_type, left, top, width, height,
+chart_data)` returns an owned graphic frame through the existing shape handle.
+Its `has_chart` and live `chart` expose kind, category and ordered series
+snapshots. Native reads and `replace_chart_data` resolve unique shape IDs,
+including nested groups. Unsupported projections remain explicit errors.
+
+Surviving series keep ordinal identity, stable idx/order, formatting and raw
+extensions. Added series use native defaults. Source-aware replacement retains
+axes, title, legend, aliases, foreign attributes and unmodeled children. Both
+bindings stage candidates and allocate returned handles before prepared
+publication. True no-op and allocation or validation failures preserve package
+bytes, revisions and existing owners.

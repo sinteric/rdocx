@@ -1,15 +1,167 @@
 use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice};
+use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
 use crate::document::PyDocument;
 use crate::run::{PyRun, PyRunCollection};
 use crate::{normalize_index, stale_to_pyerr};
 
-#[derive(Clone, Copy)]
+#[pyclass(
+    name = "MathConversionDiagnostic",
+    frozen,
+    get_all,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyMathConversionDiagnostic {
+    path: String,
+    message: String,
+}
+impl From<rdocx::MathConversionDiagnostic> for PyMathConversionDiagnostic {
+    fn from(value: rdocx::MathConversionDiagnostic) -> Self {
+        Self {
+            path: value.path,
+            message: value.message,
+        }
+    }
+}
+#[pyclass(name = "MathConversionResult", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyMathConversionResult {
+    value: String,
+    diagnostics: Vec<PyMathConversionDiagnostic>,
+}
+#[pymethods]
+impl PyMathConversionResult {
+    #[getter]
+    fn value(&self) -> &str {
+        &self.value
+    }
+    #[getter]
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .diagnostics
+            .iter()
+            .cloned()
+            .map(|v| Py::new(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+}
+#[pyclass(name = "EquationConversionResult", frozen, skip_from_py_object)]
+pub struct PyEquationConversionResult {
+    is_display: bool,
+    equations: Vec<PyMathConversionResult>,
+    diagnostics: Vec<PyMathConversionDiagnostic>,
+}
+#[pymethods]
+impl PyEquationConversionResult {
+    #[getter]
+    fn is_display(&self) -> bool {
+        self.is_display
+    }
+    #[getter]
+    fn equations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .equations
+            .iter()
+            .cloned()
+            .map(|v| Py::new(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+    #[getter]
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .diagnostics
+            .iter()
+            .cloned()
+            .map(|v| Py::new(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+}
+#[pyclass(name = "Equation", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyEquation {
+    inner: rdocx::OfficeMath,
+}
+impl PyEquation {
+    fn conversion(&self, mathml: bool) -> PyEquationConversionResult {
+        let mut diagnostics = Vec::new();
+        let children: Vec<&rdocx::CT_OMath> = match &self.inner {
+            rdocx::OfficeMath::Inline(equation) => vec![equation],
+            rdocx::OfficeMath::Display(display) => {
+                let mut remainder = display.clone();
+                remainder.equations.clear();
+                if remainder.has_unsupported_content() {
+                    diagnostics.push(PyMathConversionDiagnostic { path: "/oMathPara".into(), message: "display wrapper preserved content is not represented by per-equation conversion".into() });
+                }
+                if display.properties.justification.is_some() {
+                    diagnostics.push(PyMathConversionDiagnostic { path: "/oMathPara/oMathParaPr/jc".into(), message: "display group justification is not represented by per-equation conversion".into() });
+                }
+                display.equations.iter().collect()
+            }
+        };
+        let equations = children.into_iter().map(|child| {
+            let argument = rdocx::MathArgument::new(child.expressions.clone());
+            let converted = if mathml { rdocx::equation_to_mathml(&argument) } else { rdocx::equation_to_latex(&argument) };
+            let mut diagnostics: Vec<_> = converted.diagnostics.into_iter().map(PyMathConversionDiagnostic::from).collect();
+            let mut remainder = child.clone();
+            remainder.expressions.clear();
+            if remainder.has_unsupported_content() {
+                diagnostics.push(PyMathConversionDiagnostic { path: "/oMath".into(), message: "equation container preserved content is not represented by expression conversion".into() });
+            }
+            PyMathConversionResult { value: converted.value, diagnostics }
+        }).collect();
+        PyEquationConversionResult {
+            is_display: matches!(self.inner, rdocx::OfficeMath::Display(_)),
+            equations,
+            diagnostics,
+        }
+    }
+}
+#[pymethods]
+impl PyEquation {
+    #[getter]
+    fn is_display(&self) -> bool {
+        matches!(self.inner, rdocx::OfficeMath::Display(_))
+    }
+    fn to_latex(&self) -> PyEquationConversionResult {
+        self.conversion(false)
+    }
+    fn to_mathml(&self) -> PyEquationConversionResult {
+        self.conversion(true)
+    }
+}
+#[pyclass(name = "EquationInsertResult", frozen, skip_from_py_object)]
+pub struct PyEquationInsertResult {
+    equation: PyEquation,
+    diagnostics: Vec<PyMathConversionDiagnostic>,
+}
+#[pymethods]
+impl PyEquationInsertResult {
+    #[getter]
+    fn equation(&self) -> PyEquation {
+        self.equation.clone()
+    }
+    #[getter]
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .diagnostics
+            .iter()
+            .cloned()
+            .map(|v| Py::new(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+}
+
+#[derive(Clone)]
 pub(crate) enum ParagraphLocation {
+    Related(rdocx::ContentLocation),
     Body(usize),
     Cell {
         table: usize,
@@ -17,6 +169,113 @@ pub(crate) enum ParagraphLocation {
         cell: usize,
         paragraph: usize,
     },
+}
+
+impl ParagraphLocation {
+    fn refreshed(
+        document: &rdocx::Document,
+        location: &rdocx::ContentLocation,
+    ) -> rdocx::Result<rdocx::ContentLocation> {
+        let owner = location.story();
+        let story = document
+            .stories()?
+            .into_iter()
+            .find(|s| {
+                s.kind() == owner.kind()
+                    && s.part_name() == owner.part_name()
+                    && s.owner_index() == owner.owner_index()
+            })
+            .ok_or_else(|| rdocx::Error::Other("rich paragraph owner disappeared".to_owned()))?;
+        Ok(rdocx::ContentLocation::new(
+            story,
+            location.item_kind(),
+            location.index_path().to_vec(),
+        ))
+    }
+
+    pub(crate) fn native(
+        &self,
+        document: &rdocx::Document,
+    ) -> rdocx::Result<rdocx::ContentLocation> {
+        match self {
+            Self::Body(index) => document.paragraph_story_location(*index)?.ok_or_else(|| {
+                rdocx::Error::Other("paragraph has no checked physical owner".to_owned())
+            }),
+            Self::Cell {
+                table,
+                row,
+                cell,
+                paragraph,
+            } => document.cell_paragraph_story_location(*table, *row, *cell, *paragraph),
+            Self::Related(location) => Self::refreshed(document, location),
+        }
+    }
+
+    pub(crate) fn read<T>(
+        &self,
+        document: &rdocx::Document,
+        read: impl FnOnce(rdocx::ParagraphRef<'_>) -> T,
+    ) -> rdocx::Result<T> {
+        match self {
+            Self::Body(index) => document
+                .paragraph(*index)
+                .map(read)
+                .ok_or_else(|| rdocx::Error::Other("paragraph index out of range".to_owned())),
+            Self::Cell {
+                table,
+                row,
+                cell,
+                paragraph,
+            } => {
+                let table = document
+                    .table(*table)
+                    .ok_or_else(|| rdocx::Error::Other("table index out of range".to_owned()))?;
+                let cell = table
+                    .cell(*row, *cell)
+                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
+                let paragraph = cell.paragraph(*paragraph).ok_or_else(|| {
+                    rdocx::Error::Other("cell paragraph index out of range".to_owned())
+                })?;
+                Ok(read(paragraph))
+            }
+            Self::Related(location) => {
+                document.read_story_paragraph(&Self::refreshed(document, location)?, read)
+            }
+        }
+    }
+
+    pub(crate) fn edit<T>(
+        &self,
+        document: &mut rdocx::Document,
+        edit: impl FnOnce(&mut rdocx::Paragraph<'_>) -> rdocx::Result<T>,
+    ) -> rdocx::Result<T> {
+        match self {
+            Self::Body(index) => {
+                edit(&mut document.paragraph_mut(*index).ok_or_else(|| {
+                    rdocx::Error::Other("paragraph index out of range".to_owned())
+                })?)
+            }
+            Self::Cell {
+                table,
+                row,
+                cell,
+                paragraph,
+            } => {
+                let mut table = document
+                    .table_mut(*table)
+                    .ok_or_else(|| rdocx::Error::Other("table index out of range".to_owned()))?;
+                let mut cell = table
+                    .cell(*row, *cell)
+                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
+                edit(&mut cell.paragraph_mut(*paragraph).ok_or_else(|| {
+                    rdocx::Error::Other("cell paragraph index out of range".to_owned())
+                })?)
+            }
+            Self::Related(location) => {
+                document.edit_story_paragraph(&Self::refreshed(document, location)?, edit)
+            }
+        }
+    }
 }
 
 pub(crate) fn paragraph_location(path: &ContentPath) -> PyResult<ParagraphLocation> {
@@ -129,16 +388,107 @@ pub(crate) fn defined_style(
 pub struct PyParagraph {
     pub(crate) document: Py<PyDocument>,
     path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyParagraph {
     pub(crate) fn new(document: Py<PyDocument>, path: ContentPath) -> Self {
-        Self { document, path }
+        Self {
+            document,
+            path,
+            related: None,
+            owner: None,
+            furniture_scope: None,
+        }
+    }
+
+    pub(crate) fn for_story(
+        document: Py<PyDocument>,
+        path: ContentPath,
+        location: rdocx::ContentLocation,
+    ) -> Self {
+        Self {
+            document,
+            path,
+            related: Some(location),
+            owner: None,
+            furniture_scope: None,
+        }
+    }
+
+    pub(crate) fn bind_current(
+        mut self,
+        py: Python<'_>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope = furniture_scope;
+        let location = self.related.as_ref().map_or_else(
+            || paragraph_location(&self.path),
+            |location| Ok(ParagraphLocation::Related(location.clone())),
+        )?;
+        {
+            let document = self.document.borrow(py);
+            match location.native(&document.inner) {
+                Ok(location) => {
+                    let (path, owner) = document.capture_owner(
+                        &crate::document::WordOwnerLocation::Paragraph(location),
+                        self.path.segs.clone(),
+                        crate::document::WordView::Owner,
+                        self.furniture_scope.as_ref(),
+                    )?;
+                    self.path = path;
+                    self.owner = Some(owner);
+                }
+                Err(_) => {
+                    // Ordinary facade reads retain unsupported legacy routes.
+                    // Their snapshot authority retires on every XML publication.
+                    self.path = document.capture_snapshot(self.path.segs.clone())?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn bind_prepared(
+        mut self,
+        py: Python<'_>,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedWordRevision,
+        candidate: &rdocx::Document,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope =
+            document.prepared_furniture_scope(prepared, furniture_scope.as_ref())?;
+        let location = self.related.as_ref().map_or_else(
+            || paragraph_location(&self.path),
+            |location| Ok(ParagraphLocation::Related(location.clone())),
+        )?;
+        let location = location
+            .native(candidate)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let (path, owner) = document.capture_prepared_owner(
+            prepared,
+            &crate::document::WordOwnerLocation::Paragraph(location),
+            self.path.segs.clone(),
+            crate::document::WordView::Owner,
+            self.furniture_scope.as_ref(),
+        )?;
+        self.path = path;
+        self.owner = Some(owner);
+        Ok(self)
     }
 
     pub(crate) fn validate(&self, py: Python<'_>) -> PyResult<ParagraphLocation> {
-        let location = paragraph_location(&self.path)?;
-        let recovery_hint = match location {
+        let location = match &self.related {
+            Some(location) => ParagraphLocation::Related(location.clone()),
+            None => paragraph_location(&self.path)?,
+        };
+        let recovery_hint = match &location {
+            ParagraphLocation::Related(_) => {
+                "Re-fetch it from the current rich story owner.".to_owned()
+            }
             ParagraphLocation::Body(_) => "Re-fetch it with doc.paragraphs[i].".to_owned(),
             ParagraphLocation::Cell {
                 table,
@@ -151,8 +501,13 @@ impl PyParagraph {
         };
         let document = self.document.borrow(py);
         self.path
-            .validate_revision(document.revisions.current(), "paragraph", &recovery_hint)
+            .validate_scopes(&document.revisions, "paragraph", &recovery_hint)
             .map_err(|error| stale_to_pyerr(py, error))?;
+        if let (Some(owner), ParagraphLocation::Related(_)) = (&self.owner, &location) {
+            return document
+                .current_paragraph_owner(owner)
+                .map(ParagraphLocation::Related);
+        }
         Ok(location)
     }
 
@@ -160,33 +515,93 @@ impl PyParagraph {
         self.document.bind(py).is(document.bind(py))
     }
 
+    fn append_internal_run(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        bookmark: &str,
+        tooltip: Option<&str>,
+    ) -> PyResult<Py<PyRun>> {
+        let location = self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let native = location
+            .native(&document.inner)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let mut candidate = document.inner.clone_for_staging();
+        let position = candidate
+            .add_internal_hyperlink_at(&native, text, bookmark, tooltip)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let run_path = candidate
+            .read_story_paragraph(&position.location, |p| p.run_path(position.run_index))
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?
+            .ok_or_else(|| PyIndexError::new_err("inserted link run was not found"))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Paragraph.add_internal_hyperlink",
+            crate::document::WordPublication::ParagraphAppend(
+                location
+                    .native(&document.inner)
+                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
+            ),
+        )?;
+        let mut segments = self.path.segs.clone();
+        segments.push(PathSeg::Run(position.run_index));
+        let path = document
+            .revisions
+            .capture_prepared(&prepared.revision, segments)
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        let result = Py::new(
+            py,
+            PyRun::new(
+                self.document.clone_ref(py),
+                path,
+                run_path,
+                Some(position.location),
+            )
+            .bind_prepared(
+                py,
+                &document,
+                &prepared,
+                &candidate,
+                self.furniture_scope.clone(),
+            )?,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(result)
+    }
+
     /// Append one run, or one external hyperlink run when `url` is given, and
     /// return its handle.
-    fn append_run(&self, py: Python<'_>, text: &str, url: Option<&str>) -> PyResult<Py<PyRun>> {
+    fn append_run(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        url: Option<&str>,
+        tooltip: Option<&str>,
+    ) -> PyResult<Py<PyRun>> {
         let location = self.validate(py)?;
-        let (path, run_path) = {
+        let result = {
             let mut document = self.document.borrow_mut(py);
+            let mut candidate = document.inner.clone_for_staging();
             let relationship_id = match url {
                 Some(url) => {
                     // Check the paragraph first, so a failure leaves no
                     // orphaned relationship behind.
-                    let exists = match location {
-                        ParagraphLocation::Body(index) => document.inner.paragraph(index).is_some(),
-                        ParagraphLocation::Cell {
-                            table,
-                            row,
-                            cell,
-                            paragraph,
-                        } => document.inner.table(table).is_some_and(|table| {
-                            table
-                                .cell(row, cell)
-                                .is_some_and(|cell| cell.paragraph(paragraph).is_some())
-                        }),
-                    };
-                    if !exists {
-                        return Err(PyIndexError::new_err("paragraph index out of range"));
-                    }
-                    Some(document.inner.add_hyperlink_relationship(url))
+                    location
+                        .read(&candidate, |_| ())
+                        .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+                    Some(match &location {
+                        ParagraphLocation::Related(location) => {
+                            let location = ParagraphLocation::refreshed(&candidate, location)
+                                .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+                            candidate
+                                .add_hyperlink_relationship_to_story(location.story(), url)
+                                .map_err(|error| crate::rdocx_to_pyerr(py, error))?
+                        }
+                        _ => candidate.add_hyperlink_relationship(url),
+                    })
                 }
                 None => None,
             };
@@ -194,7 +609,7 @@ impl PyParagraph {
                 let run_index = paragraph.run_count();
                 match &relationship_id {
                     Some(relationship_id) => {
-                        paragraph.add_hyperlink(text, relationship_id);
+                        paragraph.add_hyperlink_with_tooltip(text, relationship_id, tooltip)?;
                     }
                     None => {
                         paragraph.add_run(text);
@@ -203,46 +618,170 @@ impl PyParagraph {
                 let run_path = paragraph
                     .run_path(run_index)
                     .expect("the appended run has an accepted source path");
-                (run_index, run_path)
+                Ok((run_index, run_path))
             };
-            let (run_index, run_path) = match location {
-                ParagraphLocation::Body(index) => append(
-                    &mut document
-                        .inner
-                        .paragraph_mut(index)
-                        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?,
+            let (run_index, run_path) = location
+                .edit(&mut candidate, append)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+            let operation = if url.is_some() {
+                "Paragraph.add_hyperlink"
+            } else {
+                "Paragraph.add_run"
+            };
+            let prepared = document.prepare_word_revision(
+                py,
+                &candidate,
+                operation,
+                crate::document::WordPublication::ParagraphAppend(
+                    location
+                        .native(&document.inner)
+                        .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
                 ),
-                ParagraphLocation::Cell {
-                    table,
-                    row,
-                    cell,
-                    paragraph,
-                } => {
-                    let mut table = document
-                        .inner
-                        .table_mut(table)
-                        .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                    let mut cell = table
-                        .cell(row, cell)
-                        .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                    append(
-                        &mut cell
-                            .paragraph_mut(paragraph)
-                            .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?,
-                    )
-                }
-            };
-            document.revisions.bump();
+            )?;
             let mut segments = self.path.segs.clone();
             segments.push(PathSeg::Run(run_index));
-            (document.revisions.capture(segments), run_path)
+            let path = document
+                .revisions
+                .capture_prepared(&prepared.revision, segments)
+                .map_err(oxml_py_support::revision_to_pyerr)?;
+            let result = Py::new(
+                py,
+                PyRun::new(
+                    self.document.clone_ref(py),
+                    path,
+                    run_path,
+                    self.related.clone(),
+                )
+                .bind_prepared(
+                    py,
+                    &document,
+                    &prepared,
+                    &candidate,
+                    self.furniture_scope.clone(),
+                )?,
+            )?;
+            document.commit_word_revision(prepared)?;
+            document.inner = candidate;
+            result
         };
-        Py::new(py, PyRun::new(self.document.clone_ref(py), path, run_path))
+        Ok(result)
     }
 }
 
 #[pymethods]
 impl PyParagraph {
+    #[getter]
+    fn element<'py>(slf: &Bound<'py, Self>) -> Bound<'py, Self> {
+        slf.clone()
+    }
+
+    #[getter]
+    fn xml(&self, py: Python<'_>) -> PyResult<String> {
+        self.validate(py)?;
+        let document = self.document.borrow(py);
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("paragraph XML owner route is unsupported"))?;
+        let location = document.current_paragraph_owner(owner)?;
+        let bytes = document
+            .inner
+            .paragraph_element_xml(&location)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
+        self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("paragraph XML owner route is unsupported"))?;
+        let location = document.current_paragraph_owner(owner)?;
+        let mut candidate = document.inner.clone_for_staging();
+        candidate
+            .replace_paragraph_xml(&location, xml)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        document.publish_owner_candidate(
+            py,
+            candidate,
+            "Paragraph.replace_xml",
+            crate::document::WordPublication::ElementXml(
+                crate::document::WordOwnerLocation::Paragraph(location),
+            ),
+        )
+    }
+
+    fn equations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let location = self.validate(py)?;
+        let document = self.document.borrow(py);
+        let equations = location
+            .read(&document.inner, |p| {
+                p.equations()
+                    .cloned()
+                    .map(|inner| PyEquation { inner })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|e| crate::rdocx_to_pyerr(py, e))?;
+        let values = equations
+            .into_iter()
+            .map(|v| Py::new(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+    #[pyo3(signature = (source, *, format))]
+    fn add_equation(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        format: &str,
+    ) -> PyResult<Py<PyEquationInsertResult>> {
+        let converted = match format {
+            "latex" => rdocx::equation_from_latex(source),
+            "mathml" => rdocx::equation_from_mathml(source),
+            _ => {
+                return Err(PyValueError::new_err(
+                    "equation format must be latex or mathml",
+                ));
+            }
+        }
+        .map_err(|e| crate::rdocx_to_pyerr(py, e))?;
+        let equation = rdocx::OfficeMath::inline(converted.value.expressions);
+        let result = Py::new(
+            py,
+            PyEquationInsertResult {
+                equation: PyEquation {
+                    inner: equation.clone(),
+                },
+                diagnostics: converted
+                    .diagnostics
+                    .into_iter()
+                    .map(PyMathConversionDiagnostic::from)
+                    .collect(),
+            },
+        )?;
+        let location = self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        location
+            .edit(&mut candidate, |p| p.add_equation(equation))
+            .map_err(|e| crate::rdocx_to_pyerr(py, e))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Paragraph.add_equation",
+            crate::document::WordPublication::ParagraphAppend(
+                location
+                    .native(&document.inner)
+                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
+            ),
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(result)
+    }
+
     /// Replace literal text within this paragraph, retaining run formatting.
     #[pyo3(signature = (old, new, *, expect = None))]
     fn replace_text(
@@ -255,13 +794,20 @@ impl PyParagraph {
         let location = self.validate(py)?;
         let mut document = self.document.borrow_mut(py);
         match location {
+            ParagraphLocation::Related(location) => {
+                let location = ParagraphLocation::refreshed(&document.inner, &location)
+                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+                document.scoped_replacement(py, "Paragraph.replace_text", |document| {
+                    document.try_replace_text_at(&location, old, new, expect)
+                })
+            }
             ParagraphLocation::Body(index) => {
                 let location = document
                     .inner
                     .paragraph_story_location(index)
                     .map_err(|error| crate::rdocx_to_pyerr(py, error))?
                     .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                document.scoped_replacement(py, |document| {
+                document.scoped_replacement(py, "Paragraph.replace_text", |document| {
                     document.try_replace_text_at(&location, old, new, expect)
                 })
             }
@@ -270,7 +816,7 @@ impl PyParagraph {
                 row,
                 cell,
                 paragraph,
-            } => document.scoped_replacement(py, |document| {
+            } => document.scoped_replacement(py, "Paragraph.replace_text", |document| {
                 document.try_replace_text_in_cell(
                     (table, row, cell),
                     Some(paragraph),
@@ -286,22 +832,9 @@ impl PyParagraph {
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         let location = self.validate(py)?;
         let document = self.document.borrow(py);
-        match location {
-            ParagraphLocation::Body(index) => document
-                .inner
-                .paragraph(index)
-                .map(|paragraph| paragraph.text()),
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => document.inner.table(table).and_then(|table| {
-                let cell = table.cell(row, cell)?;
-                cell.paragraph(paragraph).map(|paragraph| paragraph.text())
-            }),
-        }
-        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
+        location
+            .read(&document.inner, |paragraph| paragraph.text())
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))
     }
 
     // Replace the content with one run holding `text`, keeping the paragraph
@@ -313,41 +846,52 @@ impl PyParagraph {
         let location = self.validate(py)?;
         let text = text.unwrap_or_default();
         let mut document = self.document.borrow_mut(py);
-        let result = match location {
-            ParagraphLocation::Body(index) => document
-                .inner
-                .paragraph_mut(index)
-                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
-                .set_text(text),
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => {
-                let mut table = document
-                    .inner
-                    .table_mut(table)
-                    .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                let mut cell = table
-                    .cell(row, cell)
-                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                cell.paragraph_mut(paragraph)
-                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
-                    .set_text(text)
-            }
-        };
-        result.map_err(|error| crate::rdocx_to_pyerr(py, error))?;
-        document.revisions.bump();
+        let mut candidate = document.inner.clone_for_staging();
+        location
+            .edit(&mut candidate, |paragraph| paragraph.set_text(text))
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Paragraph.text",
+            location
+                .native(&document.inner)
+                .map(crate::document::WordPublication::ParagraphText)
+                .unwrap_or(crate::document::WordPublication::Conservative),
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
         Ok(())
     }
 
     #[getter]
     fn runs(&self, py: Python<'_>) -> PyResult<Py<PyRunCollection>> {
         self.validate(py)?;
+        let path = match &self.owner {
+            Some(owner) => {
+                let document = self.document.borrow(py);
+                document
+                    .capture_owner(
+                        &crate::document::WordOwnerLocation::Paragraph(
+                            document.current_paragraph_owner(owner)?,
+                        ),
+                        self.path.segs.clone(),
+                        crate::document::WordView::Content,
+                        self.furniture_scope.as_ref(),
+                    )?
+                    .0
+            }
+            None => self.path.clone(),
+        };
         Py::new(
             py,
-            PyRunCollection::new(self.document.clone_ref(py), self.path.clone()),
+            PyRunCollection::new(
+                self.document.clone_ref(py),
+                path,
+                self.related.clone(),
+                self.owner.clone(),
+                self.furniture_scope.clone(),
+            ),
         )
     }
 
@@ -355,22 +899,9 @@ impl PyParagraph {
     fn alignment(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let location = self.validate(py)?;
         let document = self.document.borrow(py);
-        let alignment = match location {
-            ParagraphLocation::Body(index) => document
-                .inner
-                .paragraph(index)
-                .and_then(|paragraph| paragraph.alignment()),
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => document.inner.table(table).and_then(|table| {
-                let cell = table.cell(row, cell)?;
-                cell.paragraph(paragraph)
-                    .and_then(|paragraph| paragraph.alignment())
-            }),
-        };
+        let alignment = location
+            .read(&document.inner, |paragraph| paragraph.alignment())
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
         alignment
             .map(|value| {
                 crate::enum_object(
@@ -389,39 +920,43 @@ impl PyParagraph {
             .map(crate::formatting::alignment_from_int)
             .transpose()?;
         let mut document = self.document.borrow_mut(py);
-        match location {
-            ParagraphLocation::Body(index) => document
-                .inner
-                .paragraph_mut(index)
-                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
-                .set_alignment_value(value),
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => {
-                let mut table = document
-                    .inner
-                    .table_mut(table)
-                    .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                let mut cell = table
-                    .cell(row, cell)
-                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                cell.paragraph_mut(paragraph)
-                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
-                    .set_alignment_value(value);
-            }
-        }
+        location
+            .edit(&mut document.inner, |paragraph| {
+                paragraph.set_alignment_value(value);
+                Ok(())
+            })
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
         Ok(())
     }
 
     fn add_run(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyRun>> {
-        self.append_run(py, text, None)
+        self.append_run(py, text, None, None)
     }
 
-    fn add_hyperlink(&self, py: Python<'_>, text: &str, url: &str) -> PyResult<Py<PyRun>> {
-        self.append_run(py, text, Some(url))
+    #[pyo3(signature = (text, url, *, tooltip=None))]
+    fn add_hyperlink(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        url: &str,
+        tooltip: Option<&str>,
+    ) -> PyResult<Py<PyRun>> {
+        if let Some(bookmark) = url.strip_prefix('#') {
+            self.append_internal_run(py, text, bookmark, tooltip)
+        } else {
+            self.append_run(py, text, Some(url), tooltip)
+        }
+    }
+
+    #[pyo3(signature = (text, bookmark, *, tooltip=None))]
+    fn add_internal_hyperlink(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        bookmark: &str,
+        tooltip: Option<&str>,
+    ) -> PyResult<Py<PyRun>> {
+        self.append_internal_run(py, text, bookmark, tooltip)
     }
 
     #[getter]
@@ -430,11 +965,29 @@ impl PyParagraph {
         py: Python<'_>,
     ) -> PyResult<Py<crate::formatting::PyParagraphFormat>> {
         self.validate(py)?;
+        let path = match &self.owner {
+            Some(owner) => {
+                let document = self.document.borrow(py);
+                document
+                    .capture_owner(
+                        &crate::document::WordOwnerLocation::Paragraph(
+                            document.current_paragraph_owner(owner)?,
+                        ),
+                        self.path.segs.clone(),
+                        crate::document::WordView::Properties,
+                        self.furniture_scope.as_ref(),
+                    )?
+                    .0
+            }
+            None => self.path.clone(),
+        };
         Py::new(
             py,
             crate::formatting::PyParagraphFormat::new(
                 self.document.clone_ref(py),
-                self.path.clone(),
+                path,
+                self.related.clone(),
+                self.owner.clone(),
             ),
         )
     }
@@ -505,7 +1058,10 @@ impl PyParagraphCollection {
                 .revisions
                 .capture(smallvec![PathSeg::Body(0), PathSeg::Para(index)])
         };
-        Py::new(py, PyParagraph::new(self.document.clone_ref(py), path))
+        Py::new(
+            py,
+            PyParagraph::new(self.document.clone_ref(py), path).bind_current(py, None)?,
+        )
     }
 }
 
@@ -573,6 +1129,10 @@ impl PyParagraphIterator {
             .borrow(py)
             .revisions
             .capture(smallvec![PathSeg::Body(0), PathSeg::Para(index)]);
-        Py::new(py, PyParagraph::new(self.document.clone_ref(py), path)).map(Some)
+        Py::new(
+            py,
+            PyParagraph::new(self.document.clone_ref(py), path).bind_current(py, None)?,
+        )
+        .map(Some)
     }
 }

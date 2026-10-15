@@ -1,5 +1,32 @@
 # 03, Architecture
 
+## Owned publication and causal paths
+
+`oxml-py-support` owns captured path authority, owner scopes and prepared
+revision publication. It does not own native presentation objects or keep a
+second handle registry. Word bindings prepare a finite inventory of current
+physical paragraph, table, cell, section and captured hyperlink owners.
+Supported publication retains only proven surviving owners. Regular runs keep
+the conservative document epoch, while frozen Story and StoryItem captures
+also retain snapshot-inventory authority.
+Presentation bindings capture concrete slide, shape, table-grid and text-owner
+scopes, then locate retained physical owners in their current source graph.
+Manual native snapshot constructors remain unbound and visible snapshot
+values retain their existing equality semantics.
+
+Table rows and columns collections bind their surviving physical table owner.
+Grid topology edits retire captured indexed rows, columns and cells while
+preserving those collections and the table and shape ancestors. Removing the
+parent owner retires its collections too.
+
+Bindings stage a native candidate and validate all conversions, source graph
+constraints and returned Python allocations before committing prepared scopes.
+The final native assignment cannot fail after publication. A rejected edit or
+an actual no-op leaves source, scope generations and live handles unchanged.
+First retirement records the exact public operation label for later stale
+errors. The native facades retain ownership of relationships, geometry and
+package authoring, while bindings reuse that publication protocol.
+
 ## Three families, one workspace
 
 ```
@@ -17,7 +44,7 @@ crates/
   oxml-cli-support   range parsing, JSON envelope, output-path defaulting
   oxml-chart         ChartML model and renderer
   oxml-py-support    content paths, revision checks, stale-domain errors,
-                     Length conversion helpers
+                     Length conversion helpers, shared PyO3 RGB input validation
 
   # WordprocessingML
   rdocx-opc          deprecated shim over oxml-opc
@@ -69,6 +96,16 @@ the side that owns its target type.
 
 ## Why these seams
 
+**Python RGB input belongs to `oxml-py-support`.** One concrete
+`rgb_channels(value: &Bound<PyAny>, parameter: &str) -> PyResult<(u8, u8, u8)>`
+serves both binding crates. This unpublished support crate takes the existing
+workspace PyO3 dependency without enabling `extension-module`. That feature
+stays in `rdocx-py` and `rpptx-py`. The facades and both WASM graphs do not
+consume the Python support crate. Each binding adapts the channels to its
+existing native colour representation and owns its surface-specific `None`
+and Word `auto` policy. Live colour formats keep document and content-path
+ownership in their binding, not in a second document or colour model.
+
 **`oxml-opc` does not depend on `oxml-core`.** It has its own small local-name
 handling. Staying independent means it is publishable first and consumable
 alone. `rdocx-wasm` consumes the complete `rdocx` facade rather than using this
@@ -92,11 +129,21 @@ It remains a leaf that anything can take cheaply without importing
 sniffed package metadata, and byte-first MIME inputs. The container checks do
 not claim a codec decoder.
 
+Inbound CommonMark also belongs to the `rdocx` facade. The pinned
+`pulldown-cmark` parser produces bounded events and an escaped HTML projection
+for the existing importer. Ordered diagnostics retain original source byte
+spans. Outbound Markdown derives from saved Word styles, numbering and content,
+without storing an input Markdown copy.
+
 **Inbound HTML belongs to the `rdocx` facade.** The private importer uses
 `scraper` for HTML5 document and fragment tree repair, then projects supported
 content directly into the one owned WordprocessingML document model. The edge
 does not enter `rdocx-html`, which remains an outbound emitter. This avoids a
 dependency cycle and avoids a second public intermediate document model.
+Semantic `mark` highlighting carries its final cascaded background through
+nested inline formatting. A child's own background takes precedence on that
+child, while ordinary CSS backgrounds remain scoped to their own elements.
+Nested marks choose their own highlight, and unmarked siblings inherit none.
 `Document::insert_html_fragment` reuses that importer against a staged document
 and emits concrete body content at a checked `ContentLocation`. Body and
 main-document cell destinations mutate their typed owners so retained sibling
@@ -255,9 +302,11 @@ and samples explicit segments, prepares the package, resolver, font, chart,
 picture, and media state once, then evaluates and lowers one timeline sample at
 a time. The completed opaque raster immediately enters either the facade-owned
 GIF encoder or the Motion JPEG AVI writer before the next sample is resolved.
-`gif`, `jpeg-encoder`, and `tiny-skia` are optional dependencies of the existing
-`rpptx` render feature. No codec edge enters `rpptx-layout`, `rpptx-render`, or
-an `oxml-*` crate, and audio and video package payloads are still never decoded.
+`jpeg-encoder` is an optional dependency of the existing `rpptx` render
+feature. The facade also uses `gif` and `tiny-skia` unconditionally for bounded
+image validation when rendering is disabled. No codec edge enters
+`rpptx-layout`, `rpptx-render`, or an `oxml-*` crate, and audio and video package
+payloads are still never decoded.
 
 The same boundary owns multilingual text mechanics. Rich segments retain
 logical text and source ranges while carrying script, language, direction,
@@ -344,8 +393,8 @@ The facade owns a separate deterministic-base engine for layouts where caller
 fonts override the bundled inventory. Missing families resolve from bundled
 faces without consulting system fonts. A caller font label that differs from
 its embedded family is a label-derived alias for that exact caller face. Native
-callers can also install byte-free family aliases. Resolution prefers an exact
-embedded family, then an explicit caller alias, then a label-derived alias,
+callers can also install byte-free family aliases. Within the caller tier, resolution prefers an exact
+sfnt family, then an explicit caller alias, then a label-derived alias,
 before existing mapped and generic fallbacks. Alias state retains a
 deterministic prefix of at most 256 mappings and 64 KiB of complete mapping and
 lookup identity. Checked transfer includes that exact bounded alias identity
@@ -833,6 +882,13 @@ occupying a continuous page, bookmark target ownership and recursive field
 placements. Field indices follow preorder through instructions and cached results.
 Cached children have their own display placement. Instruction operands inherit
 only their owning field's placement. Locks propagate to descendants.
+
+Complete story-range discovery materializes each physical source once per operation.
+Owner, control and namespace scopes are discovered in batches, then paragraph
+excerpts reuse checked source offsets. Cache projection shares those owned
+source/span facts. The evaluator reuses one paragraph listing for range pairing
+and bookmark-name counts, with independent failure handling for each. This
+operation-local inventory adds no global cache or revision invalidation state.
 
 Physical source identity covers modeled paragraphs, tables, controls, headers,
 footers, notes and selected typed text boxes. Actual OPC names remain distinct
@@ -2015,3 +2071,68 @@ Every consuming formatting builder on `Paragraph`, `Run`, `Table`, `Row`, and
 cannot back a Python property setter. The 61 consuming builders delegate to
 their setter twins, so Rust callers retain chaining while borrowed handles and
 Python properties use in-place mutation.
+
+## Shared Word document operations
+
+The native Word facade owns accepted-view text presentation and advisory package validation. Python and CLI callers consume the same TextReport and ValidationReport. The native crate has no CLI dependency. Plain text presentation groups readable related stories in physical inventory order and retains main text with one ordered omission diagnostic if extraction fails. Body counts use accepted content rather than presentation labels.
+
+Python template conversion admits explicit JSON scalar and container types before native mutation. Its existing workspace serde_json dependency edge introduces no separate converter model. Checked fragment publication and property mutation stage complete candidates, preserve the original on refusal and invalidate live handles only after changed publication. Markdown requests recursive physical-owner boundaries from the existing accepted projection. The default accepted view remains unchanged for its other consumers.
+
+## PowerPoint checked XML ownership
+
+The rpptx facade resolves checked XML against actual slide, layout or master
+parts and concrete physical owner paths. Existing rpptx-oxml and oxml-drawing
+parsers validate qualified roots and modeled child order. The facade stages
+package candidates, validates relationship target roles and MIME identities,
+and serializes and reparses before publication. Supported raster targets use
+the shared bounded PNG, JPEG, GIF, TIFF and BMP decoder in rpptx. Existing
+unsupported media facts may survive only with exact original target identity.
+
+The Python binding stages that native candidate and prepares returned handles
+and revision tokens before committing. Physical paragraph and run positions
+address current owners, never prove that removed children survived. Actual
+owner, text-body and XML-property child generations establish alias identity.
+Shared revision primitives remain owned by oxml-py-support.
+
+## Embedded font ownership
+
+Word owns its relationship-resolved font table and ODTTF parts. PowerPoint
+owns its source-preserving presentation font list and EOT parts. Both native
+facades stage font model, package bytes, relationships, content types and flags
+as one transaction. Shared source targets use copy-on-write and pruning removes
+only genuinely unreachable owned parts. Descriptive records and opaque producer
+source remain authoritative, and unsafe ambiguous edits refuse before publication.
+
+Both families require explicit caller authorization and exact nonempty license
+identity. Font bytes come from bounded caller inputs. Word checked listing
+bounds projected owned copies while retaining the legacy snapshot layout. Its
+indexed metadata reader resolves the actual part through the same checked
+relationship provider. PowerPoint decodes each distinct supported part once
+and shares its immutable body among aliases. Python preallocates immutable
+result snapshots before publishing the native candidate, and CLIs use those
+same native providers before staging outputs. No second ZIP/font/revision engine
+or low-level dependency on a facade is introduced.
+
+Native Office is an independent consumer of those package graphs, not a second
+font provider. PowerPoint qualifies actual regular and bold font use through
+source open, native save and normal reopen. Word's documented one-font-per-name
+behavior can synthesize styles and change saved embeddings. That native
+interoperability boundary does not change the four-face APIs, deterministic
+renderer selection or caller precedence. Native Word multi-face work belongs
+to F-X223.
+
+## Presentation semantic text projection
+
+The `rpptx` facade owns semantic HTML and Markdown projection in its existing
+HTML carrier. Python and CLI consumers call that projection without invoking
+font discovery, layout or rendering. Export options and detached results are
+concrete facade values. The source package and live owners remain unchanged.
+
+The facade directly uses the existing workspace `tiny-skia`, `gif`,
+`zune-jpeg` and `tiff` dependencies for bounded image validation, including
+when rendering and the default template are disabled. PNG and JPEG bodies are
+fully decoded, all GIF frames and TIFF pages are checked, and uncompressed BMP
+pixel extents are validated. The existing crate root owns the crate-private bounded picture-body validator.
+Semantic export attaches its source-path error context at the call site. The
+validator remains a concrete facade helper, with no dependency from a shared
+OXML crate into a facade.

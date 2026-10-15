@@ -148,16 +148,33 @@ impl<'a> SvgState<'a> {
             let Some(font) = self.layout.fonts.iter().find(|font| font.id == *font_id) else {
                 continue;
             };
-            let (mime, format) = font_content_type(font);
+            let Some(data) = standalone_font_data(font) else {
+                continue;
+            };
+            let (mime, format) = if font.data.starts_with(b"ttcf") {
+                ("font/ttf", "truetype")
+            } else {
+                font_content_type(font)
+            };
+
             write!(
                 rules,
                 "@font-face{{font-family:'rdocx-font-{}';src:url('data:{mime};base64,{}') format('{format}');font-weight:{};font-style:{}}}",
                 font.id.0,
-                BASE64.encode(font.data.as_ref()),
-                if font.bold { "bold" } else { "normal" },
-                if font.italic { "italic" } else { "normal" }
+                BASE64.encode(data.as_ref()),
+                if font.bold && !font.synthetic_bold { "bold" } else { "normal" },
+                if font.italic && !font.synthetic_italic { "italic" } else { "normal" }
             )
             .unwrap();
+            let settings = variation_settings(font);
+            if !settings.is_empty() {
+                write!(
+                    rules,
+                    "text[font-family='rdocx-font-{}']{{font-variation-settings:{}}}",
+                    font.id.0, settings
+                )
+                .unwrap();
+            }
         }
         if !rules.is_empty() {
             write!(self.defs, "<style>{rules}</style>").unwrap();
@@ -174,7 +191,7 @@ impl<'a> SvgState<'a> {
         for (index, element) in elements.iter().enumerate() {
             let element_path = format!("{path}[{index}]");
             match element {
-                PositionedElement::Text(run) => self.emit_text(run, &element_path, output),
+                PositionedElement::Text(run) => self.emit_text(run, &element_path, output, false),
                 PositionedElement::MultilingualText(run) => {
                     if !run.is_valid() {
                         self.diagnose(
@@ -184,7 +201,7 @@ impl<'a> SvgState<'a> {
                         continue;
                     }
                     let diagnostic_count = self.diagnostics.len();
-                    self.emit_text(&run.legacy_projection(), &element_path, output);
+                    self.emit_text(&run.legacy_projection(), &element_path, output, true);
                     if self.diagnostics.len() == diagnostic_count {
                         self.diagnose(
                             &element_path,
@@ -265,27 +282,72 @@ impl<'a> SvgState<'a> {
         }
     }
 
-    fn emit_text(&mut self, run: &GlyphRun, path: &str, output: &mut String) {
+    fn emit_text(&mut self, run: &GlyphRun, path: &str, output: &mut String, multilingual: bool) {
         if run.text.is_empty() {
             return;
         }
         self.diagnose_font_on_first_use(run.font_id);
 
+        let font = self.layout.fonts.iter().find(|font| font.id == run.font_id);
         write!(
             output,
             "<text xml:space=\"preserve\" y=\"{}\" font-family=\"rdocx-font-{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" fill=\"{}\" fill-opacity=\"{}\"",
             number(run.origin.y),
             run.font_id.0,
             number(run.font_size),
-            if run.bold { "bold" } else { "normal" },
-            if run.italic { "italic" } else { "normal" },
+            if run.bold && !font.is_some_and(|font| font.synthetic_bold) { "bold" } else { "normal" },
+            if run.italic && !font.is_some_and(|font| font.synthetic_italic) { "italic" } else { "normal" },
             color_hex(run.color),
             number(run.color.a.clamp(0.0, 1.0))
         )
         .unwrap();
 
+        if let Some(font) = font {
+            let settings = variation_settings(font);
+            if !settings.is_empty() || font.synthetic_bold || font.synthetic_italic {
+                write!(
+                    output,
+                    " style=\"font-synthesis:none{}\"",
+                    if settings.is_empty() {
+                        String::new()
+                    } else {
+                        format!(";font-variation-settings:{settings}")
+                    }
+                )
+                .unwrap();
+            }
+            if font.synthetic_bold {
+                write!(output, " stroke=\"{}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" paint-order=\"fill stroke\"", color_hex(run.color), number(run.color.a.clamp(0.0, 1.0)), run.font_size / 24.0).unwrap();
+            }
+            if font.synthetic_italic {
+                write!(
+                    output,
+                    " transform=\"matrix(1 0 {} 1 {} 0)\"",
+                    -0.212_556_561_670_022_1,
+                    run.origin.y * 0.212_556_561_670_022_1
+                )
+                .unwrap();
+            }
+        }
+
         let scalar_count = run.text.chars().count();
-        if scalar_count == run.glyph_ids.len() && run.advances.len() == run.glyph_ids.len() {
+        // Equal counts do not prove scalar ownership after GSUB. Admit the
+        // scalar x-list only when the selected face's nominal cmap agrees.
+        let selected_face = font.and_then(|font| validated_font_face(&font.data, font.face_index));
+        let nominal_positions = selected_face.as_ref().is_some_and(|face| {
+            run.text.chars().zip(&run.glyph_ids).all(|(scalar, glyph)| {
+                face.glyph_index(scalar).unwrap_or(ttf_parser::GlyphId(0)).0 == *glyph
+            })
+        });
+        if scalar_count == run.glyph_ids.len()
+            && run.advances.len() == run.glyph_ids.len()
+            && nominal_positions
+            && run.font_size.is_finite()
+            && run.font_size > 0.0
+            && run.origin.x.is_finite()
+            && run.origin.y.is_finite()
+            && run.advances.iter().all(|advance| advance.is_finite())
+        {
             let mut x = run.origin.x;
             output.push_str(" x=\"");
             for (index, advance) in run.advances.iter().enumerate() {
@@ -305,10 +367,16 @@ impl<'a> SvgState<'a> {
                 number(advance)
             )
             .unwrap();
-            self.diagnose(
-                path,
-                "complex shaping kept searchable text with total-advance positioning",
-            );
+            if selected_face.is_some() {
+                self.diagnose(
+                    path,
+                    if multilingual {
+                        "multilingual shaping kept searchable text with browser-positioned glyph approximation"
+                    } else {
+                        "complex shaping kept searchable text with total-advance positioning"
+                    },
+                );
+            }
         }
         let (text, replaced_invalid_xml) = sanitize_xml_text(&run.text);
         if replaced_invalid_xml {
@@ -331,10 +399,10 @@ impl<'a> SvgState<'a> {
             );
             return;
         };
-        if font.face_index != 0 {
+        if standalone_font_data(font).is_none() {
             self.diagnose(
                 &format!("fonts[{}]", font.id.0),
-                "font collection face index cannot be selected by SVG and uses the default face",
+                "selected font face cannot be embedded in searchable SVG",
             );
         }
     }
@@ -580,7 +648,7 @@ impl<'a> SvgState<'a> {
         {
             return Ok(Some(region));
         }
-        group_effect_bounds(group)
+        group_effect_bounds(group, &self.layout.fonts)
     }
 
     fn paint_attributes(&mut self, paint: &Paint, property: &str, path: &str) -> Option<String> {
@@ -629,6 +697,50 @@ impl<'a> SvgState<'a> {
                 );
                 emit_stops(stops, &mut definition);
                 definition.push_str("</radialGradient>");
+                self.defs.push_str(&definition);
+                Some(format!("{property}=\"url(#{id})\""))
+            }
+            Paint::Grid {
+                bounds,
+                columns,
+                rows,
+                colors,
+            } => {
+                Paint::grid(*bounds, *columns, *rows, colors.clone())?;
+                let id = self.definition_id();
+                let dx = bounds.width / f64::from(*columns);
+                let dy = bounds.height / f64::from(*rows);
+                let mut definition = format!(
+                    "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\">",
+                    number(bounds.x),
+                    number(bounds.y),
+                    number(bounds.width),
+                    number(bounds.height)
+                );
+                for row in 0..usize::from(*rows) {
+                    let mut col = 0;
+                    while col < usize::from(*columns) {
+                        let color = colors[row * usize::from(*columns) + col];
+                        let mut end = col + 1;
+                        while end < usize::from(*columns)
+                            && colors[row * usize::from(*columns) + end] == color
+                        {
+                            end += 1;
+                        }
+                        let _ = write!(
+                            definition,
+                            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\" fill-opacity=\"{}\"/>",
+                            number(col as f64 * dx),
+                            number(row as f64 * dy),
+                            number((end - col) as f64 * dx),
+                            number(dy),
+                            color_hex(color),
+                            number(color.a)
+                        );
+                        col = end;
+                    }
+                }
+                definition.push_str("</pattern>");
                 self.defs.push_str(&definition);
                 Some(format!("{property}=\"url(#{id})\""))
             }
@@ -710,8 +822,263 @@ fn preserves_isotropic_blur(transform: Transform) -> bool {
     (x_scale_squared - y_scale_squared).abs() <= tolerance && dot.abs() <= tolerance
 }
 
-fn group_effect_bounds(group: &GroupElement) -> Result<Option<Rect>, ()> {
-    let Some(mut source) = elements_bounds(&group.children)? else {
+/// Bound the selected SFNT directory before handing producer bytes to the
+/// parser. RawFace's collection-index stream arithmetic assumes these bounds.
+fn validated_font_face(data: &[u8], face_index: u32) -> Option<ttf_parser::Face<'_>> {
+    let read_u32 = |offset: usize| {
+        Some(u32::from_be_bytes(
+            data.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+    if data.len() > u32::MAX as usize {
+        return None;
+    }
+    let offset = if data.starts_with(b"ttcf") {
+        if !matches!(read_u32(4)?, 0x0001_0000 | 0x0002_0000) {
+            return None;
+        }
+        let count = read_u32(8)?;
+        let end = 12usize.checked_add(usize::try_from(count).ok()?.checked_mul(4)?)?;
+        if face_index >= count || end > data.len() || end > u32::MAX as usize {
+            return None;
+        }
+        usize::try_from(read_u32(
+            12usize.checked_add(usize::try_from(face_index).ok()?.checked_mul(4)?)?,
+        )?)
+        .ok()?
+    } else {
+        if face_index != 0 {
+            return None;
+        }
+        0
+    };
+    if !matches!(read_u32(offset)?, 0x0001_0000 | 0x7472_7565 | 0x4f54_544f) {
+        return None;
+    }
+    let count_at = offset.checked_add(4)?;
+    let count = usize::from(u16::from_be_bytes(
+        data.get(count_at..count_at.checked_add(2)?)?
+            .try_into()
+            .ok()?,
+    ));
+    let directory = offset.checked_add(12)?;
+    let end = directory.checked_add(count.checked_mul(16)?)?;
+    if end > data.len() || end > u32::MAX as usize {
+        return None;
+    }
+    for index in 0..count {
+        let entry = directory.checked_add(index.checked_mul(16)?)?;
+        let start = read_u32(entry.checked_add(8)?)?;
+        let length = read_u32(entry.checked_add(12)?)?;
+        let end = start.checked_add(length)?;
+        if usize::try_from(end).ok()? > data.len() {
+            return None;
+        }
+    }
+    ttf_parser::Face::parse(data, face_index).ok()
+}
+
+/// Extract only the selected collection face, retaining every unsigned table.
+/// Standalone fonts are borrowed verbatim so ordinary SVG output is unchanged.
+fn standalone_font_data(font: &FontData) -> Option<std::borrow::Cow<'_, [u8]>> {
+    validated_font_face(&font.data, font.face_index)?;
+    if !font.data.starts_with(b"ttcf") {
+        return Some(std::borrow::Cow::Borrowed(&font.data));
+    }
+    let raw = ttf_parser::RawFace::parse(&font.data, font.face_index).ok()?;
+    let mut tables = raw
+        .table_records
+        .into_iter()
+        .filter(|record| record.tag != ttf_parser::Tag::from_bytes(b"DSIG"))
+        .collect::<Vec<_>>();
+    tables.sort_by_key(|record| record.tag);
+    if tables.is_empty()
+        || tables.len() > 4095
+        || tables.windows(2).any(|pair| pair[0].tag == pair[1].tag)
+    {
+        return None;
+    }
+    let count = u16::try_from(tables.len()).ok()?;
+    let power = 1u16 << (15 - count.leading_zeros());
+    let search = power.checked_mul(16)?;
+    let directory = 12usize.checked_add(tables.len().checked_mul(16)?)?;
+    let total = tables.iter().try_fold(directory, |size, record| {
+        size.checked_add((usize::try_from(record.length).ok()?.checked_add(3)?) & !3)
+    })?;
+    if total
+        > font
+            .data
+            .len()
+            .checked_add(directory)?
+            .checked_add(tables.len().checked_mul(3)?)?
+    {
+        return None;
+    }
+    let face_offset_pos =
+        12usize.checked_add(usize::try_from(font.face_index).ok()?.checked_mul(4)?)?;
+    let face_offset = usize::try_from(u32::from_be_bytes(
+        font.data
+            .get(face_offset_pos..face_offset_pos.checked_add(4)?)?
+            .try_into()
+            .ok()?,
+    ))
+    .ok()?;
+    let mut output = vec![0u8; total];
+    output[..4].copy_from_slice(font.data.get(face_offset..face_offset.checked_add(4)?)?);
+    output[4..6].copy_from_slice(&count.to_be_bytes());
+    output[6..8].copy_from_slice(&search.to_be_bytes());
+    output[8..10].copy_from_slice(&(power.trailing_zeros() as u16).to_be_bytes());
+    output[10..12].copy_from_slice(&count.checked_mul(16)?.checked_sub(search)?.to_be_bytes());
+    let mut offset = directory;
+    let mut head_offset = None;
+    for (index, record) in tables.iter().enumerate() {
+        let start = usize::try_from(record.offset).ok()?;
+        let length = usize::try_from(record.length).ok()?;
+        let data = font.data.get(start..start.checked_add(length)?)?;
+        let end = offset.checked_add(length)?;
+        output.get_mut(offset..end)?.copy_from_slice(data);
+        if record.tag == ttf_parser::Tag::from_bytes(b"head") {
+            if length < 12 {
+                return None;
+            }
+            output[offset + 8..offset + 12].fill(0);
+            head_offset = Some(offset);
+        }
+        let padded_end = end.checked_add(3)? & !3;
+        let checksum = sfnt_checksum(output.get(offset..padded_end)?);
+        let row = 12 + index * 16;
+        output[row..row + 4].copy_from_slice(&record.tag.to_bytes());
+        output[row + 4..row + 8].copy_from_slice(&checksum.to_be_bytes());
+        output[row + 8..row + 12].copy_from_slice(&u32::try_from(offset).ok()?.to_be_bytes());
+        output[row + 12..row + 16].copy_from_slice(&record.length.to_be_bytes());
+        offset = padded_end;
+    }
+    let head = head_offset?;
+    let adjustment = 0xB1B0_AFBAu32.wrapping_sub(sfnt_checksum(&output));
+    output[head + 8..head + 12].copy_from_slice(&adjustment.to_be_bytes());
+    validated_font_face(&output, 0)?;
+    Some(std::borrow::Cow::Owned(output))
+}
+
+fn sfnt_checksum(bytes: &[u8]) -> u32 {
+    bytes.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
+}
+
+fn variation_settings(font: &FontData) -> String {
+    // CSS weight, width and style select registered axes even when FontData
+    // has no nondefault coordinates. Optical sizing can also select opsz.
+    // Freeze those effective defaults before applying the selected overrides.
+    let mut coordinates = Vec::new();
+    if let Some(face) = validated_font_face(&font.data, font.face_index) {
+        for axis in face.variation_axes() {
+            let tag = axis.tag.to_bytes();
+            if matches!(&tag, b"wght" | b"wdth" | b"ital" | b"slnt" | b"opsz") {
+                coordinates.push((tag, axis.def_value));
+            }
+        }
+    }
+    for &(tag, value) in &font.variations {
+        if let Some((_, coordinate)) = coordinates.iter_mut().find(|(axis, _)| *axis == tag) {
+            *coordinate = value;
+        } else {
+            coordinates.push((tag, value));
+        }
+    }
+    coordinates
+        .iter()
+        .map(|(tag, value)| {
+            format!(
+                "'{}' {}",
+                String::from_utf8_lossy(tag),
+                number(f64::from(*value))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Conservative painted glyph bounds in points, before ancestor transforms.
+fn glyph_ink_bounds(
+    run: &GlyphRun,
+    fonts: &[FontData],
+    x_offsets: &[f64],
+    y_offsets: &[f64],
+    y_advances: &[f64],
+) -> Result<Option<Rect>, ()> {
+    if !run.font_size.is_finite()
+        || run.font_size <= 0.0
+        || !run.origin.x.is_finite()
+        || !run.origin.y.is_finite()
+        || run.glyph_ids.len() != run.advances.len()
+    {
+        return Err(());
+    }
+    let font = fonts.iter().find(|font| font.id == run.font_id).ok_or(())?;
+    let mut face = validated_font_face(&font.data, font.face_index).ok_or(())?;
+    for (tag, value) in &font.variations {
+        if !value.is_finite() {
+            return Err(());
+        }
+        face.set_variation(ttf_parser::Tag::from_bytes(tag), *value)
+            .ok_or(())?;
+    }
+    if face.units_per_em() == 0 {
+        return Err(());
+    }
+    let scale = run.font_size / f64::from(face.units_per_em());
+    let radius = if font.synthetic_bold {
+        run.font_size / 48.0
+    } else {
+        0.0
+    };
+    let shear = if font.synthetic_italic {
+        0.212_556_561_670_022_1
+    } else {
+        0.0
+    };
+    let affine = Transform {
+        c: -shear,
+        e: shear * run.origin.y,
+        ..Transform::IDENTITY
+    };
+    let (mut x, mut y) = (run.origin.x, run.origin.y);
+    let mut result = None;
+    for (index, glyph) in run.glyph_ids.iter().enumerate() {
+        if *glyph >= face.number_of_glyphs() {
+            return Err(());
+        }
+        let position_x = x + x_offsets.get(index).copied().unwrap_or(0.0);
+        let position_y = y - y_offsets.get(index).copied().unwrap_or(0.0);
+        if let Some(bounds) = face.glyph_bounding_box(ttf_parser::GlyphId(*glyph)) {
+            let rect = Rect {
+                x: position_x + f64::from(bounds.x_min) * scale - radius,
+                y: position_y - f64::from(bounds.y_max) * scale - radius,
+                width: f64::from(i32::from(bounds.x_max) - i32::from(bounds.x_min)) * scale
+                    + 2.0 * radius,
+                height: f64::from(i32::from(bounds.y_max) - i32::from(bounds.y_min)) * scale
+                    + 2.0 * radius,
+            };
+            let rect = affine.transform_rect_bbox(rect);
+            if !rect_is_finite(&rect) {
+                return Err(());
+            }
+            result = Some(result.map_or(rect, |old| union_rect(old, rect)));
+        }
+        x += run.advances[index];
+        y -= y_advances.get(index).copied().unwrap_or(0.0);
+        if !x.is_finite() || !y.is_finite() {
+            return Err(());
+        }
+    }
+    Ok(result)
+}
+
+fn group_effect_bounds(group: &GroupElement, fonts: &[FontData]) -> Result<Option<Rect>, ()> {
+    let Some(mut source) = elements_bounds(&group.children, fonts)? else {
         return Ok(None);
     };
     if let Some(clip) = &group.clip {
@@ -739,10 +1106,10 @@ fn group_effect_bounds(group: &GroupElement) -> Result<Option<Rect>, ()> {
     rect_is_finite(&bounds).then_some(Some(bounds)).ok_or(())
 }
 
-fn elements_bounds(elements: &[PositionedElement]) -> Result<Option<Rect>, ()> {
+fn elements_bounds(elements: &[PositionedElement], fonts: &[FontData]) -> Result<Option<Rect>, ()> {
     let mut bounds = None;
     for element in elements {
-        if let Some(element) = element_bounds(element)? {
+        if let Some(element) = element_bounds(element, fonts)? {
             bounds = Some(match bounds {
                 Some(bounds) => union_rect(bounds, element),
                 None => element,
@@ -752,10 +1119,23 @@ fn elements_bounds(elements: &[PositionedElement]) -> Result<Option<Rect>, ()> {
     Ok(bounds)
 }
 
-fn element_bounds(element: &PositionedElement) -> Result<Option<Rect>, ()> {
+fn element_bounds(element: &PositionedElement, fonts: &[FontData]) -> Result<Option<Rect>, ()> {
     match element {
-        PositionedElement::Text(run) if !run.text.is_empty() => Err(()),
-        PositionedElement::MultilingualText(run) if !run.logical_text.is_empty() => Err(()),
+        PositionedElement::Text(run) if !run.text.is_empty() => {
+            glyph_ink_bounds(run, fonts, &[], &[], &[])
+        }
+        PositionedElement::MultilingualText(run) if !run.logical_text.is_empty() => {
+            if !run.is_valid() {
+                return Err(());
+            }
+            glyph_ink_bounds(
+                &run.legacy_projection(),
+                fonts,
+                &run.x_offsets,
+                &run.y_offsets,
+                &run.y_advances,
+            )
+        }
         PositionedElement::Line {
             start, end, width, ..
         } => {
@@ -786,11 +1166,9 @@ fn element_bounds(element: &PositionedElement) -> Result<Option<Rect>, ()> {
                 height: bounds.height + margin * 2.0,
             }
         })),
-        PositionedElement::Group(group) => {
-            Ok(group_effect_bounds(group)?
-                .map(|bounds| group.transform.transform_rect_bbox(bounds)))
-        }
-        PositionedElement::MarkedContent { children, .. } => elements_bounds(children),
+        PositionedElement::Group(group) => Ok(group_effect_bounds(group, fonts)?
+            .map(|bounds| group.transform.transform_rect_bbox(bounds))),
+        PositionedElement::MarkedContent { children, .. } => elements_bounds(children, fonts),
         PositionedElement::LinkAnnotation { .. }
         | PositionedElement::Text(_)
         | PositionedElement::MultilingualText(_) => Ok(None),
@@ -1066,7 +1444,12 @@ mod tests {
         TextDirection, TextScript, Transform,
     };
 
-    use super::{image_mime, is_safe_link, preserves_isotropic_blur, render_page};
+    use base64::Engine;
+
+    use super::{
+        BASE64, glyph_ink_bounds, image_mime, is_safe_link, preserves_isotropic_blur, render_page,
+        sfnt_checksum, standalone_font_data,
+    };
 
     const RESVG_ORACLE_VERSION: &str = "resvg 0.48.1";
 
@@ -1084,15 +1467,28 @@ mod tests {
             face_index: 0,
             bold: false,
             italic: false,
+            variations: vec![],
+            synthetic_bold: false,
+            synthetic_italic: false,
         }
     }
 
     fn text(value: &str, glyphs: usize) -> PositionedElement {
+        let bytes = include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf");
+        let face = ttf_parser::Face::parse(bytes, 0).unwrap();
+        let glyph_ids = if value.chars().count() == glyphs {
+            value
+                .chars()
+                .map(|scalar| face.glyph_index(scalar).unwrap_or(ttf_parser::GlyphId(0)).0)
+                .collect()
+        } else {
+            vec![1; glyphs]
+        };
         PositionedElement::Text(GlyphRun {
             origin: Point { x: 12.0, y: 28.0 },
             font_id: FontId(7),
             font_size: 14.0,
-            glyph_ids: vec![1; glyphs],
+            glyph_ids,
             advances: vec![8.0; glyphs],
             text: value.to_owned(),
             source: None,
@@ -1114,6 +1510,174 @@ mod tests {
             None,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn fx195_svg_freezes_css_registered_defaults_and_selected_overrides() {
+        // CSS normal maps wght to 400. Explicit coordinates must override it,
+        // rather than assuming a missing declaration means the fvar default.
+        for (bytes, default_weight, selected_weight) in [
+            (
+                include_bytes!("../../oxml-layout/fonts/NotoSansSC-FX058-subset.ttf").as_slice(),
+                100.0,
+                100.0,
+            ),
+            (
+                include_bytes!("../../oxml-layout/fonts/NotoSansThai.ttf").as_slice(),
+                400.0,
+                400.0,
+            ),
+            (
+                include_bytes!("../../oxml-layout/fonts/NotoSansThai.ttf").as_slice(),
+                400.0,
+                700.0,
+            ),
+        ] {
+            let face = ttf_parser::Face::parse(bytes, 0).unwrap();
+            let axis = face
+                .variation_axes()
+                .into_iter()
+                .find(|axis| axis.tag == ttf_parser::Tag::from_bytes(b"wght"))
+                .unwrap();
+            assert_eq!(axis.def_value, default_weight);
+            let mut font = test_font();
+            font.data = Arc::from(bytes);
+            font.bold = selected_weight == 700.0;
+            if selected_weight != default_weight {
+                font.variations.push((*b"wght", selected_weight));
+            }
+            let original_data = font.data.clone();
+            let original_coordinates = font.variations.clone();
+            let mut document = layout(Vec::new());
+            document.fonts = vec![font];
+            let mut state = super::SvgState::new(&document, 120.0, 80.0, Vec::new());
+            state.emit_font_definitions(&[FontId(7)]);
+            let PositionedElement::Text(mut run) = text("A", 1) else {
+                unreachable!()
+            };
+            run.bold = selected_weight == 700.0;
+            run.glyph_ids = vec![face.glyph_index('A').expect("source cmap control").0];
+            let mut selected_face = ttf_parser::Face::parse(bytes, 0).unwrap();
+            for &(tag, value) in &document.fonts[0].variations {
+                selected_face
+                    .set_variation(ttf_parser::Tag::from_bytes(&tag), value)
+                    .unwrap();
+            }
+            run.advances = vec![
+                f64::from(
+                    selected_face
+                        .glyph_hor_advance(ttf_parser::GlyphId(run.glyph_ids[0]))
+                        .unwrap(),
+                ) * run.font_size
+                    / f64::from(selected_face.units_per_em()),
+            ];
+            let mut emitted = String::new();
+            state.emit_text(&run, "control", &mut emitted, false);
+            let xml = resvg::usvg::roxmltree::Document::parse(&emitted).unwrap();
+            let node = xml.root_element();
+            assert_eq!(
+                node.attribute("font-weight"),
+                Some(if selected_weight == 700.0 {
+                    "bold"
+                } else {
+                    "normal"
+                })
+            );
+            let style = node
+                .attribute("style")
+                .expect("explicit effective instance");
+            let settings = style
+                .strip_prefix("font-synthesis:none;font-variation-settings:")
+                .unwrap();
+            let mut explicit = std::collections::BTreeMap::new();
+            for declaration in settings.split(',') {
+                let (tag, value) = declaration.trim().split_once(' ').unwrap();
+                assert!(
+                    explicit
+                        .insert(tag, value.parse::<f32>().unwrap())
+                        .is_none()
+                );
+            }
+            let mut effective_weight = if run.bold { 700.0 } else { 400.0 };
+            if let Some(selected) = explicit.get("'wght'") {
+                effective_weight = *selected;
+            }
+            assert_eq!(effective_weight, selected_weight);
+            assert_eq!(explicit.get("'wght'"), Some(&selected_weight));
+            assert!(
+                state
+                    .defs
+                    .contains(&format!("font-variation-settings:{settings}"))
+            );
+            assert_eq!(document.fonts[0].variations, original_coordinates);
+            assert_eq!(document.fonts[0].data.as_ref(), original_data.as_ref());
+        }
+        let static_font = test_font();
+        assert!(super::variation_settings(&static_font).is_empty());
+        let static_document = layout(Vec::new());
+        let mut static_state = super::SvgState::new(&static_document, 120.0, 80.0, Vec::new());
+        static_state.emit_font_definitions(&[FontId(7)]);
+        assert_eq!(
+            static_state.defs,
+            format!(
+                "<style>@font-face{{font-family:'rdocx-font-7';src:url('data:font/ttf;base64,{}') format('truetype');font-weight:normal;font-style:normal}}</style>",
+                BASE64.encode(static_font.data.as_ref())
+            )
+        );
+        let PositionedElement::Text(mut run) = text("A", 1) else {
+            unreachable!()
+        };
+        let mut static_emitted = String::new();
+        static_state.emit_text(&run, "static", &mut static_emitted, false);
+        let static_xml = resvg::usvg::roxmltree::Document::parse(&static_emitted).unwrap();
+        assert_eq!(static_xml.root_element().attribute("style"), None);
+
+        let mut synthetic = test_font();
+        synthetic.data = Arc::from(
+            include_bytes!("../../oxml-layout/fonts/NotoSansSC-FX058-subset.ttf").as_slice(),
+        );
+        synthetic.bold = true;
+        synthetic.italic = true;
+        synthetic.synthetic_bold = true;
+        synthetic.synthetic_italic = true;
+        let face = ttf_parser::Face::parse(&synthetic.data, 0).unwrap();
+        run.glyph_ids = vec![face.glyph_index('A').expect("source cmap control").0];
+        run.bold = true;
+        run.italic = true;
+        let mut synthetic_document = layout(Vec::new());
+        synthetic_document.fonts = vec![synthetic];
+        let mut synthetic_state =
+            super::SvgState::new(&synthetic_document, 120.0, 80.0, Vec::new());
+        synthetic_state.emit_font_definitions(&[FontId(7)]);
+        let mut synthetic_emitted = String::new();
+        synthetic_state.emit_text(&run, "synthetic", &mut synthetic_emitted, false);
+        let synthetic_xml = resvg::usvg::roxmltree::Document::parse(&synthetic_emitted).unwrap();
+        let node = synthetic_xml.root_element();
+        assert_eq!(node.attribute("font-weight"), Some("normal"));
+        assert_eq!(node.attribute("font-style"), Some("normal"));
+        assert_eq!(
+            node.attribute("style"),
+            Some("font-synthesis:none;font-variation-settings:'wght' 100")
+        );
+        assert_eq!(node.attribute("stroke-linecap"), Some("round"));
+        assert_eq!(node.attribute("stroke-linejoin"), Some("round"));
+        assert_eq!(node.attribute("paint-order"), Some("fill stroke"));
+        assert!(
+            node.attribute("transform")
+                .unwrap()
+                .starts_with("matrix(1 0 ")
+        );
+        assert!(
+            synthetic_state
+                .defs
+                .contains("font-weight:normal;font-style:normal")
+        );
+        assert!(
+            synthetic_state
+                .defs
+                .contains("font-variation-settings:'wght' 100")
+        );
+        assert!(synthetic_document.fonts[0].variations.is_empty());
     }
 
     #[test]
@@ -1244,6 +1808,21 @@ mod tests {
         assert!(result.svg.contains("textLength=\"40\""));
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].path, "pages[0].elements[0]");
+        let mut substituted = text("office", 6);
+        let PositionedElement::Text(run) = &mut substituted else {
+            unreachable!()
+        };
+        run.glyph_ids[1] = run.glyph_ids[0];
+        assert_eq!(run.text.chars().count(), run.glyph_ids.len());
+        let result = render_page(&layout(vec![substituted]), 0).unwrap();
+        assert!(result.svg.contains(">office</text>"));
+        assert!(result.svg.contains("textLength=\"48\""));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert!(
+            result.diagnostics[0]
+                .message
+                .contains("total-advance positioning")
+        );
     }
 
     #[test]
@@ -1424,7 +2003,18 @@ mod tests {
             _ => unreachable!(),
         };
         dangerous.text = "<&>\u{B}\"'".to_owned();
-        dangerous.glyph_ids = vec![1; 6];
+        let face = ttf_parser::Face::parse(
+            include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf"),
+            0,
+        )
+        .unwrap();
+        dangerous.glyph_ids = dangerous
+            .text
+            .chars()
+            .map(|scalar| face.glyph_index(scalar).unwrap_or(ttf_parser::GlyphId(0)).0)
+            .collect();
+        assert_eq!(dangerous.text.chars().count(), 6);
+        assert_eq!(dangerous.glyph_ids.len(), 6);
         dangerous.advances = vec![5.0; 6];
         let result = render_page(
             &layout(vec![
@@ -1515,8 +2105,619 @@ mod tests {
         }
     }
 
+    fn fx195_svg_rectangle_font() -> Vec<u8> {
+        let mut head = vec![0; 54];
+        head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        head[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        head[12..16].copy_from_slice(&0x5f0f_3cf5u32.to_be_bytes());
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        for (offset, value) in [(36, 50i16), (38, 0), (40, 590), (42, 700), (50, 1)] {
+            head[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut hhea = vec![0; 36];
+        hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        for (offset, value) in [(4, 800i16), (6, -200), (10, 600), (18, 1), (34, 2)] {
+            hhea[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut maxp = vec![0; 32];
+        maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        for (offset, value) in [(4, 2u16), (6, 4), (8, 1)] {
+            maxp[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut glyf = Vec::new();
+        for value in [1i16, 50, 0, 450, 700, 3, 0] {
+            glyf.extend_from_slice(&value.to_be_bytes());
+        }
+        glyf.extend_from_slice(&[1; 4]); // Four on-curve points.
+        for value in [50i16, 400, 0, -400, 0, 0, 700, 0] {
+            glyf.extend_from_slice(&value.to_be_bytes());
+        }
+        while !glyf.len().is_multiple_of(4) {
+            glyf.push(0);
+        }
+        let mut cmap = vec![0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12];
+        for value in [
+            4u16, 32, 0, 4, 4, 1, 0, 65, 65535, 0, 65, 65535, 65472, 1, 0, 0,
+        ] {
+            cmap.extend_from_slice(&value.to_be_bytes());
+        }
+        let mut names = Vec::new();
+        let mut strings = Vec::new();
+        for (id, value) in [
+            (1u16, "FX195SvgRectangle"),
+            (2, "Regular"),
+            (4, "FX195SvgRectangle Regular"),
+            (6, "FX195SvgRectangle-Regular"),
+            (256, "Axis"),
+        ] {
+            let text: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            for value in [3, 1, 0x409, id, text.len() as u16, strings.len() as u16] {
+                names.extend_from_slice(&value.to_be_bytes());
+            }
+            strings.extend_from_slice(&text);
+        }
+        let mut name = vec![0, 0, 0, 5, 0, 66];
+        name.extend(names);
+        name.extend(strings);
+        let mut os2 = vec![0; 78];
+        for (offset, value) in [
+            (2, 600i16),
+            (4, 400),
+            (6, 5),
+            (62, 64),
+            (64, 65),
+            (66, 65),
+            (68, 800),
+            (70, -200),
+            (74, 800),
+            (76, 200),
+        ] {
+            os2[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut post = vec![0; 32];
+        post[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+        let mut tables = vec![
+            (*b"head", head),
+            (*b"hhea", hhea),
+            (*b"maxp", maxp),
+            (*b"glyf", glyf),
+            (*b"cmap", cmap),
+            (*b"name", name),
+            (*b"OS/2", os2),
+            (*b"post", post),
+            (*b"hmtx", vec![2, 88, 0, 0, 2, 88, 0, 50]),
+            (*b"loca", vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36]),
+        ];
+        tables.sort_by_key(|(tag, _)| *tag);
+        let count = tables.len() as u16;
+        let power = 1u16 << (15 - count.leading_zeros());
+        let mut font = Vec::from(0x0001_0000u32.to_be_bytes());
+        for value in [
+            count,
+            power * 16,
+            power.trailing_zeros() as u16,
+            count * 16 - power * 16,
+        ] {
+            font.extend_from_slice(&value.to_be_bytes());
+        }
+        font.resize(12 + tables.len() * 16, 0);
+        let mut head_offset = 0;
+        for (index, (tag, mut table)) in tables.into_iter().enumerate() {
+            let length = table.len();
+            let offset = font.len();
+            if tag == *b"head" {
+                head_offset = offset;
+            }
+            while !table.len().is_multiple_of(4) {
+                table.push(0);
+            }
+            let checksum = table.chunks_exact(4).fold(0u32, |sum, word| {
+                sum.wrapping_add(u32::from_be_bytes(word.try_into().unwrap()))
+            });
+            let record = 12 + index * 16;
+            font[record..record + 4].copy_from_slice(&tag);
+            for (field, value) in [(4, checksum), (8, offset as u32), (12, length as u32)] {
+                font[record + field..record + field + 4].copy_from_slice(&value.to_be_bytes());
+            }
+            font.extend(table);
+        }
+        let checksum = font.chunks_exact(4).fold(0u32, |sum, word| {
+            sum.wrapping_add(u32::from_be_bytes(word.try_into().unwrap()))
+        });
+        font[head_offset + 8..head_offset + 12]
+            .copy_from_slice(&0xb1b0_afbau32.wrapping_sub(checksum).to_be_bytes());
+        font
+    }
+
     #[test]
-    fn font_collection_face_identity_is_diagnosed() {
+    fn fx195_variable_svg_paint_matches_independent_static_instances() {
+        use sha2::{Digest, Sha256};
+        use std::process::Command;
+        let version = Command::new("hb-subset")
+            .arg("--version")
+            .output()
+            .expect("required independent hb-subset14.4.0");
+        assert!(version.status.success());
+        assert!(
+            String::from_utf8_lossy(&version.stdout).starts_with("hb-subset (HarfBuzz) 14.4.0\n")
+        );
+        for (script, source, value, source_hash, static_hashes) in [
+            (
+                "Thai",
+                include_bytes!("../../oxml-layout/fonts/NotoSansThai.ttf").as_slice(),
+                "ภาษาไทยยินดีต้อนรับ",
+                "5a1c559bb539583c8a1fd99d1c5b9491e5e14478c9cd2bd0970d5c3096cc9ef8",
+                [
+                    "1101a6ce29474ff4bf2a68c092e8e68c652e8ff0d0b5093d36a81bbd3af1567e",
+                    "171d20a8c3a3e7c1946618d4eebbf265bce47321d9438288079b683ab00451f2",
+                ],
+            ),
+            (
+                "Arabic",
+                include_bytes!("../../oxml-layout/fonts/NotoSansArabic.ttf").as_slice(),
+                "العربية مرحبا بالعالم",
+                "63111b5b2e074dd48cc67692e0a2726d86ee94c1c37fe8598257b7b4e87e869e",
+                [
+                    "21e46030b17ddf81108d91fdf2f612674f998405d2a8837694db1d43d1db9878",
+                    "2582ee0d7c72c06b675e05fffd5ad156a75a20f1509654f33a60e8760bb3d872",
+                ],
+            ),
+            (
+                "Devanagari",
+                include_bytes!("../../oxml-layout/fonts/NotoSansDevanagari.ttf").as_slice(),
+                "देवनागरी नमस्ते दुनिया",
+                "9ce7b04f60e363d8870e5997744cf85cf69d38a4d7d129d364d92a3b14b461d7",
+                [
+                    "7d968955f9d3ec35b02cdb9265e7d04acc4b8e9e41fc3db7b44074018d5bbdbf",
+                    "7ce34ec2d15c3f5f44c49e85e94e52ab1c8cfa336ac13507da973b5d6519d7dd",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                Sha256::digest(source)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+                source_hash
+            );
+            let mut manager = FontManager::new_with_fonts(vec![(
+                "FX195 SVG variable caller".into(),
+                source.to_vec(),
+            )]);
+            let mut paintings = Vec::new();
+            let mut regular_oracle = None;
+            for (index, weight) in [400, 700].into_iter().enumerate() {
+                let filename = format!("NotoSans{script}-{weight}-static.ttf");
+                let static_bytes =
+                    if let Some(directory) = std::env::var_os("FX195_STATIC_ORACLE_DIR") {
+                        std::fs::read(std::path::Path::new(&directory).join(&filename))
+                            .expect("retained independently generated static oracle")
+                    } else {
+                        let directory = std::env::temp_dir().join(format!(
+                            "fx195-svg-oracle-{}-{script}-{weight}",
+                            std::process::id()
+                        ));
+                        std::fs::create_dir(&directory).unwrap();
+                        let input = directory.join("source.ttf");
+                        let output = directory.join(&filename);
+                        std::fs::write(&input, source).unwrap();
+                        let result = Command::new("hb-subset")
+                            .arg(&input)
+                            .arg(format!("--output-file={}", output.display()))
+                            .args([
+                                "--unicodes=*",
+                                &format!("--variations=wght={weight},wdth=100"),
+                                "--name-IDs=*",
+                                "--name-languages=*",
+                            ])
+                            .output()
+                            .unwrap();
+                        let bytes = std::fs::read(&output);
+                        std::fs::remove_dir_all(&directory).unwrap();
+                        assert!(
+                            result.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&result.stderr)
+                        );
+                        bytes.unwrap()
+                    };
+                assert_eq!(
+                    Sha256::digest(&static_bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    static_hashes[index]
+                );
+                let static_face = ttf_parser::Face::parse(&static_bytes, 0).unwrap();
+                assert!(!static_face.is_variable());
+                let id = manager
+                    .resolve_font(Some("FX195 SVG variable caller"), weight == 700, false)
+                    .unwrap();
+                let shaped = manager.shape_text(id, value, 24.0).unwrap();
+                let font = manager.font_data(id).unwrap();
+                assert_eq!(font.data.as_ref(), source);
+                let mut element = text(value, shaped.glyph_ids.len());
+                let PositionedElement::Text(run) = &mut element else {
+                    unreachable!()
+                };
+                run.origin = Point { x: 8.0, y: 32.0 };
+                run.font_id = id;
+                run.font_size = 24.0;
+                run.glyph_ids = shaped.glyph_ids;
+                run.advances = shaped.advances;
+                run.bold = weight == 700;
+                let input = LayoutResult::new(
+                    vec![Arc::new(PageFrame::new(1, 300.0, 60.0, vec![element]))],
+                    vec![font.clone()],
+                    None,
+                    Vec::new(),
+                );
+                let generated = render_page(&input, 0).unwrap();
+                let raw_actual =
+                    rasterise_with_resvg(&generated.svg, 600, 120, std::slice::from_ref(&font));
+                let mut reference = font.clone();
+                reference.data = Arc::from(static_bytes);
+                reference.variations.clear();
+                reference.bold = false;
+                reference.synthetic_bold = false;
+                // The expected SVG is independently authored, with the measured
+                // static face loaded directly and no producer CSS/axis selection.
+                let expected_svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60" viewBox="0 0 300 60"><rect width="300" height="60" fill="white"/><text x="8" y="32" font-family="rdocx-font-{}" font-size="24" fill="black">{value}</text></svg>"#,
+                    reference.id.0
+                );
+                let expected = rasterise_with_resvg(&expected_svg, 600, 120, &[reference.clone()]);
+                // usvg0.48.1 scales textLength by max rather than summed glyph
+                // advance inside a cluster. Only an independently measured identity
+                // adjustment can be omitted for this oracle. Raw SVG is unchanged.
+                let natural_advance =
+                    independent_static_advance(&reference.data, value, script, weight);
+                let oracle_svg =
+                    identity_length_adjustment_for_usvg(&generated.svg, natural_advance);
+                assert!(
+                    identity_length_adjustment_for_usvg(
+                        &format!(
+                            r#"<text textLength="{}" lengthAdjust="spacingAndGlyphs">x</text>"#,
+                            natural_advance + 1.0
+                        ),
+                        natural_advance,
+                    )
+                    .is_none(),
+                    "nonidentity adjustment must never be stripped"
+                );
+                let actual = if let Some(svg) = &oracle_svg {
+                    rasterise_with_resvg(svg, 600, 120, std::slice::from_ref(&font))
+                } else {
+                    assert!(
+                        !generated.svg.contains(" textLength="),
+                        "unqualified/nonidentity textLength requires a separate oracle"
+                    );
+                    raw_actual.clone()
+                };
+                assert!(actual.chunks_exact(4).any(|pixel| pixel[3] != 0));
+                let score = luminance_ssim(&actual, &expected);
+                println!(
+                    "{script} weight{weight}: independent HB natural advance {natural_advance}, identity correction {}, raw SSIM {}, qualified oracle SSIM {score}",
+                    oracle_svg.is_some(),
+                    luminance_ssim(&raw_actual, &expected)
+                );
+                if script == "Devanagari"
+                    && weight == 400
+                    && let Some(directory) = std::env::var_os("FX195_SVG_DIAGNOSTIC_DIR")
+                {
+                    let directory = std::path::PathBuf::from(directory);
+                    std::fs::create_dir_all(&directory).unwrap();
+                    std::fs::write(directory.join("actual.svg"), &generated.svg).unwrap();
+                    std::fs::write(directory.join("independent-static.svg"), &expected_svg)
+                        .unwrap();
+                    let without_length = generated.svg.replace(
+                        &format!(
+                            " textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\"",
+                            super::number(shaped.width)
+                        ),
+                        "",
+                    );
+                    let natural = rasterise_with_resvg(
+                        &without_length,
+                        600,
+                        120,
+                        std::slice::from_ref(&font),
+                    );
+                    let same_source_plain =
+                        rasterise_with_resvg(&expected_svg, 600, 120, std::slice::from_ref(&font));
+                    let size = resvg::tiny_skia::IntSize::from_wh(600, 120).unwrap();
+                    for (name, pixels) in [
+                        ("actual", &raw_actual),
+                        ("identity-corrected-oracle", &actual),
+                        ("independent-static", &expected),
+                        ("without-length", &natural),
+                        ("same-source-plain", &same_source_plain),
+                    ] {
+                        let image =
+                            resvg::tiny_skia::Pixmap::from_vec(pixels.clone(), size).unwrap();
+                        image
+                            .save_png(directory.join(format!("{name}.png")))
+                            .unwrap();
+                    }
+                    let PositionedElement::Text(run) = &input.pages[0].elements[0] else {
+                        unreachable!()
+                    };
+                    let face = ttf_parser::Face::parse(source, 0).unwrap();
+                    let nominal = value
+                        .chars()
+                        .map(|scalar| face.glyph_index(scalar).unwrap_or(ttf_parser::GlyphId(0)).0)
+                        .collect::<Vec<_>>();
+                    std::fs::write(directory.join("actual-shape.json"), format!(
+                        "{{\"script\":\"{script}\",\"weight\":{weight},\"scalarCount\":{},\"glyphIds\":{:?},\"nominalGlyphIds\":{:?},\"advances\":{:?},\"totalAdvance\":{},\"hasTextLength\":{},\"ssimActual\":{},\"ssimWithoutLength\":{},\"ssimSameSourcePlain\":{}}}\n",
+                        value.chars().count(), run.glyph_ids, nominal, run.advances, shaped.width,
+                        generated.svg.contains(" textLength="), luminance_ssim(&raw_actual, &expected),
+                        luminance_ssim(&natural, &expected), luminance_ssim(&same_source_plain, &expected)
+                    )).unwrap();
+                    std::fs::write(
+                        directory.join("independent-static.ttf"),
+                        reference.data.as_ref(),
+                    )
+                    .unwrap();
+                    let hb_version = Command::new("hb-shape").arg("--version").output().unwrap();
+                    assert!(hb_version.status.success());
+                    assert!(String::from_utf8_lossy(&hb_version.stdout).contains("14.4.0"));
+                    std::fs::write(directory.join("hb-shape-version.txt"), hb_version.stdout)
+                        .unwrap();
+                    for (name, file) in [
+                        (
+                            "variable",
+                            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                                .join("../oxml-layout/fonts/NotoSansDevanagari.ttf"),
+                        ),
+                        (
+                            "independent-static",
+                            directory.join("independent-static.ttf"),
+                        ),
+                    ] {
+                        let result = Command::new("hb-shape")
+                            .args([
+                                "--output-format=json",
+                                "--no-glyph-names",
+                                "--font-size=24000",
+                            ])
+                            .arg(file)
+                            .arg(value)
+                            .output()
+                            .unwrap();
+                        assert!(result.status.success());
+                        std::fs::write(directory.join(format!("{name}-hb.json")), result.stdout)
+                            .unwrap();
+                    }
+                }
+                assert!(
+                    score >= 0.99,
+                    "{script} weight{weight}: independent static SVG SSIM {score}"
+                );
+                if weight == 400 {
+                    regular_oracle = Some(expected);
+                } else {
+                    let correct_error: u64 = actual
+                        .iter()
+                        .zip(&expected)
+                        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                        .sum();
+                    let default_error: u64 = actual
+                        .iter()
+                        .zip(regular_oracle.as_ref().unwrap())
+                        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                        .sum();
+                    assert!(
+                        default_error > 0 && correct_error.saturating_mul(4) < default_error,
+                        "{script}: selected700 must paint substantially closer to independent700 than400: {correct_error}/{default_error}"
+                    );
+                }
+                paintings.push(actual);
+            }
+            assert_ne!(
+                paintings[0], paintings[1],
+                "{script} selected700 paint must differ from400"
+            );
+        }
+    }
+
+    #[test]
+    fn fx195_svg_synthetic_paint_matches_independent_rectangle() {
+        let mut fonts = FontManager::new_with_fonts(vec![(
+            "FX195SvgRectangle".into(),
+            fx195_svg_rectangle_font(),
+        )]);
+        let plain = fonts
+            .resolve_font(Some("FX195SvgRectangle"), false, false)
+            .unwrap();
+        let plain_shape = fonts.shape_text(plain, "A", 125.0).unwrap();
+        let mut ordinary_pixels = None;
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let id = fonts
+                .resolve_font(Some("FX195SvgRectangle"), bold, italic)
+                .unwrap();
+            let shaped = fonts.shape_text(id, "A", 125.0).unwrap();
+            assert_eq!(shaped.advances, plain_shape.advances);
+            let font = fonts.font_data(id).unwrap();
+            assert_eq!(font.synthetic_bold, bold);
+            assert_eq!(font.synthetic_italic, italic);
+            let mut element = text("A", 1);
+            let PositionedElement::Text(run) = &mut element else {
+                unreachable!()
+            };
+            run.origin = Point { x: 12.0, y: 100.0 };
+            run.font_id = id;
+            run.font_size = 125.0;
+            run.glyph_ids = shaped.glyph_ids;
+            run.advances = shaped.advances;
+            run.bold = bold;
+            run.italic = italic;
+            let input = LayoutResult::new(
+                vec![Arc::new(PageFrame::new(1, 120.0, 120.0, vec![element]))],
+                vec![font.clone()],
+                None,
+                Vec::new(),
+            );
+            let generated = render_page(&input, 0).unwrap();
+            assert!(generated.diagnostics.is_empty());
+            assert!(generated.svg.contains(">A</text>"));
+            let actual = rasterise_with_resvg(&generated.svg, 240, 240, &[font]);
+            // Authored glyf rectangle: x50..450,y0..700 at1000UPEM.
+            // Independent SVG geometry applies point-space round stroke and
+            // baseline-preserving tan(12deg) shear to those four known corners.
+            let stroke = if bold {
+                r#"stroke="black" stroke-width="5.208333333333333" stroke-linejoin="round" stroke-linecap="round""#
+            } else {
+                ""
+            };
+            let transform = if italic {
+                r#"transform="matrix(1 0 -0.2125565616700221 1 21.25565616700221 0)""#
+            } else {
+                ""
+            };
+            let expected_svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" fill="white"/><rect x="18.25" y="12.5" width="50" height="87.5" fill="black" {stroke} {transform}/></svg>"#
+            );
+            let expected = rasterise_with_resvg(&expected_svg, 240, 240, &[]);
+            assert!(actual.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            let worst = actual
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(
+                worst <= 1,
+                "independent SVG synthesis {bold}/{italic}: coverage delta {worst}"
+            );
+            if !bold && !italic {
+                ordinary_pixels = Some(actual);
+            } else {
+                assert_ne!(actual, *ordinary_pixels.as_ref().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn fx195_synthesized_ink_bounds_preserve_advance_and_include_offsets() {
+        let mut font = test_font();
+        font.synthetic_bold = true;
+        font.synthetic_italic = true;
+        let face = ttf_parser::Face::parse(&font.data, 0).unwrap();
+        let glyph = face.glyph_index('W').unwrap();
+        let box_units = face.glyph_bounding_box(glyph).unwrap();
+        let mut element = text("W", 1);
+        let PositionedElement::Text(run) = &mut element else {
+            unreachable!()
+        };
+        run.glyph_ids = vec![glyph.0];
+        run.font_size = 48.0;
+        run.origin = Point { x: 20.0, y: 70.0 };
+        let advances_before = run.advances.clone();
+        let bounds = glyph_ink_bounds(run, &[font.clone()], &[5.0], &[3.0], &[0.0])
+            .unwrap()
+            .unwrap();
+        let scale = 48.0 / f64::from(face.units_per_em());
+        let left = 25.0 + f64::from(box_units.x_min) * scale - 1.0;
+        let right = 25.0 + f64::from(box_units.x_max) * scale + 1.0;
+        let top = 67.0 - f64::from(box_units.y_max) * scale - 1.0;
+        let bottom = 67.0 - f64::from(box_units.y_min) * scale + 1.0;
+        let tangent = 12.0_f64.to_radians().tan();
+        let expected_left = left + tangent * (70.0 - bottom);
+        let expected_right = right + tangent * (70.0 - top);
+        for (actual, expected) in [
+            (bounds.x, expected_left),
+            (bounds.y, top),
+            (bounds.width, expected_right - expected_left),
+            (bounds.height, bottom - top),
+        ] {
+            assert!(
+                (actual - expected).abs() < 1e-10,
+                "{actual} versus {expected}"
+            );
+        }
+        assert_eq!(run.advances, advances_before);
+        run.glyph_ids[0] = face.number_of_glyphs();
+        assert!(glyph_ink_bounds(run, &[font], &[], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn fx195_selected_collection_face_is_embedded_and_painted() {
+        let sources: [&[u8]; 2] = [
+            include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf"),
+            include_bytes!("../../oxml-layout/fonts/Caladea-Regular.ttf"),
+        ];
+        let mut collection = Vec::from(&b"ttcf\0\x01\0\0\0\0\0\x02"[..]);
+        collection.resize(20, 0);
+        for (index, source) in sources.iter().enumerate() {
+            let offset = collection.len();
+            collection[12 + index * 4..16 + index * 4]
+                .copy_from_slice(&(offset as u32).to_be_bytes());
+            let mut face = source.to_vec();
+            let count = usize::from(u16::from_be_bytes(face[4..6].try_into().unwrap()));
+            for row in 0..count {
+                let start = 12 + row * 16 + 8;
+                let table = u32::from_be_bytes(face[start..start + 4].try_into().unwrap());
+                face[start..start + 4].copy_from_slice(&(table + offset as u32).to_be_bytes());
+            }
+            collection.extend_from_slice(&face);
+            collection.resize((collection.len() + 3) & !3, 0);
+        }
+        let mut font = test_font();
+        font.data = Arc::from(collection);
+        font.face_index = 1;
+        let bytes_before = font.data.clone();
+        let standalone = standalone_font_data(&font).unwrap().into_owned();
+        assert_eq!(sfnt_checksum(&standalone), 0xB1B0_AFBA);
+        let selected = ttf_parser::Face::parse(sources[1], 0).unwrap();
+        let extracted = ttf_parser::Face::parse(&standalone, 0).unwrap();
+        let first = ttf_parser::Face::parse(sources[0], 0).unwrap();
+        let glyph = selected.glyph_index('W').unwrap();
+        assert_eq!(extracted.glyph_index('W'), Some(glyph));
+        assert_eq!(
+            extracted.glyph_hor_advance(glyph),
+            selected.glyph_hor_advance(glyph)
+        );
+        assert_ne!(
+            selected.glyph_hor_advance(glyph),
+            first.glyph_hor_advance(first.glyph_index('W').unwrap())
+        );
+        let mut element = text("W", 1);
+        let PositionedElement::Text(run) = &mut element else {
+            unreachable!()
+        };
+        run.glyph_ids = vec![glyph.0];
+        run.advances = vec![
+            f64::from(selected.glyph_hor_advance(glyph).unwrap()) * run.font_size
+                / f64::from(selected.units_per_em()),
+        ];
+        let mut input = layout(vec![element]);
+        input.fonts = vec![font.clone()];
+        let svg = render_page(&input, 0).unwrap();
+        assert!(svg.diagnostics.is_empty());
+        assert!(svg.svg.contains(">W</text>"));
+        let start = svg.svg.find("data:font/ttf;base64,").unwrap() + "data:font/ttf;base64,".len();
+        let end = start + svg.svg[start..].find('\'').unwrap();
+        assert_eq!(BASE64.decode(&svg.svg[start..end]).unwrap(), standalone);
+        let mut extracted_font = font.clone();
+        extracted_font.data = Arc::from(standalone);
+        extracted_font.face_index = 0;
+        let painted = rasterise_with_resvg(&svg.svg, 240, 160, &[extracted_font]);
+        assert!(painted.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        let mut reference = font.clone();
+        reference.data = Arc::from(sources[1]);
+        reference.face_index = 0;
+        let expected = rasterise_with_resvg(&svg.svg, 240, 160, &[reference]);
+        assert_eq!(painted, expected);
+        assert_eq!(font.data, bytes_before);
+        let mut invalid = font;
+        invalid.face_index = 2;
+        assert!(standalone_font_data(&invalid).is_none());
+        invalid.data = Arc::from(&invalid.data[..19]);
+        assert!(standalone_font_data(&invalid).is_none());
+    }
+
+    #[test]
+    fn invalid_collection_face_is_diagnosed_without_embedding() {
         let mut collection = test_font();
         collection.data = Arc::from(b"ttcf synthetic collection".as_slice());
         collection.face_index = 2;
@@ -1524,11 +2725,27 @@ mod tests {
         layout.fonts = vec![collection];
 
         let result = render_page(&layout, 0).unwrap();
-        assert!(result.svg.contains("data:font/collection;base64,"));
-        assert!(result.svg.contains("format('collection')"));
+        assert!(!result.svg.contains("data:font/collection;base64,"));
+        assert!(!result.svg.contains("@font-face"));
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].path, "fonts[7]");
-        assert!(result.diagnostics[0].message.contains("face index"));
+        assert!(result.diagnostics[0].message.contains("selected font face"));
+        // Header count and table spans are checked before parser arithmetic.
+        for bytes in [
+            b"ttcf\0\x01\0\0\xff\xff\xff\xff".to_vec(),
+            b"ttcf\0\x01\0\0\0\0\0\x01\xff\xff\xff\xff".to_vec(),
+        ] {
+            let mut font = test_font();
+            font.data = Arc::from(bytes);
+            font.face_index = u32::MAX;
+            assert!(standalone_font_data(&font).is_none());
+        }
+        let mut invalid_table = test_font();
+        let mut bytes = invalid_table.data.to_vec();
+        bytes[20..24].copy_from_slice(&u32::MAX.to_be_bytes());
+        bytes[24..28].copy_from_slice(&2u32.to_be_bytes());
+        invalid_table.data = Arc::from(bytes);
+        assert!(standalone_font_data(&invalid_table).is_none());
     }
 
     #[test]
@@ -1562,7 +2779,7 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 2);
         assert_eq!(result.diagnostics[0].path, "pages[0].elements[0].fill");
         assert_eq!(result.diagnostics[1].path, "fonts[7]");
-        assert!(result.diagnostics[1].message.contains("face index"));
+        assert!(result.diagnostics[1].message.contains("selected font face"));
     }
 
     #[test]
@@ -1834,6 +3051,12 @@ mod tests {
 
     #[test]
     fn singular_group_with_text_omits_only_the_unprovable_effect() {
+        let mut unprovable = text("kept", 4);
+        let PositionedElement::Text(run) = &mut unprovable else {
+            unreachable!()
+        };
+        run.glyph_ids[0] = u16::MAX;
+        assert!(glyph_ink_bounds(run, &[test_font()], &[], &[], &[]).is_err());
         let group = PositionedElement::Group(GroupElement {
             transform: Transform {
                 d: 0.0,
@@ -1848,7 +3071,7 @@ mod tests {
                 color: Color::BLACK,
             }],
             children: vec![
-                text("kept", 4),
+                unprovable,
                 PositionedElement::FilledRect {
                     rect: Rect {
                         x: 50.0,
@@ -1866,11 +3089,19 @@ mod tests {
         assert!(result.svg.contains(">kept</text>"));
         assert!(result.svg.contains("<rect x=\"50\" y=\"10\""));
         assert!(!result.svg.contains("<filter "));
-        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics.len(), 2);
         assert_eq!(result.diagnostics[0].path, "pages[0].elements[0]");
         assert_eq!(
             result.diagnostics[0].message,
             "group effects were omitted because singular-transform source bounds could not be proven"
+        );
+        assert_eq!(
+            result.diagnostics[1].path,
+            "pages[0].elements[0].children[0]"
+        );
+        assert_eq!(
+            result.diagnostics[1].message,
+            "complex shaping kept searchable text with total-advance positioning"
         );
     }
 
@@ -2114,6 +3345,72 @@ mod tests {
                 * (variance_left + variance_right + c2))
     }
 
+    // The production formatter rounds to six decimals. Half a final decimal
+    // plus floating summation noise is the entire allowed identity tolerance.
+    fn identity_length_adjustment_for_usvg(svg: &str, natural_advance: f64) -> Option<String> {
+        if !natural_advance.is_finite()
+            || natural_advance <= 0.0
+            || svg.matches(" textLength=\"").count() != 1
+        {
+            return None;
+        }
+        let start = svg.find(" textLength=\"")?;
+        let value_start = start + " textLength=\"".len();
+        let value_end = value_start + svg[value_start..].find('"')?;
+        let target: f64 = svg[value_start..value_end].parse().ok()?;
+        let suffix = "\" lengthAdjust=\"spacingAndGlyphs\"";
+        if !target.is_finite()
+            || (target - natural_advance).abs() > 0.000_000_500_1
+            || !svg[value_end..].starts_with(suffix)
+        {
+            return None;
+        }
+        let mut corrected = svg.to_owned();
+        corrected.replace_range(start..value_end + suffix.len(), "");
+        Some(corrected)
+    }
+
+    fn independent_static_advance(bytes: &[u8], text: &str, script: &str, weight: u32) -> f64 {
+        let version = std::process::Command::new("hb-shape")
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(version.status.success());
+        assert!(
+            String::from_utf8_lossy(&version.stdout).starts_with("hb-shape (HarfBuzz) 14.4.0\n")
+        );
+        let directory = std::env::temp_dir().join(format!(
+            "fx195-svg-hb-width-{}-{script}-{weight}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("static.ttf");
+        std::fs::write(&file, bytes).unwrap();
+        let result = std::process::Command::new("hb-shape")
+            .args([
+                "--output-format=json",
+                "--no-glyph-names",
+                "--font-size=24000",
+            ])
+            .arg(&file)
+            .arg(text)
+            .output();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        let result = result.unwrap();
+        assert!(
+            result.status.success(),
+            "independent static width oracle failed"
+        );
+        let glyphs: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let glyphs = glyphs.as_array().unwrap();
+        assert!(!glyphs.is_empty());
+        glyphs
+            .iter()
+            .map(|glyph| glyph["ax"].as_i64().unwrap() as f64 / 1000.0)
+            .sum()
+    }
+
     fn rasterise_with_resvg(svg: &str, width: u32, height: u32, fonts: &[FontData]) -> Vec<u8> {
         let mut options = resvg::usvg::Options::default();
         assert!(options.fontdb.faces().next().is_none());
@@ -2354,6 +3651,112 @@ mod tests {
     }
 
     #[test]
+    fn fx205_svg_colour_grid_preserves_origin_alpha_and_repeated_source_cells() {
+        for (origin, samples) in [
+            (
+                (8.0, 8.0),
+                [
+                    [255, 0, 0],
+                    [127, 127, 255],
+                    [0, 255, 0],
+                    [191, 191, 191],
+                    [255, 0, 0],
+                    [0, 255, 0],
+                ],
+            ),
+            (
+                (-3.0, -5.0),
+                [
+                    [191, 191, 191],
+                    [0, 255, 0],
+                    [127, 127, 255],
+                    [255, 0, 0],
+                    [191, 191, 191],
+                    [127, 127, 255],
+                ],
+            ),
+        ] {
+            let paint = Paint::grid(
+                Rect {
+                    x: origin.0,
+                    y: origin.1,
+                    width: 8.0,
+                    height: 8.0,
+                },
+                2,
+                2,
+                vec![
+                    color(1.0, 0.0, 0.0),
+                    Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 1.0,
+                        a: 0.5,
+                    },
+                    color(0.0, 1.0, 0.0),
+                    Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.25,
+                    },
+                ],
+            )
+            .unwrap();
+            let scene = layout(vec![PositionedElement::Path(PathElement {
+                path: Path::rect(Rect {
+                    x: 8.0,
+                    y: 8.0,
+                    width: 32.0,
+                    height: 32.0,
+                }),
+                fill: Some(paint),
+                stroke: None,
+            })]);
+            let result = render_page(&scene, 0).unwrap();
+            assert!(result.diagnostics.is_empty());
+            let pattern = format!(
+                "patternUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"8\" height=\"8\"",
+                origin.0, origin.1
+            );
+            assert!(result.svg.contains(&pattern));
+            let png = oxml_pdf::render_page_to_png(&scene, 0, 72.0).unwrap();
+            let native = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+            let svg =
+                rasterise_with_resvg(&result.svg, native.width(), native.height(), &scene.fonts);
+            // Interior samples derive directly from the four source cells and white
+            // background. Repeat positions also decide the nonzero pattern origin.
+            for ((x, y), expected) in [(9, 9), (13, 9), (9, 13), (13, 13), (17, 9), (25, 13)]
+                .into_iter()
+                .zip(samples)
+            {
+                let offset = ((y * native.width() + x) * 4) as usize;
+                for pixels in [native.data(), svg.as_slice()] {
+                    for channel in 0..3 {
+                        assert!(
+                            (i16::from(pixels[offset + channel]) - expected[channel]).abs() <= 1
+                        );
+                    }
+                    assert_eq!(pixels[offset + 3], 255);
+                }
+            }
+            let score = luminance_ssim(native.data(), &svg);
+            assert!(score >= 0.99, "Grid SVG/raster SSIM {score}");
+            let shifted_pattern = format!(
+                "patternUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"8\" height=\"8\"",
+                origin.0 + 1.0,
+                origin.1
+            );
+            let shifted = result.svg.replacen(&pattern, &shifted_pattern, 1);
+            assert_ne!(shifted, result.svg);
+            let shifted =
+                rasterise_with_resvg(&shifted, native.width(), native.height(), &scene.fonts);
+            let score = luminance_ssim(native.data(), &shifted);
+            assert!(score < 0.99, "One-point Grid origin shift SSIM {score}");
+        }
+    }
+
+    #[test]
     fn svg_page_rasterises_like_the_png_backend() {
         assert_eq!(RESVG_ORACLE_VERSION, "resvg 0.48.1");
         let layout = representative_golden_layout();
@@ -2388,5 +3791,382 @@ mod tests {
             perturbed_score < 0.99,
             "one-point perturbation unexpectedly passed at SSIM {perturbed_score}"
         );
+    }
+    #[test]
+    #[ignore = "mandatory F-X195 installed-artifact acceptance stage, execute exact named test with --ignored after installed104 qualification"]
+    fn fx195_installed_svg_styles_paint_authenticated_independent_contours() {
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeSet;
+        use std::path::Path;
+
+        fn digest(bytes: &[u8]) -> String {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+        fn checked(path: &str, expected: &str) -> Vec<u8> {
+            let bytes = std::fs::read(path).expect("authenticated artifact is readable");
+            assert_eq!(digest(&bytes), expected, "artifact changed: {path}");
+            bytes
+        }
+        fn string<'a>(row: &'a serde_json::Value, key: &str) -> &'a str {
+            row[key].as_str().expect("required admitted string")
+        }
+        fn number(row: &serde_json::Value, key: &str) -> u32 {
+            u32::try_from(row[key].as_u64().expect("required admitted integer")).unwrap()
+        }
+        fn crop(bytes: &[u8], width: u32, roi: [u32; 4]) -> Vec<u8> {
+            let mut result = Vec::new();
+            for y in roi[1]..roi[3] {
+                let start = ((y * width + roi[0]) * 4) as usize;
+                let end = ((y * width + roi[2]) * 4) as usize;
+                result.extend_from_slice(&bytes[start..end]);
+            }
+            result
+        }
+        fn variable_owners(svg: &str) -> Vec<(std::collections::BTreeMap<String, String>, String)> {
+            use quick_xml::events::Event;
+            use quick_xml::name::ResolveResult;
+            let mut reader = quick_xml::reader::NsReader::from_str(svg);
+            let mut owners = Vec::new();
+            let mut current = None;
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                let svg_namespace = matches!(namespace, ResolveResult::Bound(value) if value.as_ref() == b"http://www.w3.org/2000/svg");
+                match event {
+                    Event::Start(element) if element.local_name().as_ref() == b"text" => {
+                        assert!(svg_namespace && current.is_none());
+                        let attributes = element
+                            .attributes()
+                            .map(|attribute| {
+                                let attribute = attribute.unwrap();
+                                (
+                                    std::str::from_utf8(attribute.key.as_ref())
+                                        .unwrap()
+                                        .to_owned(),
+                                    attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            reader.decoder(),
+                                        )
+                                        .unwrap()
+                                        .into_owned(),
+                                )
+                            })
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        current = Some((attributes, String::new()));
+                    }
+                    Event::Text(text) => {
+                        if let Some((_, contents)) = current.as_mut() {
+                            contents.push_str(&text.decode().unwrap());
+                        }
+                    }
+                    Event::End(element) if element.local_name().as_ref() == b"text" => {
+                        assert!(svg_namespace);
+                        owners.push(current.take().expect("actual opened text owner"));
+                    }
+                    Event::Eof => break,
+                    _ => assert!(
+                        current.is_none(),
+                        "authenticated positioned Thai owners have no nested or synthetic payload"
+                    ),
+                }
+            }
+            assert!(current.is_none());
+            owners
+        }
+        // ROOT executes this named stage serially after installed tests. Python
+        // never invokes Cargo. Missing admission is a failure, never a skip.
+        assert_eq!(std::env::var("F_X195_ROOT_SERIAL_SVG_STAGE").unwrap(), "1");
+        let admission_path = std::env::var("F_X195_INSTALLED_SVG_ADMISSION").unwrap();
+        let admission_sha = std::env::var("F_X195_INSTALLED_SVG_ADMISSION_SHA").unwrap();
+        let admission: serde_json::Value =
+            serde_json::from_slice(&checked(&admission_path, &admission_sha)).unwrap();
+        assert_eq!(admission["installedActualPassed"].as_u64(), Some(104));
+        assert_eq!(
+            admission["pairedFreshWheelsAuthenticated"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            admission["rootActualTerminalAuthenticated"].as_bool(),
+            Some(true)
+        );
+        checked(
+            string(&admission, "installedReceipt"),
+            string(&admission, "installedReceiptSHA"),
+        );
+        let wheels = admission["wheels"].as_array().unwrap();
+        assert_eq!(wheels.len(), 2);
+        for wheel in wheels {
+            checked(string(wheel, "path"), string(wheel, "sha256"));
+        }
+        let sources: serde_json::Value = serde_json::from_slice(&checked(
+            string(&admission, "sourceInputs"),
+            string(&admission, "sourceInputsSHA"),
+        ))
+        .unwrap();
+        assert_eq!(sources.as_object().unwrap().len(), 317);
+        assert_eq!(
+            admission["sourceModesAuthenticatedByRoot"].as_bool(),
+            Some(true)
+        );
+        let root = Path::new(string(&admission, "sourceRoot"));
+        for (relative, guard) in sources.as_object().unwrap() {
+            let path = root.join(relative);
+            let bytes = checked(path.to_str().unwrap(), string(guard, "sha256"));
+            assert_eq!(bytes.len() as u64, guard["size"].as_u64().unwrap());
+            // Native source modes are authenticated by ROOT before admission.
+            // Byte/size guards here remain portable across native targets.
+        }
+        let required: BTreeSet<String> = [
+            "genuine-italic",
+            "ital-axis",
+            "slnt-axis",
+            "synthetic-bold",
+            "synthetic-italic",
+            "synthetic-combined",
+            "variable-400",
+            "variable-700",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let mut observed = BTreeSet::new();
+        let rows = admission["artifacts"].as_array().unwrap();
+        assert_eq!(rows.len(), required.len());
+        for row in rows {
+            let artifact: serde_json::Value =
+                serde_json::from_slice(&checked(string(row, "receipt"), string(row, "receiptSHA")))
+                    .unwrap();
+            let case = string(&artifact, "case");
+            assert!(
+                observed.insert(case.to_owned()),
+                "duplicate installed owner"
+            );
+            assert!(required.contains(case));
+            assert_eq!(artifact["threshold"].as_f64(), Some(0.99));
+            let svg_bytes = checked(string(&artifact, "svg"), string(&artifact, "svgSHA"));
+            let svg = std::str::from_utf8(&svg_bytes).unwrap();
+            let family = string(&artifact, "fontFamily");
+            let font_id: u32 = family.strip_prefix("rdocx-font-").unwrap().parse().unwrap();
+            let definition = format!("@font-face{{font-family:'{family}';src:url('data:");
+            let tail = &svg[svg.find(&definition).unwrap() + definition.len()..];
+            let data_tail = &tail[tail.find(";base64,").unwrap() + ";base64,".len()..];
+            let embedded = BASE64
+                .decode(&data_tail[..data_tail.find('\'').unwrap()])
+                .unwrap();
+            assert_eq!(digest(&embedded), string(&artifact, "fontSHA"));
+            assert_eq!(artifact["fontIndex"].as_u64(), Some(0));
+            let selected = if let Some(path) = artifact["oracleFont"].as_str() {
+                // usvg does not apply variable CSS coordinates. This resolver
+                // adapter is admitted only with independently selected physical
+                // static bytes plus a verified actual emitted CSS selector.
+                let selector = artifact["selector"].as_str().unwrap_or_else(|| {
+                    match artifact["axis"].as_str().unwrap() {
+                        "ital" => "'ital' 1",
+                        "slnt" => "'slnt' -12",
+                        _ => panic!("unknown axis"),
+                    }
+                });
+                if case == "variable-400" || case == "variable-700" {
+                    let weight = if case == "variable-400" { 400.0 } else { 700.0 };
+                    let face = ttf_parser::Face::parse(&embedded, 0).unwrap();
+                    let defaults = face
+                        .variation_axes()
+                        .into_iter()
+                        .map(|axis| {
+                            (
+                                std::str::from_utf8(&axis.tag.to_bytes())
+                                    .unwrap()
+                                    .to_owned(),
+                                f64::from(axis.def_value),
+                            )
+                        })
+                        .collect::<std::collections::BTreeMap<_, _>>();
+                    assert_eq!(
+                        defaults,
+                        std::collections::BTreeMap::from([
+                            ("wght".to_owned(), 400.0),
+                            ("wdth".to_owned(), 100.0)
+                        ])
+                    );
+                    assert_eq!(
+                        artifact["authenticatedFvarDefaults"],
+                        serde_json::json!({"wght": 400.0, "wdth": 100.0})
+                    );
+                    let owners = variable_owners(svg);
+                    assert_eq!(owners.len(), 5);
+                    assert_eq!(
+                        owners
+                            .iter()
+                            .map(|(_, text)| text.as_str())
+                            .collect::<Vec<_>>(),
+                        ["ภาษา", "ไทยยิน", "ดี", "ต้อน", "รับ"]
+                    );
+                    let declared = artifact["owners"].as_array().unwrap();
+                    assert_eq!(declared.len(), owners.len());
+                    for ((attributes, text), proof) in owners.iter().zip(declared) {
+                        assert_eq!(text, string(proof, "text"));
+                        assert_eq!(attributes["font-family"], family);
+                        assert_eq!(string(proof, "family"), family);
+                        assert_eq!(string(proof, "physicalFontSHA"), digest(&embedded));
+                        assert_eq!(attributes["font-style"], "normal");
+                        assert_eq!(
+                            attributes["font-weight"],
+                            if weight == 700.0 { "bold" } else { "normal" }
+                        );
+                        for refused in ["stroke", "transform", "filter", "textLength"] {
+                            assert!(!attributes.contains_key(refused));
+                        }
+                        assert_eq!(
+                            attributes["x"].split_whitespace().count(),
+                            text.chars().count()
+                        );
+                        attributes["y"].parse::<f64>().unwrap();
+                        let mut effective = defaults.clone();
+                        let mut explicit = std::collections::BTreeMap::new();
+                        if let Some(style) = attributes.get("style") {
+                            let payload = style
+                                .strip_prefix("font-synthesis:none;font-variation-settings:")
+                                .unwrap();
+                            for declaration in payload.split(',') {
+                                let (tag, value) = declaration.trim().split_once(' ').unwrap();
+                                let tag = tag
+                                    .strip_prefix('\'')
+                                    .and_then(|tag| tag.strip_suffix('\''))
+                                    .unwrap();
+                                assert!(tag == "wght" || tag == "wdth");
+                                assert!(
+                                    explicit
+                                        .insert(tag.to_owned(), value.parse::<f64>().unwrap())
+                                        .is_none()
+                                );
+                            }
+                            assert!(!explicit.is_empty());
+                            effective.extend(explicit.clone());
+                        } else {
+                            assert_eq!(weight, 400.0);
+                            assert_eq!(proof["implicitDefault"].as_bool(), Some(true));
+                        }
+                        assert_eq!(
+                            effective,
+                            std::collections::BTreeMap::from([
+                                ("wght".to_owned(), weight),
+                                ("wdth".to_owned(), 100.0)
+                            ])
+                        );
+                        if weight == 700.0 {
+                            assert_eq!(explicit.get("wght"), Some(&700.0));
+                        }
+                        assert_eq!(
+                            proof["effectiveCoordinates"],
+                            serde_json::json!({"wght": weight, "wdth": 100.0})
+                        );
+                    }
+                } else {
+                    assert!(svg.contains(selector));
+                }
+                checked(path, string(&artifact, "oracleFontSHA"))
+            } else {
+                embedded
+            };
+            let font = FontData {
+                id: FontId(font_id),
+                family: family.to_owned(),
+                data: Arc::from(selected),
+                face_index: 0,
+                bold: false,
+                italic: false,
+                variations: vec![],
+                synthetic_bold: false,
+                synthetic_italic: false,
+            };
+            let width = number(&artifact, "width");
+            let height = number(&artifact, "height");
+            let actual = rasterise_with_resvg(svg, width, height, std::slice::from_ref(&font));
+            let expected = if artifact["expectedSVG"].is_string() {
+                let bytes = checked(
+                    string(&artifact, "expectedSVG"),
+                    string(&artifact, "expectedSVGSHA"),
+                );
+                // Independent hb-subset static source, already proven to match
+                // actual source HB positions and contours, supplies expected.
+                rasterise_with_resvg(std::str::from_utf8(&bytes).unwrap(), width, height, &[font])
+            } else {
+                let bytes = checked(
+                    string(&artifact, "expected"),
+                    string(&artifact, "expectedSHA"),
+                );
+                let png = resvg::tiny_skia::Pixmap::decode_png(&bytes).unwrap();
+                assert_eq!((png.width(), png.height()), (width, height));
+                png.data().to_vec()
+            };
+            assert_eq!(actual.len(), expected.len());
+            let references: Vec<(&str, Vec<u8>)> = [
+                ("quadratic", "expectedQuadratic", "expectedQuadraticSHA"),
+                ("cubic", "expectedCubic", "expectedCubicSHA"),
+            ]
+            .into_iter()
+            .map(|(label, path, hash)| {
+                let bytes = checked(string(&artifact, path), string(&artifact, hash));
+                let image = resvg::tiny_skia::Pixmap::decode_png(&bytes).unwrap();
+                assert_eq!((image.width(), image.height()), (width, height));
+                (label, image.data().to_vec())
+            })
+            .collect();
+            let roi = if let Some(values) = artifact["roi"].as_array() {
+                assert_eq!(values.len(), 4);
+                std::array::from_fn(|i| u32::try_from(values[i].as_u64().unwrap()).unwrap())
+            } else {
+                // ROI derives only from independent expected ink. No actual
+                // image registration or actual-mask bounds can hide a shift.
+                let mut bounds = [width, height, 0, 0];
+                for y in 0..height {
+                    for x in 0..width {
+                        let pixel = ((y * width + x) * 4) as usize;
+                        if expected[pixel..pixel + 3]
+                            .iter()
+                            .any(|channel| *channel < 200)
+                        {
+                            bounds[0] = bounds[0].min(x);
+                            bounds[1] = bounds[1].min(y);
+                            bounds[2] = bounds[2].max(x + 1);
+                            bounds[3] = bounds[3].max(y + 1);
+                        }
+                    }
+                }
+                [
+                    bounds[0].saturating_sub(3),
+                    bounds[1].saturating_sub(3),
+                    (bounds[2] + 3).min(width),
+                    (bounds[3] + 3).min(height),
+                ]
+            };
+            assert!(roi[0] < roi[2] && roi[1] < roi[3] && roi[2] <= width && roi[3] <= height);
+            let score = luminance_ssim(&crop(&actual, width, roi), &crop(&expected, width, roi));
+            assert!(
+                score >= 0.99,
+                "installed SVG {case} original static paint SSIM {score}"
+            );
+            for (curve, reference) in &references {
+                assert_eq!(actual.len(), reference.len());
+                let score =
+                    luminance_ssim(&crop(&actual, width, roi), &crop(reference, width, roi));
+                assert!(
+                    score >= 0.99,
+                    "installed SVG {case} {curve} independent paint SSIM {score}"
+                );
+                eprintln!("authenticated installed SVG case={case} curve={curve} SSIM={score}");
+            }
+        }
+        assert_eq!(observed, required);
+        for (relative, guard) in sources.as_object().unwrap() {
+            let path = root.join(relative);
+            let bytes = checked(path.to_str().unwrap(), string(guard, "sha256"));
+            assert_eq!(bytes.len() as u64, guard["size"].as_u64().unwrap());
+            // Native source modes are authenticated by ROOT before admission.
+            // Byte/size guards here remain portable across native targets.
+        }
     }
 }

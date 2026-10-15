@@ -27,11 +27,11 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+oxml-pdf = { workspace = true }
+oxml-layout = { workspace = true }
 oxml-py-support = { workspace = true }
 pyo3 = { workspace = true }
 rdocx = { workspace = true, features = ["system-fonts"] }
 rdocx-oxml = { workspace = true }
 smallvec = { workspace = true }
-
-[dev-dependencies]
-oxml-layout = { workspace = true }
+serde_json = { workspace = true }

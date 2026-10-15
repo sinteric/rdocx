@@ -651,7 +651,10 @@ fn render_path(
     let Some(path_geometry) = build_path(path) else {
         return;
     };
-    if let Some(paint) = fill.and_then(raster_paint) {
+    let fill_texture = fill.and_then(grid_texture);
+    if let Some(paint) =
+        fill.and_then(|paint| raster_paint_with_texture(paint, fill_texture.as_ref()))
+    {
         let paint_mask =
             fill.and_then(|paint| gradient_domain_mask(pixmap, paint, transform, mask));
         pixmap.fill_path(
@@ -662,8 +665,9 @@ fn render_path(
             paint_mask.as_ref().or(mask),
         );
     }
+    let stroke_texture = stroke.and_then(|stroke| grid_texture(&stroke.paint));
     if let Some(stroke) = stroke
-        && let Some(paint) = raster_paint(&stroke.paint)
+        && let Some(paint) = raster_paint_with_texture(&stroke.paint, stroke_texture.as_ref())
     {
         let paint_mask = gradient_domain_mask(pixmap, &stroke.paint, transform, mask);
         let stroke = raster_stroke(stroke);
@@ -702,6 +706,64 @@ fn fill_rule(rule: oxml_layout::FillRule) -> FillRule {
         oxml_layout::FillRule::NonZero => FillRule::Winding,
         oxml_layout::FillRule::EvenOdd => FillRule::EvenOdd,
     }
+}
+
+fn grid_texture(paint: &LayoutPaint) -> Option<Pixmap> {
+    let LayoutPaint::Grid {
+        bounds,
+        columns,
+        rows,
+        colors,
+    } = paint
+    else {
+        return None;
+    };
+    oxml_layout::Paint::grid(*bounds, *columns, *rows, colors.clone())?;
+    let mut pixmap = Pixmap::new(u32::from(*columns), u32::from(*rows))?;
+    for (pixel, color) in pixmap.pixels_mut().iter_mut().zip(colors) {
+        let a = (color.a * 255.0).round() as u8;
+        *pixel = tiny_skia::PremultipliedColorU8::from_rgba(
+            (color.r * f64::from(a)).round() as u8,
+            (color.g * f64::from(a)).round() as u8,
+            (color.b * f64::from(a)).round() as u8,
+            a,
+        )?;
+    }
+    Some(pixmap)
+}
+
+fn raster_paint_with_texture<'a>(
+    paint: &LayoutPaint,
+    texture: Option<&'a Pixmap>,
+) -> Option<Paint<'a>> {
+    if let LayoutPaint::Grid {
+        bounds,
+        columns,
+        rows,
+        ..
+    } = paint
+    {
+        let texture = texture?;
+        let transform = Transform::from_row(
+            (bounds.width / f64::from(*columns)) as f32,
+            0.0,
+            0.0,
+            (bounds.height / f64::from(*rows)) as f32,
+            bounds.x as f32,
+            bounds.y as f32,
+        );
+        return Some(Paint {
+            shader: tiny_skia::Pattern::new(
+                texture.as_ref(),
+                tiny_skia::SpreadMode::Repeat,
+                tiny_skia::FilterQuality::Nearest,
+                1.0,
+                transform,
+            ),
+            ..Paint::default()
+        });
+    }
+    raster_paint(paint)
 }
 
 fn raster_paint(paint: &LayoutPaint) -> Option<Paint<'static>> {
@@ -743,7 +805,7 @@ fn raster_paint(paint: &LayoutPaint) -> Option<Paint<'static>> {
                 ..Paint::default()
             })
         }
-        LayoutPaint::Tile { .. } => None,
+        LayoutPaint::Tile { .. } | LayoutPaint::Grid { .. } => None,
     }
 }
 
@@ -958,7 +1020,7 @@ fn render_positioned_glyph_run(
     y_offsets: &[f64],
     y_advances: &[f64],
 ) {
-    let Ok(face) = ttf_parser::Face::parse(&font_data.data, font_data.face_index) else {
+    let Some(face) = crate::font::instanced_face(font_data) else {
         return;
     };
 
@@ -987,14 +1049,41 @@ fn render_positioned_glyph_run(
         {
             // Transform: translate to glyph position, scale from font units to points,
             // and flip Y (font coordinates are Y-up, pixmap is Y-down)
-            let glyph_transform = transform
-                .pre_translate(
-                    (x + x_offsets.get(i).copied().unwrap_or(0.0)) as f32,
-                    (y - y_offsets.get(i).copied().unwrap_or(0.0)) as f32,
-                )
-                .pre_scale(scale as f32, -(scale as f32));
-
-            pixmap.fill_path(&path, &paint, FillRule::Winding, glyph_transform, mask);
+            let position_x = x + x_offsets.get(i).copied().unwrap_or(0.0);
+            let position_y = y - y_offsets.get(i).copied().unwrap_or(0.0);
+            let glyph_transform = if font_data.synthetic_italic {
+                transform
+                    .pre_translate(glyph_run.origin.x as f32, glyph_run.origin.y as f32)
+                    .pre_concat(Transform::from_row(1.0, 0.0, -0.212_556_56, 1.0, 0.0, 0.0))
+                    .pre_translate(
+                        (position_x - glyph_run.origin.x) as f32,
+                        (position_y - glyph_run.origin.y) as f32,
+                    )
+            } else {
+                transform.pre_translate(position_x as f32, position_y as f32)
+            };
+            let outline_transform = glyph_transform.pre_scale(scale as f32, -(scale as f32));
+            pixmap.fill_path(&path, &paint, FillRule::Winding, outline_transform, mask);
+            if font_data.synthetic_bold
+                && let Some(path) =
+                    path.transform(Transform::from_scale(scale as f32, scale as f32))
+            {
+                // Round joins use a fixed path-unit tolerance in tiny-skia.
+                // Stroke in points so the tolerance matches other painted paths.
+                let stroke = Stroke {
+                    width: (glyph_run.font_size / 24.0) as f32,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Stroke::default()
+                };
+                pixmap.stroke_path(
+                    &path,
+                    &paint,
+                    &stroke,
+                    glyph_transform.pre_scale(1.0, -1.0),
+                    mask,
+                );
+            }
         }
 
         if i < glyph_run.advances.len() {
@@ -1151,6 +1240,510 @@ mod tests {
         Color, Effect, FillRule, GradientStop, GroupElement, LayoutResult, MediaId, PageFrame,
         Paint, Path, PathCommand, PathElement, Point, PositionedElement, Rect, Stroke, Transform,
     };
+
+    // Source-built, two-glyph TrueType font. A is a known rectangle, with
+    // unchanged600-unit advance and an optional single ital/slnt gvar tuple.
+    // Independent hb-subset14.4 instances prove the selected top points shift
+    // by140units. No production outline renderer generates the expected path.
+    fn fx195_axis_font(axis: Option<[u8; 4]>) -> Vec<u8> {
+        let mut head = vec![0; 54];
+        head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        head[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        head[12..16].copy_from_slice(&0x5f0f_3cf5u32.to_be_bytes());
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        for (offset, value) in [(36, 50i16), (38, 0), (40, 590), (42, 700), (50, 1)] {
+            head[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut hhea = vec![0; 36];
+        hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        for (offset, value) in [(4, 800i16), (6, -200), (10, 600), (18, 1), (34, 2)] {
+            hhea[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut maxp = vec![0; 32];
+        maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        for (offset, value) in [(4, 2u16), (6, 4), (8, 1)] {
+            maxp[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut glyf = Vec::new();
+        for value in [1i16, 50, 0, 450, 700, 3, 0] {
+            glyf.extend_from_slice(&value.to_be_bytes());
+        }
+        glyf.extend_from_slice(&[1; 4]); // Four on-curve points.
+        for value in [50i16, 400, 0, -400, 0, 0, 700, 0] {
+            glyf.extend_from_slice(&value.to_be_bytes());
+        }
+        while !glyf.len().is_multiple_of(4) {
+            glyf.push(0);
+        }
+        let mut cmap = vec![0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12];
+        for value in [
+            4u16, 32, 0, 4, 4, 1, 0, 65, 65535, 0, 65, 65535, 65472, 1, 0, 0,
+        ] {
+            cmap.extend_from_slice(&value.to_be_bytes());
+        }
+        let mut names = Vec::new();
+        let mut strings = Vec::new();
+        for (id, value) in [
+            (1u16, "FX195Axis"),
+            (2, "Regular"),
+            (4, "FX195Axis Regular"),
+            (6, "FX195Axis-Regular"),
+            (256, "Axis"),
+        ] {
+            let text: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            for value in [3, 1, 0x409, id, text.len() as u16, strings.len() as u16] {
+                names.extend_from_slice(&value.to_be_bytes());
+            }
+            strings.extend_from_slice(&text);
+        }
+        let mut name = vec![0, 0, 0, 5, 0, 66];
+        name.extend(names);
+        name.extend(strings);
+        let mut os2 = vec![0; 78];
+        for (offset, value) in [
+            (2, 600i16),
+            (4, 400),
+            (6, 5),
+            (62, 64),
+            (64, 65),
+            (66, 65),
+            (68, 800),
+            (70, -200),
+            (74, 800),
+            (76, 200),
+        ] {
+            os2[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut post = vec![0; 32];
+        post[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+        let mut tables = vec![
+            (*b"head", head),
+            (*b"hhea", hhea),
+            (*b"maxp", maxp),
+            (*b"glyf", glyf),
+            (*b"cmap", cmap),
+            (*b"name", name),
+            (*b"OS/2", os2),
+            (*b"post", post),
+            (*b"hmtx", vec![2, 88, 0, 0, 2, 88, 0, 50]),
+            (*b"loca", vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36]),
+        ];
+        if let Some(axis) = axis {
+            let ital = axis == *b"ital";
+            assert!(ital || axis == *b"slnt");
+            let mut fvar = Vec::new();
+            for value in [1u16, 0, 16, 2, 1, 20, 0, 8] {
+                fvar.extend_from_slice(&value.to_be_bytes());
+            }
+            fvar.extend_from_slice(&axis);
+            for value in [
+                if ital { 0i32 } else { -12 * 65536 },
+                0,
+                if ital { 65536 } else { 0 },
+            ] {
+                fvar.extend_from_slice(&value.to_be_bytes());
+            }
+            fvar.extend_from_slice(&[0, 0, 1, 0]); // Flags and nameID256.
+            // Glyph0 has no tuple. Glyph1 changes the top two x coordinates,
+            // leaving y and the four phantom metric points unchanged.
+            let mut gvar = vec![
+                0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 28, 0, 1, 0, 10, 0, 18, 128, 0,
+            ];
+            gvar.extend_from_slice(&(if ital { 16384i16 } else { -16384 }).to_be_bytes());
+            gvar.push(0x47); // Eight signed-word x deltas, all points.
+            for value in [0i16, 0, 140, 140, 0, 0, 0, 0] {
+                gvar.extend_from_slice(&value.to_be_bytes());
+            }
+            gvar.push(0x87); // Eight zero y deltas.
+            tables.push((*b"fvar", fvar));
+            tables.push((*b"gvar", gvar));
+        }
+        tables.sort_by_key(|(tag, _)| *tag);
+        let count = tables.len() as u16;
+        let power = 1u16 << (15 - count.leading_zeros());
+        let mut font = Vec::from(0x0001_0000u32.to_be_bytes());
+        for value in [
+            count,
+            power * 16,
+            power.trailing_zeros() as u16,
+            count * 16 - power * 16,
+        ] {
+            font.extend_from_slice(&value.to_be_bytes());
+        }
+        font.resize(12 + tables.len() * 16, 0);
+        let mut head_offset = 0;
+        for (index, (tag, mut table)) in tables.into_iter().enumerate() {
+            let length = table.len();
+            let offset = font.len();
+            if tag == *b"head" {
+                head_offset = offset;
+            }
+            while !table.len().is_multiple_of(4) {
+                table.push(0);
+            }
+            let checksum = table.chunks_exact(4).fold(0u32, |sum, word| {
+                sum.wrapping_add(u32::from_be_bytes(word.try_into().unwrap()))
+            });
+            let record = 12 + index * 16;
+            font[record..record + 4].copy_from_slice(&tag);
+            for (field, value) in [(4, checksum), (8, offset as u32), (12, length as u32)] {
+                font[record + field..record + field + 4].copy_from_slice(&value.to_be_bytes());
+            }
+            font.extend(table);
+        }
+        let checksum = font.chunks_exact(4).fold(0u32, |sum, word| {
+            sum.wrapping_add(u32::from_be_bytes(word.try_into().unwrap()))
+        });
+        font[head_offset + 8..head_offset + 12]
+            .copy_from_slice(&0xb1b0_afbau32.wrapping_sub(checksum).to_be_bytes());
+        font
+    }
+
+    #[test]
+    fn fx195_italic_axes_render_independently_known_slanted_geometry() {
+        let mut mismatches = Vec::new();
+        for axis in [*b"ital", *b"slnt"] {
+            let bytes = fx195_axis_font(Some(axis));
+            let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+            assert!(face.is_variable());
+            assert_eq!(face.glyph_index('A'), Some(ttf_parser::GlyphId(1)));
+            assert_eq!(face.glyph_hor_advance(ttf_parser::GlyphId(1)), Some(600));
+            let mut fonts =
+                oxml_layout::FontManager::new_with_fonts(vec![("FX195 axis".into(), bytes)]);
+            let id = fonts.resolve_font(Some("FX195 axis"), false, true).unwrap();
+            let shaped = fonts.shape_text(id, "A", 125.0).unwrap();
+            assert_eq!(shaped.width, 75.0);
+            let run = oxml_layout::GlyphRun {
+                origin: Point { x: 10.0, y: 100.0 },
+                font_id: id,
+                font_size: 125.0,
+                glyph_ids: shaped.glyph_ids,
+                advances: shaped.advances,
+                text: "A".into(),
+                source: None,
+                color: Color::BLACK,
+                bold: false,
+                italic: true,
+                field_kind: None,
+                field_source: None,
+                tab_aligned: None,
+                note: None,
+                note_reference_source: None,
+            };
+            let actual = render_page_to_pixmap(
+                &PageFrame::new(1, 120.0, 120.0, vec![PositionedElement::Text(run)]),
+                &fonts.all_font_data(),
+                144.0,
+            )
+            .unwrap();
+            let expected = PositionedElement::Path(PathElement {
+                path: Path {
+                    commands: vec![
+                        PathCommand::MoveTo(Point { x: 16.25, y: 100.0 }),
+                        PathCommand::LineTo(Point { x: 66.25, y: 100.0 }),
+                        PathCommand::LineTo(Point { x: 83.75, y: 12.5 }),
+                        PathCommand::LineTo(Point { x: 33.75, y: 12.5 }),
+                        PathCommand::Close,
+                    ],
+                    fill_rule: FillRule::NonZero,
+                },
+                fill: Some(Paint::Solid(Color::BLACK)),
+                stroke: None,
+            });
+            let expected =
+                render_page_to_pixmap(&PageFrame::new(1, 120.0, 120.0, vec![expected]), &[], 144.0)
+                    .unwrap();
+            let differing_bytes = actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .filter(|(a, b)| a != b)
+                .count();
+            if differing_bytes != 0 {
+                mismatches.push((axis, differing_bytes));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "selected axis geometry mismatches {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn fx195_regular_only_styles_match_analytic_synthesis_geometry() {
+        let bytes = fx195_axis_font(None);
+        let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+        assert!(!face.is_variable());
+        assert!(!face.is_bold());
+        assert!(!face.is_italic());
+        assert_eq!(face.glyph_hor_advance(ttf_parser::GlyphId(1)), Some(600));
+        let mut fonts =
+            oxml_layout::FontManager::new_with_fonts(vec![("FX195 rectangle".into(), bytes)]);
+        let mut mismatches = Vec::new();
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let id = fonts
+                .resolve_font(Some("FX195 rectangle"), bold, italic)
+                .unwrap();
+            let shaped = fonts.shape_text(id, "A", 125.0).unwrap();
+            assert_eq!(
+                shaped.width, 75.0,
+                "synthesis must preserve the independent advance"
+            );
+            let run = oxml_layout::GlyphRun {
+                origin: Point { x: 10.0, y: 100.0 },
+                font_id: id,
+                font_size: 125.0,
+                glyph_ids: shaped.glyph_ids,
+                advances: shaped.advances,
+                text: "A".into(),
+                source: None,
+                color: Color::BLACK,
+                bold,
+                italic,
+                field_kind: None,
+                field_source: None,
+                tab_aligned: None,
+                note: None,
+                note_reference_source: None,
+            };
+            let actual = render_page_to_pixmap(
+                &PageFrame::new(1, 120.0, 120.0, vec![PositionedElement::Text(run)]),
+                &fonts.all_font_data(),
+                144.0,
+            )
+            .unwrap();
+            let stroke = bold.then(|| Stroke {
+                paint: Paint::Solid(Color::BLACK),
+                width: 125.0 / 24.0,
+                cap: oxml_layout::LineCap::Round,
+                join: oxml_layout::LineJoin::Round,
+                dash: None,
+            });
+            let rectangle = PositionedElement::Path(PathElement {
+                path: Path::rect(Rect {
+                    x: 16.25,
+                    y: 12.5,
+                    width: 50.0,
+                    height: 87.5,
+                }),
+                fill: Some(Paint::Solid(Color::BLACK)),
+                stroke,
+            });
+            // The analytic transform fixes baseline100 while shifting higher
+            // points right by tan(12deg) times their baseline distance. Stroke
+            // is transformed with the same outline, including round joins.
+            let shear = if italic { 0.212_556_561_670_022_1 } else { 0.0 };
+            let expected = PositionedElement::Group(GroupElement {
+                transform: Transform {
+                    c: -shear,
+                    e: 100.0 * shear,
+                    ..Transform::IDENTITY
+                },
+                clip: None,
+                opacity: 1.0,
+                effects: Vec::new(),
+                children: vec![rectangle],
+            });
+            let expected =
+                render_page_to_pixmap(&PageFrame::new(1, 120.0, 120.0, vec![expected]), &[], 144.0)
+                    .unwrap();
+            // One8-bit coverage level accommodates different f32 transform
+            // evaluation order, without accepting a geometric stroke delta.
+            let worst = actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            if worst > 1 {
+                mismatches.push((bold, italic, worst));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "analytic synthesis mismatches {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn fx195_combined_pdf_synthesis_matches_independent_painted_rectangle() {
+        let mut fonts = oxml_layout::FontManager::new_with_fonts(vec![(
+            "FX195 rectangle".into(),
+            fx195_axis_font(None),
+        )]);
+        let id = fonts
+            .resolve_font(Some("FX195 rectangle"), true, true)
+            .unwrap();
+        let shaped = fonts.shape_text(id, "A", 125.0).unwrap();
+        assert_eq!(shaped.width, 75.0);
+        let run = oxml_layout::GlyphRun {
+            origin: Point { x: 10.0, y: 100.0 },
+            font_id: id,
+            font_size: 125.0,
+            glyph_ids: shaped.glyph_ids,
+            advances: shaped.advances,
+            text: "A".into(),
+            source: None,
+            color: Color::BLACK,
+            bold: true,
+            italic: true,
+            field_kind: None,
+            field_source: None,
+            tab_aligned: None,
+            note: None,
+            note_reference_source: None,
+        };
+        let shear = 0.212_556_561_670_022_1;
+        let analytic = PositionedElement::Group(GroupElement {
+            transform: Transform {
+                c: -shear,
+                e: 100.0 * shear,
+                ..Transform::IDENTITY
+            },
+            clip: None,
+            opacity: 1.0,
+            effects: vec![],
+            children: vec![PositionedElement::Path(PathElement {
+                path: Path::rect(Rect {
+                    x: 16.25,
+                    y: 12.5,
+                    width: 50.0,
+                    height: 87.5,
+                }),
+                fill: Some(Paint::Solid(Color::BLACK)),
+                stroke: Some(Stroke {
+                    paint: Paint::Solid(Color::BLACK),
+                    width: 125.0 / 24.0,
+                    cap: oxml_layout::LineCap::Round,
+                    join: oxml_layout::LineJoin::Round,
+                    dash: None,
+                }),
+            })],
+        });
+        let layout = oxml_layout::LayoutResult::new(
+            vec![
+                PageFrame::new(1, 120.0, 120.0, vec![PositionedElement::Text(run)]).into(),
+                PageFrame::new(2, 120.0, 120.0, vec![analytic]).into(),
+            ],
+            fonts.all_font_data(),
+            None,
+            vec![],
+        );
+        let pdf = crate::render_to_pdf_checked(&layout).unwrap();
+        let base = std::env::temp_dir().join(format!("oxml-fx195-combined-{}", std::process::id()));
+        let pdf_path = base.with_extension("pdf");
+        std::fs::write(&pdf_path, pdf).unwrap();
+        let version = std::process::Command::new("pdftoppm")
+            .arg("-v")
+            .output()
+            .expect("pdftoppm is required for independent PDF geometry");
+        assert!(version.status.success());
+        eprintln!("{}", String::from_utf8_lossy(&version.stderr));
+        let output = std::process::Command::new("pdftoppm")
+            .args(["-png", "-r", "576", "-f", "1", "-l", "2"])
+            .arg(&pdf_path)
+            .arg(&base)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual_path = base.with_file_name(format!(
+            "{}-1.png",
+            base.file_name().unwrap().to_string_lossy()
+        ));
+        let expected_path = base.with_file_name(format!(
+            "{}-2.png",
+            base.file_name().unwrap().to_string_lossy()
+        ));
+        let actual = tiny_skia::Pixmap::load_png(&actual_path).unwrap();
+        let expected = tiny_skia::Pixmap::load_png(&expected_path).unwrap();
+        assert_eq!(
+            (actual.width(), actual.height()),
+            (expected.width(), expected.height())
+        );
+        let ink = |image: &tiny_skia::Pixmap, x: u32, y: u32| {
+            image
+                .pixel(x, y)
+                .is_some_and(|p| p.red() < 128 && p.green() < 128 && p.blue() < 128)
+        };
+        let mut distant = 0;
+        for (a, b) in [(&actual, &expected), (&expected, &actual)] {
+            for y in 1..a.height() - 1 {
+                for x in 1..a.width() - 1 {
+                    if ink(a, x, y)
+                        && !(y - 1..=y + 1).any(|ny| (x - 1..=x + 1).any(|nx| ink(b, nx, ny)))
+                    {
+                        distant += 1;
+                    }
+                }
+            }
+        }
+        // One pixel at576dpi permits antialias and TrueType edge rounding,
+        // while refusing a differently transformed 1/24em painted stroke.
+        assert_eq!(
+            distant, 0,
+            "PDF stroke differs from independent geometry; artifacts at {base:?}"
+        );
+        for path in [pdf_path, actual_path, expected_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn fx195_regular_only_bold_adds_ink_without_changing_advances() {
+        let mut fonts = oxml_layout::FontManager::new_with_fonts(vec![(
+            "FX195 regular only".into(),
+            include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf").to_vec(),
+        )]);
+        let mut widths = Vec::new();
+        let mut ink = Vec::new();
+        for bold in [false, true] {
+            let id = fonts
+                .resolve_font(Some("FX195 regular only"), bold, false)
+                .unwrap();
+            let shaped = fonts.shape_text(id, "Hill", 48.0).unwrap();
+            widths.push(shaped.width);
+            let run = oxml_layout::GlyphRun {
+                origin: Point { x: 12.0, y: 60.0 },
+                font_id: id,
+                font_size: 48.0,
+                glyph_ids: shaped.glyph_ids,
+                advances: shaped.advances,
+                text: "Hill".into(),
+                source: None,
+                color: Color::BLACK,
+                bold,
+                italic: false,
+                field_kind: None,
+                field_source: None,
+                tab_aligned: None,
+                note: None,
+                note_reference_source: None,
+            };
+            let page = PageFrame::new(1, 160.0, 80.0, vec![PositionedElement::Text(run)]);
+            let pixmap = render_page_to_pixmap(&page, &fonts.all_font_data(), 144.0).unwrap();
+            ink.push(
+                pixmap
+                    .pixels()
+                    .iter()
+                    .map(|pixel| 255_u64 - u64::from(pixel.red()))
+                    .sum::<u64>(),
+            );
+        }
+        assert_eq!(
+            widths[0], widths[1],
+            "synthetic paint must preserve shaped advances"
+        );
+        assert!(
+            ink[1] > ink[0],
+            "regular-only bold must add actual stroke ink: {ink:?}"
+        );
+    }
 
     fn rgb(pixel: tiny_skia::PremultipliedColorU8) -> (u8, u8, u8) {
         (pixel.red(), pixel.green(), pixel.blue())
@@ -2185,5 +2778,50 @@ mod tests {
 
         assert_eq!(rgb(pixmap.pixel(3, 8).unwrap()), (0, 0, 0));
         assert_eq!(rgb(pixmap.pixel(7, 8).unwrap()), (255, 255, 255));
+    }
+    #[test]
+    fn fx205_colour_grid_repeats_source_pixels_and_preserves_alpha() {
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 8.0,
+        };
+        let paint = Paint::grid(
+            bounds,
+            2,
+            1,
+            vec![
+                Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 0.5,
+                },
+            ],
+        )
+        .unwrap();
+        let element = PositionedElement::Path(PathElement {
+            path: Path::rect(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 32.0,
+            }),
+            fill: Some(paint),
+            stroke: None,
+        });
+        let pixmap = render_page_to_pixmap(&page(vec![element]), &[], 72.0).unwrap();
+        assert_eq!(rgb(pixmap.pixel(1, 1).unwrap()), (255, 0, 0));
+        assert_near_rgb(rgb(pixmap.pixel(5, 1).unwrap()), (127, 127, 255), 1);
+        assert_eq!(rgb(pixmap.pixel(9, 1).unwrap()), (255, 0, 0));
+        assert!(Paint::grid(bounds, 0, 1, Vec::new()).is_none());
+        assert!(Paint::grid(bounds, 2, 1, vec![Color::BLACK]).is_none());
     }
 }

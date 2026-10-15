@@ -5,15 +5,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyFloat, PyList, PySlice, PyString};
 use rpptx::{
     AutofitMode, CT_TextCharacterProperties, CT_TextParagraphProperties, ColorChoice, Emu, Fill,
-    RgbColor, SolidFill, TextAlignment, TextAnchor, TextBulletCharacter, TextBulletChoice,
-    TextFont, TextNoBullet, TextSpacing, TextStrike, TextUnderline,
+    RgbColor, SolidFill, TextAlignment, TextAnchor, TextAutoNumber, TextAutoNumberScheme,
+    TextBullet, TextBulletCharacter, TextBulletChoice, TextBulletColor, TextBulletSize,
+    TextBulletSizeValue, TextFont, TextNoBullet, TextPointValue, TextSpacing, TextStrike,
+    TextUnderline,
 };
 
 use crate::normalize_index;
 use crate::presentation::PyPresentation;
 use crate::replacement_count_to_pyerr;
 use crate::rpptx_to_pyerr;
-use crate::shape::{shape_mut_at, shape_ref_at, slide_index};
+use crate::shape::{shape_ref_at, slide_index};
+use crate::slide::PySlide;
+use crate::table::cell_ref_at;
 use crate::validate_path;
 
 const EMU_PER_CENTIPOINT: i64 = 127;
@@ -32,6 +36,30 @@ fn length_object(py: Python<'_>, emu: i64) -> PyResult<Py<PyAny>> {
         .getattr("Length")?
         .call1((emu,))
         .map(Bound::unbind)
+}
+
+pub(crate) fn anchor_object(py: Python<'_>, anchor: TextAnchor) -> PyResult<Py<PyAny>> {
+    let value = match anchor {
+        TextAnchor::Top => 1,
+        TextAnchor::Center => 3,
+        TextAnchor::Bottom => 4,
+        TextAnchor::Justified => 6,
+        TextAnchor::Distributed => 7,
+    };
+    text_enum(py, "MSO_VERTICAL_ANCHOR", value)
+}
+
+pub(crate) fn anchor_from_value(value: i32) -> PyResult<TextAnchor> {
+    match value {
+        1 => Ok(TextAnchor::Top),
+        3 => Ok(TextAnchor::Center),
+        4 => Ok(TextAnchor::Bottom),
+        6 => Ok(TextAnchor::Justified),
+        7 => Ok(TextAnchor::Distributed),
+        _ => Err(PyValueError::new_err(
+            "vertical anchor must be an MSO_ANCHOR member",
+        )),
+    }
 }
 
 fn text_enum(py: Python<'_>, name: &str, value: i32) -> PyResult<Py<PyAny>> {
@@ -98,6 +126,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRunCollection>()?;
     module.add_class::<PyHyperlink>()?;
     module.add_class::<PyFont>()?;
+    module.add_class::<PyMasterTextStyles>()?;
+    module.add_class::<PyTextStyleList>()?;
     Ok(())
 }
 
@@ -115,14 +145,119 @@ fn run_index(path: &ContentPath) -> Option<usize> {
     })
 }
 
+fn names_cell(path: &ContentPath) -> bool {
+    path.segs
+        .iter()
+        .any(|segment| matches!(segment, PathSeg::Row(_)))
+        && path
+            .segs
+            .iter()
+            .any(|segment| matches!(segment, PathSeg::Cell(_)))
+}
+
+fn text_frame_ref_at<'a>(
+    presentation: &'a PyPresentation,
+    path: &ContentPath,
+) -> Option<rpptx::TextFrameRef<'a>> {
+    if names_cell(path) {
+        cell_ref_at(presentation, path)?.text_frame()
+    } else {
+        shape_ref_at(presentation, path)?.text_frame()
+    }
+}
+
+fn text_frame_mut_at<'a>(
+    presentation: &'a mut PyPresentation,
+    path: &ContentPath,
+) -> Option<rpptx::TextFrame<'a>> {
+    let current = presentation.current_path(path)?;
+    native_text_frame_mut_at(&mut presentation.inner, &current)
+}
+
+fn native_text_frame_mut_at<'a>(
+    presentation: &'a mut rpptx::Presentation,
+    path: &ContentPath,
+) -> Option<rpptx::TextFrame<'a>> {
+    if names_cell(path) {
+        crate::table::native_cell_mut_at(presentation, path)
+            .map(rpptx::TableCellMut::into_text_frame)
+    } else {
+        crate::shape::native_shape_mut_at(presentation, path)?.into_text_frame()
+    }
+}
+
+fn style_address(
+    presentation: &PyPresentation,
+    path: &ContentPath,
+) -> Option<(usize, &'static str, usize)> {
+    let current = presentation.current_path(path)?;
+    let master = current.segs.iter().find_map(|segment| {
+        if let PathSeg::Master(index) = segment {
+            Some(*index)
+        } else {
+            None
+        }
+    })?;
+    let style = current.segs.iter().find_map(|segment| {
+        if let PathSeg::TextStyle(index) = segment {
+            ["title", "body", "other"].get(*index).copied()
+        } else {
+            None
+        }
+    })?;
+    Some((master, style, paragraph_index(&current)? + 1))
+}
+
+fn update_style_level(
+    py: Python<'_>,
+    presentation: &mut PyPresentation,
+    path: &ContentPath,
+    update: impl FnOnce(&mut CT_TextParagraphProperties) -> PyResult<()>,
+) -> PyResult<()> {
+    let (master, style, level) = style_address(presentation, path)
+        .ok_or_else(|| PyIndexError::new_err("master style owner is absent"))?;
+    let mut properties = presentation
+        .inner
+        .master_text_style(master, style, level)
+        .map_err(|error| crate::rpptx_to_pyerr(py, error))?
+        .cloned()
+        .unwrap_or_default();
+    let before = properties.clone();
+    update(&mut properties)?;
+    if properties == before {
+        return Ok(());
+    }
+    let mut candidate = presentation.inner.clone();
+    candidate
+        .set_master_text_style(master, style, level, properties)
+        .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+    let proofs = presentation.unchanged_owners()?;
+    let prepared = presentation.prepare_owners(
+        &candidate,
+        "MasterTextStyles.level",
+        &proofs,
+        false,
+        false,
+        false,
+    )?;
+    presentation.publish_owners(candidate, prepared)
+}
+
 fn font_properties(
-    presentation: &rpptx::Presentation,
+    presentation: &PyPresentation,
     path: &ContentPath,
 ) -> Option<rpptx::CT_TextCharacterProperties> {
+    if let Some((master, style, level)) = style_address(presentation, path) {
+        return presentation
+            .inner
+            .master_text_style(master, style, level)
+            .ok()??
+            .default_run_properties
+            .clone();
+    }
     let paragraph = paragraph_index(path)?;
-    let paragraph = shape_ref_at(presentation, path)
-        .and_then(|shape| shape.text_frame())
-        .and_then(|frame| frame.paragraph(paragraph))?;
+    let paragraph =
+        text_frame_ref_at(presentation, path).and_then(|frame| frame.paragraph(paragraph))?;
     match run_index(path) {
         Some(run) => paragraph.run(run)?.properties().cloned(),
         None => paragraph.default_run_properties().cloned(),
@@ -133,6 +268,23 @@ fn font_properties(
 pub struct PyTextFrame {
     pub(crate) presentation: Py<PyPresentation>,
     pub(crate) path: ContentPath,
+}
+
+fn fit_point_size(value: &Bound<'_, PyAny>) -> PyResult<u16> {
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<pyo3::types::PyInt>() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "max_size must be a positive integer",
+        ));
+    }
+    let size = value
+        .extract::<u16>()
+        .map_err(|_| PyValueError::new_err("max_size must be from 1 through 4000"))?;
+    if size == 0 || size > 4000 {
+        return Err(PyValueError::new_err(
+            "max_size must be from 1 through 4000",
+        ));
+    }
+    Ok(size)
 }
 
 impl PyTextFrame {
@@ -156,8 +308,7 @@ impl PyTextFrame {
         read: impl FnOnce(rpptx::TextFrameRef<'_>) -> T,
     ) -> PyResult<T> {
         self.validate(py)?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .map(read)
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))
     }
@@ -169,8 +320,7 @@ impl PyTextFrame {
     ) -> PyResult<T> {
         self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        text_frame_mut_at(&mut presentation, &self.path)
             .map(|mut frame| update(&mut frame))
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))
     }
@@ -211,10 +361,26 @@ type Insets = (Option<Emu>, Option<Emu>, Option<Emu>, Option<Emu>);
 #[pymethods]
 impl PyTextFrame {
     #[getter]
+    fn element(&self, py: Python<'_>) -> PyResult<Py<crate::presentation::PyPptElement>> {
+        self.validate(py)?;
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let path = presentation.capture_text_body_path(current.segs, None)?;
+        drop(presentation);
+        crate::presentation::PyPptElement::new_checked(
+            py,
+            self.presentation.clone_ref(py),
+            path,
+            crate::presentation::PptElementKind::TextBody,
+        )
+    }
+
+    #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         self.validate(py)?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .map(|frame| frame.text())
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))
     }
@@ -223,12 +389,82 @@ impl PyTextFrame {
     fn set_text(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
+        native_text_frame_mut_at(&mut candidate, &current)
             .map(|mut frame| frame.set_text(value))
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))?;
-        presentation.revisions.bump();
+        let survivors = presentation.text_changed_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "TextFrame.text",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
         Ok(())
+    }
+
+    /// Formats one checked owner without changing text topology.
+    #[pyo3(signature=(font_family=None,max_size=18,*,fonts=None,font_dir=None,font_dirs=None))]
+    fn fit_text<'py>(
+        &self,
+        py: Python<'py>,
+        font_family: Option<String>,
+        #[pyo3(from_py_with=fit_point_size)] max_size: u16,
+        fonts: Option<Vec<(String, Bound<'py, pyo3::types::PyBytes>)>>,
+        font_dir: Option<std::path::PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<crate::layout::PyAutofitUpdate> {
+        self.validate(py)?;
+        let size = max_size;
+        let files = crate::presentation::collect_caller_fonts(py, fonts, font_dir, font_dirs)?
+            .unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|f| (f.family.as_str(), f.data.as_slice()))
+            .collect::<Vec<_>>();
+        let mut presentation = self.presentation.borrow_mut(py);
+        let slide = slide_index(&self.path)?;
+        let children = self
+            .path
+            .segs
+            .iter()
+            .filter_map(|s| {
+                if let PathSeg::Shape(i) = s {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let row = self.path.segs.iter().find_map(|s| {
+            if let PathSeg::Row(i) = s {
+                Some(*i)
+            } else {
+                None
+            }
+        });
+        let column = self.path.segs.iter().find_map(|s| {
+            if let PathSeg::Cell(i) = s {
+                Some(*i)
+            } else {
+                None
+            }
+        });
+        let location = presentation
+            .inner
+            .text_frame_location(slide, &children, row.zip(column))
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let inner = &mut presentation.inner;
+        let result = py
+            .detach(|| inner.fit_text_at(&location, font_family.as_deref(), size, &refs))
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        Ok(crate::layout::PyAutofitUpdate::from(&result))
     }
 
     #[getter]
@@ -236,7 +472,26 @@ impl PyTextFrame {
         self.validate(py)?;
         Py::new(
             py,
-            PyParagraphCollection::new(self.presentation.clone_ref(py), self.path.clone()),
+            PyParagraphCollection::new(self.presentation.clone_ref(py), {
+                let presentation = self.presentation.borrow(py);
+                let current = presentation
+                    .current_path(&self.path)
+                    .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+                if current
+                    .segs
+                    .iter()
+                    .any(|seg| matches!(seg, PathSeg::Shape(_)))
+                    && text_frame_ref_at(&presentation, &current).is_some()
+                {
+                    presentation.capture_text_body_path(
+                        current.segs,
+                        Some(oxml_py_support::RevisionScope::Text),
+                    )?
+                } else {
+                    presentation
+                        .capture_path(current.segs, Some(oxml_py_support::RevisionScope::Text))?
+                }
+            }),
         )
     }
 
@@ -257,8 +512,28 @@ impl PyTextFrame {
     ) -> PyResult<usize> {
         self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        let count = shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        if names_cell(&self.path) && text_frame_ref_at(&presentation, &self.path).is_none() {
+            cell_ref_at(&presentation, &self.path)
+                .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+            if placeholder.is_empty() {
+                return Err(rpptx_to_pyerr(
+                    py,
+                    rpptx::Error::InvalidSlideMutation {
+                        operation: "replace text",
+                        message: "placeholder must not be empty".to_owned(),
+                    },
+                ));
+            }
+            if let Some(expected) = expect.filter(|&expected| expected != 0) {
+                return Err(replacement_count_to_pyerr(py, placeholder, expected, 0));
+            }
+            return Ok(0);
+        }
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
+        let count = native_text_frame_mut_at(&mut candidate, &current)
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))?
             .try_replace_text(placeholder, replacement, expect)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
@@ -266,46 +541,61 @@ impl PyTextFrame {
             return Err(replacement_count_to_pyerr(py, placeholder, expected, count));
         }
         if count > 0 {
-            presentation.revisions.bump();
+            let survivors = presentation.text_changed_owners(&self.path)?;
+            let prepared = presentation.prepare_owners(
+                &candidate,
+                "TextFrame.try_replace_text",
+                &survivors,
+                false,
+                false,
+                false,
+            )?;
+            presentation.publish_owners(candidate, prepared)?;
         }
         Ok(count)
     }
 
     fn add_paragraph(&self, py: Python<'_>) -> PyResult<Py<PyParagraph>> {
         self.validate(py)?;
-        let original_path = self.path.clone();
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
         let index = {
-            let mut presentation = self.presentation.borrow_mut(py);
-            let mut frame = shape_mut_at(&mut presentation.inner, &original_path)
-                .and_then(rpptx::ShapeMut::into_text_frame)
+            let mut frame = native_text_frame_mut_at(&mut candidate, &current)
                 .ok_or_else(|| PyValueError::new_err("shape has no text frame"))?;
             let index = frame.paragraph_count();
             frame.add_paragraph();
             index
         };
-        let path = {
-            let mut presentation = self.presentation.borrow_mut(py);
-            presentation.revisions.bump();
-            let mut segments = original_path.segs.clone();
-            segments.push(PathSeg::Para(index));
-            presentation.revisions.capture(segments)
-        };
-        Py::new(py, PyParagraph::new(self.presentation.clone_ref(py), path))
+        let survivors = presentation.appended_text_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "TextFrame.add_paragraph",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let mut segments = current.segs;
+        segments.push(PathSeg::Para(index));
+        let path = presentation.capture_prepared_path(&prepared, segments, None)?;
+        let result = Py::new(py, PyParagraph::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
     }
 
     #[getter]
     fn autofit(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
         self.validate(py)?;
-        Ok(
-            shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-                .and_then(|shape| shape.text_frame())
-                .and_then(|frame| frame.autofit_mode())
-                .map(|mode| match mode {
-                    rpptx::AutofitMode::None => "none",
-                    rpptx::AutofitMode::Normal => "normal",
-                    rpptx::AutofitMode::Shape => "shape",
-                }),
-        )
+        Ok(text_frame_ref_at(&self.presentation.borrow(py), &self.path)
+            .and_then(|frame| frame.autofit_mode())
+            .map(|mode| match mode {
+                rpptx::AutofitMode::None => "none",
+                rpptx::AutofitMode::Normal => "normal",
+                rpptx::AutofitMode::Shape => "shape",
+            }))
     }
 
     #[getter]
@@ -379,35 +669,14 @@ impl PyTextFrame {
 
     #[getter]
     fn vertical_anchor(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let anchor = self.read(py, |frame| frame.vertical_anchor())?;
-        anchor
-            .map(|anchor| {
-                let value = match anchor {
-                    TextAnchor::Top => 1,
-                    TextAnchor::Center => 3,
-                    TextAnchor::Bottom => 4,
-                    TextAnchor::Justified => 6,
-                    TextAnchor::Distributed => 7,
-                };
-                text_enum(py, "MSO_VERTICAL_ANCHOR", value)
-            })
+        self.read(py, |frame| frame.vertical_anchor())?
+            .map(|anchor| anchor_object(py, anchor))
             .transpose()
     }
 
     #[setter]
     fn set_vertical_anchor(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
-        let anchor = value
-            .map(|value| match value {
-                1 => Ok(TextAnchor::Top),
-                3 => Ok(TextAnchor::Center),
-                4 => Ok(TextAnchor::Bottom),
-                6 => Ok(TextAnchor::Justified),
-                7 => Ok(TextAnchor::Distributed),
-                _ => Err(PyValueError::new_err(
-                    "vertical anchor must be an MSO_ANCHOR member",
-                )),
-            })
-            .transpose()?;
+        let anchor = value.map(anchor_from_value).transpose()?;
         self.update(py, |frame| frame.set_vertical_anchor(anchor))
     }
 
@@ -451,8 +720,15 @@ impl PyParagraph {
         read: impl FnOnce(Option<&CT_TextParagraphProperties>) -> T,
     ) -> PyResult<T> {
         let index = self.validate(py)?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        let presentation = self.presentation.borrow(py);
+        if let Some((master, style, level)) = style_address(&presentation, &self.path) {
+            let properties = presentation
+                .inner
+                .master_text_style(master, style, level)
+                .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+            return Ok(read(properties));
+        }
+        text_frame_ref_at(&presentation, &self.path)
             .and_then(|frame| frame.paragraph(index))
             .map(|paragraph| read(paragraph.properties()))
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
@@ -467,8 +743,13 @@ impl PyParagraph {
     ) -> PyResult<()> {
         let index = self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        let mut paragraph = shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        if style_address(&presentation, &self.path).is_some() {
+            return update_style_level(py, &mut presentation, &self.path, |properties| {
+                update(properties);
+                Ok(())
+            });
+        }
+        let mut paragraph = text_frame_mut_at(&mut presentation, &self.path)
             .and_then(|frame| frame.into_paragraph_mut(index))
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
         let current = paragraph.properties().cloned().unwrap_or_default();
@@ -543,10 +824,26 @@ fn alignment_from_value(value: i32) -> PyResult<TextAlignment> {
 #[pymethods]
 impl PyParagraph {
     #[getter]
+    fn element(&self, py: Python<'_>) -> PyResult<Py<crate::presentation::PyPptElement>> {
+        self.validate(py)?;
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let path = presentation.capture_path(current.segs, None)?;
+        drop(presentation);
+        crate::presentation::PyPptElement::new_checked(
+            py,
+            self.presentation.clone_ref(py),
+            path,
+            crate::presentation::PptElementKind::Paragraph,
+        )
+    }
+
+    #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         let index = self.validate(py)?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .and_then(|frame| frame.paragraph(index))
             .map(|paragraph| paragraph.text())
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
@@ -556,20 +853,31 @@ impl PyParagraph {
     fn set_text(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let index = self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
+        native_text_frame_mut_at(&mut candidate, &current)
             .and_then(|frame| frame.into_paragraph_mut(index))
             .map(|mut paragraph| paragraph.set_text(value))
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-        presentation.revisions.bump();
+        let survivors = presentation.text_changed_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Paragraph.text",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
         Ok(())
     }
 
     #[getter]
     fn level(&self, py: Python<'_>) -> PyResult<u8> {
         let index = self.validate(py)?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .and_then(|frame| frame.paragraph(index))
             .map(|paragraph| paragraph.level())
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
@@ -578,8 +886,7 @@ impl PyParagraph {
     #[setter]
     fn set_level(&self, py: Python<'_>, value: u8) -> PyResult<()> {
         let index = self.validate(py)?;
-        let changed = shape_mut_at(&mut self.presentation.borrow_mut(py).inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        let changed = text_frame_mut_at(&mut self.presentation.borrow_mut(py), &self.path)
             .and_then(|frame| frame.into_paragraph_mut(index))
             .is_some_and(|mut paragraph| paragraph.set_level(value));
         if changed {
@@ -594,11 +901,20 @@ impl PyParagraph {
     #[getter]
     fn font(&self, py: Python<'_>) -> PyResult<Py<PyFont>> {
         self.validate(py)?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
             PyFont {
                 presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
+                path,
             },
         )
     }
@@ -606,33 +922,114 @@ impl PyParagraph {
     #[getter]
     fn runs(&self, py: Python<'_>) -> PyResult<Py<PyRunCollection>> {
         self.validate(py)?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("paragraph owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_path(current.segs, Some(oxml_py_support::RevisionScope::Text))?;
         Py::new(
             py,
-            PyRunCollection::new(self.presentation.clone_ref(py), self.path.clone()),
+            PyRunCollection::new(self.presentation.clone_ref(py), path),
         )
+    }
+
+    #[pyo3(signature = (field_type, text=None))]
+    fn add_field(&self, py: Python<'_>, field_type: &str, text: Option<String>) -> PyResult<()> {
+        let paragraph = self.validate(py)?;
+        let mut p = self.presentation.borrow_mut(py);
+        let path = p
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("text owner is absent"))?;
+        let slide = slide_index(&path)?;
+        let children = path
+            .segs
+            .iter()
+            .filter_map(|seg| {
+                if let PathSeg::Shape(index) = seg {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let cell = path.segs.iter().find_map(|seg| {
+            if let PathSeg::Cell(index) = seg {
+                Some(*index)
+            } else {
+                None
+            }
+        });
+        let row = path.segs.iter().find_map(|seg| {
+            if let PathSeg::Row(index) = seg {
+                Some(*index)
+            } else {
+                None
+            }
+        });
+        if row.is_some() != cell.is_some() {
+            return Err(PyIndexError::new_err("cell path is incomplete"));
+        }
+        let cell = row.zip(cell);
+        let mut candidate = p.inner.clone();
+        candidate
+            .add_text_field(
+                slide,
+                &children,
+                cell,
+                paragraph,
+                field_type,
+                text.as_deref(),
+            )
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let proofs = p.appended_text_owners(&self.path)?;
+        let prepared = p.prepare_owners(
+            &candidate,
+            "Paragraph.add_field",
+            &proofs,
+            false,
+            false,
+            false,
+        )?;
+        p.publish_owners(candidate, prepared)
     }
 
     #[pyo3(signature = (text = ""))]
     fn add_run(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyRun>> {
         let index = self.validate(py)?;
-        let run = shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let run = text_frame_ref_at(&presentation, &self.path)
             .and_then(|frame| frame.paragraph(index))
             .map(|paragraph| paragraph.run_count())
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-        let path = {
-            let mut presentation = self.presentation.borrow_mut(py);
-            shape_mut_at(&mut presentation.inner, &self.path)
-                .and_then(rpptx::ShapeMut::into_text_frame)
+        let mut candidate = presentation.inner.clone();
+        {
+            let mut paragraph = native_text_frame_mut_at(&mut candidate, &current)
                 .and_then(|frame| frame.into_paragraph_mut(index))
-                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
-                .add_run(text);
-            presentation.revisions.bump();
-            let mut segments = self.path.segs.clone();
-            segments.push(PathSeg::Run(run));
-            presentation.revisions.capture(segments)
-        };
-        Py::new(py, PyRun::new(self.presentation.clone_ref(py), path))
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
+            paragraph.add_run(text);
+        }
+        let survivors = presentation.appended_text_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Paragraph.add_run",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let mut segments = current.segs;
+        segments.push(PathSeg::Run(run));
+        let path = presentation.capture_prepared_path(&prepared, segments, None)?;
+        let result = Py::new(py, PyRun::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
     }
 
     #[getter]
@@ -782,6 +1179,199 @@ impl PyParagraph {
             properties.set_bullet(Some(bullet));
         })
     }
+    /// Compatibility spelling for the same checked bullet choice.
+    #[getter]
+    fn bullet_char(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.bullet(py)
+    }
+
+    #[setter]
+    fn set_bullet_char(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        self.set_bullet(py, value)
+    }
+
+    /// The auto-numbering scheme of a numbered paragraph, such as
+    /// `arabicPeriod` (1. 2. 3.), `alphaLcParenR` (a) b) c)), or
+    /// `romanUcPeriod` (I. II. III.), or `None` when the paragraph is not
+    /// numbered. Assigning a scheme numbers the paragraph, keeping a start
+    /// value already set, and `None` removes the numbering.
+    #[getter]
+    fn auto_number(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
+        self.read_bullet(py, |bullet| match &bullet.choice {
+            Some(TextBulletChoice::AutoNumber(number)) => Some(number.scheme.as_str()),
+            _ => None,
+        })
+    }
+
+    #[setter]
+    fn set_auto_number(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        let scheme = value
+            .map(|value| {
+                TextAutoNumberScheme::parse(value).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "auto number scheme must be an ST_TextAutonumberScheme token such as \
+                         \"arabicPeriod\", got {value:?}"
+                    ))
+                })
+            })
+            .transpose()?;
+        self.edit_bullet(py, |bullet| match (scheme, &mut bullet.choice) {
+            (Some(scheme), Some(TextBulletChoice::AutoNumber(number))) => number.scheme = scheme,
+            (Some(scheme), choice) => {
+                *choice = Some(TextBulletChoice::AutoNumber(TextAutoNumber::new(scheme)));
+            }
+            (None, choice @ Some(TextBulletChoice::AutoNumber(_))) => *choice = None,
+            (None, _) => {}
+        })
+    }
+
+    /// The number of the first paragraph of an auto-numbered list, from 1
+    /// to 32767, or `None` to start at 1.
+    #[getter]
+    fn auto_number_start(&self, py: Python<'_>) -> PyResult<Option<u16>> {
+        self.read_bullet(py, |bullet| match &bullet.choice {
+            Some(TextBulletChoice::AutoNumber(number)) => number.start_at,
+            _ => None,
+        })
+    }
+
+    #[setter]
+    fn set_auto_number_start(&self, py: Python<'_>, value: Option<u16>) -> PyResult<()> {
+        if value.is_some_and(|value| !(1..=32_767).contains(&value)) {
+            return Err(PyValueError::new_err(
+                "auto number start must be from 1 to 32767",
+            ));
+        }
+        if value.is_some() && self.auto_number(py)?.is_none() {
+            return Err(PyValueError::new_err(
+                "the paragraph is not numbered, set auto_number first",
+            ));
+        }
+        self.edit_bullet(py, |bullet| {
+            if let Some(TextBulletChoice::AutoNumber(number)) = &mut bullet.choice {
+                number.start_at = value;
+            }
+        })
+    }
+
+    /// The sRGB colour of the bullet or number as an `RGBColor`, or `None`
+    /// when it follows the text or uses another kind of colour.
+    #[getter]
+    fn bullet_color(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let color = self.read_bullet(py, |bullet| match bullet.color.as_ref()?.color {
+            ColorChoice::Srgb { value, .. } => Some(value),
+            _ => None,
+        })?;
+        color
+            .map(|color| {
+                let [red, green, blue] = color.components();
+                py.import("rpptx.dml.color")?
+                    .getattr("RGBColor")?
+                    .call1((red, green, blue))
+                    .map(Bound::unbind)
+            })
+            .transpose()
+    }
+
+    #[setter]
+    fn set_bullet_color(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let color = value
+            .filter(|value| !value.is_none())
+            .map(|value| {
+                oxml_py_support::rgb_channels(value, "bullet_color")
+                    .map(|(r, g, b)| RgbColor::new(r, g, b))
+            })
+            .transpose()?;
+        self.edit_bullet(py, |bullet| match color {
+            Some(rgb) => {
+                if let Some(current) = &mut bullet.color {
+                    current.color = crate::dml::with_rgb(Some(current.color.clone()), rgb);
+                } else {
+                    bullet.color = Some(TextBulletColor::new(ColorChoice::srgb(rgb)));
+                }
+            }
+            None => bullet.color = None,
+        })
+    }
+
+    /// The bullet or number size as a fraction of the text size, from 0.25
+    /// to 4.0. `None` means no percentage value, including retained point-size
+    /// values. Assigning `None` removes only the explicit size owner.
+    #[getter]
+    fn bullet_size(&self, py: Python<'_>) -> PyResult<Option<f64>> {
+        let size = self.read_bullet(py, |bullet| match &bullet.size.as_ref()?.value {
+            TextBulletSizeValue::Percent(value) => Some(value.clone()),
+            TextBulletSizeValue::Points(_) => None,
+        })?;
+        size.map(|value| {
+            match value.strip_suffix('%') {
+                Some(percent) => percent.parse::<f64>().map(|percent| percent / 100.0),
+                None => value.parse::<f64>().map(|value| value / 100_000.0),
+            }
+            .map_err(|_| PyValueError::new_err(format!("bullet size {value:?} is not a number")))
+        })
+        .transpose()
+    }
+
+    #[setter]
+    fn set_bullet_size(&self, py: Python<'_>, value: Option<f64>) -> PyResult<()> {
+        let size = value
+            .map(|value| {
+                if !value.is_finite() || !(0.25..=4.0).contains(&value) {
+                    return Err(PyValueError::new_err(
+                        "bullet size must be from 0.25 to 4.0",
+                    ));
+                }
+                TextBulletSize::percent(((value * 100_000.0).trunc() as i64).to_string()).map_err(
+                    |_| {
+                        PyValueError::new_err(format!(
+                            "bullet size must be from 0.25 to 4.0, got {value}"
+                        ))
+                    },
+                )
+            })
+            .transpose()?;
+        self.edit_bullet(py, |bullet| bullet.size = size)
+    }
+
+    /// The typeface of a bullet character, such as `Wingdings`, or `None`
+    /// when it follows the text.
+    #[getter]
+    fn bullet_font(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read_bullet(py, |bullet| {
+            bullet.font.as_ref().map(|font| font.typeface.clone())
+        })
+    }
+
+    #[setter]
+    fn set_bullet_font(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let font = typeface(value)?;
+        self.edit_bullet(py, |bullet| set_typeface(&mut bullet.font, font))
+    }
+}
+
+impl PyParagraph {
+    /// Reads one part of the direct bullet.
+    fn read_bullet<T>(
+        &self,
+        py: Python<'_>,
+        read: impl FnOnce(&TextBullet) -> Option<T>,
+    ) -> PyResult<Option<T>> {
+        self.read(py, |properties| {
+            properties
+                .and_then(|properties| properties.bullet.as_ref())
+                .and_then(read)
+        })
+    }
+
+    /// Changes the direct bullet, removing it when nothing is left.
+    fn edit_bullet(&self, py: Python<'_>, edit: impl FnOnce(&mut TextBullet)) -> PyResult<()> {
+        self.update(py, |properties| {
+            let mut bullet = properties.bullet.clone().unwrap_or_default();
+            edit(&mut bullet);
+            properties.set_bullet((bullet != TextBullet::default()).then_some(bullet));
+        })
+    }
 }
 
 #[pyclass(name = "ParagraphCollection")]
@@ -805,16 +1395,20 @@ impl PyParagraphCollection {
             ".text_frame.paragraphs",
         )?;
         drop(presentation);
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .map(|frame| frame.paragraph_count())
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))
     }
 
     fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyParagraph>> {
-        let mut segments = self.path.segs.clone();
+        let mut segments = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?
+            .segs;
         segments.push(PathSeg::Para(index));
-        let path = self.presentation.borrow(py).revisions.capture(segments);
+        let path = self.presentation.borrow(py).capture_path(segments, None)?;
         Py::new(py, PyParagraph::new(self.presentation.clone_ref(py), path))
     }
 }
@@ -884,14 +1478,30 @@ impl PyRun {
 #[pymethods]
 impl PyRun {
     #[getter]
+    fn element(&self, py: Python<'_>) -> PyResult<Py<crate::presentation::PyPptElement>> {
+        validate_path(py, &self.presentation.borrow(py), &self.path, "run", "")?;
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let path = presentation.capture_path(current.segs, None)?;
+        drop(presentation);
+        crate::presentation::PyPptElement::new_checked(
+            py,
+            self.presentation.clone_ref(py),
+            path,
+            crate::presentation::PptElementKind::Run,
+        )
+    }
+
+    #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         validate_path(py, &self.presentation.borrow(py), &self.path, "run", "")?;
         let paragraph = paragraph_index(&self.path)
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
         let run =
             run_index(&self.path).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .and_then(|frame| frame.paragraph(paragraph))
             .and_then(|paragraph| paragraph.run(run))
             .map(|run| run.text().to_owned())
@@ -908,8 +1518,7 @@ impl PyRun {
         let run =
             run_index(&self.path).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
         let mut presentation = self.presentation.borrow_mut(py);
-        let frame = shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        let frame = text_frame_mut_at(&mut presentation, &self.path)
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))?;
         let mut paragraph = frame
             .into_paragraph_mut(paragraph)
@@ -924,11 +1533,20 @@ impl PyRun {
     #[getter]
     fn font(&self, py: Python<'_>) -> PyResult<Py<PyFont>> {
         validate_path(py, &self.presentation.borrow(py), &self.path, "run", "")?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
             PyFont {
                 presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
+                path,
             },
         )
     }
@@ -936,11 +1554,20 @@ impl PyRun {
     #[getter]
     fn hyperlink(&self, py: Python<'_>) -> PyResult<Py<PyHyperlink>> {
         validate_path(py, &self.presentation.borrow(py), &self.path, "run", "")?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
             PyHyperlink {
                 presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
+                path,
             },
         )
     }
@@ -954,24 +1581,54 @@ pub struct PyHyperlink {
 }
 
 impl PyHyperlink {
-    /// Returns the run's direct character properties, raising when the run
-    /// no longer exists.
+    /// Returns the current physical owner path and direct character properties,
+    /// raising when the run no longer exists.
     fn run_properties(
         &self,
         py: Python<'_>,
         presentation: &PyPresentation,
-    ) -> PyResult<Option<CT_TextCharacterProperties>> {
+    ) -> PyResult<(ContentPath, Option<CT_TextCharacterProperties>)> {
         validate_path(py, presentation, &self.path, "hyperlink", ".hyperlink")?;
-        let paragraph = paragraph_index(&self.path)
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("run owner is absent"))?;
+        let paragraph = paragraph_index(&current)
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
         let run =
-            run_index(&self.path).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
-        shape_ref_at(&presentation.inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+            run_index(&current).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
+        let shape = crate::shape::native_shape_ref_at(&presentation.inner, &current)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let frame = if names_cell(&current) {
+            let row = current
+                .segs
+                .iter()
+                .find_map(|segment| match segment {
+                    PathSeg::Row(index) => Some(*index),
+                    _ => None,
+                })
+                .ok_or_else(|| PyIndexError::new_err("row index is missing"))?;
+            let column = current
+                .segs
+                .iter()
+                .rev()
+                .find_map(|segment| match segment {
+                    PathSeg::Cell(index) => Some(*index),
+                    _ => None,
+                })
+                .ok_or_else(|| PyIndexError::new_err("column index is missing"))?;
+            shape
+                .table()
+                .and_then(|table| table.cell(row, column))
+                .and_then(|cell| cell.text_frame())
+        } else {
+            shape.text_frame()
+        };
+        let properties = frame
             .and_then(|frame| frame.paragraph(paragraph))
             .and_then(|paragraph| paragraph.run(run))
             .map(|run| run.properties().cloned())
-            .ok_or_else(|| PyIndexError::new_err("run index out of range"))
+            .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
+        Ok((current, properties))
     }
 }
 
@@ -981,7 +1638,7 @@ impl PyHyperlink {
     #[getter]
     fn address(&self, py: Python<'_>) -> PyResult<Option<String>> {
         let presentation = self.presentation.borrow(py);
-        let properties = self.run_properties(py, &presentation)?;
+        let (current, properties) = self.run_properties(py, &presentation)?;
         let Some(relationship_id) = properties
             .as_ref()
             .and_then(|properties| properties.hyperlink_click.as_ref())
@@ -992,8 +1649,66 @@ impl PyHyperlink {
         };
         Ok(presentation
             .inner
-            .hyperlink_address(slide_index(&self.path)?, relationship_id)
+            .hyperlink_address(slide_index(&current)?, relationship_id)
             .map(str::to_owned))
+    }
+
+    /// The checked named slide-jump target, or None for another click action.
+    #[getter]
+    fn target_slide(&self, py: Python<'_>) -> PyResult<Option<Py<PySlide>>> {
+        let presentation = self.presentation.borrow(py);
+        let (current, _) = self.run_properties(py, &presentation)?;
+        if names_cell(&current) {
+            return Err(PyValueError::new_err(
+                "cell hyperlink assignment is not supported",
+            ));
+        }
+        let paragraph = paragraph_index(&current)
+            .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
+        let run =
+            run_index(&current).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
+        let shape_id = crate::shape::native_shape_ref_at(&presentation.inner, &current)
+            .and_then(|shape| shape.non_visual_id())
+            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        let Some(target) = presentation
+            .inner
+            .run_target_slide(slide_index(&current)?, shape_id, paragraph, run)
+            .map_err(|error| rpptx_to_pyerr(py, error))?
+        else {
+            return Ok(None);
+        };
+        let path = presentation.capture_path(smallvec::smallvec![PathSeg::Slide(target)], None)?;
+        Py::new(py, PySlide::new(self.presentation.clone_ref(py), path)).map(Some)
+    }
+
+    /// Replaces the click target with an owned slide, or clears it for None.
+    #[setter]
+    fn set_target_slide(&self, py: Python<'_>, slide: Option<PyRef<'_, PySlide>>) -> PyResult<()> {
+        let target = match slide {
+            Some(slide) if !slide.presentation.is(&self.presentation) => {
+                return Err(PyValueError::new_err("slide is not in this presentation"));
+            }
+            Some(slide) => Some(slide.validate(py)?),
+            None => None,
+        };
+        let mut presentation = self.presentation.borrow_mut(py);
+        let (current, _) = self.run_properties(py, &presentation)?;
+        if names_cell(&current) {
+            return Err(PyValueError::new_err(
+                "cell hyperlink assignment is not supported",
+            ));
+        }
+        let paragraph = paragraph_index(&current)
+            .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
+        let run =
+            run_index(&current).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
+        let shape_id = crate::shape::native_shape_ref_at(&presentation.inner, &current)
+            .and_then(|shape| shape.non_visual_id())
+            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        presentation
+            .inner
+            .set_run_target_slide(slide_index(&current)?, shape_id, paragraph, run, target)
+            .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
     /// Points the run's click hyperlink at `value`, or removes it for `None`
@@ -1002,18 +1717,23 @@ impl PyHyperlink {
     #[setter]
     fn set_address(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
         let mut presentation = self.presentation.borrow_mut(py);
-        self.run_properties(py, &presentation)?;
-        let paragraph = paragraph_index(&self.path)
+        let (current, _) = self.run_properties(py, &presentation)?;
+        let paragraph = paragraph_index(&current)
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
         let run =
-            run_index(&self.path).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
-        let shape_id = shape_ref_at(&presentation.inner, &self.path)
+            run_index(&current).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
+        if names_cell(&current) {
+            return Err(PyValueError::new_err(
+                "cell hyperlink assignment is not supported",
+            ));
+        }
+        let shape_id = crate::shape::native_shape_ref_at(&presentation.inner, &current)
             .and_then(|shape| shape.non_visual_id())
             .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
         presentation
             .inner
             .set_run_hyperlink(
-                slide_index(&self.path)?,
+                slide_index(&current)?,
                 shape_id,
                 paragraph,
                 run,
@@ -1044,17 +1764,21 @@ impl PyRunCollection {
         )?;
         let paragraph = paragraph_index(&self.path)
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
-        shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-            .and_then(|shape| shape.text_frame())
+        text_frame_ref_at(&self.presentation.borrow(py), &self.path)
             .and_then(|frame| frame.paragraph(paragraph))
             .map(|paragraph| paragraph.run_count())
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
     }
 
     fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyRun>> {
-        let mut segments = self.path.segs.clone();
+        let mut segments = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?
+            .segs;
         segments.push(PathSeg::Run(index));
-        let path = self.presentation.borrow(py).revisions.capture(segments);
+        let path = self.presentation.borrow(py).capture_path(segments, None)?;
         Py::new(py, PyRun::new(self.presentation.clone_ref(py), path))
     }
 }
@@ -1106,6 +1830,23 @@ impl PyRunIterator {
     }
 }
 
+fn typeface(value: Option<String>) -> PyResult<Option<TextFont>> {
+    value
+        .map(TextFont::new)
+        .transpose()
+        .map_err(|_| PyValueError::new_err("font name must not be empty"))
+}
+
+/// Replaces or removes one typeface. An existing font element keeps its
+/// panose and charset attributes.
+fn set_typeface(slot: &mut Option<TextFont>, font: Option<TextFont>) {
+    match (slot.as_mut(), font) {
+        (_, None) => *slot = None,
+        (Some(current), Some(font)) => current.typeface = font.typeface,
+        (None, font) => *slot = font,
+    }
+}
+
 #[pyclass(name = "Font")]
 pub struct PyFont {
     presentation: Py<PyPresentation>,
@@ -1113,6 +1854,10 @@ pub struct PyFont {
 }
 
 impl PyFont {
+    pub(crate) fn new(presentation: Py<PyPresentation>, path: ContentPath) -> Self {
+        Self { presentation, path }
+    }
+
     fn validate(&self, py: Python<'_>) -> PyResult<()> {
         validate_path(
             py,
@@ -1129,7 +1874,7 @@ impl PyFont {
         read: impl FnOnce(Option<&CT_TextCharacterProperties>) -> T,
     ) -> PyResult<T> {
         self.validate(py)?;
-        let properties = font_properties(&self.presentation.borrow(py).inner, &self.path);
+        let properties = font_properties(&self.presentation.borrow(py), &self.path);
         Ok(read(properties.as_ref()))
     }
 
@@ -1141,12 +1886,33 @@ impl PyFont {
         py: Python<'_>,
         update: impl FnOnce(&mut CT_TextCharacterProperties),
     ) -> PyResult<()> {
+        self.update_checked(py, |properties| {
+            update(properties);
+            Ok(())
+        })
+    }
+
+    fn update_checked(
+        &self,
+        py: Python<'_>,
+        update: impl FnOnce(&mut CT_TextCharacterProperties) -> PyResult<()>,
+    ) -> PyResult<()> {
         self.validate(py)?;
         let paragraph = paragraph_index(&self.path)
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
         let mut presentation = self.presentation.borrow_mut(py);
-        let mut paragraph = shape_mut_at(&mut presentation.inner, &self.path)
-            .and_then(rpptx::ShapeMut::into_text_frame)
+        if style_address(&presentation, &self.path).is_some() {
+            return update_style_level(py, &mut presentation, &self.path, |level| {
+                let before = level.default_run_properties.clone().unwrap_or_default();
+                let mut properties = before.clone();
+                update(&mut properties)?;
+                if properties != before {
+                    level.default_run_properties = Some(properties);
+                }
+                Ok(())
+            });
+        }
+        let mut paragraph = text_frame_mut_at(&mut presentation, &self.path)
             .and_then(|frame| frame.into_paragraph_mut(paragraph))
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
         if let Some(run) = run_index(&self.path) {
@@ -1155,7 +1921,7 @@ impl PyFont {
                 .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
             let current = run.properties().cloned().unwrap_or_default();
             let mut properties = current.clone();
-            update(&mut properties);
+            update(&mut properties)?;
             if properties != current {
                 run.set_properties(properties);
             }
@@ -1165,13 +1931,72 @@ impl PyFont {
                 .and_then(|properties| properties.default_run_properties.clone())
                 .unwrap_or_default();
             let mut properties = current.clone();
-            update(&mut properties);
+            update(&mut properties)?;
             if properties != current {
                 *paragraph.default_run_properties_mut() = properties;
             }
         }
         Ok(())
     }
+}
+
+/// Read direct run or paragraph-default colour through the validated font owner.
+pub(crate) fn font_color_at(
+    py: Python<'_>,
+    presentation: &Py<PyPresentation>,
+    path: &ContentPath,
+) -> PyResult<Option<ColorChoice>> {
+    PyFont::new(presentation.clone_ref(py), path.clone()).read(py, |properties| {
+        match properties.and_then(|properties| properties.fill.as_ref()) {
+            Some(Fill::Solid(fill)) => fill.color.clone(),
+            _ => None,
+        }
+    })
+}
+
+/// Replace direct font colour, preserving existing solid-fill source metadata.
+pub(crate) fn write_font_color(
+    py: Python<'_>,
+    presentation: &Py<PyPresentation>,
+    path: &ContentPath,
+    color: Option<ColorChoice>,
+) -> PyResult<()> {
+    PyFont::new(presentation.clone_ref(py), path.clone()).update(py, |properties| {
+        match (properties.fill.as_mut(), color) {
+            (_, None) => properties.fill = None,
+            (Some(Fill::Solid(fill)), Some(color)) => fill.color = Some(color),
+            (_, Some(color)) => {
+                let mut fill = SolidFill::default();
+                fill.color = Some(color);
+                properties.fill = Some(Fill::Solid(fill));
+            }
+        }
+    })
+}
+
+/// Reads highlight through the same validated run or paragraph owner as Font.color.
+pub(crate) fn font_highlight_at(
+    py: Python<'_>,
+    presentation: &Py<PyPresentation>,
+    path: &ContentPath,
+) -> PyResult<Option<ColorChoice>> {
+    PyFont::new(presentation.clone_ref(py), path.clone()).read(py, |properties| {
+        properties.and_then(|properties| properties.highlight.clone())
+    })
+}
+
+/// Refuses unsupported source edits before publishing changed properties.
+pub(crate) fn write_font_highlight(
+    py: Python<'_>,
+    presentation: &Py<PyPresentation>,
+    path: &ContentPath,
+    color: Option<ColorChoice>,
+) -> PyResult<()> {
+    PyFont::new(presentation.clone_ref(py), path.clone()).update_checked(py, |properties| {
+        properties
+            .set_highlight(color)
+            .map_err(|error| PyValueError::new_err(format!("Font.highlight: {error}")))
+    })
 }
 
 fn underline_from_value(value: i32) -> PyResult<TextUnderline> {
@@ -1223,28 +2048,6 @@ fn underline_value(underline: TextUnderline) -> i32 {
         TextUnderline::WavyHeavy => 16,
         TextUnderline::WavyDouble => 17,
     }
-}
-
-/// Reads a font colour: an `RGBColor` or any triple of 0 to 255 integers,
-/// or a six-digit hexadecimal string such as `3C2F80`.
-fn font_color(value: &Bound<'_, PyAny>) -> PyResult<RgbColor> {
-    if value.is_instance_of::<PyString>() {
-        return RgbColor::parse(&value.extract::<String>()?).map_err(|_| {
-            PyValueError::new_err("font color strings must contain six hexadecimal digits")
-        });
-    }
-    let (red, green, blue) = value.extract::<(i64, i64, i64)>().map_err(|_| {
-        PyTypeError::new_err("font color must be an RGBColor, a six-digit hex string, or None")
-    })?;
-    let channel = |value: i64| {
-        u8::try_from(value)
-            .map_err(|_| PyValueError::new_err("font color channels must be from 0 to 255"))
-    };
-    Ok(RgbColor::new(
-        channel(red)?,
-        channel(green)?,
-        channel(blue)?,
-    ))
 }
 
 #[pymethods]
@@ -1335,7 +2138,19 @@ impl PyFont {
 
     #[setter]
     fn set_all_caps(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
-        self.update(py, |properties| properties.all_caps = value)
+        self.update(py, |properties| properties.set_all_caps(value))
+    }
+
+    #[getter]
+    fn small_caps(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.read(py, |properties| {
+            properties.and_then(|properties| properties.small_caps)
+        })
+    }
+
+    #[setter]
+    fn set_small_caps(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.update(py, |properties| properties.set_small_caps(value))
     }
 
     #[getter]
@@ -1362,43 +2177,240 @@ impl PyFont {
     }
 
     #[getter]
-    fn color(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        self.read(py, |properties| {
-            let Some(Fill::Solid(fill)) = properties?.fill.as_ref() else {
-                return None;
-            };
-            let Some(ColorChoice::Srgb { value, .. }) = fill.color.as_ref() else {
-                return None;
-            };
-            Some(value.to_string())
-        })
+    fn color(&self, py: Python<'_>) -> PyResult<Py<crate::dml::PyColorFormat>> {
+        self.validate(py)?;
+        Py::new(
+            py,
+            crate::dml::PyColorFormat::font(self.presentation.clone_ref(py), self.path.clone()),
+        )
     }
 
     #[setter]
     fn set_color(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let color = match value {
-            None => None,
-            Some(value) if value.is_none() => None,
-            Some(value) => Some(font_color(value)?),
-        };
-        self.update(py, |properties| {
-            let Some(color) = color else {
-                properties.fill = None;
-                return;
-            };
-            match properties.fill.as_mut() {
-                // An existing sRGB colour keeps its transforms, such as `a:alpha`.
-                Some(Fill::Solid(SolidFill {
-                    color: Some(ColorChoice::Srgb { value, .. }),
-                    ..
-                })) => *value = color,
-                Some(Fill::Solid(fill)) => fill.color = Some(ColorChoice::srgb(color)),
-                _ => {
-                    let mut fill = SolidFill::default();
-                    fill.color = Some(ColorChoice::srgb(color));
-                    properties.fill = Some(Fill::Solid(fill));
+        let color = value
+            .filter(|value| !value.is_none())
+            .map(|value| {
+                let (red, green, blue) = oxml_py_support::rgb_channels(value, "Font.color")?;
+                Ok::<_, PyErr>(RgbColor::new(red, green, blue))
+            })
+            .transpose()?;
+        let current = font_color_at(py, &self.presentation, &self.path)?;
+        let color = color.map(|rgb| crate::dml::with_rgb(current, rgb));
+        write_font_color(py, &self.presentation, &self.path, color)
+    }
+
+    #[getter]
+    fn highlight(&self, py: Python<'_>) -> PyResult<Py<crate::dml::PyColorFormat>> {
+        self.validate(py)?;
+        Py::new(
+            py,
+            crate::dml::PyColorFormat::font_highlight(
+                self.presentation.clone_ref(py),
+                self.path.clone(),
+            ),
+        )
+    }
+
+    #[setter]
+    fn set_highlight(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let color = value
+            .filter(|value| !value.is_none())
+            .map(|value| {
+                let (red, green, blue) = oxml_py_support::rgb_channels(value, "Font.highlight")?;
+                Ok::<_, PyErr>(RgbColor::new(red, green, blue))
+            })
+            .transpose()?;
+        let current = font_highlight_at(py, &self.presentation, &self.path)?;
+        let color = color.map(|rgb| crate::dml::with_rgb(current, rgb));
+        write_font_highlight(py, &self.presentation, &self.path, color)
+    }
+
+    #[getter]
+    fn highlight_color(&self, py: Python<'_>) -> PyResult<Py<crate::dml::PyColorFormat>> {
+        self.validate(py)?;
+        Py::new(
+            py,
+            crate::dml::PyColorFormat::font_highlight(
+                self.presentation.clone_ref(py),
+                self.path.clone(),
+            ),
+        )
+    }
+
+    #[setter]
+    fn set_highlight_color(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let color = value
+            .filter(|value| !value.is_none())
+            .map(|value| {
+                let (red, green, blue) =
+                    oxml_py_support::rgb_channels(value, "Font.highlight_color")?;
+                Ok::<_, PyErr>(RgbColor::new(red, green, blue))
+            })
+            .transpose()?;
+        let current = font_highlight_at(py, &self.presentation, &self.path)?;
+        let color = color.map(|rgb| crate::dml::with_rgb(current, rgb));
+        write_font_highlight(py, &self.presentation, &self.path, color)
+    }
+
+    /// The vertical offset as a fraction of the font size: positive raises
+    /// the text (0.3 is PowerPoint's superscript), negative lowers it (-0.25
+    /// is its subscript), and `None` inherits.
+    #[getter]
+    fn baseline(&self, py: Python<'_>) -> PyResult<Option<f64>> {
+        let baseline = self.read(py, |properties| {
+            properties.and_then(|properties| properties.baseline.clone())
+        })?;
+        baseline
+            .map(|value| {
+                match value.strip_suffix('%') {
+                    Some(percent) => percent.parse::<f64>().map(|percent| percent / 100.0),
+                    None => value.parse::<f64>().map(|value| value / 100_000.0),
                 }
+                .map_err(|_| PyValueError::new_err(format!("baseline {value:?} is not a number")))
+            })
+            .transpose()
+    }
+
+    #[setter]
+    fn set_baseline(&self, py: Python<'_>, value: Option<f64>) -> PyResult<()> {
+        let baseline = value
+            .map(|value| {
+                if (-1.0..=1.0).contains(&value) {
+                    Ok(((value * 100_000.0).trunc() as i32).to_string())
+                } else {
+                    Err(PyValueError::new_err(format!(
+                        "baseline must be from -1.0 to 1.0, got {value}"
+                    )))
+                }
+            })
+            .transpose()?;
+        self.update(py, |properties| properties.baseline = baseline)
+    }
+
+    /// The character spacing as a `Length`, positive to expand and negative
+    /// to condense, or `None` to inherit.
+    #[getter]
+    fn spacing(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let spacing = self.read(py, |properties| {
+            properties.and_then(|properties| properties.spacing.clone())
+        })?;
+        match spacing {
+            Some(TextPointValue::Centipoints(centipoints)) => {
+                length_object(py, i64::from(centipoints) * EMU_PER_CENTIPOINT).map(Some)
             }
+            Some(TextPointValue::UniversalMeasure(value)) => {
+                let unit_start = value
+                    .find(|character: char| character.is_ascii_alphabetic())
+                    .unwrap_or(value.len());
+                let (number, unit) = value.split_at(unit_start);
+                let multiplier = match unit {
+                    "mm" => 36_000.0,
+                    "cm" => 360_000.0,
+                    "in" => 914_400.0,
+                    "pt" => 12_700.0,
+                    "pc" | "pi" => 152_400.0,
+                    _ => {
+                        return Err(PyValueError::new_err(format!(
+                            "unsupported character spacing unit {unit:?}"
+                        )));
+                    }
+                };
+                let emu = number
+                    .parse::<f64>()
+                    .map_err(|_| PyValueError::new_err("invalid character spacing measure"))?
+                    * multiplier;
+                if !emu.is_finite() || emu < i64::MIN as f64 || emu >= i64::MAX as f64 {
+                    return Err(PyValueError::new_err(
+                        "character spacing measure is outside the Length range",
+                    ));
+                }
+                length_object(py, emu.trunc() as i64).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[setter]
+    fn set_spacing(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        let spacing = value
+            .map(|emu| {
+                let centipoints = emu / EMU_PER_CENTIPOINT;
+                if (-MAX_FONT_SIZE..=MAX_FONT_SIZE).contains(&centipoints) {
+                    Ok(TextPointValue::Centipoints(centipoints as i32))
+                } else {
+                    Err(PyValueError::new_err(
+                        "character spacing must be from -4000 to 4000 points",
+                    ))
+                }
+            })
+            .transpose()?;
+        self.update(py, |properties| properties.spacing = spacing)
+    }
+
+    /// The language tag of the text, such as `en-US` or `fr-FR`, which
+    /// proofing and hyphenation use, or `None` to inherit.
+    #[getter]
+    fn language(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |properties| {
+            properties
+                .and_then(CT_TextCharacterProperties::language)
+                .map(str::to_owned)
+        })
+    }
+
+    #[setter]
+    fn set_language(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        if let Some(value) = value.as_deref()
+            && (value.is_empty()
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+        {
+            return Err(PyValueError::new_err(format!(
+                "language must be a tag such as \"en-US\", got {value:?}"
+            )));
+        }
+        self.update(py, |properties| properties.set_language(value.as_deref()))
+    }
+
+    /// The East Asian typeface (`a:ea`), or `None` to inherit.
+    #[getter]
+    fn east_asian_name(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |properties| {
+            properties
+                .and_then(|properties| properties.east_asian.as_ref())
+                .map(|font| font.typeface.clone())
+        })
+    }
+
+    #[setter]
+    fn set_east_asian_name(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let font = typeface(value)?;
+        self.update(py, |properties| {
+            set_typeface(&mut properties.east_asian, font);
+        })
+    }
+
+    /// The complex-script typeface (`a:cs`), used for Arabic, Hebrew, Thai
+    /// and other complex scripts, or `None` to inherit.
+    #[getter]
+    fn complex_script_name(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |properties| {
+            properties
+                .and_then(|properties| properties.complex_script.as_ref())
+                .map(|font| font.typeface.clone())
+        })
+    }
+
+    #[setter]
+    fn set_complex_script_name(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let font = typeface(value)?;
+        self.update(py, |properties| {
+            set_typeface(&mut properties.complex_script, font);
         })
     }
 
@@ -1457,4 +2469,106 @@ where
     Err(PyTypeError::new_err(format!(
         "{kind} indices must be integers or slices"
     )))
+}
+
+/// Master title, body and other styles, bound to the existing physical owner.
+#[pyclass(name = "MasterTextStyles")]
+pub struct PyMasterTextStyles {
+    pub(crate) presentation: Py<PyPresentation>,
+    pub(crate) path: ContentPath,
+}
+impl PyMasterTextStyles {
+    fn list(&self, py: Python<'_>, style: usize) -> PyResult<Py<PyTextStyleList>> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "master text styles",
+            ".text_styles",
+        )?;
+        let mut path = self.path.clone();
+        path.segs.push(PathSeg::TextStyle(style));
+        Py::new(
+            py,
+            PyTextStyleList {
+                presentation: self.presentation.clone_ref(py),
+                path,
+            },
+        )
+    }
+}
+#[pymethods]
+impl PyMasterTextStyles {
+    #[getter]
+    fn title(&self, py: Python<'_>) -> PyResult<Py<PyTextStyleList>> {
+        self.list(py, 0)
+    }
+    #[getter]
+    fn body(&self, py: Python<'_>) -> PyResult<Py<PyTextStyleList>> {
+        self.list(py, 1)
+    }
+    #[getter]
+    fn other(&self, py: Python<'_>) -> PyResult<Py<PyTextStyleList>> {
+        self.list(py, 2)
+    }
+}
+/// Nine master levels with the existing paragraph-format editing interface.
+#[pyclass(name = "TextStyleList")]
+pub struct PyTextStyleList {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+impl PyTextStyleList {
+    fn item(&self, py: Python<'_>, level: usize) -> PyResult<Py<PyParagraph>> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "master text style",
+            ".text_styles",
+        )?;
+        if level >= 9 {
+            return Err(PyIndexError::new_err("text style level is out of range"));
+        }
+        let mut path = self.path.clone();
+        path.segs.push(PathSeg::Para(level));
+        Py::new(py, PyParagraph::new(self.presentation.clone_ref(py), path))
+    }
+}
+#[pymethods]
+impl PyTextStyleList {
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "master text style",
+            ".text_styles",
+        )?;
+        Ok(9)
+    }
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Py<PyParagraph>> {
+        self.item(py, normalize_index(index, 9, "text style level")?)
+    }
+    /// One-based selection matching the native DrawingML level number.
+    fn level(&self, py: Python<'_>, level: usize) -> PyResult<Py<PyParagraph>> {
+        if !(1..=9).contains(&level) {
+            return Err(PyValueError::new_err("level must be from 1 through 9"));
+        }
+        self.item(py, level - 1)
+    }
+    /// The first level's direct font, without materializing absent defaults.
+    #[getter]
+    fn font(&self, py: Python<'_>) -> PyResult<Py<PyFont>> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "master text style",
+            ".text_styles",
+        )?;
+        let mut path = self.path.clone();
+        path.segs.push(PathSeg::Para(0));
+        Py::new(py, PyFont::new(self.presentation.clone_ref(py), path))
+    }
 }

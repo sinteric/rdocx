@@ -18,7 +18,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-opc | 99,448 compressed bytes, 385,353 member bytes, 12 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `oxml-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: oxml-opc | 107,708 compressed bytes, 434,211 member bytes, 12 members | 0.14.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `oxml-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
@@ -45,4 +45,4 @@ assert_eq!(content_types.defaults["xml"], "application/xml");
 # Ok::<(), oxml_opc::OpcError>(())
 ```
 
-Add `oxml-opc = "0.14.0"` to your dependencies. Start with the [package API documentation](https://docs.rs/oxml-opc).
+Add `oxml-opc = "0.14.1"` to your dependencies. Start with the [package API documentation](https://docs.rs/oxml-opc).

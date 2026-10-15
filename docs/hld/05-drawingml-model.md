@@ -211,6 +211,32 @@ correctly inside a non-rectangular shape and would otherwise have to be invented
 
 The generated table and its provenance are covered in `08-rendering-spec.md`.
 
+The concrete shape-property inheritance operation stages missing geometry,
+fill, line and effect groups into a clone. A local transform retains its
+rotation and flip values, including explicit zero and false, while absent
+optional offset, extent and child coordinates inherit individually. An absent
+local transform inherits the complete lower transform. Copied opaque children
+retain their source namespace authority and schema position. Conflicting
+opaque owner metadata refuses atomically rather than rebinding local payload.
+The operation retains original source XML and its typed projection for
+admission. Unrepresentable opaque metadata on modeled descendants refuses
+from either the local or inherited owner, even without a namespace conflict.
+Those retained source facts do not participate in ordinary shape-property
+equality or serialization.
+
+`CT_Shape::style_for_materialization` prepares the actual source-scoped
+shape style without mutating the owner or clearing its current reference
+selections. Source-format notes stage direct fill, line, effect and font
+appearance before calling `materialize_style_references`. That operation
+validates the qualified owned style references, sets the fill, line and effect
+matrix indexes to zero and selects the schema None font collection. It stages
+the complete edit before publishing it. Original namespace authority, ordered
+opaque payload and foreign lookalikes remain preserved or receive a named
+atomic refusal when they cannot be represented. Legitimate modeled reference
+edits participate in preparation rather than being replaced by stale source
+snapshots. These materialization-specific source facts do not change ordinary
+style equality or writing.
+
 ## Text body
 
 ```
@@ -314,6 +340,36 @@ properties. The reader accepts any prefix, and the writer emits `a:defPPr`
 before the ascending level properties with fixed `a:` prefixes. Unmodelled
 siblings remain in their original positions around those typed children.
 
+Character properties, paragraph properties and list styles each expose a
+concrete `with_inherited_defaults` operation. Local schema choices win,
+including explicit false, zero and no-bullet values. Missing paragraph and
+character defaults inherit without replacing unrelated local choices, and
+list default properties remain distinct from the nine level properties.
+Inheritance stages a clone and preserves qualified opaque attributes and
+ordered children. Copied lower children close their required namespaces,
+while inherited unqualified scalar attributes add no unrelated namespace
+bindings to the local owner. Ambiguous opaque metadata conflicts refuse
+without changing either input.
+
+### Character-owner source and caps
+
+`a:rPr`, default character properties and terminal paragraph properties model
+`cap="all"`, `cap="small"` and `cap="none"`. Setting either caps mode to a
+boolean selects that direct mode and clears the opposite direct mode. Clearing
+one mode leaves the other mode intact. Parsed conflicting direct modes are
+rejected by checked authoring. Highlight owns a direct DrawingML colour choice.
+Its live colour view retains source attributes, opaque children and existing
+transform payloads. An edit that cannot retain an unmodelled transform
+attribute refuses before changing the owner.
+
+Imported character properties and click links interpret owned elements and
+relationship attributes by namespace URI, including ancestor declarations,
+aliases and local rebinding. Foreign lookalikes and unqualified opaque `id`
+attributes stay lexical source payload. Source-aware changes keep the original
+qualified root, declarations, attributes and sibling order. Newly generated
+owned descendants locally close their required DrawingML and relationship
+namespaces rather than inheriting a foreign fixed-prefix binding.
+
 ## Tables
 
 `CT_Table` models optional table properties, the required column grid, and one
@@ -393,6 +449,12 @@ extracts `a:tbl` from a larger XML part passes the ancestor namespace bindings
 to `from_xml_with_inherited_namespaces`, which keeps opaque producer-prefixed
 content namespace-complete in standalone output.
 
+A direct cell anchor parses and writes the namespace-owned `a:tcPr/@anchor`
+without rewriting the text body's `a:bodyPr`. Aliased element owners and rebound
+foreign lookalikes remain distinct. Getter reads and absent clears create no
+property node. Changed cell-property owners retain unrelated attributes,
+children and source order.
+
 ## Theme
 
 `CT_OfficeStyleSheet` is read **and written**, because every `.pptx` requires
@@ -436,3 +498,34 @@ writer retains ownership of fixed-prefix `a:srgbClr` serialization.
 Anything not in the list above is captured verbatim through
 `oxml_core::raw_xml::capture_element` and re-emitted in place. That is not a
 fallback, it is the design: parse what you render, preserve the rest.
+
+## PowerPoint field and theme access
+
+Paragraph field insertion supports slidenum, the imported datetime alias and datetime1 through
+datetime13. It preserves absent versus empty cached text, copies the selected
+paragraph formatting and allocates an identity unique across slide, layout and
+master fields. No automatic date operation reads a clock or locale. The caller
+supplies automatic cached text explicitly.
+
+Each presentation master exposes its own relationship-resolved Theme. Live
+colours include all twelve scheme slots as the existing scalar RGB values, with
+checked absolute RGB assignment. Major and minor font sets expose writable
+Latin, East Asian and complex-script typefaces. An absent slot remains absent
+instead of borrowing a different master's theme. Theme edits patch selected
+qualified source attributes and remove only recognised colour transforms when
+assigning absolute RGB. Unsafe selected opaque content refuses. Unselected
+lexical attributes, supplemental mappings and format scheme source remain exact.
+Selected scheme transfer closes actual namespace and compatibility policy from
+its source owner without changing the destination theme root.
+
+## Direct script and spacing properties
+
+Character spacing admits centipoints and universal pt/in/cm/mm/pc/pi units.
+Python reads an explicit value as Length and writes EMU divided by127 with
+truncation toward zero. Baseline is a signed fraction from-1 to1, represented
+as a truncated DrawingML percentage. Language updates the qualified retained
+character-property start token without discarding unrelated attributes. Latin,
+East Asian and complex-script faces remain independent typed font slots.
+Bullet scheme/start, colour, fractional size and font edit their own choices.
+An imported absolute point bullet size is preserved and is not reported as a
+fractional size or as a follows-text choice.

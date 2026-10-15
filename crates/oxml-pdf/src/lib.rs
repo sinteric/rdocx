@@ -18,9 +18,20 @@ pub use raster::{RasterError, RasterFormat, RasterOptions, RasterOutput};
 /// Render a laid-out document to PDF bytes.
 ///
 /// The `LayoutResult` must contain all pages, fonts, metadata, and outlines
-/// produced by a format-specific layout engine.
+/// produced by a format-specific layout engine. If a contributing font cannot
+/// be prepared, this legacy operation returns an empty vector without a partial
+/// PDF. Use [`render_to_pdf_checked`] to receive the actual preparation error.
 pub fn render_to_pdf(layout: &LayoutResult) -> Vec<u8> {
     writer::write_pdf(layout)
+}
+
+/// Render PDF bytes after preparing every contributing font exactly once.
+///
+/// A missing or unembeddable selected instance returns an error before output.
+/// This normal PDF operation does not impose archival action or paint rules.
+pub fn render_to_pdf_checked(layout: &LayoutResult) -> Result<Vec<u8>, PdfError> {
+    let prepared_fonts = font::prepare_fonts(layout)?;
+    Ok(writer::write_pdf_impl(layout, None, prepared_fonts))
 }
 
 /// Render a laid-out document to one explicitly selected archival PDF profile.
@@ -30,8 +41,12 @@ pub fn render_to_pdf_with_options(
     layout: &LayoutResult,
     options: PdfOptions,
 ) -> Result<Vec<u8>, PdfError> {
-    conformance::preflight(layout)?;
-    Ok(writer::write_archival_pdf(layout, options.profile))
+    let prepared_fonts = conformance::preflight(layout)?;
+    Ok(writer::write_pdf_impl(
+        layout,
+        Some(options.profile),
+        prepared_fonts,
+    ))
 }
 
 /// Render a single page to PNG bytes.
@@ -78,6 +93,90 @@ mod tests {
             None,
             vec![],
         )
+    }
+
+    #[test]
+    fn fx195_pdf_font_failure_returns_no_partial_legacy_bytes() {
+        let mut fonts = oxml_layout::FontManager::new_deterministic().unwrap();
+        let mut runs = Vec::new();
+        for bold in [false, true] {
+            let id = fonts.resolve_font(Some("Carlito"), bold, false).unwrap();
+            let shaped = fonts.shape_text(id, "A", 12.0).unwrap();
+            assert_eq!(shaped.glyph_ids.len(), 1);
+            assert!(shaped.width > 0.0);
+            runs.push(PositionedElement::Text(GlyphRun {
+                origin: Point { x: 20.0, y: 30.0 },
+                font_id: id,
+                font_size: 12.0,
+                glyph_ids: shaped.glyph_ids,
+                advances: shaped.advances,
+                text: "A".into(),
+                source: None,
+                color: Color::BLACK,
+                bold,
+                italic: false,
+                field_kind: None,
+                field_source: None,
+                tab_aligned: None,
+                note: None,
+                note_reference_source: None,
+            }));
+        }
+        let valid_fonts = fonts.all_font_data();
+        assert_eq!(valid_fonts.len(), 2);
+        let valid = LayoutResult::new(
+            vec![PageFrame::new(1, 100.0, 100.0, runs.clone()).into()],
+            valid_fonts.clone(),
+            None,
+            vec![],
+        );
+        let valid_pdf = render_to_pdf(&valid);
+        assert!(valid_pdf.starts_with(b"%PDF"));
+        assert_eq!(render_to_pdf_checked(&valid).unwrap(), valid_pdf);
+        let mut failures = Vec::new();
+        let missing = LayoutResult::new(valid.pages.clone(), vec![], None, vec![]);
+        assert!(matches!(
+            render_to_pdf_checked(&missing),
+            Err(PdfError::MissingEmbeddedFont { .. })
+        ));
+        if !render_to_pdf(&missing).is_empty() {
+            failures.push("missing contributing font");
+        }
+        let mut corrupt_fonts = valid_fonts.clone();
+        corrupt_fonts[0].data = std::sync::Arc::from([0u8, 1, 2, 3]);
+        let corrupt = LayoutResult::new(valid.pages.clone(), corrupt_fonts, None, vec![]);
+        assert!(matches!(
+            render_to_pdf_checked(&corrupt),
+            Err(PdfError::MissingEmbeddedFont { .. })
+        ));
+        if !render_to_pdf(&corrupt).is_empty() {
+            failures.push("corrupt plus valid contributing font");
+        }
+        let mut wrong_face_fonts = valid_fonts.clone();
+        wrong_face_fonts[1].face_index = u32::MAX;
+        let wrong_face = LayoutResult::new(valid.pages.clone(), wrong_face_fonts, None, vec![]);
+        assert!(matches!(
+            render_to_pdf_checked(&wrong_face),
+            Err(PdfError::MissingEmbeddedFont { .. })
+        ));
+        if !render_to_pdf(&wrong_face).is_empty() {
+            failures.push("invalid selected collection face");
+        }
+        // An unused invalid face is not a contributing-font failure and cannot
+        // change otherwise valid output or force loading/subsetting that face.
+        let mut unused_fonts = valid_fonts.clone();
+        let mut unused = valid_fonts[0].clone();
+        unused.id = FontId(999);
+        unused.data = std::sync::Arc::from([0u8, 1, 2, 3]);
+        unused_fonts.push(unused);
+        let with_unused = LayoutResult::new(valid.pages.clone(), unused_fonts, None, vec![]);
+        assert_eq!(render_to_pdf(&with_unused), valid_pdf);
+        assert_eq!(render_to_pdf_checked(&with_unused).unwrap(), valid_pdf);
+        for (actual, original) in valid.fonts.iter().zip(valid_fonts.iter()) {
+            assert_eq!(actual.data.as_ref(), original.data.as_ref());
+            assert!(std::sync::Arc::ptr_eq(&actual.data, &original.data));
+        }
+        assert!(failures.is_empty(), "partial PDF output for {failures:?}");
     }
 
     #[test]

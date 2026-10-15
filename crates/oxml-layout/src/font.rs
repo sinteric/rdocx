@@ -11,12 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
-#[cfg(all(test, feature = "system-fonts"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{LayoutError, Result};
 use crate::line::TextSegment;
-use crate::output::{FontId, SourceSpan};
+use crate::output::{Diagnostic, FontId, SourceSpan};
 
 /// Font data provided by the user or extracted from an OOXML file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +24,60 @@ pub struct FontFile {
     pub family: String,
     /// Raw font file bytes (TTF/OTF).
     pub data: Vec<u8>,
+}
+
+impl FontFile {
+    /// Read supported caller font files in lexical path order.
+    /// A missing directory, unreadable entry or malformed supported font fails
+    /// instead of silently changing the requested fallback configuration.
+    pub fn from_dir(path: &std::path::Path) -> Result<Vec<Self>> {
+        let failed = |error: std::io::Error| {
+            LayoutError::FontParse(format!("font directory {}: {error}", path.display()))
+        };
+        if !std::fs::metadata(path).map_err(failed)?.is_dir() {
+            return Err(LayoutError::FontParse(format!(
+                "font directory {} is not a directory",
+                path.display()
+            )));
+        }
+        let mut paths = std::fs::read_dir(path)
+            .map_err(failed)?
+            .map(|entry| entry.map(|entry| entry.path()).map_err(failed))
+            .collect::<Result<Vec<_>>>()?;
+        paths.sort();
+        let mut fonts = Vec::new();
+        for entry in paths {
+            let supported = entry
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ["ttf", "otf", "ttc"]
+                        .iter()
+                        .any(|kind| ext.eq_ignore_ascii_case(kind))
+                });
+            if !supported {
+                continue;
+            }
+            let data = std::fs::read(&entry).map_err(|error| {
+                LayoutError::FontParse(format!("font file {}: {error}", entry.display()))
+            })?;
+            ttf_parser::Face::parse(&data, 0).map_err(|error| {
+                LayoutError::FontParse(format!("font file {}: {error}", entry.display()))
+            })?;
+            let family = entry
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| {
+                    LayoutError::FontParse(format!(
+                        "font filename {} is not UTF-8",
+                        entry.display()
+                    ))
+                })?
+                .to_owned();
+            fonts.push(Self { family, data });
+        }
+        Ok(fonts)
+    }
 }
 
 /// Key for caching resolved fonts.
@@ -481,6 +534,52 @@ struct LoadedFont {
     /// HarfRust's per-face shaping caches. Building these is the expensive
     /// part of shaping, so it happens once per face instead of once per run.
     shaper_data: harfrust::ShaperData,
+    variations: Vec<([u8; 4], f32)>,
+    shaper_instance: Option<harfrust::ShaperInstance>,
+    synthetic_bold: bool,
+    synthetic_italic: bool,
+}
+
+/// Preserve defaults unless a style was explicitly requested. Keep restricted
+/// instances distinct from synthesis rather than claiming an unavailable style.
+fn face_style_adjustment(
+    face: &ttf_parser::Face<'_>,
+    bold: bool,
+    italic: bool,
+) -> (Vec<([u8; 4], f32)>, bool, bool) {
+    let axis = |tag: &[u8; 4]| {
+        face.variation_axes()
+            .into_iter()
+            .find(|axis| axis.tag == ttf_parser::Tag::from_bytes(tag))
+    };
+    let mut variations = Vec::new();
+    let mut select = |tag, axis: ttf_parser::VariationAxis, value: f32| {
+        let selected = value.clamp(axis.min_value, axis.max_value);
+        if selected != axis.def_value {
+            variations.push((tag, selected));
+        }
+        selected
+    };
+    let genuine_bold = if bold {
+        match axis(b"wght") {
+            Some(weight) => select(*b"wght", weight, 700.0) >= 700.0,
+            None => face.is_bold() || face.weight().to_number() >= 700,
+        }
+    } else {
+        false
+    };
+    let mut genuine_italic = face.style() != ttf_parser::Style::Normal;
+    if italic && !genuine_italic {
+        if let Some(axis) =
+            axis(b"ital").filter(|axis| axis.min_value <= 1.0 && axis.max_value >= 1.0)
+        {
+            select(*b"ital", axis, 1.0);
+            genuine_italic = true;
+        } else if let Some(axis) = axis(b"slnt").filter(|axis| axis.min_value < 0.0) {
+            genuine_italic = select(*b"slnt", axis, -12.0) < 0.0;
+        }
+    }
+    (variations, bold && !genuine_bold, italic && !genuine_italic)
 }
 
 /// A face's line metrics as Windows reports them to Word, in design units.
@@ -532,8 +631,34 @@ impl WordLineUnits {
     }
 }
 
+/// One successfully shaped nonempty final text contribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontContribution {
+    pub font_id: FontId,
+    pub requested_family: Option<String>,
+}
+
+/// A transactional local capture within the current bounded trace.
+#[derive(Debug)]
+pub struct FontContributionScope {
+    generation: u64,
+    event_start: usize,
+    depth: usize,
+    owns_trace: bool,
+    diagnostic_start: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontTraceEvent {
+    Resolution(FontId),
+    Contribution(FontContribution),
+}
+
 struct ParagraphFontTrace {
-    ids: Vec<FontId>,
+    events: Vec<FontTraceEvent>,
+    generation: u64,
+    scope_depth: usize,
+    owned_family_bytes: usize,
     overflowed: bool,
 }
 
@@ -567,6 +692,10 @@ pub struct FontManager {
     coverage_misses: HashSet<char>,
     /// Exact additional font set currently loaded into `db`.
     additional_fonts: Vec<FontFile>,
+    /// One decoded body per physical embedded part and every owned alias.
+    embedded_fonts: Vec<(Vec<String>, Arc<[u8]>)>,
+    /// Owned embedded typeface aliases, separate from caller provenance.
+    embedded_aliases: HashMap<String, Vec<fontdb::ID>>,
     /// Lowercased caller labels mapped to the exact faces loaded from their
     /// bytes. Rebuilt together with `additional_fonts`.
     caller_aliases: HashMap<String, Vec<fontdb::ID>>,
@@ -583,6 +712,9 @@ pub struct FontManager {
     paragraph_font_trace: Option<ParagraphFontTrace>,
     /// Distinct current-layout fonts in first-resolution order.
     layout_fonts: Vec<FontId>,
+    // At most one current-output message per Aptos request spelling.
+    // Scope capture rolls provisional messages back with their contributions.
+    layout_font_diagnostics: Vec<Diagnostic>,
 }
 
 /// Families with broad non-Latin coverage, tried before scanning everything.
@@ -631,6 +763,8 @@ const RESOLUTION_CACHE_MAX_ENTRIES: usize = 256;
 const COVERAGE_FALLBACK_MAX_ENTRIES: usize = 256;
 const COVERAGE_MISS_MAX_ENTRIES: usize = 4_096;
 const PARAGRAPH_FONT_TRACE_MAX_ENTRIES: usize = 4_096;
+const PARAGRAPH_FONT_TRACE_MAX_BYTES: usize = SHAPING_CACHE_MAX_BYTES;
+static NEXT_FONT_TRACE_GENERATION: AtomicUsize = AtomicUsize::new(1);
 
 /// Maximum caller-declared aliases retained for resolution identity.
 const CALLER_ALIAS_MAX_ENTRIES: usize = 256;
@@ -688,6 +822,8 @@ impl FontManager {
             coverage_fallbacks: HashMap::new(),
             coverage_misses: HashSet::new(),
             additional_fonts: Vec::new(),
+            embedded_fonts: Vec::new(),
+            embedded_aliases: HashMap::new(),
             caller_aliases: HashMap::new(),
             caller_families: HashMap::new(),
             explicit_aliases: Vec::new(),
@@ -695,6 +831,7 @@ impl FontManager {
             shaping_memo: Mutex::new(ShapingMemo::new()),
             paragraph_font_trace: None,
             layout_fonts: Vec::new(),
+            layout_font_diagnostics: Vec::new(),
         }
     }
 
@@ -737,19 +874,158 @@ impl FontManager {
         if self.additional_fonts == font_files {
             return false;
         }
+        let embedded = self.embedded_fonts.clone();
+        // Previously admitted immutable embedded sources remain valid. Refuse
+        // atomically if rebuilding ever fails instead of clearing active state.
+        self.rebuild_font_sources(&embedded, font_files).is_ok()
+    }
 
-        self.db = self.base_db.clone();
-        self.caller_aliases.clone_from(&self.base_caller_aliases);
-        self.caller_families.clone_from(&self.base_caller_families);
+    /// Load bounded physical embedded font sources and all their owned aliases.
+    /// Caller faces retain priority. An unchanged set preserves loaded IDs and caches.
+    #[doc(hidden)]
+    pub fn load_embedded_fonts(&mut self, sources: &[(Vec<String>, Arc<[u8]>)]) -> Result<bool> {
+        if self.embedded_fonts == sources {
+            return Ok(false);
+        }
+        let callers = self.additional_fonts.clone();
+        self.rebuild_font_sources(sources, &callers)?;
+        Ok(true)
+    }
+
+    fn rebuild_font_sources(
+        &mut self,
+        embedded_fonts: &[(Vec<String>, Arc<[u8]>)],
+        font_files: &[FontFile],
+    ) -> Result<()> {
+        const FACE_LIMIT: usize = 64 * 1024 * 1024;
+        const TOTAL_LIMIT: usize = 256 * 1024 * 1024;
+        const ALIAS_LIMIT: usize = 16_384;
+        const ALIAS_BYTES_LIMIT: usize = 4 * 1024 * 1024;
+        let refused = || {
+            LayoutError::FontParse(
+                "embedded font sources exceed the data or alias limits".to_owned(),
+            )
+        };
+        if embedded_fonts.len() > 4096 {
+            return Err(refused());
+        }
+        let mut total = 0usize;
+        let mut aliases = 0usize;
+        let mut alias_bytes = 0usize;
+        for (names, data) in embedded_fonts {
+            total = total.checked_add(data.len()).ok_or_else(refused)?;
+            aliases = aliases.checked_add(names.len()).ok_or_else(refused)?;
+            if data.len() > FACE_LIMIT
+                || total > TOTAL_LIMIT
+                || aliases > ALIAS_LIMIT
+                || names.is_empty()
+            {
+                return Err(refused());
+            }
+            for name in names {
+                alias_bytes = alias_bytes
+                    .checked_add(name.len().saturating_mul(4))
+                    .ok_or_else(refused)?;
+                if name.is_empty() || name.len() > 4096 || alias_bytes > ALIAS_BYTES_LIMIT {
+                    return Err(refused());
+                }
+            }
+        }
+        let mut face_count = 0usize;
+        let mut alias_references = 0usize;
+        let mut font_name_bytes = 0usize;
+        for (names, data) in embedded_fonts {
+            let count = ttf_parser::fonts_in_collection(data).unwrap_or(1);
+            if count == 0 || count > 256 {
+                return Err(refused());
+            }
+            face_count = face_count.checked_add(count as usize).ok_or_else(refused)?;
+            alias_references = alias_references
+                .checked_add(
+                    names
+                        .len()
+                        .checked_mul(count as usize)
+                        .ok_or_else(refused)?,
+                )
+                .ok_or_else(refused)?;
+            if face_count > 4096 || alias_references > 262_144 {
+                return Err(refused());
+            }
+            for index in 0..count {
+                let face = ttf_parser::Face::parse(data, index).map_err(|error| {
+                    LayoutError::FontParse(format!("embedded font face: {error:?}"))
+                })?;
+                if face.names().len() > 1024 {
+                    return Err(refused());
+                }
+                for name in face.names() {
+                    font_name_bytes = font_name_bytes
+                        .checked_add(name.name.len())
+                        .ok_or_else(refused)?;
+                    if font_name_bytes > ALIAS_BYTES_LIMIT {
+                        return Err(refused());
+                    }
+                }
+            }
+        }
+        let mut db = self.base_db.clone();
+        let mut embedded_aliases: HashMap<String, Vec<fontdb::ID>> = HashMap::new();
+        for (names, data) in embedded_fonts {
+            let before = db.len();
+            let mut body = Vec::new();
+            body.try_reserve_exact(data.len()).map_err(|error| {
+                LayoutError::FontParse(format!("embedded font allocation: {error}"))
+            })?;
+            body.extend_from_slice(data);
+            db.load_font_data(body);
+            let ids = db
+                .faces()
+                .skip(before)
+                .map(|face| face.id)
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Err(LayoutError::FontParse(
+                    "embedded font contains no supported faces".to_owned(),
+                ));
+            }
+            for name in names {
+                embedded_aliases
+                    .entry(name.to_lowercase())
+                    .or_default()
+                    .extend(ids.iter().copied());
+            }
+        }
+        let mut caller_aliases = self.base_caller_aliases.clone();
+        let mut caller_families = self.base_caller_families.clone();
         for font_file in font_files {
             Self::load_caller_font(
-                &mut self.db,
-                &mut self.caller_aliases,
-                &mut self.caller_families,
+                &mut db,
+                &mut caller_aliases,
+                &mut caller_families,
                 &font_file.family,
                 font_file.data.clone(),
             );
         }
+        // CSS ranking still compares every face. On an equal rank, retain
+        // constructor provenance ahead of the additional tier. Reverse the
+        // constructor block so its established first-loaded tie stays first
+        // when best_caller_face visits the additional tier last-loaded first.
+        for (active, base) in [
+            (&mut caller_aliases, &self.base_caller_aliases),
+            (&mut caller_families, &self.base_caller_families),
+        ] {
+            for (family, base_ids) in base {
+                if let Some(ids) = active.get_mut(family) {
+                    ids[..base_ids.len()].reverse();
+                    ids.rotate_left(base_ids.len());
+                }
+            }
+        }
+
+        self.db = db;
+        self.caller_aliases = caller_aliases;
+        self.caller_families = caller_families;
+        self.embedded_aliases = embedded_aliases;
         self.cache.clear();
         self.memory_face_data.clear();
         self.fonts.clear();
@@ -757,6 +1033,7 @@ impl FontManager {
         self.coverage_fallbacks.clear();
         self.coverage_misses.clear();
         self.additional_fonts = font_files.to_vec();
+        self.embedded_fonts = embedded_fonts.to_vec();
         if self.shaping_memo.is_poisoned() {
             self.shaping_memo.clear_poison();
         }
@@ -764,7 +1041,7 @@ impl FontManager {
             .get_mut()
             .expect("shaping cache poison was cleared")
             .clear();
-        true
+        Ok(())
     }
 
     /// Create a FontManager with user-provided fonts (no system font loading).
@@ -789,6 +1066,12 @@ impl FontManager {
         manager.base_caller_families = caller_families.clone();
         manager.caller_aliases = caller_aliases;
         manager.caller_families = caller_families;
+        // Constructor-only ties retain their original first-loaded selection.
+        for active in [&mut manager.caller_aliases, &mut manager.caller_families] {
+            for ids in active.values_mut() {
+                ids.reverse();
+            }
+        }
         manager
     }
 
@@ -858,29 +1141,394 @@ impl FontManager {
     pub fn begin_layout(&mut self) {
         self.paragraph_font_trace = None;
         self.layout_fonts = Vec::new();
+        self.layout_font_diagnostics = Vec::new();
     }
 
-    /// Begin recording the exact resolution events for one cache candidate.
+    /// Begin recording exact events for one bounded cache candidate.
     #[doc(hidden)]
     pub fn begin_paragraph_font_trace(&mut self) {
+        let Ok(generation) = NEXT_FONT_TRACE_GENERATION.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |generation| generation.checked_add(1),
+        ) else {
+            self.paragraph_font_trace = None;
+            return;
+        };
+        let generation = generation as u64;
         self.paragraph_font_trace = Some(ParagraphFontTrace {
-            ids: Vec::new(),
+            events: Vec::new(),
+            generation,
+            scope_depth: 0,
+            owned_family_bytes: 0,
             overflowed: false,
         });
     }
 
-    /// Finish one bounded paragraph trace. An overflowed paragraph bypasses reuse.
+    /// Finish the legacy resolution-only projection without adding contribution IDs.
     #[doc(hidden)]
     pub fn finish_paragraph_font_trace(&mut self) -> Option<Vec<FontId>> {
+        if self.paragraph_font_trace.as_ref()?.scope_depth != 0 {
+            return None;
+        }
+        let trace = self.paragraph_font_trace.take()?;
+        if trace.overflowed {
+            return None;
+        }
+        let mut ids = trace
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                FontTraceEvent::Resolution(id) => Some(id),
+                FontTraceEvent::Contribution(_) => None,
+            })
+            .collect::<Vec<_>>();
+        ids.shrink_to_fit();
+        Some(ids)
+    }
+
+    /// Finish only final contributions. Resolution attempts never establish identity.
+    #[doc(hidden)]
+    pub fn finish_paragraph_font_contributions(&mut self) -> Option<Vec<FontContribution>> {
+        if self.paragraph_font_trace.as_ref()?.scope_depth != 0 {
+            return None;
+        }
+        let trace = self.paragraph_font_trace.take()?;
+        if trace.overflowed {
+            return None;
+        }
+        let mut contributions = trace
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                FontTraceEvent::Contribution(contribution) => Some(contribution),
+                FontTraceEvent::Resolution(_) => None,
+            })
+            .collect::<Vec<_>>();
+        contributions.shrink_to_fit();
+        Some(contributions)
+    }
+
+    /// Finish one ordered bounded cache carrier, preserving resolution inventory.
+    #[doc(hidden)]
+    pub fn finish_paragraph_font_events(&mut self) -> Option<Vec<FontTraceEvent>> {
+        if self.paragraph_font_trace.as_ref()?.scope_depth != 0 {
+            return None;
+        }
         let mut trace = self.paragraph_font_trace.take()?;
         if trace.overflowed {
             return None;
         }
-        trace.ids.shrink_to_fit();
-        Some(trace.ids)
+        trace.events.shrink_to_fit();
+        Some(trace.events)
     }
 
-    /// Replay the exact resolution events attached to a cached paragraph.
+    /// Capture a local shape without replacing a caller's active trace.
+    #[doc(hidden)]
+    pub fn begin_font_contribution_scope(&mut self) -> Option<FontContributionScope> {
+        let owns_trace = self.paragraph_font_trace.is_none();
+        if owns_trace {
+            self.begin_paragraph_font_trace();
+        }
+        let trace = self.paragraph_font_trace.as_mut()?;
+        if trace.overflowed {
+            return None;
+        }
+        let depth = trace.scope_depth.checked_add(1)?;
+        trace.scope_depth = depth;
+        Some(FontContributionScope {
+            generation: trace.generation,
+            event_start: trace.events.len(),
+            depth,
+            owns_trace,
+            diagnostic_start: self.layout_font_diagnostics.len(),
+        })
+    }
+
+    /// Return bounded staged contributions, preserving caller resolution events.
+    #[doc(hidden)]
+    pub fn finish_font_contribution_scope(
+        &mut self,
+        scope: FontContributionScope,
+    ) -> Result<Option<Vec<FontTraceEvent>>> {
+        let trace = self.paragraph_font_trace.as_ref().ok_or_else(|| {
+            LayoutError::Layout("font contribution scope no longer active".into())
+        })?;
+        if trace.generation != scope.generation
+            || trace.scope_depth != scope.depth
+            || (!trace.overflowed && scope.event_start > trace.events.len())
+        {
+            return Err(LayoutError::Layout(
+                "stale or nested font contribution scope".into(),
+            ));
+        }
+        if trace.overflowed {
+            self.layout_font_diagnostics
+                .truncate(scope.diagnostic_start);
+            if scope.owns_trace {
+                self.paragraph_font_trace = None;
+            } else {
+                self.paragraph_font_trace.as_mut().unwrap().scope_depth -= 1;
+            }
+            return Ok(None);
+        }
+        let staged = &trace.events[scope.event_start..];
+        let bytes = staged.iter().fold(
+            staged
+                .len()
+                .checked_mul(std::mem::size_of::<FontTraceEvent>()),
+            |total, event| {
+                total.and_then(|total| {
+                    total.checked_add(match event {
+                        FontTraceEvent::Resolution(_) => 0,
+                        FontTraceEvent::Contribution(contribution) => contribution
+                            .requested_family
+                            .as_ref()
+                            .map_or(0, String::capacity),
+                    })
+                })
+            },
+        );
+        if bytes.is_none_or(|bytes| bytes > PARAGRAPH_FONT_TRACE_MAX_BYTES) {
+            return Err(LayoutError::Layout(
+                "font trace capture exceeds byte budget".into(),
+            ));
+        }
+        let mut result = Vec::with_capacity(staged.len());
+        if result
+            .capacity()
+            .saturating_mul(std::mem::size_of::<FontTraceEvent>())
+            .saturating_add(bytes.unwrap().saturating_sub(std::mem::size_of_val(staged)))
+            > PARAGRAPH_FONT_TRACE_MAX_BYTES
+        {
+            return Err(LayoutError::Layout(
+                "font trace capture allocation exceeds budget".into(),
+            ));
+        }
+        result.extend(staged.iter().cloned());
+        self.layout_font_diagnostics
+            .truncate(scope.diagnostic_start);
+        if scope.owns_trace {
+            self.paragraph_font_trace = None;
+        } else {
+            let trace = self.paragraph_font_trace.as_mut().unwrap();
+            let mut index = 0usize;
+            trace.events.retain(|event| {
+                let keep =
+                    index < scope.event_start || matches!(event, FontTraceEvent::Resolution(_));
+                index += 1;
+                keep
+            });
+            trace.owned_family_bytes = trace
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    FontTraceEvent::Contribution(contribution) => {
+                        contribution.requested_family.as_ref()
+                    }
+                    FontTraceEvent::Resolution(_) => None,
+                })
+                .map(String::capacity)
+                .sum();
+            trace.scope_depth -= 1;
+        }
+        Ok(Some(result))
+    }
+
+    /// Copy private native shaping context within one bounded admission budget.
+    #[doc(hidden)]
+    pub fn copy_font_request_context(
+        &mut self,
+        family: Option<&str>,
+        owned_bytes: &mut usize,
+        context_entries: &mut usize,
+    ) -> Option<String> {
+        let family = family?;
+        let total = owned_bytes.checked_add(family.len());
+        if total.is_none_or(|bytes| bytes > PARAGRAPH_FONT_TRACE_MAX_BYTES)
+            || *context_entries >= PARAGRAPH_FONT_TRACE_MAX_ENTRIES
+        {
+            if let Some(trace) = self.paragraph_font_trace.as_mut() {
+                trace.events = Vec::new();
+                trace.owned_family_bytes = 0;
+                trace.overflowed = true;
+            }
+            *owned_bytes = PARAGRAPH_FONT_TRACE_MAX_BYTES;
+            return None;
+        }
+        let copied = family.to_owned();
+        *context_entries += 1;
+        *owned_bytes = owned_bytes.saturating_add(copied.capacity());
+        Some(copied)
+    }
+
+    /// Admit a successfully shaped final segment, retaining its original request.
+    #[doc(hidden)]
+    pub fn record_font_contribution(
+        &mut self,
+        font_id: FontId,
+        requested_family: Option<&str>,
+        text: &str,
+    ) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.get_font(font_id)?;
+        let bytes = requested_family.map_or(0, str::len);
+        if let Some(trace) = self.paragraph_font_trace.as_mut() {
+            let total = trace
+                .owned_family_bytes
+                .checked_add(bytes)
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        trace
+                            .events
+                            .capacity()
+                            .max(trace.events.len().saturating_add(1))
+                            .saturating_mul(std::mem::size_of::<FontTraceEvent>()),
+                    )
+                });
+            if total.is_none_or(|bytes| bytes > PARAGRAPH_FONT_TRACE_MAX_BYTES)
+                || trace.events.len() >= PARAGRAPH_FONT_TRACE_MAX_ENTRIES
+            {
+                trace.events = Vec::new();
+                trace.owned_family_bytes = 0;
+                trace.overflowed = true;
+            } else if !trace.overflowed {
+                let requested_family = requested_family.map(str::to_owned);
+                trace.owned_family_bytes += requested_family.as_ref().map_or(0, String::capacity);
+                trace
+                    .events
+                    .push(FontTraceEvent::Contribution(FontContribution {
+                        font_id,
+                        requested_family,
+                    }));
+                if trace
+                    .events
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<FontTraceEvent>())
+                    .saturating_add(trace.owned_family_bytes)
+                    > PARAGRAPH_FONT_TRACE_MAX_BYTES
+                {
+                    trace.events = Vec::new();
+                    trace.owned_family_bytes = 0;
+                    trace.overflowed = true;
+                }
+            }
+        }
+        if !self.layout_fonts.contains(&font_id) {
+            self.layout_fonts.push(font_id);
+        }
+        self.record_font_approximation(font_id, requested_family);
+        Ok(())
+    }
+
+    /// Validate the entire cached contribution before any trace or inventory mutation.
+    #[doc(hidden)]
+    pub fn validate_font_trace_events(&self, contributions: &[FontTraceEvent]) -> Result<()> {
+        let owned_bytes = contributions.iter().try_fold(0usize, |total, event| {
+            let (id, bytes) = match event {
+                FontTraceEvent::Resolution(id) => (*id, 0),
+                FontTraceEvent::Contribution(contribution) => (
+                    contribution.font_id,
+                    contribution
+                        .requested_family
+                        .as_ref()
+                        .map_or(0, String::capacity),
+                ),
+            };
+            self.get_font(id)?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| LayoutError::Layout("font trace byte count overflow".into()))
+        })?;
+        let (count, existing_bytes, capacity, overflowed) = self
+            .paragraph_font_trace
+            .as_ref()
+            .map_or((0, 0, 0, false), |trace| {
+                (
+                    trace.events.len(),
+                    trace.owned_family_bytes,
+                    trace.events.capacity(),
+                    trace.overflowed,
+                )
+            });
+        let total_count = count.checked_add(contributions.len());
+        let total_bytes = total_count
+            .and_then(|count| {
+                capacity
+                    .max(count)
+                    .checked_mul(std::mem::size_of::<FontTraceEvent>())
+            })
+            .and_then(|bytes| bytes.checked_add(existing_bytes))
+            .and_then(|bytes| bytes.checked_add(owned_bytes));
+        if overflowed
+            || total_count.is_none_or(|count| count > PARAGRAPH_FONT_TRACE_MAX_ENTRIES)
+            || total_bytes.is_none_or(|bytes| bytes > PARAGRAPH_FONT_TRACE_MAX_BYTES)
+        {
+            return Err(LayoutError::Layout(
+                "font contribution replay exceeds trace budget".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Atomically replay an admitted final contribution vector.
+    #[doc(hidden)]
+    pub fn replay_font_trace_events(&mut self, contributions: &[FontTraceEvent]) -> Result<()> {
+        self.validate_font_trace_events(contributions)?;
+        if let Some(trace) = self.paragraph_font_trace.as_mut() {
+            let mut prepared = Vec::with_capacity(trace.events.len() + contributions.len());
+            let owned_bytes = trace.owned_family_bytes
+                + contributions
+                    .iter()
+                    .map(|entry| match entry {
+                        FontTraceEvent::Resolution(_) => 0,
+                        FontTraceEvent::Contribution(entry) => {
+                            entry.requested_family.as_ref().map_or(0, String::capacity)
+                        }
+                    })
+                    .sum::<usize>();
+            if prepared
+                .capacity()
+                .saturating_mul(std::mem::size_of::<FontTraceEvent>())
+                .saturating_add(owned_bytes)
+                > PARAGRAPH_FONT_TRACE_MAX_BYTES
+            {
+                return Err(LayoutError::Layout(
+                    "font contribution replay allocation exceeds budget".into(),
+                ));
+            }
+            prepared.extend(trace.events.iter().cloned());
+            prepared.extend(contributions.iter().cloned());
+            trace.owned_family_bytes = prepared
+                .iter()
+                .filter_map(|event| match event {
+                    FontTraceEvent::Contribution(contribution) => {
+                        contribution.requested_family.as_ref()
+                    }
+                    FontTraceEvent::Resolution(_) => None,
+                })
+                .map(String::capacity)
+                .sum();
+            trace.events = prepared;
+        }
+        for event in contributions {
+            let id = match event {
+                FontTraceEvent::Resolution(id) => *id,
+                FontTraceEvent::Contribution(contribution) => contribution.font_id,
+            };
+            if !self.layout_fonts.contains(&id) {
+                self.layout_fonts.push(id);
+            }
+            if let FontTraceEvent::Contribution(contribution) = event {
+                self.record_font_approximation(id, contribution.requested_family.as_deref());
+            }
+        }
+        Ok(())
+    }
+
+    /// Replay the exact legacy resolution events attached to a cached paragraph.
     #[doc(hidden)]
     pub fn replay_layout_font_trace(&mut self, trace: &[FontId]) {
         for &font_id in trace {
@@ -1002,6 +1650,175 @@ impl FontManager {
             None => Ok(primary),
             Some(id) => Ok(id),
         }
+    }
+
+    /// Current layout's owned approximation facts, never loaded-font history.
+    #[doc(hidden)]
+    pub fn current_font_diagnostics(&self) -> &[Diagnostic] {
+        &self.layout_font_diagnostics
+    }
+
+    // Selection aliases name requests, not the physical family of a face.
+    // Authenticate the selected collection face from its original source bytes.
+    fn physical_requested_family_matches(&self, index: usize, requested: &str) -> bool {
+        let Some(font) = self.fonts.get(index) else {
+            return false;
+        };
+        let Ok(face) = ttf_parser::Face::parse(&font.data, font.face_index) else {
+            return false;
+        };
+        face.names().into_iter().any(|name| {
+            matches!(
+                name.name_id,
+                ttf_parser::name_id::FAMILY
+                    | ttf_parser::name_id::TYPOGRAPHIC_FAMILY
+                    | ttf_parser::name_id::WWS_FAMILY
+            ) && name
+                .to_string()
+                .is_some_and(|family| family.eq_ignore_ascii_case(requested))
+        })
+    }
+
+    fn record_font_approximation(&mut self, id: FontId, requested: Option<&str>) {
+        let Some(requested) = requested else {
+            return;
+        };
+        let requested = if requested.eq_ignore_ascii_case("Aptos") {
+            "Aptos"
+        } else if requested.eq_ignore_ascii_case("Aptos Display") {
+            "Aptos Display"
+        } else {
+            return;
+        };
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        if self.physical_requested_family_matches(index, requested) {
+            return;
+        }
+        let prefix = format!("Font '{requested}' is approximate: ");
+        if self
+            .layout_font_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.starts_with(&prefix))
+        {
+            return;
+        }
+        self.layout_font_diagnostics.push(Diagnostic {
+            message: format!(
+                "{prefix}selected '{}' for contributing text",
+                self.fonts[index].family
+            ),
+        });
+    }
+
+    /// Select an explicit symbol or bullet without changing its source owner.
+    /// Genuine original-code coverage wins over the bounded semantic substitute.
+    pub fn resolve_symbol_text(
+        &mut self,
+        family: Option<&str>,
+        bold: bool,
+        italic: bool,
+        original: &str,
+        ppt_bullet_compatibility: bool,
+    ) -> Result<(String, FontId)> {
+        let primary = self.resolve_font(family, bold, italic)?;
+        if self.has_original_symbol_coverage(primary, family, original) {
+            return Ok((original.to_owned(), primary));
+        }
+        let displayed: String = original
+            .chars()
+            .map(|character| {
+                let code = character as u32;
+                let code = if (0xf000..=0xf0ff).contains(&code) {
+                    code - 0xf000
+                } else {
+                    code
+                };
+                let mapped = if family.is_some_and(|name| name.eq_ignore_ascii_case("Wingdings")) {
+                    match code {
+                        0xa7 => Some('\u{25aa}'),
+                        0xd8 => Some('\u{27a2}'),
+                        0xfc => Some('\u{2713}'),
+                        0x76 => Some('\u{2756}'),
+                        0x71 => Some('\u{2751}'),
+                        0x6e => Some('\u{25a0}'),
+                        0xfe => Some('\u{2611}'),
+                        0xb7 if ppt_bullet_compatibility && character == '\u{f0b7}' => {
+                            Some('\u{2022}')
+                        }
+                        _ => None,
+                    }
+                } else if family.is_some_and(|name| name.eq_ignore_ascii_case("Symbol"))
+                    && code == 0xb7
+                {
+                    Some('\u{2022}')
+                } else {
+                    None
+                };
+                mapped.unwrap_or(character)
+            })
+            .collect();
+        let selected = self.resolve_font_for_text(family, bold, italic, &displayed)?;
+        Ok((displayed, selected))
+    }
+
+    /// Whether the selected physical requested face covers the original symbol codes.
+    /// Caller labels alone cannot establish this coverage or symbol meaning.
+    pub fn has_original_symbol_coverage(
+        &self,
+        selected: FontId,
+        family: Option<&str>,
+        original: &str,
+    ) -> bool {
+        self.index_of(selected).is_some_and(|index| {
+            family.is_some_and(|name| self.physical_requested_family_matches(index, name))
+                && self.uncovered(index, original).is_empty()
+        })
+    }
+
+    /// Owned unknown semantic mappings for accepted original symbol text.
+    /// This query neither records font history nor claims glyphs are missing.
+    pub fn unknown_symbol_diagnostics(
+        &self,
+        selected: FontId,
+        requested: Option<&str>,
+        original: &str,
+        displayed: &str,
+    ) -> Vec<String> {
+        if self.index_of(selected).is_none() {
+            return Vec::new();
+        }
+        let family = match requested {
+            Some(name) if name.eq_ignore_ascii_case("Wingdings") => "Wingdings",
+            Some(name) if name.eq_ignore_ascii_case("Symbol") => "Symbol",
+            _ => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        for (source, displayed) in original.chars().zip(displayed.chars()) {
+            let code = source as u32;
+            if source != displayed
+                || source.is_whitespace()
+                || source.is_control()
+                || !(code <= 0xff || (0xf000..=0xf0ff).contains(&code))
+            {
+                continue;
+            }
+            let mut utf8 = [0; 4];
+            if self.has_original_symbol_coverage(
+                selected,
+                Some(family),
+                source.encode_utf8(&mut utf8),
+            ) {
+                continue;
+            }
+            let message = format!("Unknown {family} symbol U+{code:04X}: original code retained");
+            if !result.contains(&message) {
+                result.push(message);
+            }
+        }
+        // One canonical family and at most 512 original low-byte/PUA scalars.
+        result
     }
 
     /// The characters in `text` that the font at `idx` cannot draw.
@@ -1169,8 +1986,36 @@ impl FontManager {
             fontdb::Weight::NORMAL
         };
 
+        let caller_candidate = || {
+            let exact = self.caller_families.get(family_name);
+            let aliases = self.caller_aliases.get(&requested_key);
+            match (exact, aliases) {
+                (Some(exact), Some(aliases)) => {
+                    // CSS compares both buckets together. Equal ranks retain
+                    // constructor-first ties, then the latest additional face.
+                    let (mut constructor, mut additional): (Vec<_>, Vec<_>) = self
+                        .db
+                        .faces()
+                        .filter(|face| exact.contains(&face.id) || aliases.contains(&face.id))
+                        .map(|face| face.id)
+                        .partition(|id| self.base_db.face(*id).is_some());
+                    constructor.reverse();
+                    additional.extend(constructor);
+                    best_caller_face(&self.db, &additional, weight, style)
+                }
+                (Some(ids), None) | (None, Some(ids)) => {
+                    best_caller_face(&self.db, ids, weight, style)
+                }
+                (None, None) => None,
+            }
+        };
         let query_family = |family: &str| {
             if let Some(ids) = self.caller_families.get(family)
+                && let Some(id) = best_caller_face(&self.db, ids, weight, style)
+            {
+                return Some(id);
+            }
+            if let Some(ids) = self.embedded_aliases.get(&family.to_lowercase())
                 && let Some(id) = best_caller_face(&self.db, ids, weight, style)
             {
                 return Some(id);
@@ -1184,7 +2029,11 @@ impl FontManager {
             self.db.query(&query)
         };
 
-        let mut found_id = query_family(family_name);
+        let mut found_id = if self.explicit_alias_map.contains_key(&requested_key) {
+            query_family(family_name)
+        } else {
+            caller_candidate().or_else(|| query_family(family_name))
+        };
         if found_id.is_none()
             && let Some(alias) = self.explicit_alias_map.get(&requested_key)
         {
@@ -1270,15 +2119,35 @@ impl FontManager {
         let (data, face_index) = font_data_for_face(&self.db, db_id, &mut self.memory_face_data)
             .ok_or_else(|| LayoutError::FontParse("Failed to load font data".into()))?;
 
-        let (units_per_em, ascender, descender, line_gap, word_line) = {
-            let face = ttf_parser::Face::parse(&data, face_index)
+        let (
+            units_per_em,
+            ascender,
+            descender,
+            line_gap,
+            word_line,
+            variations,
+            synthetic_bold,
+            synthetic_italic,
+        ) = {
+            let mut face = ttf_parser::Face::parse(&data, face_index)
                 .map_err(|e| LayoutError::FontParse(format!("ttf-parser error: {e}")))?;
+            let (variations, synthetic_bold, synthetic_italic) =
+                face_style_adjustment(&face, bold, italic);
+            for (tag, value) in &variations {
+                face.set_variation(ttf_parser::Tag::from_bytes(tag), *value)
+                    .ok_or_else(|| {
+                        LayoutError::FontParse("selected font axis could not be applied".into())
+                    })?;
+            }
             (
                 face.units_per_em(),
                 face.ascender(),
                 face.descender(),
                 face.line_gap(),
                 WordLineUnits::of(&face),
+                variations,
+                synthetic_bold,
+                synthetic_italic,
             )
         };
 
@@ -1290,10 +2159,19 @@ impl FontManager {
             )));
         }
 
-        let shaper_data = {
+        let (shaper_data, shaper_instance) = {
             let face = harfrust::FontRef::from_index(&data, face_index)
                 .map_err(|e| LayoutError::FontParse(format!("failed to read font face: {e}")))?;
-            harfrust::ShaperData::new(&face)
+            let instance = (!variations.is_empty()).then(|| {
+                harfrust::ShaperInstance::from_variations(
+                    &face,
+                    variations.iter().map(|(tag, value)| harfrust::Variation {
+                        tag: harfrust::Tag::new(tag),
+                        value: *value,
+                    }),
+                )
+            });
+            (harfrust::ShaperData::new(&face), instance)
         };
 
         let actual_family = self
@@ -1322,6 +2200,10 @@ impl FontManager {
             line_gap,
             word_line,
             shaper_data,
+            variations,
+            shaper_instance,
+            synthetic_bold,
+            synthetic_italic,
         });
         self.remember_font_key(key, idx);
         if record_layout_use {
@@ -1424,7 +2306,11 @@ impl FontManager {
         let face = harfrust::FontRef::from_index(&font.data, font.face_index)
             .map_err(|e| LayoutError::Shaping(format!("failed to read font face: {e}")))?;
 
-        let shaper = font.shaper_data.shaper(&face).build();
+        let shaper = font
+            .shaper_data
+            .shaper(&face)
+            .instance(font.shaper_instance.as_ref())
+            .build();
 
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
@@ -1486,7 +2372,14 @@ impl FontManager {
         } else {
             multilingual_break_opportunities(&segment.text)
         };
-        self.shape_multilingual_with_levels(segment, language, &break_offsets, &levels, 0)
+        self.shape_multilingual_with_levels(
+            segment,
+            language,
+            &break_offsets,
+            &levels,
+            0,
+            (false, false, &mut Vec::new()),
+        )
     }
 
     /// Shape styled spans with one paragraph-wide bidi resolution.
@@ -1496,6 +2389,33 @@ impl FontManager {
         base_direction: TextDirection,
         no_wrap: bool,
     ) -> Result<Vec<MultilingualTextSegment>> {
+        let requests = vec![(false, false); segments.len()];
+        self.shape_multilingual_paragraph_with_caps(segments, base_direction, no_wrap, &requests)
+            .map(|(spans, _)| spans)
+    }
+
+    /// Shape PowerPoint small-caps requests in the same paragraph-wide bidi pass.
+    /// Requests correspond to input occurrences, including equal-text runs.
+    /// Logical text and source clusters remain the original input. Unsupported
+    /// selected faces use uppercase lowercase graphemes at 80 percent size.
+    pub fn shape_multilingual_paragraph_with_caps(
+        &mut self,
+        segments: Vec<(TextSegment, Option<String>)>,
+        base_direction: TextDirection,
+        no_wrap: bool,
+        requests: &[(bool, bool)],
+    ) -> Result<(Vec<MultilingualTextSegment>, Vec<String>)> {
+        if requests.iter().any(|(small, all)| *small && *all) {
+            return Err(LayoutError::Shaping(
+                "conflicting all-caps and small-caps request".to_owned(),
+            ));
+        }
+        if requests.len() != segments.len() {
+            return Err(LayoutError::Shaping(
+                "small-caps request count differs from styled runs".to_owned(),
+            ));
+        }
+        let mut diagnostics = Vec::new();
         let paragraph_text = segments
             .iter()
             .map(|(segment, _)| segment.text.as_str())
@@ -1510,7 +2430,7 @@ impl FontManager {
             })
             .collect::<Vec<_>>();
         if paragraph_text.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), diagnostics));
         }
         let paragraph_level = match base_direction {
             TextDirection::Auto => None,
@@ -1532,7 +2452,11 @@ impl FontManager {
         };
         let mut logical_index = 0usize;
         let mut shaped = Vec::new();
-        for ((segment, language), byte_offset) in segments.into_iter().zip(segment_starts) {
+        for (((segment, language), byte_offset), (small_caps, all_caps)) in segments
+            .into_iter()
+            .zip(segment_starts)
+            .zip(requests.iter().copied())
+        {
             let byte_end = byte_offset + segment.text.len();
             if !segment.text.is_empty() {
                 let forced_levels = (segment.direction != TextDirection::Auto)
@@ -1554,12 +2478,13 @@ impl FontManager {
                     &break_offsets,
                     levels,
                     logical_index,
+                    (small_caps, all_caps, &mut diagnostics),
                 )?;
                 logical_index += spans.len();
                 shaped.extend(spans);
             }
         }
-        Ok(shaped)
+        Ok((shaped, diagnostics))
     }
 
     /// `break_offsets` are the line break opportunities within the segment,
@@ -1571,7 +2496,9 @@ impl FontManager {
         break_offsets: &HashSet<usize>,
         levels: &[unicode_bidi::Level],
         logical_index_base: usize,
+        caps: (bool, bool, &mut Vec<String>),
     ) -> Result<Vec<MultilingualTextSegment>> {
+        let (small_caps, all_caps, diagnostics) = caps;
         let grapheme_boundaries = icu_segmenter::GraphemeClusterSegmenter::new()
             .segment_str(&segment.text)
             .collect::<Vec<_>>();
@@ -1643,25 +2570,155 @@ impl FontManager {
             }
         }
 
-        let mut logical = Vec::with_capacity(font_ranges.len());
-        for (logical_index, (start, end, script, level, font_id)) in
-            font_ranges.into_iter().enumerate()
-        {
-            let text = &segment.text[start..end];
-            let metrics = self.metrics(font_id, segment.font_size)?;
+        let mut cap_ranges = Vec::new();
+        for (start, end, script, level, font_id) in font_ranges {
             let direction = if level.is_rtl() {
                 TextDirection::RightToLeft
             } else {
                 TextDirection::LeftToRight
             };
-            let positioned = self.shape_explicit(
+            let text = &segment.text[start..end];
+            let lowercase = text.to_lowercase();
+            // Test actual feature application on this face, script and language.
+            // A global GSUB tag alone does not prove a reachable substitution.
+            let has_lowercase = text.chars().any(char::is_lowercase);
+            let feature_applies = if small_caps && has_lowercase {
+                let plain = self.shape_explicit(
+                    font_id,
+                    &lowercase,
+                    segment.font_size,
+                    script,
+                    language,
+                    direction,
+                )?;
+                let caps = self.shape_explicit_with_small_caps(
+                    font_id,
+                    &lowercase,
+                    segment.font_size,
+                    (script, language, direction),
+                    true,
+                )?;
+                plain.glyph_ids != caps.glyph_ids
+            } else {
+                false
+            };
+            if all_caps {
+                cap_ranges.push((
+                    start,
+                    end,
+                    script,
+                    level,
+                    font_id,
+                    segment.font_size,
+                    false,
+                    true,
+                ));
+            } else if !small_caps || !has_lowercase || feature_applies {
+                cap_ranges.push((
+                    start,
+                    end,
+                    script,
+                    level,
+                    font_id,
+                    segment.font_size,
+                    feature_applies,
+                    false,
+                ));
+            } else {
+                let font = self.get_font(font_id)?;
+                let message = format!(
+                    "small caps: selected face '{}' lacks an applicable smcp substitution for {:?}; using 80 percent uppercase fallback",
+                    font.family, script
+                );
+                if !diagnostics.contains(&message) {
+                    diagnostics.push(message);
+                }
+                // Keep every original grapheme together. An expanding uppercase
+                // mapping belongs to that original grapheme's logical cluster.
+                let boundaries = icu_segmenter::GraphemeClusterSegmenter::new()
+                    .segment_str(text)
+                    .collect::<Vec<_>>();
+                for window in boundaries.windows(2) {
+                    let lo = start + window[0];
+                    let hi = start + window[1];
+                    let lower = segment.text[lo..hi].chars().any(char::is_lowercase);
+                    cap_ranges.push((
+                        lo,
+                        hi,
+                        script,
+                        level,
+                        font_id,
+                        segment.font_size * if lower { 0.8 } else { 1.0 },
+                        false,
+                        lower,
+                    ));
+                }
+            }
+        }
+        let mut logical = Vec::with_capacity(cap_ranges.len());
+        for (
+            logical_index,
+            (start, end, script, level, font_id, size_pt, feature_applies, fallback),
+        ) in cap_ranges.into_iter().enumerate()
+        {
+            let text = &segment.text[start..end];
+            let metrics = self.metrics(font_id, size_pt)?;
+            let direction = if level.is_rtl() {
+                TextDirection::RightToLeft
+            } else {
+                TextDirection::LeftToRight
+            };
+            let rendered = if fallback {
+                text.to_uppercase()
+            } else {
+                text.to_owned()
+            };
+            let mut positioned = self.shape_explicit_with_small_caps(
                 font_id,
-                text,
-                segment.font_size,
-                script,
-                language,
-                direction,
+                &rendered,
+                size_pt,
+                (script, language, direction),
+                feature_applies,
             )?;
+            if fallback {
+                let mut owners = Vec::new();
+                for (index, character) in text.chars().enumerate() {
+                    owners.extend(character.to_uppercase().map(|_| index as u32));
+                }
+                for cluster in &mut positioned.clusters {
+                    let lo = cluster.char_start as usize;
+                    let hi = cluster.char_end as usize;
+                    cluster.char_start = *owners.get(lo).ok_or_else(|| {
+                        LayoutError::Shaping(
+                            "uppercase cluster starts outside its logical owner".to_owned(),
+                        )
+                    })?;
+                    cluster.char_end = owners
+                        .get(hi.checked_sub(1).ok_or_else(|| {
+                            LayoutError::Shaping("empty uppercase cluster".to_owned())
+                        })?)
+                        .ok_or_else(|| {
+                            LayoutError::Shaping(
+                                "uppercase cluster ends outside its logical owner".to_owned(),
+                            )
+                        })?
+                        + 1;
+                }
+                let mut merged: Vec<GlyphCluster> = Vec::new();
+                for cluster in positioned.clusters {
+                    if let Some(last) = merged.last_mut()
+                        && last.char_start < cluster.char_end
+                        && cluster.char_start < last.char_end
+                    {
+                        last.glyph_end = cluster.glyph_end;
+                        last.char_start = last.char_start.min(cluster.char_start);
+                        last.char_end = last.char_end.max(cluster.char_end);
+                    } else {
+                        merged.push(cluster);
+                    }
+                }
+                positioned.clusters = merged;
+            }
             let char_start = segment.text[..start].chars().count() as u32;
             let char_end = segment.text[..end].chars().count() as u32;
             let source = segment.source.map(|source| SourceSpan {
@@ -1673,6 +2730,7 @@ impl FontManager {
             base.text = text.to_owned();
             base.source = source;
             base.font_id = font_id;
+            base.font_size = size_pt;
             base.glyph_ids = positioned.glyph_ids;
             base.advances = positioned.x_advances.clone();
             base.width = positioned.x_advances.iter().sum();
@@ -1728,10 +2786,32 @@ impl FontManager {
         language: Option<&str>,
         direction: TextDirection,
     ) -> Result<PositionedShape> {
+        self.shape_explicit_with_small_caps(
+            font_id,
+            text,
+            size_pt,
+            (script, language, direction),
+            false,
+        )
+    }
+
+    fn shape_explicit_with_small_caps(
+        &self,
+        font_id: FontId,
+        text: &str,
+        size_pt: f64,
+        properties: (TextScript, Option<&str>, TextDirection),
+        small_caps: bool,
+    ) -> Result<PositionedShape> {
+        let (script, language, direction) = properties;
         let font = self.get_font(font_id)?;
         let face = harfrust::FontRef::from_index(&font.data, font.face_index)
             .map_err(|error| LayoutError::Shaping(format!("failed to read font face: {error}")))?;
-        let shaper = font.shaper_data.shaper(&face).build();
+        let shaper = font
+            .shaper_data
+            .shaper(&face)
+            .instance(font.shaper_instance.as_ref())
+            .build();
         let mut buffer = harfrust::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.set_script(harfrust_script(script));
@@ -1742,7 +2822,13 @@ impl FontManager {
         if let Some(language) = language.and_then(harfrust::Language::new) {
             buffer.set_language(language);
         }
-        let output = shaper.shape(buffer, harfrust::ShapeOptions::default());
+        let features = [harfrust::Feature::new(harfrust::Tag::new(b"smcp"), 1, ..)];
+        let options = if small_caps {
+            harfrust::ShapeOptions::default().features(&features)
+        } else {
+            harfrust::ShapeOptions::default()
+        };
+        let output = shaper.shape(buffer, options);
         let infos = output.glyph_infos();
         let positions = output.glyph_positions();
         let scale = size_pt / f64::from(font.units_per_em);
@@ -1787,6 +2873,9 @@ impl FontManager {
             face_index: font.face_index,
             bold: font.bold,
             italic: font.italic,
+            variations: font.variations.clone(),
+            synthetic_bold: font.synthetic_bold,
+            synthetic_italic: font.synthetic_italic,
         })
     }
 
@@ -1801,6 +2890,9 @@ impl FontManager {
                 face_index: f.face_index,
                 bold: f.bold,
                 italic: f.italic,
+                variations: f.variations.clone(),
+                synthetic_bold: f.synthetic_bold,
+                synthetic_italic: f.synthetic_italic,
             })
             .collect()
     }
@@ -1836,9 +2928,22 @@ impl FontManager {
 
     fn record_layout_font(&mut self, font_id: FontId) {
         if let Some(trace) = self.paragraph_font_trace.as_mut() {
-            if trace.ids.len() < PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
-                trace.ids.push(font_id);
-            } else {
+            if !trace.overflowed && trace.events.len() < PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
+                trace.events.push(FontTraceEvent::Resolution(font_id));
+                if trace
+                    .events
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<FontTraceEvent>())
+                    .saturating_add(trace.owned_family_bytes)
+                    > PARAGRAPH_FONT_TRACE_MAX_BYTES
+                {
+                    trace.events = Vec::new();
+                    trace.owned_family_bytes = 0;
+                    trace.overflowed = true;
+                }
+            } else if !trace.overflowed {
+                trace.events = Vec::new();
+                trace.owned_family_bytes = 0;
                 trace.overflowed = true;
             }
         }
@@ -1993,7 +3098,7 @@ fn best_caller_face(
 
     let mut candidates = fontdb::Database::new();
     let mut candidate_ids = Vec::with_capacity(ids.len());
-    for id in ids {
+    for id in ids.iter().rev() {
         let mut face = db.face(*id)?.clone();
         for (family, _) in &mut face.families {
             CANDIDATE_FAMILY.clone_into(family);
@@ -2028,19 +3133,39 @@ fn font_data_for_face(
 ) -> Option<(Arc<[u8]>, u32)> {
     let face = db.face(id)?;
     let face_index = face.index;
-    #[cfg(feature = "system-fonts")]
-    if let fontdb::Source::File(path) = &face.source {
-        return shared_file_font_bytes(path).map(|data| (data, face_index));
+    match &face.source {
+        fontdb::Source::Binary(data) => match memory_face_data.get(&id) {
+            Some(data) => Some((Arc::clone(data), face_index)),
+            None => {
+                // Collection faces share one original source allocation. Match
+                // source identity rather than copying identical bytes per face.
+                let shared = db.faces().find_map(|other| match &other.source {
+                    fontdb::Source::Binary(source) if Arc::ptr_eq(source, data) => {
+                        memory_face_data.get(&other.id).cloned()
+                    }
+                    _ => None,
+                });
+                let data: Arc<[u8]> =
+                    shared.unwrap_or_else(|| Arc::from(data.as_ref().as_ref().to_vec()));
+                memory_face_data.insert(id, Arc::clone(&data));
+                Some((data, face_index))
+            }
+        },
+        #[cfg(feature = "system-fonts")]
+        fontdb::Source::File(path) => shared_file_font_bytes(path).map(|data| (data, face_index)),
+        // A source that fontdb features enabled elsewhere in the build add,
+        // such as `memmap`'s shared file, read through fontdb itself.
+        #[allow(unreachable_patterns)]
+        _ => {
+            if let Some(data) = memory_face_data.get(&id) {
+                return Some((Arc::clone(data), face_index));
+            }
+            let (data, face_index) =
+                db.with_face_data(id, |bytes, index| (Arc::<[u8]>::from(bytes), index))?;
+            memory_face_data.insert(id, Arc::clone(&data));
+            Some((data, face_index))
+        }
     }
-    if let Some(data) = memory_face_data.get(&id) {
-        return Some((Arc::clone(data), face_index));
-    }
-    // A consumer can unify fontdb's fs/memmap features without enabling our
-    // system-fonts feature. Its Source enum then includes File/SharedFile.
-    let (data, face_index) =
-        db.with_face_data(id, |bytes, index| (Arc::<[u8]>::from(bytes), index))?;
-    memory_face_data.insert(id, Arc::clone(&data));
-    Some((data, face_index))
 }
 
 #[cfg(feature = "system-fonts")]
@@ -2121,10 +3246,10 @@ fn map_font_name(name: &str) -> &[&str] {
         "Times New Roman" => &["Times New Roman", "Liberation Serif", "Times"],
         "Courier New" => &["Courier New", "Liberation Mono", "Courier"],
         "Consolas" => &["Consolas", "Liberation Mono", "DejaVu Sans Mono"],
-        "Segoe UI" => &["Segoe UI", "Carlito", "Liberation Sans"],
+        "Segoe UI" => &["Segoe UI", "Selawik", "Carlito", "Liberation Sans"],
         "Tahoma" => &["Tahoma", "Liberation Sans", "Helvetica"],
         "Verdana" => &["Verdana", "Liberation Sans", "DejaVu Sans"],
-        "Georgia" => &["Georgia", "Caladea", "Liberation Serif"],
+        "Georgia" => &["Georgia", "Gelasio", "Caladea", "Liberation Serif"],
         "Palatino Linotype" => &["Palatino Linotype", "Palatino", "Liberation Serif"],
         "Book Antiqua" => &["Book Antiqua", "Palatino", "Liberation Serif"],
         "Garamond" => &["Garamond", "Caladea", "Liberation Serif"],
@@ -2142,6 +3267,351 @@ mod tests {
     use super::*;
     use crate::Color;
     use crate::bundled_fonts::bundled_font_data;
+
+    // Independent hb-subset/hb-shape 14.4.0 static instances, 1000 upem.
+    // The S91 oracle receipt pins original bytes, commands and rounding limits.
+    #[test]
+    fn fx195_strict_directories_preserve_lexical_order_and_refuse_bad_inputs() {
+        let path =
+            std::env::temp_dir().join(format!("fx195-font-directory-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        assert!(FontFile::from_dir(&path).unwrap().is_empty());
+        let bytes = include_bytes!("../fonts/Carlito-Regular.ttf");
+        std::fs::write(path.join("z.ttf"), bytes).unwrap();
+        std::fs::write(path.join("a.TTF"), bytes).unwrap();
+        let fonts = FontFile::from_dir(&path).unwrap();
+        assert_eq!(
+            fonts
+                .iter()
+                .map(|font| font.family.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert!(
+            fonts
+                .iter()
+                .all(|font| font.data.as_slice() == bytes.as_slice())
+        );
+        assert!(FontFile::from_dir(&path.join("z.ttf")).is_err());
+        std::fs::write(path.join("bad.otf"), b"invalid font").unwrap();
+        assert!(FontFile::from_dir(&path).is_err());
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(FontFile::from_dir(&path).is_err());
+    }
+
+    #[test]
+    fn fx195_variable_bold_matches_independent_harfbuzz_advances() {
+        let mut mismatches = Vec::new();
+        for (bytes, text, expected) in [
+            (
+                include_bytes!("../fonts/NotoSansThai.ttf").as_slice(),
+                "ภาษาไทยยินดีต้อนรับ",
+                8742.0,
+            ),
+            (
+                include_bytes!("../fonts/NotoSansArabic.ttf").as_slice(),
+                "العربية مرحبا بالعالم",
+                8427.0,
+            ),
+            (
+                include_bytes!("../fonts/NotoSansDevanagari.ttf").as_slice(),
+                "देवनागरी नमस्ते दुनिया",
+                8656.0,
+            ),
+        ] {
+            let mut fonts =
+                FontManager::new_with_fonts(vec![("FX195 caller".into(), bytes.to_vec())]);
+            let bold = fonts
+                .resolve_font(Some("FX195 caller"), true, false)
+                .unwrap();
+            let shaped = fonts.shape_text(bold, text, 1000.0).unwrap();
+            if (shaped.width - expected).abs() > 1.0 {
+                mismatches.push(format!(
+                    "bold {text:?}: expected {expected} design units, got {}",
+                    shaped.width
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:?}");
+    }
+
+    #[test]
+    fn fx195_regular_variable_preserves_independent_default_advances() {
+        for (bytes, text, expected) in [
+            (
+                include_bytes!("../fonts/NotoSansThai.ttf").as_slice(),
+                "ภาษาไทยยินดีต้อนรับ",
+                8300.0,
+            ),
+            (
+                include_bytes!("../fonts/NotoSansArabic.ttf").as_slice(),
+                "العربية مرحبا بالعالم",
+                7591.0,
+            ),
+            (
+                include_bytes!("../fonts/NotoSansDevanagari.ttf").as_slice(),
+                "देवनागरी नमस्ते दुनिया",
+                7948.0,
+            ),
+        ] {
+            let mut fonts =
+                FontManager::new_with_fonts(vec![("FX195 caller".into(), bytes.to_vec())]);
+            let regular = fonts
+                .resolve_font(Some("FX195 caller"), false, false)
+                .unwrap();
+            let shaped = fonts.shape_text(regular, text, 1000.0).unwrap();
+            assert!(
+                (shaped.width - expected).abs() <= 1.0,
+                "regular {text:?}: expected {expected} design units, got {}",
+                shaped.width
+            );
+        }
+    }
+
+    #[test]
+    fn fx195_bundled_variable_bold_is_not_exempt_from_weight_selection() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let bold = fonts
+            .resolve_font(Some("Noto Sans Thai"), true, false)
+            .unwrap();
+        let shaped = fonts.shape_text(bold, "ภาษาไทยยินดีต้อนรับ", 1000.0).unwrap();
+        assert!(
+            (shaped.width - 8742.0).abs() <= 1.0,
+            "bundled bold must use the independently measured 700 instance, got {}",
+            shaped.width
+        );
+    }
+
+    #[test]
+    fn fx195_variable_ttc_keeps_face_index_and_shared_original_bytes() {
+        let collection = test_ttc(&[
+            include_bytes!("../fonts/NotoSansThai.ttf"),
+            include_bytes!("../fonts/Carlito-Bold.ttf"),
+        ]);
+        let mut fonts =
+            FontManager::new_with_fonts(vec![("FX195 collection".into(), collection.clone())]);
+        let thai = fonts
+            .resolve_font(Some("Noto Sans Thai"), true, false)
+            .unwrap();
+        let carlito = fonts.resolve_font(Some("Carlito"), true, false).unwrap();
+        let thai_data = fonts.font_data(thai).unwrap();
+        let carlito_data = fonts.font_data(carlito).unwrap();
+        assert_eq!(thai_data.face_index, 0);
+        assert_eq!(carlito_data.face_index, 1);
+        assert_eq!(thai_data.data.as_ref(), collection);
+        assert_eq!(carlito_data.data.as_ref(), collection);
+        assert!(Arc::ptr_eq(&thai_data.data, &carlito_data.data));
+        let static_face = ttf_parser::Face::parse(&carlito_data.data, 1).unwrap();
+        assert!(!static_face.is_variable());
+        assert!(static_face.is_bold());
+        let shaped = fonts.shape_text(thai, "ภาษาไทยยินดีต้อนรับ", 1000.0).unwrap();
+        assert!(
+            (shaped.width - 8742.0).abs() <= 1.0,
+            "TTC selected700 must match independent advance, got {}",
+            shaped.width
+        );
+    }
+
+    #[test]
+    fn fx195_static_four_style_faces_keep_their_original_bytes() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        for (bold, italic, expected) in [
+            (
+                false,
+                false,
+                include_bytes!("../fonts/Carlito-Regular.ttf").as_slice(),
+            ),
+            (
+                true,
+                false,
+                include_bytes!("../fonts/Carlito-Bold.ttf").as_slice(),
+            ),
+            (
+                false,
+                true,
+                include_bytes!("../fonts/Carlito-Italic.ttf").as_slice(),
+            ),
+            (
+                true,
+                true,
+                include_bytes!("../fonts/Carlito-BoldItalic.ttf").as_slice(),
+            ),
+        ] {
+            let id = fonts.resolve_font(Some("Carlito"), bold, italic).unwrap();
+            assert_eq!(fonts.font_data(id).unwrap().data.as_ref(), expected);
+        }
+    }
+
+    #[test]
+    fn fx206_caps_requests_keep_occurrence_identity_expansion_and_default_projection() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let source = SourceSpan {
+            node: crate::SourceNodeId::new(7).unwrap(),
+            char_start: 40,
+            char_end: 43,
+        };
+        let first = multilingual_test_segment(&mut fonts, "aBß", 24.0, Some(source));
+        let second = first.clone();
+        let plain = fonts
+            .shape_multilingual_paragraph(
+                vec![(first.clone(), Some("en".to_owned()))],
+                TextDirection::Auto,
+                false,
+            )
+            .unwrap();
+        let (defaults, diagnostics) = fonts
+            .shape_multilingual_paragraph_with_caps(
+                vec![(first.clone(), Some("en".to_owned()))],
+                TextDirection::Auto,
+                false,
+                &[(false, false)],
+            )
+            .unwrap();
+        assert_eq!(defaults.len(), plain.len());
+        for (actual, expected) in defaults.iter().zip(&plain) {
+            assert_eq!(actual.text(), expected.text());
+            assert_eq!(actual.glyph_ids(), expected.glyph_ids());
+            assert_eq!(actual.x_advances(), expected.x_advances());
+            assert_eq!(actual.clusters(), expected.clusters());
+        }
+        assert!(diagnostics.is_empty());
+        let (caps, diagnostics) = fonts
+            .shape_multilingual_paragraph_with_caps(
+                vec![
+                    (first, Some("en".to_owned())),
+                    (second, Some("en".to_owned())),
+                ],
+                TextDirection::Auto,
+                false,
+                &[(true, false), (false, false)],
+            )
+            .unwrap();
+        assert!(!diagnostics.is_empty());
+        assert_eq!(
+            caps.iter()
+                .map(MultilingualTextSegment::text)
+                .collect::<String>(),
+            "aBßaBß"
+        );
+        let sharp = caps.iter().find(|span| span.text() == "ß").unwrap();
+        assert_eq!(sharp.glyph_ids().len(), 2);
+        assert_eq!(sharp.clusters().len(), 1);
+        assert_eq!(sharp.base().source.unwrap().char_start, 42);
+        assert_eq!(sharp.base().source.unwrap().char_end, 43);
+        assert!((sharp.base().font_size - 19.2).abs() < 1e-9);
+        assert!(
+            caps.iter()
+                .any(|span| span.text() == "aBß" && span.base().font_size == 24.0),
+            "equal text in a distinct occurrence retains its own request"
+        );
+        assert!(
+            fonts
+                .shape_multilingual_paragraph_with_caps(
+                    Vec::new(),
+                    TextDirection::Auto,
+                    false,
+                    &[(true, false)]
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "required F206 physical host smcp oracle stage, run explicitly with pinned HB_SHAPE and FONT_ORACLE_PYTHON"]
+    fn fx206_selected_smcp_matches_independent_harfbuzz_and_original_clusters() {
+        let path = std::path::Path::new(
+            "/Applications/Microsoft PowerPoint.app/Contents/Resources/DFonts/calibri.ttf",
+        );
+        let data = std::fs::read(path).expect("authenticated private host oracle face must exist");
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.load_additional_fonts(&[FontFile {
+            family: "F206 private smcp oracle".to_owned(),
+            data,
+        }]);
+        let text = "Small caps Straße";
+        let mut seed = multilingual_test_segment(&mut fonts, text, 24.0, None);
+        seed.font_id = fonts
+            .resolve_font_for_text(Some("F206 private smcp oracle"), false, false, text)
+            .unwrap();
+        let font = fonts.get_font(seed.font_id).unwrap();
+        assert_eq!(font.family, "Calibri");
+        let upem = font.units_per_em;
+        let script = r#"import json,subprocess,sys
+h,p,t,u=sys.argv[1:]
+for feature in ['smcp=0','smcp=1']:
+ d=json.loads(subprocess.check_output([h,p,t,'--no-glyph-names','--output-format=json','--script=latn','--language=en','--direction=ltr','--font-size='+u,'--features='+feature],text=True))
+ print(','.join(str(x['g']) for x in d))
+ print(','.join(str(x['ax']) for x in d))
+"#;
+        let output = std::process::Command::new(
+            std::env::var("FONT_ORACLE_PYTHON").expect("explicit pinned interpreter"),
+        )
+        .args([
+            "-c",
+            script,
+            &std::env::var("HB_SHAPE").expect("explicit pinned HarfBuzz"),
+            path.to_str().unwrap(),
+            text,
+            &upem.to_string(),
+        ])
+        .output()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "independent oracle precondition: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let rows = stdout.lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        let gids = |row: &str| {
+            row.split(',')
+                .map(|item| item.parse::<u16>().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let advances = |row: &str| {
+            row.split(',')
+                .map(|item| item.parse::<f64>().unwrap() * 24.0 / f64::from(upem))
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            gids(rows[0]),
+            gids(rows[2]),
+            "real smcp application differs from features-off shape"
+        );
+        let (actual, diagnostics) = fonts
+            .shape_multilingual_paragraph_with_caps(
+                vec![(seed, Some("en".to_owned()))],
+                TextDirection::LeftToRight,
+                false,
+                &[(true, false)],
+            )
+            .unwrap();
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            actual
+                .iter()
+                .map(MultilingualTextSegment::text)
+                .collect::<String>(),
+            text
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .flat_map(|span| span.glyph_ids().iter().copied())
+                .collect::<Vec<_>>(),
+            gids(rows[2])
+        );
+        let actual_advances = actual
+            .iter()
+            .flat_map(|span| span.x_advances().iter().copied())
+            .collect::<Vec<_>>();
+        let expected = advances(rows[3]);
+        assert_eq!(actual_advances.len(), expected.len());
+        for (actual, expected) in actual_advances.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-9);
+        }
+    }
 
     fn multilingual_test_segment(
         manager: &mut FontManager,
@@ -2222,7 +3692,7 @@ mod tests {
     }
 
     #[test]
-    fn caller_font_labels_resolve_after_exact_embedded_families() {
+    fn caller_font_labels_override_bundled_families_and_keep_explicit_aliases() {
         let caladea = bundled_font_data()
             .into_iter()
             .find(|(family, _)| *family == "Caladea")
@@ -2250,10 +3720,10 @@ mod tests {
 
         let exact = manager
             .resolve_font(Some("Carlito"), false, false)
-            .expect("embedded family resolves exactly");
+            .expect("caller label overrides the bundled family");
         assert_eq!(
             manager.fonts[manager.index_of(exact).unwrap()].family,
-            "Carlito"
+            "Caladea"
         );
 
         manager.set_caller_aliases(&[("Document Serif".to_owned(), "Carlito".to_owned())]);
@@ -2541,50 +4011,363 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fx220_embedded_physical_body_serves_two_thousand_aliases_atomically() {
+        let body: Arc<[u8]> = Arc::from(include_bytes!("../fonts/Caladea-Regular.ttf").as_slice());
+        let names = (0..2000)
+            .map(|index| format!("FX220 Alias {index}"))
+            .collect::<Vec<_>>();
+        let sources = vec![(names, body.clone())];
+        let mut manager = FontManager::new_deterministic().unwrap();
+        let base = manager.db.len();
+        assert!(manager.load_embedded_fonts(&sources).unwrap());
+        assert_eq!(manager.db.len(), base + 1);
+        let mut ids = Vec::new();
+        let mut data = Vec::new();
+        for index in [0, 999, 1999] {
+            let id = manager
+                .resolve_font(Some(&format!("FX220 Alias {index}")), false, false)
+                .unwrap();
+            data.push(manager.font_data(id).unwrap().data);
+            ids.push(id);
+        }
+        assert!(Arc::ptr_eq(&data[0], &data[1]) && Arc::ptr_eq(&data[1], &data[2]));
+        assert_eq!(data[0].as_ref(), body.as_ref());
+        let cache = manager.cache.len();
+        assert!(!manager.load_embedded_fonts(&sources).unwrap());
+        assert_eq!(manager.cache.len(), cache);
+        assert_eq!(
+            manager
+                .resolve_font(Some("FX220 Alias 0"), false, false)
+                .unwrap(),
+            ids[0]
+        );
+        let refused = vec![(vec!["too many".to_owned(); 16_385], body.clone())];
+        assert!(manager.load_embedded_fonts(&refused).is_err());
+        assert!(
+            manager
+                .load_embedded_fonts(&[(
+                    vec!["malformed".to_owned()],
+                    Arc::from([0_u8; 16].as_slice())
+                )])
+                .is_err()
+        );
+        let mut hostile_collection = b"ttcf\x00\x01\x00\x00".to_vec();
+        hostile_collection.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(
+            manager
+                .load_embedded_fonts(&[(
+                    vec!["hostile collection".to_owned()],
+                    Arc::from(hostile_collection)
+                )])
+                .is_err()
+        );
+        assert_eq!(manager.cache.len(), cache);
+        assert_eq!(manager.db.len(), base + 1);
+        assert_eq!(
+            manager
+                .resolve_font(Some("FX220 Alias 0"), false, false)
+                .unwrap(),
+            ids[0]
+        );
+        let caller = include_bytes!("../fonts/Carlito-Regular.ttf").to_vec();
+        manager.load_additional_fonts(&[FontFile {
+            family: "FX220 Alias 1999".to_owned(),
+            data: caller.clone(),
+        }]);
+        let id = manager
+            .resolve_font(Some("FX220 Alias 1999"), false, false)
+            .unwrap();
+        assert_eq!(manager.font_data(id).unwrap().data.as_ref(), caller);
+        let id = manager
+            .resolve_font(Some("FX220 Alias 999"), false, false)
+            .unwrap();
+        assert_eq!(manager.font_data(id).unwrap().data.as_ref(), body.as_ref());
+        assert!(manager.load_embedded_fonts(&[]).unwrap());
+        assert!(manager.embedded_aliases.is_empty());
+    }
+
+    #[test]
+    fn fx220_embedded_four_faces_preserve_css_and_caller_priority() {
+        let face_data: [&[u8]; 4] = [
+            include_bytes!("../fonts/Caladea-Regular.ttf"),
+            include_bytes!("../fonts/Caladea-Bold.ttf"),
+            include_bytes!("../fonts/Caladea-Italic.ttf"),
+            include_bytes!("../fonts/Caladea-BoldItalic.ttf"),
+        ];
+        let sources = face_data
+            .iter()
+            .map(|data| (vec!["Embedded FX220".to_owned()], Arc::<[u8]>::from(*data)))
+            .collect::<Vec<_>>();
+        let mut manager = FontManager::new_deterministic().unwrap();
+        manager.load_embedded_fonts(&sources).unwrap();
+        for (index, (bold, italic)) in [(false, false), (true, false), (false, true), (true, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let id = manager
+                .resolve_font(Some("Embedded FX220"), bold, italic)
+                .unwrap();
+            assert_eq!(
+                manager.font_data(id).unwrap().data.as_ref(),
+                face_data[index]
+            );
+        }
+        let caller = include_bytes!("../fonts/Carlito-Regular.ttf").to_vec();
+        let mut constructor =
+            FontManager::new_with_fonts(vec![("Embedded FX220".to_owned(), caller.clone())]);
+        constructor.load_embedded_fonts(&sources).unwrap();
+        let id = constructor
+            .resolve_font(Some("Embedded FX220"), false, false)
+            .unwrap();
+        assert_eq!(constructor.font_data(id).unwrap().data.as_ref(), caller);
+        manager.load_additional_fonts(&[FontFile {
+            family: "Embedded FX220".to_owned(),
+            data: caller.clone(),
+        }]);
+        let id = manager
+            .resolve_font(Some("Embedded FX220"), false, false)
+            .unwrap();
+        assert_eq!(manager.font_data(id).unwrap().data.as_ref(), caller);
+    }
+
+    #[test]
+    fn fx220_cross_bucket_ranking_retains_constructor_and_css_precedence() {
+        let family = "FX220CX";
+        let exact = font_with_family(include_bytes!("../fonts/Caladea-Regular.ttf"), family);
+        let alias = include_bytes!("../fonts/Carlito-Regular.ttf").to_vec();
+        let bold = include_bytes!("../fonts/Carlito-Bold.ttf").to_vec();
+        let italic = include_bytes!("../fonts/Carlito-Italic.ttf").to_vec();
+        let bold_italic = include_bytes!("../fonts/Carlito-BoldItalic.ttf").to_vec();
+        for (constructor, additional) in [
+            (exact.clone(), alias.clone()),
+            (alias.clone(), exact.clone()),
+        ] {
+            let mut manager =
+                FontManager::new_with_fonts(vec![(family.to_owned(), constructor.clone())]);
+            let files = vec![FontFile {
+                family: family.to_owned(),
+                data: additional,
+            }];
+            assert!(manager.load_additional_fonts(&files));
+            let id = manager.resolve_font(Some(family), false, false).unwrap();
+            assert_eq!(manager.font_data(id).unwrap().data.as_ref(), constructor);
+            assert!(!manager.load_additional_fonts(&files));
+            assert_eq!(
+                manager.resolve_font(Some(family), false, false).unwrap(),
+                id
+            );
+            assert!(manager.load_additional_fonts(&[
+                FontFile {
+                    family: family.to_owned(),
+                    data: bold.clone()
+                },
+                FontFile {
+                    family: family.to_owned(),
+                    data: italic.clone()
+                },
+                FontFile {
+                    family: family.to_owned(),
+                    data: bold_italic.clone()
+                },
+            ]));
+            for (is_bold, is_italic, expected) in [
+                (true, false, &bold),
+                (false, true, &italic),
+                (true, true, &bold_italic),
+            ] {
+                let id = manager
+                    .resolve_font(Some(family), is_bold, is_italic)
+                    .unwrap();
+                assert_eq!(manager.font_data(id).unwrap().data.as_ref(), expected);
+            }
+        }
+        let mut manager = FontManager::new_deterministic().unwrap();
+        for files in [
+            vec![exact.clone(), alias.clone()],
+            vec![alias.clone(), exact.clone()],
+        ] {
+            let expected = files.last().unwrap().clone();
+            manager.load_additional_fonts(
+                &files
+                    .into_iter()
+                    .map(|data| FontFile {
+                        family: family.to_owned(),
+                        data,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let id = manager.resolve_font(Some(family), false, false).unwrap();
+            assert_eq!(manager.font_data(id).unwrap().data.as_ref(), expected);
+        }
+        manager.set_caller_aliases(&[("Explicit FX220".to_owned(), family.to_owned())]);
+        let direct = manager.resolve_font(Some(family), false, false).unwrap();
+        let indirect = manager
+            .resolve_font(Some("Explicit FX220"), false, false)
+            .unwrap();
+        assert_eq!(
+            manager.font_data(direct).unwrap().data,
+            manager.font_data(indirect).unwrap().data
+        );
+        assert!(
+            manager
+                .resolve_font(Some("Missing FX220"), false, false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn fx195_equal_rank_caller_faces_select_last_loaded_original_bytes() {
+        let family = "FX195CX";
+        let first = font_with_family(include_bytes!("../fonts/Carlito-Regular.ttf"), family);
+        let second = font_with_family(include_bytes!("../fonts/Caladea-Regular.ttf"), family);
+        assert_ne!(first, second);
+        let mut constructor = FontManager::new_with_fonts(vec![
+            ("Constructor Alias".to_owned(), first.clone()),
+            ("Constructor Alias".to_owned(), second.clone()),
+        ]);
+        for requested in [family, "Constructor Alias"] {
+            let selected = constructor
+                .resolve_font(Some(requested), false, false)
+                .unwrap();
+            assert_eq!(
+                constructor.font_data(selected).unwrap().data.as_ref(),
+                first
+            );
+        }
+        assert!(constructor.load_additional_fonts(&[FontFile {
+            family: family.to_owned(),
+            data: second.clone(),
+        }]));
+        for requested in [family, "Constructor Alias"] {
+            let selected = constructor
+                .resolve_font(Some(requested), false, false)
+                .unwrap();
+            assert_eq!(
+                constructor.font_data(selected).unwrap().data.as_ref(),
+                first
+            );
+        }
+        let mut manager = FontManager::new_deterministic().unwrap();
+        let mut files = vec![
+            FontFile {
+                family: family.to_owned(),
+                data: first.clone(),
+            },
+            FontFile {
+                family: family.to_owned(),
+                data: second.clone(),
+            },
+        ];
+        assert!(manager.load_additional_fonts(&files));
+        let selected = manager.resolve_font(Some(family), false, false).unwrap();
+        assert_eq!(manager.font_data(selected).unwrap().data.as_ref(), second);
+        assert_eq!(manager.font_data(selected).unwrap().face_index, 0);
+        assert!(!manager.load_additional_fonts(&files));
+        assert_eq!(
+            manager.resolve_font(Some(family), false, false).unwrap(),
+            selected
+        );
+
+        files.reverse();
+        assert!(manager.load_additional_fonts(&files));
+        let selected = manager.resolve_font(Some(family), false, false).unwrap();
+        assert_eq!(manager.font_data(selected).unwrap().data.as_ref(), first);
+        assert_eq!(manager.font_data(selected).unwrap().face_index, 0);
+
+        let bold = font_with_family(include_bytes!("../fonts/Carlito-Bold.ttf"), family);
+        assert!(constructor.load_additional_fonts(&[FontFile {
+            family: family.to_owned(),
+            data: bold.clone(),
+        }]));
+        let selected = constructor.resolve_font(Some(family), true, false).unwrap();
+        assert_eq!(constructor.font_data(selected).unwrap().data.as_ref(), bold);
+        assert!(!constructor.font_data(selected).unwrap().synthetic_bold);
+        assert!(manager.load_additional_fonts(&[
+            FontFile {
+                family: family.to_owned(),
+                data: bold.clone(),
+            },
+            FontFile {
+                family: family.to_owned(),
+                data: second.clone(),
+            },
+        ]));
+        let selected = manager.resolve_font(Some(family), true, false).unwrap();
+        assert_eq!(manager.font_data(selected).unwrap().data.as_ref(), bold);
+        assert!(!manager.font_data(selected).unwrap().synthetic_bold);
+        let regular = manager.resolve_font(Some(family), false, false).unwrap();
+        assert_eq!(manager.font_data(regular).unwrap().data.as_ref(), second);
+    }
+
     fn font_with_family(source: &[u8], family: &str) -> Vec<u8> {
-        assert_eq!(family.len(), 7);
+        assert!(family.is_ascii() && !family.is_empty());
         let mut font = source.to_vec();
         let table_count = u16::from_be_bytes([font[4], font[5]]) as usize;
-        let name_offset = (0..table_count)
-            .find_map(|table| {
-                let record = 12 + table * 16;
-                (&font[record..record + 4] == b"name").then(|| {
-                    u32::from_be_bytes(font[record + 8..record + 12].try_into().unwrap()) as usize
-                })
-            })
+        let record = (0..table_count)
+            .map(|table| 12 + table * 16)
+            .find(|record| &font[*record..*record + 4] == b"name")
             .expect("font has name table");
-        let count = u16::from_be_bytes([font[name_offset + 2], font[name_offset + 3]]) as usize;
-        let strings = name_offset
-            + u16::from_be_bytes([font[name_offset + 4], font[name_offset + 5]]) as usize;
+        let offset = u32::from_be_bytes(font[record + 8..record + 12].try_into().unwrap()) as usize;
+        let length =
+            u32::from_be_bytes(font[record + 12..record + 16].try_into().unwrap()) as usize;
+        let mut names = font[offset..offset + length].to_vec();
+        let count = u16::from_be_bytes([names[2], names[3]]) as usize;
+        let strings = u16::from_be_bytes([names[4], names[5]]) as usize;
         for index in 0..count {
-            let record = name_offset + 6 + index * 12;
-            let platform = u16::from_be_bytes([font[record], font[record + 1]]);
-            let name_id = u16::from_be_bytes([font[record + 6], font[record + 7]]);
-            let length = u16::from_be_bytes([font[record + 8], font[record + 9]]) as usize;
-            let offset = u16::from_be_bytes([font[record + 10], font[record + 11]]) as usize;
+            let entry = 6 + index * 12;
+            let platform = u16::from_be_bytes([names[entry], names[entry + 1]]);
+            let name_id = u16::from_be_bytes([names[entry + 6], names[entry + 7]]);
             if !matches!(name_id, 1 | 16) {
                 continue;
             }
-            let destination = &mut font[strings + offset..strings + offset + length];
-            match (platform, length) {
-                (0 | 3, 14) => {
-                    for (bytes, ch) in destination
-                        .as_chunks_mut::<2>()
-                        .0
-                        .iter_mut()
-                        .zip(family.bytes())
-                    {
-                        bytes.copy_from_slice(&(ch as u16).to_be_bytes());
-                    }
-                }
-                (1, 7) => destination.copy_from_slice(family.as_bytes()),
-                _ => {}
-            }
+            let encoded = match platform {
+                0 | 3 => family
+                    .encode_utf16()
+                    .flat_map(u16::to_be_bytes)
+                    .collect::<Vec<_>>(),
+                1 => family.as_bytes().to_vec(),
+                _ => continue,
+            };
+            let string_offset = u16::try_from(names.len() - strings).unwrap();
+            let length = u16::try_from(encoded.len()).unwrap();
+            names[entry + 8..entry + 10].copy_from_slice(&length.to_be_bytes());
+            names[entry + 10..entry + 12].copy_from_slice(&string_offset.to_be_bytes());
+            names.extend_from_slice(&encoded);
         }
+        let checksum = |data: &[u8]| {
+            data.chunks(4).fold(0u32, |sum, chunk| {
+                let mut word = [0; 4];
+                word[..chunk.len()].copy_from_slice(chunk);
+                sum.wrapping_add(u32::from_be_bytes(word))
+            })
+        };
+        while !font.len().is_multiple_of(4) {
+            font.push(0);
+        }
+        let new_offset = u32::try_from(font.len()).unwrap();
+        font[record + 4..record + 8].copy_from_slice(&checksum(&names).to_be_bytes());
+        font[record + 8..record + 12].copy_from_slice(&new_offset.to_be_bytes());
+        font[record + 12..record + 16]
+            .copy_from_slice(&u32::try_from(names.len()).unwrap().to_be_bytes());
+        font.extend_from_slice(&names);
+        let head = (0..table_count)
+            .map(|table| 12 + table * 16)
+            .find(|record| &font[*record..*record + 4] == b"head")
+            .unwrap();
+        let head_offset =
+            u32::from_be_bytes(font[head + 8..head + 12].try_into().unwrap()) as usize;
+        let head_length =
+            u32::from_be_bytes(font[head + 12..head + 16].try_into().unwrap()) as usize;
+        font[head_offset + 8..head_offset + 12].fill(0);
+        let head_checksum = checksum(&font[head_offset..head_offset + head_length]);
+        font[head + 4..head + 8].copy_from_slice(&head_checksum.to_be_bytes());
+        let adjustment = 0xb1b0afba_u32.wrapping_sub(checksum(&font));
+        font[head_offset + 8..head_offset + 12].copy_from_slice(&adjustment.to_be_bytes());
+        assert_eq!(checksum(&font), 0xb1b0afba);
         font
     }
 
-    #[cfg(feature = "system-fonts")]
     fn test_ttc(fonts: &[&[u8]]) -> Vec<u8> {
         let header_len = 12 + fonts.len() * 4;
         let mut collection = vec![0u8; header_len];
@@ -3089,6 +4872,181 @@ mod tests {
         assert_eq!(trace.capacity(), trace.len());
     }
 
+    #[test]
+    fn fx195_contribution_scope_preserves_legacy_and_original_requests() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        fm.begin_layout();
+        fm.begin_paragraph_font_trace();
+        let id = fm.resolve_font(Some("Carlito"), false, false).unwrap();
+        let scope = fm.begin_font_contribution_scope().unwrap();
+        fm.record_font_contribution(id, Some("Aptos"), "A").unwrap();
+        fm.record_font_contribution(id, Some("Calibri"), "A")
+            .unwrap();
+        let staged = fm.finish_font_contribution_scope(scope).unwrap().unwrap();
+        assert_eq!(staged.len(), 2);
+        let projected = staged
+            .iter()
+            .filter_map(|event| match event {
+                FontTraceEvent::Contribution(contribution) => Some(contribution),
+                FontTraceEvent::Resolution(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(projected[0].font_id, projected[1].font_id);
+        assert_ne!(projected[0].requested_family, projected[1].requested_family);
+        assert!(fm.finish_paragraph_font_contributions().unwrap().is_empty());
+        fm.begin_paragraph_font_trace();
+        fm.replay_layout_font_trace(&[id]);
+        fm.replay_font_trace_events(&staged).unwrap();
+        assert_eq!(fm.finish_paragraph_font_trace().unwrap(), vec![id]);
+        fm.begin_paragraph_font_trace();
+        fm.replay_font_trace_events(&staged).unwrap();
+        assert_eq!(
+            fm.finish_paragraph_font_contributions().unwrap(),
+            projected.into_iter().cloned().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn fx195_contribution_nested_stale_and_empty_scopes_are_atomic() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm.resolve_font(Some("Carlito"), false, false).unwrap();
+        fm.begin_layout();
+        fm.begin_paragraph_font_trace();
+        fm.record_font_contribution(id, Some("outer"), "A").unwrap();
+        let outer = fm.begin_font_contribution_scope().unwrap();
+        let inner = fm.begin_font_contribution_scope().unwrap();
+        fm.record_font_contribution(id, Some("inner"), "A").unwrap();
+        let before = format!("{:?}", fm.paragraph_font_trace.as_ref().unwrap().events);
+        assert!(fm.finish_font_contribution_scope(outer).is_err());
+        assert_eq!(
+            format!("{:?}", fm.paragraph_font_trace.as_ref().unwrap().events),
+            before
+        );
+        let captured = fm.finish_font_contribution_scope(inner).unwrap().unwrap();
+        assert_eq!(captured.len(), 1);
+        let stale = fm.begin_font_contribution_scope().unwrap();
+        fm.begin_paragraph_font_trace();
+        fm.record_font_contribution(id, Some("replacement"), "A")
+            .unwrap();
+        let inventory = fm.current_layout_fonts().to_vec();
+        assert!(fm.finish_font_contribution_scope(stale).is_err());
+        assert_eq!(fm.current_layout_fonts(), inventory);
+        let remaining = fm.finish_paragraph_font_contributions().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].requested_family.as_deref(),
+            Some("replacement")
+        );
+        fm.begin_paragraph_font_trace();
+        fm.record_font_contribution(id, Some("empty"), "").unwrap();
+        assert!(fm.finish_paragraph_font_contributions().unwrap().is_empty());
+        fm.begin_paragraph_font_trace();
+        fm.resolve_font(Some("Carlito"), false, false).unwrap();
+        assert!(fm.finish_paragraph_font_contributions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fx195_contribution_replay_refusal_and_capture_overflow_are_atomic() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm.resolve_font(Some("Carlito"), false, false).unwrap();
+        fm.begin_layout();
+        fm.begin_paragraph_font_trace();
+        fm.record_font_contribution(id, Some("kept"), "A").unwrap();
+        let before = format!("{:?}", fm.paragraph_font_trace.as_ref().unwrap().events);
+        let inventory = fm.current_layout_fonts().to_vec();
+        let bad = vec![
+            FontTraceEvent::Contribution(FontContribution {
+                font_id: id,
+                requested_family: Some("valid first".into()),
+            }),
+            FontTraceEvent::Contribution(FontContribution {
+                font_id: FontId(u32::MAX),
+                requested_family: None,
+            }),
+        ];
+        assert!(fm.replay_font_trace_events(&bad).is_err());
+        assert_eq!(fm.current_layout_fonts(), inventory);
+        assert_eq!(
+            format!("{:?}", fm.paragraph_font_trace.as_ref().unwrap().events),
+            before
+        );
+        let huge = "x".repeat(PARAGRAPH_FONT_TRACE_MAX_BYTES + 1);
+        assert!(
+            fm.replay_font_trace_events(&[FontTraceEvent::Contribution(FontContribution {
+                font_id: id,
+                requested_family: Some(huge.clone()),
+            })])
+            .is_err()
+        );
+        assert_eq!(fm.current_layout_fonts(), inventory);
+        assert_eq!(
+            format!("{:?}", fm.paragraph_font_trace.as_ref().unwrap().events),
+            before
+        );
+        let scope = fm.begin_font_contribution_scope().unwrap();
+        fm.record_font_contribution(id, Some(&huge), "A").unwrap();
+        assert!(fm.finish_font_contribution_scope(scope).unwrap().is_none());
+        assert!(fm.finish_paragraph_font_contributions().is_none());
+        assert!(fm.paragraph_font_trace.is_none());
+        fm.begin_paragraph_font_trace();
+        for _ in 0..=PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
+            fm.record_font_contribution(id, Some("bounded"), "A")
+                .unwrap();
+        }
+        assert!(fm.finish_paragraph_font_contributions().is_none());
+        assert!(fm.paragraph_font_trace.is_none());
+    }
+
+    #[test]
+    fn fx195_contribution_scope_rejects_other_manager_and_bounds_private_context() {
+        let mut first = FontManager::new_deterministic().unwrap();
+        let mut second = FontManager::new_deterministic().unwrap();
+        let id = second.resolve_font(Some("Carlito"), false, false).unwrap();
+        let foreign_scope = first.begin_font_contribution_scope().unwrap();
+        let own_scope = second.begin_font_contribution_scope().unwrap();
+        second
+            .record_font_contribution(id, Some("kept"), "A")
+            .unwrap();
+        let before = format!("{:?}", second.paragraph_font_trace.as_ref().unwrap().events);
+        let inventory = second.current_layout_fonts().to_vec();
+        assert!(
+            second
+                .finish_font_contribution_scope(foreign_scope)
+                .is_err()
+        );
+        assert_eq!(
+            format!("{:?}", second.paragraph_font_trace.as_ref().unwrap().events),
+            before
+        );
+        assert_eq!(second.current_layout_fonts(), inventory);
+        assert!(
+            second
+                .finish_font_contribution_scope(own_scope)
+                .unwrap()
+                .is_some()
+        );
+        second.begin_paragraph_font_trace();
+        let mut bytes = PARAGRAPH_FONT_TRACE_MAX_BYTES;
+        let mut entries = 0;
+        assert!(
+            second
+                .copy_font_request_context(Some("no extra allocation"), &mut bytes, &mut entries)
+                .is_none()
+        );
+        assert_eq!(entries, 0);
+        assert!(second.finish_paragraph_font_events().is_none());
+        second.begin_paragraph_font_trace();
+        let mut bytes = 0;
+        let mut entries = PARAGRAPH_FONT_TRACE_MAX_ENTRIES;
+        assert!(
+            second
+                .copy_font_request_context(Some("entry overflow"), &mut bytes, &mut entries)
+                .is_none()
+        );
+        assert_eq!(bytes, PARAGRAPH_FONT_TRACE_MAX_BYTES);
+        assert!(second.finish_paragraph_font_events().is_none());
+    }
+
     #[cfg(feature = "system-fonts")]
     #[test]
     fn file_byte_cache_is_bounded_and_recovers_from_poison() {
@@ -3360,5 +5318,326 @@ mod tests {
                 "no bundled face covers {text}"
             );
         }
+    }
+
+    #[test]
+    fn fx210_owned_diagnostics_roll_back_provisional_scopes_and_replay_final_events() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.begin_layout();
+        let id = fonts.resolve_font(Some("Calibri"), false, false).unwrap();
+        fonts
+            .record_font_contribution(id, Some("Aptos"), "accepted")
+            .unwrap();
+        let accepted = fonts.current_font_diagnostics().to_vec();
+        assert_eq!(accepted.len(), 1);
+        let outer = fonts.begin_font_contribution_scope().unwrap();
+        fonts
+            .record_font_contribution(id, Some("Aptos Display"), "provisional")
+            .unwrap();
+        let inner = fonts.begin_font_contribution_scope().unwrap();
+        fonts
+            .record_font_contribution(id, Some("Aptos"), "nested")
+            .unwrap();
+        let nested = fonts
+            .finish_font_contribution_scope(inner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fonts.current_font_diagnostics().len(), 2);
+        let staged = fonts
+            .finish_font_contribution_scope(outer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fonts.current_font_diagnostics(), accepted);
+        fonts.replay_font_trace_events(&staged).unwrap();
+        assert_eq!(fonts.current_font_diagnostics().len(), 2);
+        fonts.replay_font_trace_events(&nested).unwrap();
+        assert_eq!(fonts.current_font_diagnostics().len(), 2);
+        let final_facts = fonts.current_font_diagnostics().to_vec();
+        fonts.begin_layout();
+        assert!(fonts.current_font_diagnostics().is_empty());
+        fonts
+            .record_font_contribution(id, Some("Aptos"), "")
+            .unwrap();
+        fonts
+            .record_font_contribution(id, Some("Calibri"), "accepted")
+            .unwrap();
+        assert!(fonts.current_font_diagnostics().is_empty());
+        fonts.replay_font_trace_events(&staged).unwrap();
+        assert_eq!(fonts.current_font_diagnostics(), &final_facts[1..]);
+    }
+
+    #[test]
+    fn fx210_overflow_cannot_lose_committed_warning_or_publish_provisional_warning() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.begin_layout();
+        let id = fonts.resolve_font(Some("Calibri"), false, false).unwrap();
+        fonts
+            .record_font_contribution(id, Some("Aptos"), "accepted")
+            .unwrap();
+        let accepted = fonts.current_font_diagnostics().to_vec();
+        let scope = fonts.begin_font_contribution_scope().unwrap();
+        for _ in 0..=PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
+            fonts
+                .record_font_contribution(id, Some("Aptos Display"), "staged")
+                .unwrap();
+        }
+        assert!(
+            fonts
+                .finish_font_contribution_scope(scope)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fonts.current_font_diagnostics(), accepted);
+        fonts.begin_paragraph_font_trace();
+        for _ in 0..=PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
+            fonts
+                .record_font_contribution(id, Some("Calibri"), "accepted")
+                .unwrap();
+        }
+        fonts
+            .record_font_contribution(id, Some("Aptos Display"), "accepted")
+            .unwrap();
+        assert!(fonts.finish_paragraph_font_events().is_none());
+        assert_eq!(fonts.current_font_diagnostics().len(), 2);
+        let before = fonts.current_font_diagnostics().to_vec();
+        assert!(
+            fonts
+                .replay_font_trace_events(&[FontTraceEvent::Contribution(FontContribution {
+                    font_id: FontId(u32::MAX),
+                    requested_family: Some("Aptos".into()),
+                })])
+                .is_err()
+        );
+        assert_eq!(fonts.current_font_diagnostics(), before);
+    }
+
+    #[test]
+    fn fx211c_original_symbol_coverage_authenticates_physical_family_and_glyphs() {
+        let source = include_bytes!("../fonts/Carlito-Regular.ttf");
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.load_additional_fonts(&[FontFile {
+            family: "Wingdings".to_owned(),
+            data: source.to_vec(),
+        }]);
+        let alias = fonts.resolve_font(Some("Wingdings"), false, false).unwrap();
+        assert!(!fonts.has_original_symbol_coverage(alias, Some("Wingdings"), "ÿ"));
+        fonts.load_additional_fonts(&[FontFile {
+            family: "Wingdings".to_owned(),
+            data: font_with_family(source, "Wingdings"),
+        }]);
+        let actual = fonts.resolve_font(Some("Wingdings"), false, false).unwrap();
+        assert!(fonts.has_original_symbol_coverage(actual, Some("Wingdings"), "ÿ"));
+        assert!(
+            fonts
+                .unknown_symbol_diagnostics(actual, Some("Wingdings"), "ÿ", "ÿ")
+                .is_empty()
+        );
+        assert!(
+            fonts
+                .unknown_symbol_diagnostics(
+                    FontId(u32::MAX),
+                    Some("Wingdings"),
+                    "\u{f0ff}",
+                    "\u{f0ff}"
+                )
+                .is_empty()
+        );
+        let genuine = fonts.font_data(actual).unwrap();
+        let original = ttf_parser::Face::parse(source, 0).unwrap();
+        let renamed = ttf_parser::Face::parse(genuine.data.as_ref(), 0).unwrap();
+        assert_eq!(renamed.glyph_index('ÿ'), original.glyph_index('ÿ'));
+        let count = u16::from_be_bytes([source[4], source[5]]) as usize;
+        for table in 0..count {
+            let tag = ttf_parser::Tag::from_bytes(
+                source[12 + table * 16..16 + table * 16].try_into().unwrap(),
+            );
+            if tag != ttf_parser::Tag::from_bytes(b"name")
+                && tag != ttf_parser::Tag::from_bytes(b"head")
+            {
+                assert_eq!(
+                    renamed.raw_face().table(tag),
+                    original.raw_face().table(tag)
+                );
+            }
+        }
+
+        assert!(!fonts.has_original_symbol_coverage(actual, Some("Wingdings"), "\u{f0ff}"));
+        assert!(!fonts.has_original_symbol_coverage(actual, Some("Symbol"), "ÿ"));
+        let resolved = fonts
+            .resolve_symbol_text(Some("Wingdings"), false, false, "ÿ", true)
+            .unwrap();
+        assert_eq!(
+            resolved,
+            ("ÿ".to_owned(), actual),
+            "genuine original glyph beats semantic fallback"
+        );
+    }
+
+    #[test]
+    fn fx210_explicit_symbol_table_is_bounded_and_covered() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        for (family, code, target) in [
+            ("Wingdings", 0xa7, '\u{25aa}'),
+            ("Wingdings", 0xd8, '\u{27a2}'),
+            ("Wingdings", 0xfc, '\u{2713}'),
+            ("Wingdings", 0x76, '\u{2756}'),
+            ("Wingdings", 0x71, '\u{2751}'),
+            ("Wingdings", 0x6e, '\u{25a0}'),
+            ("Wingdings", 0xfe, '\u{2611}'),
+            ("Symbol", 0xb7, '\u{2022}'),
+        ] {
+            for code in [code, code + 0xf000] {
+                let original = char::from_u32(code).unwrap().to_string();
+                let (display, id) = fonts
+                    .resolve_symbol_text(Some(family), false, false, &original, false)
+                    .unwrap();
+                assert_eq!(display, target.to_string());
+                let shaped = fonts.shape_text(id, &display, 12.0).unwrap();
+                assert!(!shaped.glyph_ids.is_empty());
+                assert!(shaped.glyph_ids.iter().all(|glyph| *glyph != 0));
+            }
+        }
+        for (family, original) in [
+            ("Wingdings 2", "\u{f0a7}"),
+            ("Unrelated", "\u{f0a7}"),
+            ("Wingdings", "\u{f001}"),
+            ("Wingdings", "\u{f0b7}"),
+        ] {
+            assert_eq!(
+                fonts
+                    .resolve_symbol_text(Some(family), false, false, original, false)
+                    .unwrap()
+                    .0,
+                original
+            );
+        }
+        assert_eq!(
+            fonts
+                .resolve_symbol_text(Some("Wingdings"), false, false, "\u{f0b7}", true)
+                .unwrap()
+                .0,
+            "\u{2022}"
+        );
+        let id = fonts.resolve_font(Some("Carlito"), false, false).unwrap();
+        assert_eq!(
+            fonts
+                .resolve_symbol_text(Some("Carlito"), false, false, "v", false)
+                .unwrap(),
+            ("v".into(), id)
+        );
+    }
+    #[test]
+    fn fx210_caller_labels_cannot_authenticate_aptos_or_original_symbol_faces() {
+        let source = bundled_font_data()
+            .into_iter()
+            .find(|(family, _)| *family == "Carlito")
+            .unwrap()
+            .1;
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.load_additional_fonts(&[FontFile {
+            family: "Aptos".to_owned(),
+            data: source.to_vec(),
+        }]);
+        fonts.begin_layout();
+        let selected = fonts.resolve_font(Some("Aptos"), false, false).unwrap();
+        let index = fonts.index_of(selected).unwrap();
+        assert_eq!(fonts.fonts[index].data.as_ref(), source);
+        assert_eq!(fonts.fonts[index].face_index, 0);
+        assert!(fonts.physical_requested_family_matches(index, "Carlito"));
+        assert!(!fonts.physical_requested_family_matches(index, "Aptos"));
+        fonts
+            .record_font_contribution(selected, Some("Aptos"), "actual")
+            .unwrap();
+        assert_eq!(fonts.current_font_diagnostics().len(), 1);
+        assert!(
+            fonts.current_font_diagnostics()[0]
+                .message
+                .contains("Font 'Aptos' is approximate")
+        );
+        assert!(
+            fonts.current_font_diagnostics()[0]
+                .message
+                .contains("Carlito")
+        );
+        // Accepted caller aliases still choose the same original bytes on replay.
+        fonts.begin_paragraph_font_trace();
+        fonts
+            .record_font_contribution(selected, Some("Aptos"), "actual")
+            .unwrap();
+        let events = fonts.finish_paragraph_font_events().unwrap();
+        fonts.begin_layout();
+        fonts.replay_font_trace_events(&events).unwrap();
+        assert_eq!(fonts.current_font_diagnostics().len(), 1);
+        assert_eq!(fonts.font_data(selected).unwrap().data.as_ref(), source);
+
+        fonts.load_additional_fonts(&[FontFile {
+            family: "Wingdings".to_owned(),
+            data: source.to_vec(),
+        }]);
+        let aliased = fonts.resolve_font(Some("Wingdings"), false, false).unwrap();
+        let index = fonts.index_of(aliased).unwrap();
+        assert_eq!(fonts.fonts[index].data.as_ref(), source);
+        assert!(
+            fonts.uncovered(index, "ü").is_empty(),
+            "Carlito genuinely covers the low-byte operand"
+        );
+        assert!(!fonts.physical_requested_family_matches(index, "Wingdings"));
+        let (display, id) = fonts
+            .resolve_symbol_text(Some("Wingdings"), false, false, "ü", false)
+            .unwrap();
+        assert_eq!(
+            display, "✓",
+            "a caller label cannot give Carlito's Latin glyph original Wingdings precedence"
+        );
+        assert!(
+            fonts
+                .shape_text(id, &display, 12.0)
+                .unwrap()
+                .glyph_ids
+                .iter()
+                .all(|glyph| *glyph != 0)
+        );
+        let (original, genuine) = fonts
+            .resolve_symbol_text(Some("Carlito"), false, false, "ü", false)
+            .unwrap();
+        assert_eq!(original, "ü");
+        let index = fonts.index_of(genuine).unwrap();
+        assert!(fonts.physical_requested_family_matches(index, "Carlito"));
+        assert!(fonts.uncovered(index, &original).is_empty());
+        assert_eq!(fonts.fonts[index].data.as_ref(), source);
+    }
+
+    #[test]
+    fn fx210_physical_family_authentication_reads_the_selected_collection_face() {
+        let bundled = bundled_font_data();
+        let caladea = bundled
+            .iter()
+            .find(|(family, _)| *family == "Caladea")
+            .unwrap()
+            .1;
+        let carlito = bundled
+            .iter()
+            .find(|(family, _)| *family == "Carlito")
+            .unwrap()
+            .1;
+        let collection = test_ttc(&[caladea, carlito]);
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.load_additional_fonts(&[FontFile {
+            family: "Two physical families".to_owned(),
+            data: collection.clone(),
+        }]);
+        let selected = fonts.resolve_font(Some("Carlito"), false, false).unwrap();
+        let index = fonts.index_of(selected).unwrap();
+        assert_eq!(fonts.fonts[index].data.as_ref(), collection);
+        assert_eq!(fonts.fonts[index].face_index, 1);
+        assert!(fonts.physical_requested_family_matches(index, "Carlito"));
+        assert!(!fonts.physical_requested_family_matches(index, "Caladea"));
+        assert!(!fonts.physical_requested_family_matches(index, "Two physical families"));
+        let first = fonts.resolve_font(Some("Caladea"), false, false).unwrap();
+        let index = fonts.index_of(first).unwrap();
+        assert_eq!(fonts.fonts[index].face_index, 0);
+        assert!(fonts.physical_requested_family_matches(index, "Caladea"));
+        assert!(!fonts.physical_requested_family_matches(index, "Carlito"));
+        assert!(!fonts.physical_requested_family_matches(usize::MAX, "Carlito"));
     }
 }

@@ -192,6 +192,7 @@ pub(crate) const CLEAR_TABLE_ROW_PROPERTIES: u32 = 1 << 14;
 pub(crate) const CLEAR_TABLE_CELL_PROPERTIES: u32 = 1 << 15;
 pub(crate) const CLEAR_FONT_THEME: u32 = 1 << 16;
 pub(crate) const CLEAR_COLOR_THEME: u32 = 1 << 17;
+pub(crate) const REPLACE_PARAGRAPH_PROPERTIES: u32 = 1 << 18;
 
 impl StyleBuilder {
     /// Create a new paragraph style builder.
@@ -414,7 +415,16 @@ impl StyleBuilder {
     /// Set paragraph properties for this style.
     pub fn paragraph_properties(mut self, ppr: CT_PPr) -> Self {
         self.style.ppr = Some(ppr);
+        self.cleared &= !(CLEAR_PARAGRAPH_PROPERTIES | REPLACE_PARAGRAPH_PROPERTIES);
+        self
+    }
+
+    /// Replace the complete, source-preserving paragraph property snapshot.
+    /// Unlike an overlay, explicit absent fields clear their direct facts.
+    pub fn replace_paragraph_properties(mut self, properties: CT_PPr) -> Self {
+        self.style.ppr = Some(properties);
         self.cleared &= !CLEAR_PARAGRAPH_PROPERTIES;
+        self.cleared |= REPLACE_PARAGRAPH_PROPERTIES;
         self
     }
 
@@ -455,6 +465,7 @@ impl StyleBuilder {
     /// Remove all paragraph properties during an update.
     pub fn clear_paragraph_properties(mut self) -> Self {
         self.style.ppr = None;
+        self.cleared &= !REPLACE_PARAGRAPH_PROPERTIES;
         self.cleared |= CLEAR_PARAGRAPH_PROPERTIES;
         self
     }

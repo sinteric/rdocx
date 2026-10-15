@@ -70,17 +70,12 @@ pub fn to_html_fragment(input: &HtmlInput, options: &HtmlOptions) -> String {
 
 /// Convert a DOCX document to Markdown.
 pub fn to_markdown(input: &HtmlInput) -> String {
-    markdown::emit_markdown(
-        &input.document.body,
-        &input.styles,
-        input.numbering.as_ref(),
-        &input.hyperlink_urls,
-    )
+    markdown::emit_markdown(input)
 }
 
 /// A paragraph or a table that the emitters write as one block.
 enum Block<'a> {
-    Paragraph(Box<Cow<'a, CT_P>>),
+    Paragraph(Box<Cow<'a, CT_P>>, Vec<usize>),
     Table(&'a CT_Tbl),
 }
 
@@ -88,20 +83,30 @@ enum Block<'a> {
 /// control is transparent: what it wraps, nested controls included, is
 /// written as if the control were not there, which is what `Paragraph.text`
 /// and `Document::text` read.
-fn body_blocks(body: &CT_Body) -> Vec<Block<'_>> {
+fn body_blocks(body: &CT_Body, preserve_field_owners: bool) -> Vec<Block<'_>> {
     let mut blocks = Vec::new();
-    let mut carried: Option<CT_P> = None;
+    let mut carried: Option<(CT_P, Vec<usize>)> = None;
     for (index, item) in body.content.iter().enumerate() {
         match item {
             BodyContent::Paragraph(paragraph) => {
-                let paragraph = match carried.take() {
-                    Some(prefix) => Cow::Owned(join_accepted_paragraphs(prefix, paragraph)),
-                    None => Cow::Borrowed(paragraph),
+                let (paragraph, boundaries) = match carried.take() {
+                    Some(prefix) => {
+                        let (joined, boundaries) =
+                            join_accepted_paragraphs(prefix, paragraph, preserve_field_owners);
+                        (Cow::Owned(joined), boundaries)
+                    }
+                    None => (Cow::Borrowed(paragraph), Vec::new()),
                 };
                 if body.accepted_paragraph_joins_next(index) {
-                    carried = Some(paragraph.accepted_view().into_owned());
+                    carried = Some(if preserve_field_owners {
+                        let (view, mut projected) = paragraph.accepted_view_with_field_owners();
+                        projected.extend(boundaries);
+                        (view.into_owned(), projected)
+                    } else {
+                        (paragraph.accepted_view().into_owned(), Vec::new())
+                    });
                 } else {
-                    blocks.push(Block::Paragraph(Box::new(paragraph)));
+                    blocks.push(Block::Paragraph(Box::new(paragraph), boundaries));
                 }
             }
             BodyContent::Table(table) => blocks.push(Block::Table(table)),
@@ -112,9 +117,20 @@ fn body_blocks(body: &CT_Body) -> Vec<Block<'_>> {
     blocks
 }
 
-fn join_accepted_paragraphs(prefix: CT_P, paragraph: &CT_P) -> CT_P {
-    let mut result = paragraph.accepted_view().into_owned();
+fn join_accepted_paragraphs(
+    prefix: (CT_P, Vec<usize>),
+    paragraph: &CT_P,
+    preserve_field_owners: bool,
+) -> (CT_P, Vec<usize>) {
+    let (prefix, mut boundaries) = prefix;
+    let (mut result, projected) = if preserve_field_owners {
+        let (view, boundaries) = paragraph.accepted_view_with_field_owners();
+        (view.into_owned(), boundaries)
+    } else {
+        (paragraph.accepted_view().into_owned(), Vec::new())
+    };
     let offset = prefix.runs.len();
+    boundaries.extend(projected.into_iter().map(|at| offset + at));
     for hyperlink in &mut result.hyperlinks {
         hyperlink.run_start += offset;
         hyperlink.run_end += offset;
@@ -125,7 +141,7 @@ fn join_accepted_paragraphs(prefix: CT_P, paragraph: &CT_P) -> CT_P {
     let mut runs = prefix.runs;
     runs.extend(result.runs);
     result.runs = runs;
-    result
+    (result, boundaries)
 }
 
 /// The paragraphs and nested tables of a table cell, as [`body_blocks`]
@@ -134,9 +150,10 @@ fn cell_blocks(cell: &CT_Tc) -> Vec<Block<'_>> {
     let mut blocks = Vec::new();
     for item in &cell.content {
         match item {
-            CellContent::Paragraph(paragraph) => {
-                blocks.push(Block::Paragraph(Box::new(Cow::Borrowed(paragraph))))
-            }
+            CellContent::Paragraph(paragraph) => blocks.push(Block::Paragraph(
+                Box::new(Cow::Borrowed(paragraph)),
+                Vec::new(),
+            )),
             CellContent::Table(table) => blocks.push(Block::Table(table)),
             CellContent::ContentControl(control) => push_control_blocks(control, &mut blocks),
         }
@@ -147,9 +164,10 @@ fn cell_blocks(cell: &CT_Tc) -> Vec<Block<'_>> {
 fn push_control_blocks<'a>(control: &'a CT_Sdt, blocks: &mut Vec<Block<'a>>) {
     for item in &control.content {
         match item {
-            SdtContent::Paragraph(paragraph) => {
-                blocks.push(Block::Paragraph(Box::new(Cow::Borrowed(paragraph))))
-            }
+            SdtContent::Paragraph(paragraph) => blocks.push(Block::Paragraph(
+                Box::new(Cow::Borrowed(paragraph)),
+                Vec::new(),
+            )),
             SdtContent::Table(table) => blocks.push(Block::Table(table)),
             SdtContent::ContentControl(nested) => push_control_blocks(nested, blocks),
             // A control around a paragraph or a table holds no rows, cells or
@@ -228,10 +246,7 @@ mod tests {
             "{html}"
         );
         let markdown = to_markdown(&input);
-        assert!(
-            markdown.contains("**one\ttwo***  \nthree\n---\nfour*"),
-            "{markdown}"
-        );
+        assert_eq!(markdown, "**one\ttwo**  \n*three*\n\n---\n\n*four*\n\n");
     }
 
     #[test]
@@ -435,5 +450,48 @@ mod tests {
         assert!(html.contains("<strong"));
         assert!(html.contains("<em"));
         assert!(html.contains("bold text"));
+    }
+
+    #[test]
+    fn fx203_markdown_preserves_literal_whitespace_field_break_and_source_boundaries() {
+        let cases = [
+            (r#"<w:p><w:r><w:t xml:space="preserve"> \t </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> bold </w:t><w:br/></w:r></w:p>"#.replace("\\t", "\t"), " \t  **bold**   \n\n\n"),
+            (r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>left</w:t></w:r><w:fldSimple w:instr=" AUTHOR "><w:r><w:rPr><w:b/></w:rPr><w:t>field</w:t></w:r></w:fldSimple><w:r><w:rPr><w:b/></w:rPr><w:t>right</w:t></w:r></w:p>"#.into(), "**left****field****right**\n\n"),
+            (r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>left</w:t></w:r><w:customXml><w:fldSimple w:instr=" AUTHOR "><w:r><w:rPr><w:b/></w:rPr><w:t>field</w:t></w:r></w:fldSimple></w:customXml><w:r><w:rPr><w:b/></w:rPr><w:t>right</w:t></w:r></w:p>"#.into(), "**left****field****right**\n\n"),
+            (r#"<w:p><w:hyperlink r:id="rId1"><w:r><w:rPr><w:b/></w:rPr><w:t>before</w:t><w:br w:type="page"/><w:t>after</w:t></w:r></w:hyperlink></w:p>"#.into(), "[**before**](https://example.com/a)\n\n---\n\n[**after**](https://example.com/a)\n\n"),
+            (r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> \t </w:t></w:r></w:p>"#.replace("\\t", "\t"), " \t \n\n"),
+            (r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>left</w:t></w:r><w:sdt><w:sdtContent><w:r><w:rPr><w:b/></w:rPr><w:t>control</w:t></w:r></w:sdtContent></w:sdt><w:ins w:id="1"><w:r><w:rPr><w:b/></w:rPr><w:t>inserted</w:t></w:r></w:ins><w:r><w:rPr><w:b/></w:rPr><w:t>right</w:t></w:r></w:p>"#.into(), "**left****control****inserted****right**\n\n"),
+            (r#"<w:p><w:fldSimple w:instr=" AUTHOR "><w:r><w:rPr><w:b/></w:rPr><w:t>before</w:t><w:br/><w:t>after</w:t><w:br w:type="column"/><w:t>end</w:t></w:r></w:fldSimple></w:p>"#.into(), "**before**  \n**after**  \n**end**\n\n"),
+            (r#"<w:p><w:sdt><w:sdtContent><w:r><w:rPr><w:b/></w:rPr><w:t>A</w:t></w:r><w:sdt><w:sdtContent><w:r><w:rPr><w:b/></w:rPr><w:t>B</w:t></w:r></w:sdtContent></w:sdt><w:ins w:id="2" w:author="Ada"><w:r><w:rPr><w:b/></w:rPr><w:t>C</w:t></w:r></w:ins><w:r><w:rPr><w:b/></w:rPr><w:t>D</w:t></w:r></w:sdtContent></w:sdt></w:p>"#.into(), "**A****B****C****D**\n\n"),
+        ];
+        for (body, expected) in cases {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:q="urn:opaque"><w:body>{body}</w:body></w:document>"#
+            );
+            let input = HtmlInput {
+                document: CT_Document::from_xml(xml.as_bytes()).unwrap(),
+                styles: CT_Styles::new_default(),
+                numbering: None,
+                images: HashMap::new(),
+                hyperlink_urls: HashMap::from([("rId1".into(), "https://example.com/a".into())]),
+            };
+            let before = input.document.to_xml().unwrap();
+            if body.contains("fldSimple") {
+                let BodyContent::Paragraph(paragraph) = &input.document.body.content[0] else {
+                    panic!("the field fixture owns one paragraph");
+                };
+                assert!(paragraph.accepted_view().runs.iter().all(|run| {
+                    run.content
+                        .iter()
+                        .all(|content| !matches!(content, rdocx_oxml::text::RunContent::Field(_)))
+                }));
+                let (accepted, boundaries) = paragraph.accepted_view_with_field_owners();
+                assert!(!boundaries.is_empty());
+                assert!(boundaries.iter().all(|at| *at <= accepted.runs.len()));
+                assert_eq!(accepted.accepted_text(), paragraph.accepted_text());
+            }
+            assert_eq!(to_markdown(&input), expected, "{body}");
+            assert_eq!(input.document.to_xml().unwrap(), before);
+        }
     }
 }

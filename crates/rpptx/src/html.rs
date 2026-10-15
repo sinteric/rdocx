@@ -1,25 +1,1262 @@
 //! Bounded HTML and CSS import into the native Presentation facade.
 
+#[cfg(feature = "default-template")]
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "default-template")]
 use std::io::Read;
 use std::path::Path;
 
+#[cfg(feature = "default-template")]
 use oxml_drawing::text::{
     CT_RegularTextRun, CT_TextCharacterProperties, CT_TextLineBreak, CT_TextParagraphProperties,
     TextAlignment, TextFont, TextHyperlink, TextRun, TextStrike, TextUnderline,
 };
+#[cfg(feature = "default-template")]
 use scraper::{ElementRef, Html, Node, Selector};
 
 use super::*;
 
+/// Read-only semantic export choices. Pictures are embedded by default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentationTextExportOptions {
+    pub include_notes: bool,
+    pub skip_hidden: bool,
+    pub inline_images: bool,
+}
+
+impl Default for PresentationTextExportOptions {
+    fn default() -> Self {
+        Self {
+            include_notes: false,
+            skip_hidden: false,
+            inline_images: true,
+        }
+    }
+}
+
+/// Detached semantic content and every resource or loss report it owns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PresentationTextExport {
+    pub text: String,
+    pub assets: Vec<(String, Vec<u8>)>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SemanticFormat {
+    Html,
+    Markdown,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+struct SemanticMarks {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    baseline: i8,
+}
+
+impl SemanticMarks {
+    fn apply(&mut self, properties: &oxml_drawing::text::CT_TextCharacterProperties) {
+        if let Some(value) = properties.bold {
+            self.bold = value;
+        }
+        if let Some(value) = properties.italic {
+            self.italic = value;
+        }
+        if let Some(value) = properties.underline {
+            self.underline = value != oxml_drawing::text::TextUnderline::None;
+        }
+        if let Some(value) = properties.strike {
+            self.strike = matches!(
+                value,
+                oxml_drawing::text::TextStrike::Single | oxml_drawing::text::TextStrike::Double
+            );
+        }
+        if let Some(value) = &properties.baseline
+            && let Ok(value) = value.trim_end_matches('%').parse::<f64>()
+        {
+            self.baseline = if value > 0.0 {
+                1
+            } else if value < 0.0 {
+                -1
+            } else {
+                0
+            };
+        }
+    }
+    fn tags(self) -> Vec<&'static str> {
+        [
+            (self.bold, "strong"),
+            (self.italic, "em"),
+            (self.underline, "u"),
+            (self.strike, "s"),
+            (self.baseline > 0, "sup"),
+            (self.baseline < 0, "sub"),
+        ]
+        .into_iter()
+        .filter_map(|(on, tag)| on.then_some(tag))
+        .collect()
+    }
+}
+
+struct SemanticExporter<'a> {
+    deck: &'a Presentation,
+    options: &'a PresentationTextExportOptions,
+    format: SemanticFormat,
+    result: PresentationTextExport,
+    resources: HashMap<String, usize>,
+    list_levels: Vec<(u8, bool, usize)>,
+    numbers: HashMap<u8, (String, u32)>,
+}
+
+impl Presentation {
+    pub fn to_html(&self) -> Result<PresentationTextExport> {
+        self.to_html_with_options(&PresentationTextExportOptions::default())
+    }
+    pub fn to_markdown(&self) -> Result<PresentationTextExport> {
+        self.to_markdown_with_options(&PresentationTextExportOptions::default())
+    }
+    pub fn to_html_with_options(
+        &self,
+        options: &PresentationTextExportOptions,
+    ) -> Result<PresentationTextExport> {
+        SemanticExporter::new(self, options, SemanticFormat::Html).export()
+    }
+    pub fn to_markdown_with_options(
+        &self,
+        options: &PresentationTextExportOptions,
+    ) -> Result<PresentationTextExport> {
+        SemanticExporter::new(self, options, SemanticFormat::Markdown).export()
+    }
+    /// Publishes the document and all detached pictures without overwriting files.
+    pub fn save_html(
+        &self,
+        path: &Path,
+        options: &PresentationTextExportOptions,
+    ) -> Result<Vec<String>> {
+        let result = self.to_html_with_options(options)?;
+        publish_semantic_export(path, &result)?;
+        Ok(result.diagnostics)
+    }
+    pub fn save_markdown(
+        &self,
+        path: &Path,
+        options: &PresentationTextExportOptions,
+    ) -> Result<Vec<String>> {
+        let result = self.to_markdown_with_options(options)?;
+        publish_semantic_export(path, &result)?;
+        Ok(result.diagnostics)
+    }
+}
+
+impl<'a> SemanticExporter<'a> {
+    fn new(
+        deck: &'a Presentation,
+        options: &'a PresentationTextExportOptions,
+        format: SemanticFormat,
+    ) -> Self {
+        Self {
+            deck,
+            options,
+            format,
+            result: PresentationTextExport {
+                text: String::new(),
+                assets: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            resources: HashMap::new(),
+            list_levels: Vec::new(),
+            numbers: HashMap::new(),
+        }
+    }
+    fn diagnostic(&mut self, path: &str, message: &str) {
+        self.result.diagnostics.push(format!("{path}: {message}"));
+    }
+    fn export(mut self) -> Result<PresentationTextExport> {
+        if self.format == SemanticFormat::Html {
+            self.result.text.push_str("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\" /><title>Presentation</title><style>p,h1,aside{white-space:pre-wrap}</style></head><body>\n");
+        }
+        for (index, record) in self.deck.slides.iter().enumerate() {
+            if self.options.skip_hidden && record.slide.hidden() {
+                continue;
+            }
+            let path = format!("slide {}", index + 1);
+            let title = semantic_title(&record.slide.common_slide_data.shape_tree.children);
+            let mut heading = None;
+            if let Some(ShapeTreeChild::Shape(shape)) = title
+                && let Some(body) = &shape.text_body
+            {
+                let levels = semantic_inherited_styles(self.deck, index, Some(shape))?;
+                let mut content = String::new();
+                for paragraph in body.paragraphs() {
+                    if !content.is_empty() {
+                        content.push_str("<br />");
+                    }
+                    let level = paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.level)
+                        .unwrap_or(0)
+                        .min(8);
+                    let mut inherited = levels[usize::from(level)].clone();
+                    if let Some(properties) = &paragraph.properties {
+                        inherited.apply_paragraph(properties);
+                    }
+                    content.push_str(&self.inline(index, paragraph, inherited.marks, &path)?);
+                }
+                if !content.is_empty() {
+                    heading = Some(content);
+                }
+            }
+            let classification = if heading.is_some() {
+                "title"
+            } else {
+                "fallback"
+            };
+            let heading = heading.unwrap_or_else(|| format!("Slide {}", index + 1));
+            if classification == "fallback" {
+                self.diagnostic(&path, "no nonempty title, used source slide number");
+            }
+            if self.format == SemanticFormat::Html {
+                self.result.text.push_str(&format!("<section id=\"slide-{}\" data-slide-number=\"{}\" data-slide-id=\"{}\" data-title-kind=\"{classification}\">\n<h1>",index+1,index+1,record.id));
+                self.result.text.push_str(&heading);
+                self.result.text.push_str("</h1>\n");
+            } else {
+                self.result.text.push_str(&format!(
+                    "<a id=\"slide-{}\"></a>\n\n# {}\n\n",
+                    index + 1,
+                    heading
+                ));
+            }
+            self.numbers.clear();
+            self.walk(
+                index,
+                &record.slide.common_slide_data.shape_tree.children,
+                title,
+                &path,
+            )?;
+            self.close_lists();
+            if self.options.include_notes
+                && let Some(notes) = slide_ref(record).notes_text()
+            {
+                if self.format == SemanticFormat::Html {
+                    self.result
+                        .text
+                        .push_str("<aside class=\"notes\"><h2>Notes</h2><p>");
+                    self.result
+                        .text
+                        .push_str(&semantic_escape(&notes).replace('\n', "<br />"));
+                    self.result.text.push_str("</p></aside>\n");
+                } else {
+                    self.result.text.push_str("## Notes\n\n");
+                    for line in notes.split('\n') {
+                        self.result
+                            .text
+                            .push_str(&format!("> {}\n", semantic_md_preserved(line)));
+                    }
+                    self.result.text.push('\n');
+                }
+            }
+            if self.format == SemanticFormat::Html {
+                self.result.text.push_str("</section>\n");
+            }
+        }
+        if self.format == SemanticFormat::Html {
+            self.result.text.push_str("</body></html>\n");
+        }
+        Ok(self.result)
+    }
+    fn walk(
+        &mut self,
+        index: usize,
+        children: &[ShapeTreeChild],
+        title: Option<&ShapeTreeChild>,
+        path: &str,
+    ) -> Result<()> {
+        for (ordinal, child) in children.iter().enumerate() {
+            let path = format!("{path}/shape {ordinal}");
+            let shape = shape_ref(child);
+            if !matches!(child, ShapeTreeChild::Picture(_)) {
+                for (kind, value) in [
+                    ("alternative text", shape.alt_text()),
+                    ("title metadata", shape.title()),
+                ] {
+                    if let Some(value) = value.filter(|value| !value.is_empty()) {
+                        self.diagnostic(&path, &format!("non-picture {kind}: {value}"));
+                    }
+                }
+            }
+            if title.is_some_and(|title| std::ptr::eq(title, child)) {
+                continue;
+            }
+            match child {
+                ShapeTreeChild::GroupShape(group) => {
+                    self.walk(index, &group.children, title, &path)?
+                }
+                ShapeTreeChild::AlternateContent(alternate) => {
+                    if let Some(children) = alternate.selected_fallback() {
+                        self.walk(index, children, title, &path)?;
+                    } else {
+                        self.diagnostic(&path, "unsupported compatibility content omitted");
+                    }
+                }
+                ShapeTreeChild::Shape(source) => {
+                    if let Some(body) = &source.text_body {
+                        self.close_lists();
+                        self.numbers.clear();
+                        let lists = semantic_inherited_styles(self.deck, index, Some(source))?;
+                        for paragraph in body.paragraphs() {
+                            self.paragraph(index, paragraph, &lists, &path)?;
+                        }
+                        self.close_lists();
+                    } else {
+                        self.diagnostic(&path, "non-text shape omitted");
+                    }
+                }
+                ShapeTreeChild::Picture(_) => {
+                    self.close_lists();
+                    self.picture(index, shape, &path)?;
+                }
+                ShapeTreeChild::GraphicFrame(frame) => {
+                    self.close_lists();
+                    match frame.graphic_data.payload() {
+                        GraphicDataPayload::Table(table) => self.table(index, table, &path)?,
+                        _ => self.diagnostic(
+                            &path,
+                            "unsupported chart, SmartArt or embedded-object projection omitted",
+                        ),
+                    }
+                }
+                _ => self.diagnostic(&path, "connector or decoration omitted"),
+            }
+        }
+        Ok(())
+    }
+    fn close_lists(&mut self) {
+        if self.format == SemanticFormat::Html {
+            while let Some((_, ordered, _)) = self.list_levels.pop() {
+                self.result.text.push_str(if ordered {
+                    "</li></ol>\n"
+                } else {
+                    "</li></ul>\n"
+                });
+            }
+        } else if !self.list_levels.is_empty() {
+            self.list_levels.clear();
+            self.result.text.push('\n');
+        }
+    }
+    fn paragraph(
+        &mut self,
+        index: usize,
+        paragraph: &oxml_drawing::text::CT_TextParagraph,
+        lists: &[SemanticParagraphStyle; 9],
+        path: &str,
+    ) -> Result<()> {
+        use oxml_drawing::text::TextBulletChoice;
+        let level = paragraph
+            .properties
+            .as_ref()
+            .and_then(|p| p.level)
+            .unwrap_or(0);
+        let mut effective = lists
+            .get(usize::from(level))
+            .cloned()
+            .ok_or_else(|| semantic_error(path, "paragraph list level exceeds nine levels"))?;
+        if let Some(properties) = &paragraph.properties {
+            effective.apply_paragraph(properties);
+        }
+        let text = self.inline(index, paragraph, effective.marks, path)?;
+        let bullet = effective.bullet.as_ref();
+        let ordered = matches!(bullet, Some(TextBulletChoice::AutoNumber(_)));
+        let listed = matches!(
+            bullet,
+            Some(TextBulletChoice::AutoNumber(_) | TextBulletChoice::Character(_))
+        );
+        if !listed {
+            self.close_lists();
+            self.numbers.remove(&level);
+        }
+        self.numbers.retain(|key, _| *key <= level);
+        let number = if let Some(TextBulletChoice::AutoNumber(value)) = bullet {
+            let scheme = format!("{:?}", value.scheme);
+            let current = self
+                .numbers
+                .entry(level)
+                .or_insert((scheme.clone(), u32::from(value.start_at.unwrap_or(1))));
+            if current.0 != scheme {
+                *current = (scheme, u32::from(value.start_at.unwrap_or(1)));
+            }
+            let number = current.1;
+            current.1 = current
+                .1
+                .checked_add(1)
+                .ok_or_else(|| semantic_error(path, "numbering overflow"))?;
+            Some(number)
+        } else {
+            None
+        };
+        let label = if let (Some(number), Some(TextBulletChoice::AutoNumber(value))) =
+            (number, bullet)
+        {
+            semantic_number_label(value.scheme,number).unwrap_or_else(||{self.diagnostic(path,"unsupported ordered-label scheme, retained source scheme and counter with decimal fallback");format!("{number}.")})
+        } else {
+            String::new()
+        };
+        let nondecimal = matches!(bullet,Some(TextBulletChoice::AutoNumber(value)) if value.scheme!=oxml_drawing::text::TextAutoNumberScheme::ArabicPeriod);
+        if self.format == SemanticFormat::Html {
+            if listed {
+                let mut sibling = false;
+                while self.list_levels.last().is_some_and(|&(open, kind, _)| {
+                    open > level || (open == level && kind != ordered)
+                }) {
+                    let (_, kind, _) = self.list_levels.pop().unwrap();
+                    self.result
+                        .text
+                        .push_str(if kind { "</li></ol>\n" } else { "</li></ul>\n" });
+                }
+                if self
+                    .list_levels
+                    .last()
+                    .is_some_and(|&(open, _, _)| open == level)
+                {
+                    self.result.text.push_str("</li>\n");
+                    sibling = true;
+                }
+                if !sibling {
+                    self.result.text.push_str(if ordered {
+                        "<ol style=\"list-style-type:none\">\n"
+                    } else {
+                        "<ul>\n"
+                    });
+                    self.list_levels.push((level, ordered, 0));
+                }
+                self.result.text.push_str(&format!(
+                    "<li data-source-level=\"{level}\"{}>",
+                    number
+                        .map(|number| format!(" value=\"{number}\""))
+                        .unwrap_or_default()
+                ));
+                if ordered {
+                    self.result.text.push_str(&format!(
+                        "<span class=\"source-marker\">{} </span>",
+                        semantic_escape(&label)
+                    ));
+                }
+                if let Some(TextBulletChoice::Character(character)) = bullet {
+                    self.result.text.push_str(&format!(
+                        "<span hidden=\"hidden\" data-source-bullet=\"{}\"></span>",
+                        semantic_escape(&character.character)
+                    ));
+                }
+                self.result.text.push_str(&text);
+            } else {
+                self.result.text.push_str(&format!("<p>{text}</p>\n"));
+            }
+        } else if listed {
+            while self
+                .list_levels
+                .last()
+                .is_some_and(|&(open, _, _)| open >= level)
+            {
+                self.list_levels.pop();
+            }
+            let indent = self.list_levels.last().map_or(0, |&(_, _, column)| column);
+            let marker = number
+                .map(|number| format!("{number}. "))
+                .unwrap_or_else(|| "- ".to_owned());
+            self.list_levels
+                .push((level, ordered, indent + marker.len()));
+            let text = if nondecimal {
+                self.diagnostic(
+                    path,
+                    "Markdown canonical decimal list marker, source ordered label retained as text",
+                );
+                format!("{} {text}", semantic_md_text(&label))
+            } else {
+                text
+            };
+            self.result.text.push_str(&format!(
+                "{}{marker}{}\n",
+                " ".repeat(indent),
+                text.replace('\n', &format!("\n{}", " ".repeat(indent + marker.len())))
+            ));
+        } else {
+            self.result.text.push_str(&text);
+            self.result.text.push_str("\n\n");
+        }
+        Ok(())
+    }
+    fn inline(
+        &mut self,
+        index: usize,
+        paragraph: &oxml_drawing::text::CT_TextParagraph,
+        base: SemanticMarks,
+        path: &str,
+    ) -> Result<String> {
+        use oxml_drawing::text::TextRun;
+        let mut out = String::new();
+        for run in &paragraph.runs {
+            let (text, properties) = match run {
+                TextRun::Run(run) => (run.text.value.as_str(), run.properties.as_ref()),
+                TextRun::Field(field) => {
+                    self.diagnostic(path, "field exported as stored text without recalculation");
+                    (
+                        field.text.as_ref().map_or("", |text| text.value.as_str()),
+                        field.run_properties.as_ref(),
+                    )
+                }
+                TextRun::Break(_) => {
+                    out.push_str(if self.format == SemanticFormat::Html {
+                        "<br />"
+                    } else {
+                        "  \n"
+                    });
+                    continue;
+                }
+            };
+            let mut marks = base;
+            if let Some(properties) = properties {
+                marks.apply(properties);
+            }
+            let link = properties
+                .and_then(|p| p.hyperlink_click.as_ref())
+                .and_then(|h| h.relationship_id.as_deref())
+                .map(|id| self.link(index, id, path))
+                .transpose()?
+                .flatten();
+            let mut value = if self.format == SemanticFormat::Html {
+                semantic_escape(text).replace(['\u{000b}', '\n'], "<br />")
+            } else {
+                semantic_md_preserved(text).replace(['\u{000b}', '\n'], "  \n")
+            };
+            for tag in marks.tags().into_iter().rev() {
+                value = format!("<{tag}>{value}</{tag}>");
+            }
+            if let Some(link) = link {
+                value = if self.format == SemanticFormat::Html {
+                    format!("<a href=\"{}\">{value}</a>", semantic_escape(&link))
+                } else {
+                    format!(
+                        "[{value}](<{}>)",
+                        link.replace('&', "&amp;")
+                            .replace('\\', "%5C")
+                            .replace(' ', "%20")
+                            .replace('<', "%3C")
+                            .replace('>', "%3E")
+                    )
+                };
+            }
+            out.push_str(&value);
+        }
+        Ok(out)
+    }
+    fn link(&mut self, index: usize, id: &str, path: &str) -> Result<Option<String>> {
+        let record = &self.deck.slides[index];
+        let Some(rel) = self
+            .deck
+            .package
+            .get_part_rels(&record.part_name)
+            .and_then(|rels| rels.get_by_id(id))
+        else {
+            self.diagnostic(path, "missing hyperlink relationship");
+            return Ok(None);
+        };
+        if rel.rel_type == rel_types::SLIDE && !relationship_is_external(rel) {
+            let target = OpcPackage::resolve_rel_target(&record.part_name, &rel.target);
+            if let Some((target_index, target)) =
+                self.deck.slides.iter().enumerate().find(|(_, slide)| {
+                    OpcPackage::resolve_rel_target("/", &slide.part_name)
+                        .eq_ignore_ascii_case(&target)
+                })
+            {
+                if self.options.skip_hidden && target.slide.hidden() {
+                    self.diagnostic(
+                        path,
+                        "internal hyperlink target omitted by hidden-slide filtering",
+                    );
+                    return Ok(None);
+                }
+                return Ok(Some(format!("#slide-{}", target_index + 1)));
+            }
+            self.diagnostic(path, "internal hyperlink has no source slide target");
+            return Ok(None);
+        }
+        if rel.rel_type != rel_types::HYPERLINK || !relationship_is_external(rel) {
+            self.diagnostic(path, "foreign hyperlink relationship omitted");
+            return Ok(None);
+        }
+        let lower = rel.target.to_ascii_lowercase();
+        if rel.target.chars().any(|c| c.is_control())
+            || !["http://", "https://", "mailto:", "tel:"]
+                .iter()
+                .any(|prefix| lower.starts_with(prefix))
+        {
+            return Err(semantic_error(path, "unsafe hyperlink destination"));
+        }
+        Ok(Some(rel.target.clone()))
+    }
+    fn picture(&mut self, index: usize, shape: ShapeRef<'_>, path: &str) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let id = shape
+            .non_visual_id()
+            .ok_or_else(|| semantic_error(path, "picture has no owned id"))?;
+        let image = self.deck.picture_image(index, id)?;
+        let extension = match image.content_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/tiff" => "tiff",
+            "image/bmp" => "bmp",
+            _ => return Err(semantic_error(path, "unsupported picture media type")),
+        };
+        let detected = oxml_media::ImageFormat::sniff(image.bytes)
+            .ok_or_else(|| semantic_error(path, "invalid picture bytes"))?;
+        if detected.content_type() != image.content_type {
+            return Err(semantic_error(
+                path,
+                "picture content type does not match its bytes",
+            ));
+        }
+        validate_semantic_picture(image.bytes, detected)
+            .map_err(|message| semantic_error(path, message))?;
+        let hash = Sha256::digest(image.bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let destination = if self.options.inline_images {
+            format!(
+                "data:{};base64,{}",
+                image.content_type,
+                semantic_base64(image.bytes)
+            )
+        } else {
+            let name = format!("image-{hash}.{extension}");
+            if !self.resources.contains_key(&name) {
+                self.resources
+                    .insert(name.clone(), self.result.assets.len());
+                self.result
+                    .assets
+                    .push((name.clone(), image.bytes.to_vec()));
+            }
+            name
+        };
+        let alt = shape.alt_text().unwrap_or_default();
+        let title = shape.title().unwrap_or_default();
+        if self.format == SemanticFormat::Html {
+            self.result.text.push_str(&format!(
+                "<img src=\"{}\" alt=\"{}\" title=\"{}\" />\n",
+                semantic_escape(&destination),
+                semantic_escape(&alt),
+                semantic_escape(&title)
+            ));
+        } else {
+            self.result.text.push_str(&format!(
+                "![{}](<{destination}> \"{}\")\n\n",
+                semantic_md_preserved(&alt).replace('\n', "&#10;"),
+                semantic_escape(&title)
+                    .replace('\n', "&#10;")
+                    .replace('\r', "&#13;")
+                    .replace('\\', "\\\\")
+            ));
+        }
+        Ok(())
+    }
+    fn table(
+        &mut self,
+        index: usize,
+        table: &oxml_drawing::table::CT_Table,
+        path: &str,
+    ) -> Result<()> {
+        let lists = semantic_inherited_styles(self.deck, index, None)?;
+        let style = semantic_table_style(self.deck, table)?;
+        if self.format == SemanticFormat::Html {
+            self.result.text.push_str("<table><tbody>\n");
+        }
+        for (row_index, row) in table.rows.iter().enumerate() {
+            if self.format == SemanticFormat::Html {
+                self.result.text.push_str("<tr>");
+            } else {
+                self.result.text.push('|');
+            }
+            for (column, cell) in row.cells.iter().enumerate() {
+                if cell.horizontal_merge || cell.vertical_merge {
+                    if self.format == SemanticFormat::Markdown {
+                        self.result.text.push_str(" | ");
+                    }
+                    continue;
+                }
+                let marks = semantic_table_marks(style.as_ref(), table, row_index, column);
+                let mut cell_lists = lists.clone();
+                for level in &mut cell_lists {
+                    if let Some(value) = marks.0 {
+                        level.marks.bold = value;
+                    }
+                    if let Some(value) = marks.1 {
+                        level.marks.italic = value;
+                    }
+                }
+                let mut text = String::new();
+                if let Some(body) = &cell.text_body {
+                    let paragraphs = body.paragraphs();
+                    let complex = paragraphs.len() > 1
+                        || paragraphs.iter().any(|p| {
+                            let level = p.properties.as_ref().and_then(|p| p.level).unwrap_or(0);
+                            let mut effective = cell_lists
+                                .get(usize::from(level))
+                                .cloned()
+                                .unwrap_or_default();
+                            if let Some(properties) = &p.properties {
+                                effective.apply_paragraph(properties);
+                            }
+                            matches!(
+                                effective.bullet,
+                                Some(
+                                    oxml_drawing::text::TextBulletChoice::AutoNumber(_)
+                                        | oxml_drawing::text::TextBulletChoice::Character(_)
+                                )
+                            )
+                        });
+                    if complex {
+                        let outer_text = std::mem::take(&mut self.result.text);
+                        let outer_levels = std::mem::take(&mut self.list_levels);
+                        let outer_numbers = std::mem::take(&mut self.numbers);
+                        let outer_format = self.format;
+                        self.format = SemanticFormat::Html;
+                        let result: Result<()> = (|| {
+                            for paragraph in paragraphs {
+                                self.paragraph(index, paragraph, &cell_lists, path)?;
+                            }
+                            self.close_lists();
+                            Ok(())
+                        })();
+                        text = std::mem::replace(&mut self.result.text, outer_text);
+                        self.list_levels = outer_levels;
+                        self.numbers = outer_numbers;
+                        self.format = outer_format;
+                        result?;
+                        if self.format == SemanticFormat::Markdown {
+                            text = text.replace('\n', "").replace('|', "&#124;");
+                        }
+                    } else if let Some(paragraph) = paragraphs.first() {
+                        let level = paragraph
+                            .properties
+                            .as_ref()
+                            .and_then(|p| p.level)
+                            .unwrap_or(0);
+                        let mut effective =
+                            cell_lists.get(usize::from(level)).cloned().ok_or_else(|| {
+                                semantic_error(path, "paragraph list level exceeds nine levels")
+                            })?;
+                        if let Some(properties) = &paragraph.properties {
+                            effective.apply_paragraph(properties);
+                        }
+                        text = self.inline(index, paragraph, effective.marks, path)?;
+                    }
+                }
+                if self.format == SemanticFormat::Html {
+                    let tag = if row_index == 0
+                        && table.properties.as_ref().is_some_and(|p| p.first_row)
+                    {
+                        "th"
+                    } else {
+                        "td"
+                    };
+                    self.result.text.push_str(&format!(
+                        "<{tag} rowspan=\"{}\" colspan=\"{}\">{text}</{tag}>",
+                        cell.row_span, cell.grid_span
+                    ));
+                } else {
+                    if cell.row_span > 1 || cell.grid_span > 1 {
+                        self.diagnostic(
+                            path,
+                            "Markdown pipe table cannot represent merged-cell spans",
+                        );
+                    }
+                    self.result
+                        .text
+                        .push_str(&format!(" {} |", text.replace('\n', "<br>")));
+                }
+            }
+            self.result
+                .text
+                .push_str(if self.format == SemanticFormat::Html {
+                    "</tr>\n"
+                } else {
+                    "\n"
+                });
+            if self.format == SemanticFormat::Markdown && row_index == 0 {
+                self.result.text.push('|');
+                for _ in &table.grid.columns {
+                    self.result.text.push_str(" --- |");
+                }
+                self.result.text.push('\n');
+            }
+        }
+        self.result
+            .text
+            .push_str(if self.format == SemanticFormat::Html {
+                "</tbody></table>\n"
+            } else {
+                "\n"
+            });
+        Ok(())
+    }
+}
+
+fn semantic_title(children: &[ShapeTreeChild]) -> Option<&ShapeTreeChild> {
+    for child in children {
+        if matches!(
+            shape_ref(child).placeholder_type(),
+            Some("title" | "ctrTitle")
+        ) {
+            return Some(child);
+        }
+        let nested = match child {
+            ShapeTreeChild::GroupShape(group) => semantic_title(&group.children),
+            ShapeTreeChild::AlternateContent(alternate) => {
+                alternate.selected_fallback().and_then(semantic_title)
+            }
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
+        }
+    }
+    None
+}
+
+#[derive(Clone, Default)]
+struct SemanticParagraphStyle {
+    marks: SemanticMarks,
+    bullet: Option<oxml_drawing::text::TextBulletChoice>,
+}
+impl SemanticParagraphStyle {
+    fn apply_paragraph(&mut self, p: &oxml_drawing::text::CT_TextParagraphProperties) {
+        if let Some(choice) = p.bullet.as_ref().and_then(|p| p.choice.as_ref()) {
+            self.bullet = Some(choice.clone());
+        }
+        if let Some(p) = &p.default_run_properties {
+            self.marks.apply(p);
+        }
+    }
+}
+fn semantic_apply_list(
+    levels: &mut [SemanticParagraphStyle; 9],
+    style: &oxml_drawing::text::CT_TextListStyle,
+) {
+    for (index, level) in levels.iter_mut().enumerate() {
+        if let Some(p) = &style.default_paragraph_properties {
+            level.apply_paragraph(p);
+        }
+        if let Some(p) = style.level(index + 1) {
+            level.apply_paragraph(p);
+        }
+    }
+}
+
+fn semantic_inherited_styles(
+    deck: &Presentation,
+    index: usize,
+    shape: Option<&CT_Shape>,
+) -> Result<[SemanticParagraphStyle; 9]> {
+    let mut levels: [SemanticParagraphStyle; 9] =
+        std::array::from_fn(|_| SemanticParagraphStyle::default());
+    if let Some(style) = &deck.presentation.default_text_style {
+        semantic_apply_list(&mut levels, style);
+    }
+    let layout_index = deck
+        .slide_layout_index(index)
+        .ok_or_else(|| semantic_error("inheritance", "slide layout is missing"))?;
+    let layout = &deck.layouts[layout_index].layout;
+    let master_index = deck.layout_master_index(layout_index)?;
+    let master = deck.masters[master_index]
+        .master
+        .as_ref()
+        .map_err(|error| semantic_error("inheritance", error))?;
+    if let Some(styles) = &master.text_styles {
+        let style = match shape
+            .and_then(|shape| shape.placeholder.as_ref())
+            .map(|p| p.effective_type())
+        {
+            Some(PhType::Title | PhType::CenteredTitle) => &styles.title_style,
+            Some(PhType::Body | PhType::Subtitle | PhType::Object) => &styles.body_style,
+            _ => &styles.other_style,
+        };
+        semantic_apply_list(&mut levels, style);
+    }
+    if let Some(shape) = shape {
+        if let Some(placeholder) = &shape.placeholder
+            && let Some(layout_shape) = semantic_placeholder(
+                &layout.common_slide_data.shape_tree.children,
+                &placeholder.key(),
+            )
+        {
+            if let Some(key) = layout_shape.placeholder.as_ref().map(|p| p.key())
+                && let Some(master_shape) =
+                    semantic_placeholder(&master.common_slide_data.shape_tree.children, &key)
+                && let Some(style) = master_shape.text_body.as_ref().and_then(|p| p.list_style())
+            {
+                semantic_apply_list(&mut levels, style);
+            }
+            if let Some(style) = layout_shape.text_body.as_ref().and_then(|p| p.list_style()) {
+                semantic_apply_list(&mut levels, style);
+            }
+        }
+        if let Some(style) = shape.text_body.as_ref().and_then(|p| p.list_style()) {
+            semantic_apply_list(&mut levels, style);
+        }
+    }
+    Ok(levels)
+}
+fn semantic_placeholder_keys_match(
+    left: &rpptx_oxml::placeholder::PlaceholderKey,
+    right: &rpptx_oxml::placeholder::PlaceholderKey,
+) -> bool {
+    let latent = |kind: &PhType| {
+        matches!(
+            kind,
+            PhType::DateTime | PhType::Footer | PhType::SlideNumber
+        )
+    };
+    if latent(&left.ph_type) && latent(&right.ph_type) {
+        left.ph_type == right.ph_type
+    } else {
+        left.matches(right)
+    }
+}
+fn semantic_placeholder<'a>(
+    children: &'a [ShapeTreeChild],
+    key: &rpptx_oxml::placeholder::PlaceholderKey,
+) -> Option<&'a CT_Shape> {
+    for child in children {
+        let result = match child {
+            ShapeTreeChild::Shape(shape) => shape
+                .placeholder
+                .as_ref()
+                .filter(|p| semantic_placeholder_keys_match(key, &p.key()))
+                .map(|_| shape),
+            ShapeTreeChild::GroupShape(group) => semantic_placeholder(&group.children, key),
+            ShapeTreeChild::AlternateContent(alternate) => alternate
+                .selected_fallback()
+                .and_then(|children| semantic_placeholder(children, key)),
+            _ => None,
+        };
+        if result.is_some() {
+            return result;
+        }
+    }
+    None
+}
+
+fn semantic_table_style(
+    deck: &Presentation,
+    table: &oxml_drawing::table::CT_Table,
+) -> Result<Option<oxml_drawing::table::CT_TableStyle>> {
+    use oxml_drawing::table::{CT_TableStyle, CT_TableStyleList};
+    let styles = deck
+        .package
+        .get_part_rels(&deck.presentation_part)
+        .and_then(|rels| {
+            rels.items.iter().find(|rel| {
+                rel.rel_type == rel_types::TABLE_STYLES && !relationship_is_external(rel)
+            })
+        })
+        .map(|rel| OpcPackage::resolve_rel_target(&deck.presentation_part, &rel.target))
+        .map(|part| {
+            CT_TableStyleList::from_xml(required_part(&deck.package, &part)?)
+                .map_err(|error| semantic_error("table style", error.to_string()))
+        })
+        .transpose()?;
+    let props = table.properties.as_ref();
+    let selected = props
+        .and_then(|p| p.style_id.as_deref())
+        .or_else(|| styles.as_ref().and_then(|s| s.default_style_id.as_deref()));
+    let builtin = selected.and_then(CT_TableStyle::builtin);
+    let style = styles
+        .as_ref()
+        .and_then(|s| selected.and_then(|id| s.styles.iter().find(|s| s.style_id == id)))
+        .cloned()
+        .or(builtin);
+    Ok(style)
+}
+
+fn semantic_table_marks(
+    style: Option<&oxml_drawing::table::CT_TableStyle>,
+    table: &oxml_drawing::table::CT_Table,
+    row: usize,
+    column: usize,
+) -> (Option<bool>, Option<bool>) {
+    let props = table.properties.as_ref();
+    let mut marks = (None, None);
+    if let Some(style) = style {
+        let rows = table.rows.len();
+        let columns = table.grid.columns.len();
+        let mut regions = vec![style.whole_table.as_ref()];
+        if props.is_some_and(|p| p.band_rows) {
+            let offset = usize::from(props.is_some_and(|p| p.first_row));
+            regions.push(if row.saturating_sub(offset) % 2 == 0 {
+                style.band1_horizontal.as_ref()
+            } else {
+                style.band2_horizontal.as_ref()
+            });
+        }
+        if props.is_some_and(|p| p.band_columns) {
+            let offset = usize::from(props.is_some_and(|p| p.first_column));
+            regions.push(if column.saturating_sub(offset) % 2 == 0 {
+                style.band1_vertical.as_ref()
+            } else {
+                style.band2_vertical.as_ref()
+            });
+        }
+        if column == 0 && props.is_some_and(|p| p.first_column) {
+            regions.push(style.first_column.as_ref());
+        }
+        if column + 1 == columns && props.is_some_and(|p| p.last_column) {
+            regions.push(style.last_column.as_ref());
+        }
+        if row == 0 && props.is_some_and(|p| p.first_row) {
+            regions.push(style.first_row.as_ref());
+        }
+        if row + 1 == rows && props.is_some_and(|p| p.last_row) {
+            regions.push(style.last_row.as_ref());
+        }
+        if row == 0 && column == 0 && props.is_some_and(|p| p.first_row && p.first_column) {
+            regions.push(style.north_west_cell.as_ref());
+        }
+        if row == 0 && column + 1 == columns && props.is_some_and(|p| p.first_row && p.last_column)
+        {
+            regions.push(style.north_east_cell.as_ref());
+        }
+        if row + 1 == rows && column == 0 && props.is_some_and(|p| p.last_row && p.first_column) {
+            regions.push(style.south_west_cell.as_ref());
+        }
+        if row + 1 == rows
+            && column + 1 == columns
+            && props.is_some_and(|p| p.last_row && p.last_column)
+        {
+            regions.push(style.south_east_cell.as_ref());
+        }
+        for region in regions.into_iter().flatten() {
+            if let Some(p) = &region.text_style {
+                if let Some(value) = p.bold {
+                    marks.0 = Some(value);
+                }
+                if let Some(value) = p.italic {
+                    marks.1 = Some(value);
+                }
+            }
+        }
+    }
+    marks
+}
+
+fn semantic_number_label(
+    scheme: oxml_drawing::text::TextAutoNumberScheme,
+    number: u32,
+) -> Option<String> {
+    use oxml_drawing::text::TextAutoNumberScheme as S;
+    if number == 0 || number > 32_767 {
+        return None;
+    }
+    let (mut body, lower) = match scheme {
+        S::AlphaLowerParenBoth | S::AlphaLowerParenRight | S::AlphaLowerPeriod => {
+            (semantic_alpha(number), true)
+        }
+        S::AlphaUpperParenBoth | S::AlphaUpperParenRight | S::AlphaUpperPeriod => {
+            (semantic_alpha(number), false)
+        }
+        S::RomanLowerParenBoth | S::RomanLowerParenRight | S::RomanLowerPeriod => {
+            (semantic_roman(number), true)
+        }
+        S::RomanUpperParenBoth | S::RomanUpperParenRight | S::RomanUpperPeriod => {
+            (semantic_roman(number), false)
+        }
+        S::ArabicParenBoth | S::ArabicParenRight | S::ArabicPeriod | S::ArabicPlain => {
+            (number.to_string(), false)
+        }
+        _ => return None,
+    };
+    if lower {
+        body.make_ascii_lowercase();
+    }
+    Some(match scheme {
+        S::AlphaLowerParenBoth
+        | S::AlphaUpperParenBoth
+        | S::RomanLowerParenBoth
+        | S::RomanUpperParenBoth
+        | S::ArabicParenBoth => format!("({body})"),
+        S::AlphaLowerParenRight
+        | S::AlphaUpperParenRight
+        | S::RomanLowerParenRight
+        | S::RomanUpperParenRight
+        | S::ArabicParenRight => format!("{body})"),
+        S::ArabicPlain => body,
+        _ => format!("{body}."),
+    })
+}
+fn semantic_alpha(mut number: u32) -> String {
+    let mut chars = Vec::new();
+    while number > 0 {
+        number -= 1;
+        chars.push(char::from(b'A' + (number % 26) as u8));
+        number /= 26;
+    }
+    chars.iter().rev().collect()
+}
+fn semantic_roman(mut number: u32) -> String {
+    let mut out = String::new();
+    for (value, token) in [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ] {
+        while number >= value {
+            number -= value;
+            out.push_str(token);
+        }
+    }
+    out
+}
+fn semantic_error(path: impl Into<String>, message: impl Into<String>) -> Error {
+    Error::Html {
+        path: path.into(),
+        message: message.into(),
+    }
+}
+fn semantic_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+fn semantic_md_text(text: &str) -> String {
+    let mut out = String::new();
+    for character in text.chars() {
+        if "\\`*_{}[]<>()#!|+-=~&.".contains(character) {
+            out.push('\\');
+        }
+        out.push(character);
+    }
+    out
+}
+fn semantic_md_preserved(text: &str) -> String {
+    semantic_md_text(text)
+        .replace(' ', "&#32;")
+        .replace('\t', "&#9;")
+        .replace('\r', "&#13;")
+}
+fn semantic_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        for value in [
+            ALPHABET[(a >> 2) as usize],
+            ALPHABET[(((a & 3) << 4) | (b >> 4)) as usize],
+            if chunk.len() > 1 {
+                ALPHABET[(((b & 15) << 2) | (c >> 6)) as usize]
+            } else {
+                b'='
+            },
+            if chunk.len() > 2 {
+                ALPHABET[(c & 63) as usize]
+            } else {
+                b'='
+            },
+        ] {
+            out.push(char::from(value));
+        }
+    }
+    out
+}
+
+fn publish_semantic_export(path: &Path, result: &PresentationTextExport) -> Result<()> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .ok_or_else(|| semantic_error("save", "output has no filename"))?;
+    let mut outputs = vec![(parent.join(filename), result.text.as_bytes())];
+    for (name, bytes) in &result.assets {
+        if Path::new(name).components().count() != 1 || !name.starts_with("image-") {
+            return Err(semantic_error("save", "unsafe asset name"));
+        }
+        outputs.push((parent.join(name), bytes.as_slice()));
+    }
+    let mut unique = HashSet::new();
+    for (target, _) in &outputs {
+        if !unique.insert(target.clone()) || target.symlink_metadata().is_ok() {
+            return Err(semantic_error("save", "output collision"));
+        }
+    }
+    let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut staged = Vec::new();
+    let mut published = Vec::new();
+    let operation = (|| -> Result<()> {
+        for (index, (target, bytes)) in outputs.iter().enumerate() {
+            let temporary = parent.join(format!(
+                ".rpptx-semantic-{}-{nonce}-{index}",
+                std::process::id()
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(OpcError::from)?;
+            staged.push((temporary, target.clone()));
+            file.write_all(bytes).map_err(OpcError::from)?;
+            file.sync_all().map_err(OpcError::from)?;
+        }
+        for (temporary, target) in &staged {
+            std::fs::hard_link(temporary, target).map_err(OpcError::from)?;
+            published.push(target.clone());
+        }
+        Ok(())
+    })();
+    if operation.is_err() {
+        for target in published {
+            let _ = std::fs::remove_file(target);
+        }
+    }
+    for (temporary, _) in staged {
+        let _ = std::fs::remove_file(temporary);
+    }
+    operation
+}
+
+#[cfg(feature = "default-template")]
 const VIEWPORT_WIDTH_PX: i64 = 1_280;
+#[cfg(feature = "default-template")]
 const VIEWPORT_HEIGHT_PX: i64 = 720;
+#[cfg(feature = "default-template")]
 const EMU_PER_CSS_PIXEL: i64 = 9_525;
+#[cfg(feature = "default-template")]
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// One caller-owned image available to the HTML importer.
 #[derive(Clone, Copy, Debug)]
+#[cfg(feature = "default-template")]
 pub struct HtmlImageResource<'a> {
     pub source: &'a str,
     pub bytes: &'a [u8],
@@ -28,6 +1265,7 @@ pub struct HtmlImageResource<'a> {
 
 /// One stable path-aware loss report at the HTML conversion boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(feature = "default-template")]
 pub struct HtmlDiagnostic {
     pub path: String,
     pub property: Option<String>,
@@ -35,12 +1273,14 @@ pub struct HtmlDiagnostic {
 }
 
 /// A freshly converted editable presentation and its ordered diagnostics.
+#[cfg(feature = "default-template")]
 pub struct HtmlReadResult {
     pub presentation: Presentation,
     pub diagnostics: Vec<HtmlDiagnostic>,
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg(feature = "default-template")]
 struct Limits {
     input_bytes: usize,
     depth: usize,
@@ -58,6 +1298,7 @@ struct Limits {
     slides: usize,
 }
 
+#[cfg(feature = "default-template")]
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -80,6 +1321,7 @@ impl Default for Limits {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg(feature = "default-template")]
 struct ComputedStyle {
     position_absolute: bool,
     left: Option<Emu>,
@@ -99,6 +1341,7 @@ struct ComputedStyle {
     alignment: Option<TextAlignment>,
 }
 
+#[cfg(feature = "default-template")]
 impl ComputedStyle {
     fn inherited(&self) -> Self {
         Self {
@@ -116,6 +1359,7 @@ impl ComputedStyle {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(feature = "default-template")]
 enum StyleChange {
     PositionAbsolute(bool),
     Left(Emu),
@@ -135,6 +1379,7 @@ enum StyleChange {
     Alignment(TextAlignment),
 }
 
+#[cfg(feature = "default-template")]
 impl StyleChange {
     fn apply(&self, style: &mut ComputedStyle) {
         match self {
@@ -159,6 +1404,7 @@ impl StyleChange {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "default-template")]
 struct CssRule {
     selector: Selector,
     specificity: (u32, u32, u32),
@@ -167,6 +1413,7 @@ struct CssRule {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(feature = "default-template")]
 enum InlinePiece {
     Text {
         text: String,
@@ -177,12 +1424,14 @@ enum InlinePiece {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(feature = "default-template")]
 struct ParagraphModel {
     pieces: Vec<InlinePiece>,
     style: ComputedStyle,
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg(feature = "default-template")]
 struct Geometry {
     left: Emu,
     top: Emu,
@@ -190,6 +1439,7 @@ struct Geometry {
     height: Emu,
 }
 
+#[cfg(feature = "default-template")]
 struct Importer<'a> {
     dom: &'a Html,
     presentation: Presentation,
@@ -206,6 +1456,7 @@ struct Importer<'a> {
     selector_matches: usize,
 }
 
+#[cfg(feature = "default-template")]
 impl Presentation {
     /// Converts one bounded HTML document or fragment into a fresh editable deck.
     pub fn from_html(html: &str, images: &[HtmlImageResource<'_>]) -> Result<HtmlReadResult> {
@@ -214,7 +1465,7 @@ impl Presentation {
 
     /// Opens and converts one UTF-8 HTML path without fetching external resources.
     pub fn open_html<P: AsRef<Path>>(
-        path: P,
+        path: &Path,
         images: &[HtmlImageResource<'_>],
     ) -> Result<HtmlReadResult> {
         let mut file = std::fs::File::open(path).map_err(OpcError::from)?;
@@ -227,6 +1478,7 @@ impl Presentation {
     }
 }
 
+#[cfg(feature = "default-template")]
 fn from_html_with_limits<'a>(
     html: &str,
     images: &[HtmlImageResource<'a>],
@@ -272,6 +1524,7 @@ fn from_html_with_limits<'a>(
     importer.finish()
 }
 
+#[cfg(feature = "default-template")]
 fn validate_images<'a>(
     images: &[HtmlImageResource<'a>],
     limits: Limits,
@@ -298,6 +1551,7 @@ fn validate_images<'a>(
     Ok(map)
 }
 
+#[cfg(feature = "default-template")]
 fn validate_dom(dom: &Html, limits: Limits) -> Result<()> {
     let mut nodes = 0_usize;
     let mut text_bytes = 0_usize;
@@ -331,6 +1585,7 @@ fn validate_dom(dom: &Html, limits: Limits) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "default-template")]
 impl Importer<'_> {
     fn record_parser_repairs(&mut self) -> Result<()> {
         for error in &self.dom.errors {
@@ -1127,6 +2382,7 @@ impl Importer<'_> {
     }
 }
 
+#[cfg(feature = "default-template")]
 fn write_paragraphs(frame: &mut TextFrame<'_>, paragraphs: &[ParagraphModel]) -> Result<()> {
     frame.set_text("");
     let count = paragraphs.len().max(1);
@@ -1193,6 +2449,7 @@ fn write_paragraphs(frame: &mut TextFrame<'_>, paragraphs: &[ParagraphModel]) ->
     Ok(())
 }
 
+#[cfg(feature = "default-template")]
 fn character_properties(style: &ComputedStyle) -> Result<CT_TextCharacterProperties> {
     let font_size = style.font_size_points.map(|points| (points * 100.0) as i32);
     let latin = style
@@ -1226,6 +2483,7 @@ fn character_properties(style: &ComputedStyle) -> Result<CT_TextCharacterPropert
     Ok(properties)
 }
 
+#[cfg(feature = "default-template")]
 fn solid_fill(color: &str) -> Result<Fill> {
     let xml = format!(
         r#"<a:solidFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:srgbClr val="{color}"/></a:solidFill>"#
@@ -1233,6 +2491,7 @@ fn solid_fill(color: &str) -> Result<Fill> {
     Fill::from_xml(xml.as_bytes()).map_err(|error| html_error("css", error.to_string()))
 }
 
+#[cfg(feature = "default-template")]
 fn solid_line(width: Emu, color: &str) -> Result<CT_LineProperties> {
     let width = u32::try_from(width.0)
         .map_err(|_| html_error("css", "border width is outside DrawingML range"))?;
@@ -1243,6 +2502,7 @@ fn solid_line(width: Emu, color: &str) -> Result<CT_LineProperties> {
         .map_err(|error| html_error("css", error.to_string()))
 }
 
+#[cfg(feature = "default-template")]
 fn geometry(
     style: &ComputedStyle,
     parent_left: Emu,
@@ -1277,6 +2537,7 @@ fn geometry(
     })
 }
 
+#[cfg(feature = "default-template")]
 fn parse_style_changes(
     property: &str,
     value: &str,
@@ -1367,6 +2628,7 @@ fn parse_style_changes(
     Ok(changes)
 }
 
+#[cfg(feature = "default-template")]
 fn parse_border(value: &str) -> std::result::Result<Vec<StyleChange>, String> {
     if value.trim().eq_ignore_ascii_case("none") {
         return Ok(vec![StyleChange::BorderWidth(Emu(0))]);
@@ -1389,6 +2651,7 @@ fn parse_border(value: &str) -> std::result::Result<Vec<StyleChange>, String> {
     Ok(changes)
 }
 
+#[cfg(feature = "default-template")]
 fn parse_css_length(value: &str, signed: bool) -> std::result::Result<Emu, String> {
     let value = value.trim().to_ascii_lowercase();
     if value == "0" {
@@ -1421,6 +2684,7 @@ fn parse_css_length(value: &str, signed: bool) -> std::result::Result<Emu, Strin
     Ok(Emu(emu as i64))
 }
 
+#[cfg(feature = "default-template")]
 fn parse_font_points(value: &str) -> std::result::Result<f64, String> {
     let emu = parse_css_length(value, false)?;
     let points = emu.0 as f64 / 12_700.0;
@@ -1432,6 +2696,7 @@ fn parse_font_points(value: &str) -> std::result::Result<f64, String> {
     Ok(points)
 }
 
+#[cfg(feature = "default-template")]
 fn parse_color(value: &str) -> std::result::Result<String, String> {
     let lower = value.trim().to_ascii_lowercase();
     let color = match lower.as_str() {
@@ -1459,6 +2724,7 @@ fn parse_color(value: &str) -> std::result::Result<String, String> {
     Ok(color)
 }
 
+#[cfg(feature = "default-template")]
 fn safe_link_target(target: &str) -> bool {
     let trimmed = target.trim();
     if trimmed.is_empty() {
@@ -1475,6 +2741,7 @@ fn safe_link_target(target: &str) -> bool {
         .is_some_and(|prefix| prefix.contains(':'))
 }
 
+#[cfg(feature = "default-template")]
 fn supported_selector(selector: &str) -> bool {
     !selector.is_empty()
         && !selector
@@ -1488,6 +2755,7 @@ fn supported_selector(selector: &str) -> bool {
         && !selector.contains(">>")
 }
 
+#[cfg(feature = "default-template")]
 fn specificity(selector: &str) -> (u32, u32, u32) {
     let ids = selector.bytes().filter(|byte| *byte == b'#').count() as u32;
     let classes = selector.bytes().filter(|byte| *byte == b'.').count() as u32;
@@ -1502,6 +2770,7 @@ fn specificity(selector: &str) -> (u32, u32, u32) {
     (ids, classes, types)
 }
 
+#[cfg(feature = "default-template")]
 fn compare_specificity(left: (u32, u32, u32), right: (u32, u32, u32)) -> Ordering {
     left.0
         .cmp(&right.0)
@@ -1509,6 +2778,7 @@ fn compare_specificity(left: (u32, u32, u32), right: (u32, u32, u32)) -> Orderin
         .then_with(|| left.2.cmp(&right.2))
 }
 
+#[cfg(feature = "default-template")]
 fn is_supported_structure(name: &str) -> bool {
     matches!(
         name,
@@ -1543,6 +2813,7 @@ fn is_supported_structure(name: &str) -> bool {
     )
 }
 
+#[cfg(feature = "default-template")]
 fn is_block_element(name: &str) -> bool {
     matches!(
         name,
@@ -1550,10 +2821,12 @@ fn is_block_element(name: &str) -> bool {
     )
 }
 
+#[cfg(feature = "default-template")]
 fn element_has_visible_content(element: ElementRef<'_>) -> bool {
     element.value().name() == "img" || element.text().any(|text| !text.trim().is_empty())
 }
 
+#[cfg(feature = "default-template")]
 fn unsupported_element_has_presence(element: ElementRef<'_>, style: &ComputedStyle) -> bool {
     style.position_absolute
         || element.text().any(|text| !text.trim().is_empty())
@@ -1584,10 +2857,12 @@ fn unsupported_element_has_presence(element: ElementRef<'_>, style: &ComputedSty
         .any(|attribute| element.attr(attribute).is_some())
 }
 
+#[cfg(feature = "default-template")]
 fn element_key(element: ElementRef<'_>) -> usize {
     element.value() as *const _ as usize
 }
 
+#[cfg(feature = "default-template")]
 fn nearest_ancestor_named<'a>(element: ElementRef<'a>, name: &str) -> Option<ElementRef<'a>> {
     let mut ancestor = element.parent();
     while let Some(node) = ancestor {
@@ -1601,6 +2876,7 @@ fn nearest_ancestor_named<'a>(element: ElementRef<'a>, name: &str) -> Option<Ele
     None
 }
 
+#[cfg(feature = "default-template")]
 fn element_path(element: ElementRef<'_>) -> String {
     let mut segments = Vec::new();
     let mut current = Some(*element);
@@ -1638,6 +2914,7 @@ fn element_path(element: ElementRef<'_>) -> String {
     segments.join("/")
 }
 
+#[cfg(feature = "default-template")]
 fn strip_css_comments(css: &str) -> String {
     let mut output = String::with_capacity(css.len());
     let mut remainder = css;
@@ -1653,6 +2930,7 @@ fn strip_css_comments(css: &str) -> String {
     output
 }
 
+#[cfg(feature = "default-template")]
 fn collapse_text(text: &str, pending_space: &mut bool, emitted: bool) -> String {
     let mut output = String::new();
     let mut emitted = emitted;
@@ -1671,6 +2949,7 @@ fn collapse_text(text: &str, pending_space: &mut bool, emitted: bool) -> String 
     output
 }
 
+#[cfg(feature = "default-template")]
 fn contains_ascii_case_insensitive(haystack: &str, needle: &[u8]) -> bool {
     haystack
         .as_bytes()
@@ -1678,6 +2957,7 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
+#[cfg(feature = "default-template")]
 fn read_bounded<R: Read>(reader: &mut R, expected: usize, limit: usize) -> Result<Vec<u8>> {
     let read_limit = u64::try_from(limit)
         .ok()
@@ -1694,6 +2974,7 @@ fn read_bounded<R: Read>(reader: &mut R, expected: usize, limit: usize) -> Resul
     Ok(bytes)
 }
 
+#[cfg(feature = "default-template")]
 fn html_error(path: impl Into<String>, message: impl Into<String>) -> Error {
     Error::Html {
         path: path.into(),
@@ -1701,7 +2982,7 @@ fn html_error(path: impl Into<String>, message: impl Into<String>) -> Error {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "default-template"))]
 mod tests {
     use std::io::Cursor;
 

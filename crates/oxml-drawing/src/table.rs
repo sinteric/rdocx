@@ -15,7 +15,7 @@ use crate::line::CT_LineProperties;
 use crate::namespace::{A_NS, reject_conflicting_a_prefix};
 use crate::order::OrderedRawChildren;
 use crate::style_ref::StyleReference;
-use crate::text::CT_TextBody;
+use crate::text::{CT_TextBody, TextAnchor};
 
 pub type Result<T> = std::result::Result<T, OxmlError>;
 type RawAttributes = Vec<(String, String)>;
@@ -103,6 +103,8 @@ impl Eq for GridColumnRaw {}
 #[allow(non_camel_case_types)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CT_TableCellProperties {
+    /// Direct cell text anchoring from a:tcPr, distinct from a:bodyPr.
+    pub anchor: Option<TextAnchor>,
     pub margin_left: Option<Emu>,
     pub margin_right: Option<Emu>,
     pub margin_top: Option<Emu>,
@@ -115,6 +117,8 @@ pub struct CT_TableCellProperties {
     pub unsupported: Vec<String>,
     raw_attributes: RawAttributes,
     raw_children: OrderedRawChildren,
+    // Unknown root attributes retain their original quotes and entity spelling.
+    raw_attribute_spellings: Vec<String>,
 }
 
 /// One DrawingML table style list from `ppt/tableStyles.xml`.
@@ -398,24 +402,7 @@ impl CT_Table {
 
     /// Parses a complete `a:tbl` with any namespace prefix.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
-        let mut reader = Reader::from_reader(xml);
-        let mut buffer = Vec::new();
-        loop {
-            match reader.read_event_into(&mut buffer)? {
-                Event::Start(start) if matches_local_name(start.name().as_ref(), b"tbl") => {
-                    reject_conflicting_a_prefix(&start)?;
-                    return Self::from_element(&mut reader, &start);
-                }
-                Event::Empty(start) if matches_local_name(start.name().as_ref(), b"tbl") => {
-                    reject_conflicting_a_prefix(&start)?;
-                    return Err(missing("a:tblGrid and a:tr"));
-                }
-                Event::Start(start) | Event::Empty(start) => return Err(unexpected(&start)),
-                Event::Eof => return Err(missing("a:tbl")),
-                _ => {}
-            }
-            buffer.clear();
-        }
+        Self::from_xml_with_inherited_namespaces(xml, &[])
     }
 
     /// Parses an extracted table and retains namespace bindings inherited from
@@ -426,7 +413,51 @@ impl CT_Table {
         inherited_namespaces: &[(String, String)],
     ) -> Result<Self> {
         let local_a_namespace = root_a_namespace_declaration(xml)?;
-        let mut table = Self::from_xml(xml)?;
+        // Canonical a-prefixed fragments retain the existing fixed-prefix
+        // entrypoint convention. Actual inherited/local bindings override it.
+        let mut inherited_scope = vec![("a".to_owned(), A_NS.to_owned())];
+        for (prefix, uri) in inherited_namespaces {
+            if let Some((_, current)) = inherited_scope.iter_mut().find(|(name, _)| name == prefix)
+            {
+                *current = uri.clone();
+            } else {
+                inherited_scope.push((prefix.clone(), uri.clone()));
+            }
+        }
+        let mut reader = Reader::from_reader(xml);
+        let mut buffer = Vec::new();
+        let mut table = loop {
+            match reader.read_event_into(&mut buffer)? {
+                Event::Start(start)
+                    if drawingml_child_name(&start, &inherited_scope)? == b"tbl" =>
+                {
+                    reject_conflicting_a_prefix(&start)?;
+                    break Self::from_element(&mut reader, &start, &inherited_scope)?;
+                }
+                Event::Empty(start)
+                    if drawingml_child_name(&start, &inherited_scope)? == b"tbl" =>
+                {
+                    reject_conflicting_a_prefix(&start)?;
+                    return Err(missing("a:tblGrid and a:tr"));
+                }
+                Event::Start(start) | Event::Empty(start) => return Err(unexpected(&start)),
+                Event::Eof => return Err(missing("a:tbl")),
+                _ => {}
+            }
+            buffer.clear();
+        };
+        loop {
+            match reader.read_event()? {
+                Event::Eof => break,
+                Event::Comment(_) | Event::PI(_) => {}
+                Event::Text(text) if text.iter().all(u8::is_ascii_whitespace) => {}
+                _ => {
+                    return Err(OxmlError::InvalidValue(
+                        "trailing table XML content".to_owned(),
+                    ));
+                }
+            }
+        }
         for (prefix, uri) in inherited_namespaces {
             if prefix == "a" {
                 if uri != A_NS && local_a_namespace.as_deref() != Some(A_NS) {
@@ -458,7 +489,12 @@ impl CT_Table {
         Ok(table)
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        start: &BytesStart<'_>,
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
+        let namespaces = table_namespace_scope(start, inherited)?;
         let mut properties = None;
         let mut grid = None;
         let mut rows = Vec::new();
@@ -468,7 +504,7 @@ impl CT_Table {
         loop {
             match reader.read_event_into(&mut buffer)? {
                 Event::Start(child) => {
-                    let name = local_name(child.name().as_ref()).to_vec();
+                    let name = drawingml_child_name(&child, &namespaces)?;
                     if matches!(name.as_slice(), b"tblPr" | b"tblGrid" | b"tr") {
                         reject_conflicting_a_prefix(&child)?;
                     }
@@ -476,6 +512,7 @@ impl CT_Table {
                     capture_table_child(
                         &name,
                         raw,
+                        &namespaces,
                         &mut properties,
                         &mut grid,
                         &mut rows,
@@ -484,7 +521,7 @@ impl CT_Table {
                     )?;
                 }
                 Event::Empty(child) => {
-                    let name = local_name(child.name().as_ref()).to_vec();
+                    let name = drawingml_child_name(&child, &namespaces)?;
                     if matches!(name.as_slice(), b"tblPr" | b"tblGrid" | b"tr") {
                         reject_conflicting_a_prefix(&child)?;
                     }
@@ -492,6 +529,7 @@ impl CT_Table {
                     capture_table_child(
                         &name,
                         raw,
+                        &namespaces,
                         &mut properties,
                         &mut grid,
                         &mut rows,
@@ -754,6 +792,35 @@ impl CT_Table {
     /// Returns every merged rectangle by its origin, after checking that each
     /// row has one explicit cell per grid column and that every merge fits
     /// the grid.
+    /// Checks the explicit grid and every modeled merge continuation.
+    pub fn validate_grid_and_merges(&self) -> Result<()> {
+        let regions = self.merge_regions()?;
+        if self.grid.columns.is_empty() || self.rows.is_empty() {
+            return Err(missing("nonempty table grid and rows"));
+        }
+        for (row, source) in self.rows.iter().enumerate() {
+            for (column, cell) in source.cells.iter().enumerate() {
+                let mut covering = regions.iter().filter(|region| {
+                    region.rows().contains(&row) && region.columns().contains(&column)
+                });
+                let region = covering.next();
+                if covering.next().is_some() {
+                    return Err(OxmlError::InvalidValue(
+                        "overlapping table merges".to_owned(),
+                    ));
+                }
+                let horizontal = region.is_some_and(|region| column > region.left);
+                let vertical = region.is_some_and(|region| row > region.top);
+                if cell.horizontal_merge != horizontal || cell.vertical_merge != vertical {
+                    return Err(OxmlError::InvalidValue(
+                        "table merge continuation has no matching origin".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn merge_regions(&self) -> Result<Vec<MergeRegion>> {
         let columns = self.grid.columns.len();
         if self.rows.iter().any(|row| row.cells.len() != columns) {
@@ -830,6 +897,50 @@ fn index_out_of_range(kind: &str, index: usize) -> OxmlError {
     OxmlError::InvalidValue(format!("{kind} index {index} is out of range"))
 }
 
+fn table_namespace_scope(
+    start: &BytesStart<'_>,
+    inherited: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let mut scope = inherited.to_vec();
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        let key = attribute.key.as_ref();
+        let prefix = if key == b"xmlns" {
+            Some("")
+        } else if let Some(prefix) = key.strip_prefix(b"xmlns:") {
+            Some(std::str::from_utf8(prefix)?)
+        } else {
+            None
+        };
+        if let Some(prefix) = prefix {
+            let uri = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?
+                .into_owned();
+            if let Some((_, current)) = scope.iter_mut().find(|(name, _)| name == prefix) {
+                *current = uri;
+            } else {
+                scope.push((prefix.to_owned(), uri));
+            }
+        }
+    }
+    Ok(scope)
+}
+
+fn drawingml_child_name(start: &BytesStart<'_>, inherited: &[(String, String)]) -> Result<Vec<u8>> {
+    let scope = table_namespace_scope(start, inherited)?;
+    let name = start.name();
+    let raw = std::str::from_utf8(name.as_ref())?;
+    let (prefix, local) = raw.split_once(':').unwrap_or(("", raw));
+    if scope
+        .iter()
+        .any(|(candidate, uri)| candidate == prefix && uri == A_NS)
+    {
+        Ok(local.as_bytes().to_vec())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn root_a_namespace_declaration(xml: &[u8]) -> Result<Option<String>> {
     let mut reader = Reader::from_reader(xml);
     let mut buffer = Vec::new();
@@ -898,6 +1009,7 @@ fn is_ncname_continue(value: char) -> bool {
 fn capture_table_child(
     name: &[u8],
     raw: Vec<u8>,
+    namespaces: &[(String, String)],
     properties: &mut Option<CT_TableProperties>,
     grid: &mut Option<CT_TableGrid>,
     rows: &mut Vec<CT_TableRow>,
@@ -914,7 +1026,7 @@ fn capture_table_child(
             *boundary = 2;
         }
         b"tr" if grid.is_some() => {
-            let mut row = CT_TableRow::from_xml(&raw)?;
+            let mut row = CT_TableRow::from_xml(&raw, namespaces)?;
             row.origin_index = rows.len();
             rows.push(row);
             *boundary = 2 + rows.len();
@@ -1411,16 +1523,16 @@ impl CT_TableRow {
         Ok(writer.into_inner())
     }
 
-    fn from_xml(xml: &[u8]) -> Result<Self> {
+    fn from_xml(xml: &[u8], inherited: &[(String, String)]) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer)? {
-                Event::Start(start) if matches_local_name(start.name().as_ref(), b"tr") => {
+                Event::Start(start) if drawingml_child_name(&start, inherited)? == b"tr" => {
                     reject_conflicting_a_prefix(&start)?;
-                    return Self::from_element(&mut reader, &start);
+                    return Self::from_element(&mut reader, &start, inherited);
                 }
-                Event::Empty(start) if matches_local_name(start.name().as_ref(), b"tr") => {
+                Event::Empty(start) if drawingml_child_name(&start, inherited)? == b"tr" => {
                     reject_conflicting_a_prefix(&start)?;
                     return Err(missing("at least one a:tc"));
                 }
@@ -1432,21 +1544,28 @@ impl CT_TableRow {
         }
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        start: &BytesStart<'_>,
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
+        let namespaces = table_namespace_scope(start, inherited)?;
         let mut cells = Vec::new();
         let mut raw_children = OrderedRawChildren::default();
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer)? {
-                Event::Start(child) if matches_local_name(child.name().as_ref(), b"tc") => {
+                Event::Start(child) if drawingml_child_name(&child, &namespaces)? == b"tc" => {
                     reject_conflicting_a_prefix(&child)?;
-                    let mut cell = CT_TableCell::from_xml(&capture_element(reader, &child)?)?;
+                    let mut cell =
+                        CT_TableCell::from_xml(&capture_element(reader, &child)?, &namespaces)?;
                     cell.origin_index = cells.len();
                     cells.push(cell);
                 }
-                Event::Empty(child) if matches_local_name(child.name().as_ref(), b"tc") => {
+                Event::Empty(child) if drawingml_child_name(&child, &namespaces)? == b"tc" => {
                     reject_conflicting_a_prefix(&child)?;
-                    let mut cell = CT_TableCell::from_xml(&capture_empty_element(&child)?)?;
+                    let mut cell =
+                        CT_TableCell::from_xml(&capture_empty_element(&child)?, &namespaces)?;
                     cell.origin_index = cells.len();
                     cells.push(cell);
                 }
@@ -1516,24 +1635,61 @@ impl CT_TableRow {
 }
 
 impl CT_TableCell {
+    /// Parses one cell whose DrawingML namespace is explicitly qualified.
+    pub fn from_xml_fragment(xml: &[u8]) -> Result<Self> {
+        Self::from_xml(xml, &[])
+    }
+
+    /// Serializes the cell with a standalone DrawingML namespace.
+    pub fn to_xml(&self) -> Result<Vec<u8>> {
+        let xml = self.canonical_xml()?;
+        let mut reader = Reader::from_reader(xml.as_slice());
+        let mut writer = Writer::new(Vec::new());
+        let first = reader.read_event()?;
+        let Event::Start(mut root) = first else {
+            return Err(missing("a:tc"));
+        };
+        if !root
+            .attributes()
+            .any(|attribute| attribute.is_ok_and(|attribute| attribute.key.as_ref() == b"xmlns:a"))
+        {
+            root.push_attribute(("xmlns:a", A_NS));
+        }
+        writer.write_event(Event::Start(root))?;
+        loop {
+            let event = reader.read_event()?;
+            if matches!(event, Event::Eof) {
+                break;
+            }
+            writer.write_event(event)?;
+        }
+        Ok(writer.into_inner())
+    }
+
     fn canonical_xml(&self) -> Result<Vec<u8>> {
         let mut writer = Writer::new(Vec::new());
         self.write_xml(&mut writer)?;
         Ok(writer.into_inner())
     }
 
-    fn from_xml(xml: &[u8]) -> Result<Self> {
+    fn from_xml(xml: &[u8], inherited: &[(String, String)]) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer)? {
-                Event::Start(start) if matches_local_name(start.name().as_ref(), b"tc") => {
+                Event::Start(start) if drawingml_child_name(&start, inherited)? == b"tc" => {
                     reject_conflicting_a_prefix(&start)?;
-                    return Self::from_element(&mut reader, &start);
+                    let cell = Self::from_element(&mut reader, &start, inherited)?;
+                    crate::text::paragraph::text_reject_trailing(&mut reader)
+                        .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
+                    return Ok(cell);
                 }
-                Event::Empty(start) if matches_local_name(start.name().as_ref(), b"tc") => {
+                Event::Empty(start) if drawingml_child_name(&start, inherited)? == b"tc" => {
                     reject_conflicting_a_prefix(&start)?;
-                    return Self::from_start(&start, None, None, OrderedRawChildren::default());
+                    let cell = Self::from_start(&start, None, None, OrderedRawChildren::default())?;
+                    crate::text::paragraph::text_reject_trailing(&mut reader)
+                        .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
+                    return Ok(cell);
                 }
                 Event::Start(start) | Event::Empty(start) => return Err(unexpected(&start)),
                 Event::Eof => return Err(missing("a:tc")),
@@ -1543,7 +1699,12 @@ impl CT_TableCell {
         }
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        start: &BytesStart<'_>,
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
+        let namespaces = table_namespace_scope(start, inherited)?;
         let mut text_body = None;
         let mut properties = None;
         let mut raw_children = OrderedRawChildren::default();
@@ -1552,7 +1713,7 @@ impl CT_TableCell {
         loop {
             match reader.read_event_into(&mut buffer)? {
                 Event::Start(child) => {
-                    let name = local_name(child.name().as_ref()).to_vec();
+                    let name = drawingml_child_name(&child, &namespaces)?;
                     if matches!(name.as_slice(), b"txBody" | b"tcPr") {
                         reject_conflicting_a_prefix(&child)?;
                     }
@@ -1560,6 +1721,7 @@ impl CT_TableCell {
                     capture_cell_child(
                         &name,
                         raw,
+                        &namespaces,
                         &mut text_body,
                         &mut properties,
                         &mut raw_children,
@@ -1567,7 +1729,7 @@ impl CT_TableCell {
                     )?;
                 }
                 Event::Empty(child) => {
-                    let name = local_name(child.name().as_ref()).to_vec();
+                    let name = drawingml_child_name(&child, &namespaces)?;
                     if matches!(name.as_slice(), b"txBody" | b"tcPr") {
                         reject_conflicting_a_prefix(&child)?;
                     }
@@ -1575,6 +1737,7 @@ impl CT_TableCell {
                     capture_cell_child(
                         &name,
                         raw,
+                        &namespaces,
                         &mut text_body,
                         &mut properties,
                         &mut raw_children,
@@ -1694,6 +1857,7 @@ impl CT_TableCell {
 fn capture_cell_child(
     name: &[u8],
     raw: Vec<u8>,
+    namespaces: &[(String, String)],
     text_body: &mut Option<CT_TextBody>,
     properties: &mut Option<CT_TableCellProperties>,
     raw_children: &mut OrderedRawChildren,
@@ -1707,7 +1871,7 @@ fn capture_cell_child(
             *boundary = 1;
         }
         b"tcPr" if *boundary <= 1 && properties.is_none() => {
-            *properties = Some(CT_TableCellProperties::from_xml(&raw)?);
+            *properties = Some(CT_TableCellProperties::from_xml(&raw, namespaces)?);
             *boundary = 2;
         }
         b"txBody" | b"tcPr" => {
@@ -1720,16 +1884,74 @@ fn capture_cell_child(
     Ok(())
 }
 
+// The reader already validates attributes and duplicates through raw_attributes.
+// Keep only unmodelled complete attribute tokens, including whitespace and quotes.
+fn tcpr_attribute_spellings(start: &BytesStart<'_>) -> Result<Vec<String>> {
+    let bytes = start.as_ref();
+    let text = std::str::from_utf8(bytes)?;
+    let mut position = start.name().as_ref().len();
+    let mut retained = Vec::new();
+    while position < bytes.len() {
+        let begin = position;
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        if position == bytes.len() {
+            break;
+        }
+        let key_begin = position;
+        while bytes
+            .get(position)
+            .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'=')
+        {
+            position += 1;
+        }
+        let key = &bytes[key_begin..position];
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        if bytes.get(position) != Some(&b'=') {
+            return Err(OxmlError::InvalidValue("invalid tcPr attribute".to_owned()));
+        }
+        position += 1;
+        while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+            position += 1;
+        }
+        let quote = *bytes
+            .get(position)
+            .ok_or_else(|| OxmlError::InvalidValue("missing tcPr attribute quote".to_owned()))?;
+        if !matches!(quote, b'\'' | b'"') {
+            return Err(OxmlError::InvalidValue(
+                "invalid tcPr attribute quote".to_owned(),
+            ));
+        }
+        position += 1;
+        while bytes.get(position).is_some_and(|b| *b != quote) {
+            position += 1;
+        }
+        if position == bytes.len() {
+            return Err(OxmlError::InvalidValue(
+                "unterminated tcPr attribute".to_owned(),
+            ));
+        }
+        position += 1;
+        if ![b"marL".as_slice(), b"marR", b"marT", b"marB", b"anchor"].contains(&key) {
+            retained.push(text[begin..position].to_owned());
+        }
+    }
+    Ok(retained)
+}
+
 impl CT_TableCellProperties {
-    fn from_xml(xml: &[u8]) -> Result<Self> {
+    fn from_xml(xml: &[u8], inherited: &[(String, String)]) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer)? {
-                Event::Start(start) if matches_local_name(start.name().as_ref(), b"tcPr") => {
-                    return Self::from_element(&mut reader, &start);
+                Event::Start(start) if drawingml_child_name(&start, inherited)? == b"tcPr" => {
+                    return Self::from_element(&mut reader, &start, inherited);
                 }
-                Event::Empty(start) if matches_local_name(start.name().as_ref(), b"tcPr") => {
+                Event::Empty(start) if drawingml_child_name(&start, inherited)? == b"tcPr" => {
                     return Self::from_start(&start);
                 }
                 Event::Start(start) | Event::Empty(start) => return Err(unexpected(&start)),
@@ -1746,24 +1968,41 @@ impl CT_TableCellProperties {
             margin_right: optional_emu_attr(start, b"marR")?,
             margin_top: optional_emu_attr(start, b"marT")?,
             margin_bottom: optional_emu_attr(start, b"marB")?,
-            raw_attributes: raw_attributes(start, &[b"marL", b"marR", b"marT", b"marB"], false)?,
+            anchor: decoded_attr(start, b"anchor")?
+                .map(|value| {
+                    TextAnchor::parse(&value).ok_or_else(|| {
+                        OxmlError::InvalidValue(format!("invalid a:tcPr anchor: {value}"))
+                    })
+                })
+                .transpose()?,
+            raw_attributes: raw_attributes(
+                start,
+                &[b"marL", b"marR", b"marT", b"marB", b"anchor"],
+                false,
+            )?,
+            raw_attribute_spellings: tcpr_attribute_spellings(start)?,
             ..Self::default()
         })
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        start: &BytesStart<'_>,
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
+        let namespaces = table_namespace_scope(start, inherited)?;
         let mut properties = Self::from_start(start)?;
         let mut boundary = 0usize;
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer)? {
                 Event::Start(child) => {
-                    let name = local_name(child.name().as_ref()).to_vec();
+                    let name = drawingml_child_name(&child, &namespaces)?;
                     let raw = capture_element(reader, &child)?;
                     properties.capture_child(&name, raw, &mut boundary)?;
                 }
                 Event::Empty(child) => {
-                    let name = local_name(child.name().as_ref()).to_vec();
+                    let name = drawingml_child_name(&child, &namespaces)?;
                     let raw = capture_empty_element(&child)?;
                     properties.capture_child(&name, raw, &mut boundary)?;
                 }
@@ -1811,7 +2050,18 @@ impl CT_TableCellProperties {
         push_optional_emu(&mut start, "marR", self.margin_right);
         push_optional_emu(&mut start, "marT", self.margin_top);
         push_optional_emu(&mut start, "marB", self.margin_bottom);
-        push_attributes(&mut start, &self.raw_attributes);
+        if let Some(anchor) = self.anchor {
+            start.push_attribute(("anchor", anchor.as_str()));
+        }
+        if self.raw_attribute_spellings.is_empty() {
+            push_attributes(&mut start, &self.raw_attributes);
+        } else {
+            let mut content = std::str::from_utf8(start.as_ref())?.to_owned();
+            for spelling in &self.raw_attribute_spellings {
+                content.push_str(spelling);
+            }
+            start = BytesStart::from_content(content, "a:tcPr".len());
+        }
         let has_modelled = self.left.is_some()
             || self.right.is_some()
             || self.top.is_some()
@@ -3580,6 +3830,7 @@ fn unexpected(start: &BytesStart<'_>) -> OxmlError {
 
 #[cfg(test)]
 mod tests {
+    use quick_xml::Writer;
     use std::path::PathBuf;
 
     use oxml_opc::OpcPackage;
@@ -3587,10 +3838,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        A_NS, CT_Table, CT_TableStyle, CT_TableStyleList, Emu, Fill, OxmlError, StyleReference,
-        builtin_table_styles,
+        A_NS, CT_Table, CT_TableCellProperties, CT_TableStyle, CT_TableStyleList, Emu, Fill,
+        OxmlError, StyleReference, builtin_table_styles,
     };
     use crate::color::{ColorChoice, ColorTransform};
+    use crate::text::TextAnchor;
 
     #[test]
     fn new_table_uses_truncating_dimensions_and_valid_cell_shells() {
@@ -3769,6 +4021,196 @@ mod tests {
             Some("{5940675A-B579-460E-94D1-54222C63F5DA}")
         );
         assert_eq!(table, CT_Table::from_xml(&table.to_xml().unwrap()).unwrap());
+    }
+
+    #[test]
+    fn fx206_tcpr_anchor_modes_and_foreign_attribute_spellings_round_trip() {
+        for (token, expected) in [
+            ("t", TextAnchor::Top),
+            ("ctr", TextAnchor::Center),
+            ("b", TextAnchor::Bottom),
+            ("just", TextAnchor::Justified),
+            ("dist", TextAnchor::Distributed),
+        ] {
+            let input = format!(
+                "<a:tcPr xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:x='urn:foreign' x:keep='&#65;&#x42;' x:anchor='foreign' anchor=\"{token}\"><x:opaque xmlns:a='urn:foreign'><a:node/></x:opaque></a:tcPr>"
+            );
+            let mut properties = CT_TableCellProperties::from_xml(
+                input.as_bytes(),
+                &[("a".to_owned(), A_NS.to_owned())],
+            )
+            .unwrap();
+            assert_eq!(properties.anchor, Some(expected));
+            for value in [Some(expected), None, Some(TextAnchor::Bottom)] {
+                properties.anchor = value;
+                let mut writer = Writer::new(Vec::new());
+                properties.write_xml(&mut writer).unwrap();
+                let output = writer.into_inner();
+                let text = std::str::from_utf8(&output).unwrap();
+                assert!(text.contains("x:keep='&#65;&#x42;'"));
+                assert!(text.contains("x:anchor='foreign'"));
+                assert!(text.contains("<x:opaque xmlns:a='urn:foreign'><a:node/></x:opaque>"));
+                let reopened =
+                    CT_TableCellProperties::from_xml(&output, &[("a".to_owned(), A_NS.to_owned())])
+                        .unwrap();
+                assert_eq!(reopened.anchor, value);
+                assert_eq!(reopened.raw_children, properties.raw_children);
+                assert_eq!(
+                    reopened.raw_attribute_spellings,
+                    properties.raw_attribute_spellings
+                );
+                let mut repeat = Writer::new(Vec::new());
+                reopened.write_xml(&mut repeat).unwrap();
+                assert_eq!(repeat.into_inner(), output);
+            }
+        }
+        let foreign = CT_TableCellProperties::from_xml(
+            b"<a:tcPr xmlns:x='urn:foreign' x:anchor='b'/>",
+            &[("a".to_owned(), A_NS.to_owned())],
+        )
+        .unwrap();
+        assert_eq!(foreign.anchor, None);
+        let mut writer = Writer::new(Vec::new());
+        foreign.write_xml(&mut writer).unwrap();
+        assert!(
+            std::str::from_utf8(&writer.into_inner())
+                .unwrap()
+                .contains("x:anchor='b'")
+        );
+        let aliased = br#"<q:tbl xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:foreign"><q:tblGrid><q:gridCol w="100"/></q:tblGrid><q:tr h="100"><q:tc><q:tcPr anchor="ctr" x:anchor="b"/></q:tc></q:tr></q:tbl>"#;
+        let table = CT_Table::from_xml(aliased).unwrap();
+        assert_eq!(
+            table.rows[0].cells[0].properties.as_ref().unwrap().anchor,
+            Some(TextAnchor::Center)
+        );
+        let saved = table.to_xml().unwrap();
+        assert!(
+            std::str::from_utf8(&saved)
+                .unwrap()
+                .contains(r#"x:anchor="b""#)
+        );
+        assert_eq!(
+            CT_Table::from_xml(&saved).unwrap().rows[0].cells[0]
+                .properties
+                .as_ref()
+                .unwrap()
+                .anchor,
+            Some(TextAnchor::Center)
+        );
+        let rebound = br#"<a:tbl xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:tblGrid><a:gridCol w="100"/></a:tblGrid><a:tr h="100"><a:tc><a:tcPr xmlns:a="urn:foreign" anchor="b"/></a:tc></a:tr></a:tbl>"#;
+        let foreign_table = CT_Table::from_xml(rebound).unwrap();
+        assert!(foreign_table.rows[0].cells[0].properties.is_none());
+        assert!(
+            std::str::from_utf8(&foreign_table.to_xml().unwrap())
+                .unwrap()
+                .contains(r#"<a:tcPr xmlns:a="urn:foreign" anchor="b"/>"#)
+        );
+        assert_eq!(
+            CT_TableCellProperties::from_xml(b"<a:tcPr/>", &[("a".to_owned(), A_NS.to_owned())])
+                .unwrap()
+                .anchor,
+            None
+        );
+        assert!(
+            CT_TableCellProperties::from_xml(
+                b"<a:tcPr anchor='invalid'/>",
+                &[("a".to_owned(), A_NS.to_owned())]
+            )
+            .is_err()
+        );
+        assert!(
+            CT_TableCellProperties::from_xml(
+                b"<a:tcPr anchor='t' anchor='b'/>",
+                &[("a".to_owned(), A_NS.to_owned())]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fx206_foreign_tcpr_lookalike_is_opaque_before_real_owner_base() {
+        let valid = br#"<q:tbl xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main"><q:tblGrid><q:gridCol w="100"/></q:tblGrid><q:tr h="100"><q:tc><q:tcPr/></q:tc></q:tr></q:tbl>"#;
+        assert!(
+            CT_Table::from_xml(valid).is_ok(),
+            "positive actual table constructor"
+        );
+        let input = br#"<q:tbl xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:f="urn:foreign"><q:tblGrid><q:gridCol w="100"/></q:tblGrid><q:tr h="100"><q:tc><f:tcPr f:keep="&#65;"><q:tcPr anchor="b"/></f:tcPr><q:tcPr anchor="ctr"/></q:tc></q:tr></q:tbl>"#;
+        let result = CT_Table::from_xml(input);
+        assert!(
+            result.is_ok(),
+            "foreign tcPr cannot consume the real owner slot: {result:?}"
+        );
+        let table = result.unwrap();
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].cells.len(), 1);
+        let saved = table.to_xml().unwrap();
+        assert!(
+            std::str::from_utf8(&saved)
+                .unwrap()
+                .contains(r#"<f:tcPr f:keep="&#65;"><q:tcPr anchor="b"/></f:tcPr>"#)
+        );
+        assert_eq!(CT_Table::from_xml(&saved).unwrap().to_xml().unwrap(), saved);
+    }
+
+    #[test]
+    fn fx206_tcpr_namespace_scope_alias_default_rebind_and_foreign_children() {
+        let cases = [
+            (r#"<f:tcPr f:keep="opaque"/>"#, r#"<q:tcPr anchor="ctr"/>"#),
+            (
+                r#"<tcPr xmlns="urn:foreign" anchor="b"/>"#,
+                r#"<tcPr xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" anchor="ctr"/>"#,
+            ),
+            (
+                r#"<q:tcPr xmlns:q="urn:foreign" anchor="b"/>"#,
+                r#"<q:tcPr anchor="ctr"/>"#,
+            ),
+            (
+                r#"<a:tcPr xmlns:a="urn:foreign" anchor="b"/>"#,
+                r#"<q:tcPr anchor="ctr"/>"#,
+            ),
+        ];
+        for (opaque, owned) in cases {
+            let input = format!(
+                r#"<q:tbl xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:f="urn:foreign"><q:tblGrid><q:gridCol w="100"/></q:tblGrid><q:tr h="100"><q:tc>{opaque}{owned}</q:tc></q:tr></q:tbl>"#
+            );
+            let mut table = CT_Table::from_xml(input.as_bytes()).unwrap();
+            assert_eq!(
+                table.rows[0].cells[0].properties.as_ref().unwrap().anchor,
+                Some(TextAnchor::Center)
+            );
+            for value in [Some(TextAnchor::Bottom), None, Some(TextAnchor::Top)] {
+                table.rows[0].cells[0].properties.as_mut().unwrap().anchor = value;
+                let saved = table.to_xml().unwrap();
+                let output = std::str::from_utf8(&saved).unwrap();
+                assert!(output.contains(opaque), "opaque owner changed: {output}");
+                assert_eq!(
+                    CT_Table::from_xml(&saved).unwrap().rows[0].cells[0]
+                        .properties
+                        .as_ref()
+                        .unwrap()
+                        .anchor,
+                    value
+                );
+                assert_eq!(CT_Table::from_xml(&saved).unwrap().to_xml().unwrap(), saved);
+            }
+        }
+        let inherited = vec![
+            ("q".to_owned(), A_NS.to_owned()),
+            ("f".to_owned(), "urn:foreign".to_owned()),
+        ];
+        let input = br#"<q:tbl><q:tblGrid><q:gridCol w="100"/></q:tblGrid><q:tr h="100"><q:tc><f:tcPr anchor="b"/><q:tcPr anchor="ctr"><f:solidFill><q:srgbClr val="FF0000"/></f:solidFill></q:tcPr></q:tc></q:tr></q:tbl>"#;
+        let table = CT_Table::from_xml_with_inherited_namespaces(input, &inherited).unwrap();
+        let properties = table.rows[0].cells[0].properties.as_ref().unwrap();
+        assert_eq!(properties.anchor, Some(TextAnchor::Center));
+        assert!(properties.fill.is_none(), "foreign fill cannot be promoted");
+        let saved = table.to_xml().unwrap();
+        let output = std::str::from_utf8(&saved).unwrap();
+        assert!(output.contains(r#"<f:tcPr anchor="b"/>"#));
+        assert!(output.contains(r#"<f:solidFill><q:srgbClr val="FF0000"/></f:solidFill>"#));
+        assert!(
+            output.contains(r#"xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main""#)
+        );
+        assert_eq!(CT_Table::from_xml(&saved).unwrap().to_xml().unwrap(), saved);
     }
 
     #[test]

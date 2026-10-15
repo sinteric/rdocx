@@ -77,6 +77,17 @@ impl OrderedRawChildren {
     }
 }
 
+impl OrderedRawChildren {
+    /// Folds the removed typed member boundary without losing raw sibling bytes.
+    pub fn close_boundary(&mut self, boundary: usize) {
+        for child in &mut self.children {
+            if child.boundary >= boundary && child.boundary > 0 {
+                child.boundary -= 1;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use oxml_core::raw_xml::{capture_element, capture_empty_element};

@@ -30,16 +30,39 @@ pub use paragraph::{
 };
 
 use body::{Result, missing_end};
+use paragraph::{
+    TextNamespaceScope, text_capture_opaque_event, text_close_generated_child, text_fragment_scope,
+    text_namespace_scope, text_owned_name, text_reject_trailing, text_root_spellings_scoped,
+};
+
+#[derive(Clone, Debug)]
+struct SourceBodyProperties {
+    raw: Vec<u8>,
+    original: CT_TextBodyProperties,
+    _namespaces: Vec<(String, String)>,
+}
 
 /// The `a:txBody` shell with typed body properties and opaque later text stages.
 #[allow(non_camel_case_types)]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CT_TextBody {
     pub body_properties: CT_TextBodyProperties,
     list_style: Option<CT_TextListStyle>,
     paragraphs: Vec<CT_TextParagraph>,
     raw_children: OrderedRawChildren,
+    source_root: Vec<String>,
+    source_tag: String,
+    source_body_properties: Option<SourceBodyProperties>,
 }
+impl PartialEq for CT_TextBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.body_properties == other.body_properties
+            && self.list_style == other.list_style
+            && self.paragraphs == other.paragraphs
+            && self.raw_children == other.raw_children
+    }
+}
+impl Eq for CT_TextBody {}
 
 impl Default for CT_TextBody {
     fn default() -> Self {
@@ -55,16 +78,37 @@ impl CT_TextBody {
             list_style: None,
             paragraphs: vec![CT_TextParagraph::default()],
             raw_children: OrderedRawChildren::default(),
+            source_root: Vec::new(),
+            source_tag: String::new(),
+            source_body_properties: None,
         }
     }
 
     /// Parses a complete `a:txBody` while retaining later text stages.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
-        Self::from_xml_as(xml, b"txBody")
+        Self::from_xml_with_inherited_namespaces(xml, &[])
     }
 
     /// Parses a complete text body under a caller-selected root local name.
     pub fn from_xml_as(xml: &[u8], root_local_name: &[u8]) -> Result<Self> {
+        Self::from_xml_as_with_namespaces(xml, root_local_name, &[])
+    }
+
+    /// Parses a text-body fragment in its actual enclosing namespace scope.
+    pub fn from_xml_with_inherited_namespaces(
+        xml: &[u8],
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
+        Self::from_xml_as_with_namespaces(xml, b"txBody", inherited)
+    }
+
+    /// Parses a caller-selected text-body root in its actual enclosing namespace scope.
+    /// Retained source declarations stay separate from inherited lookup bindings.
+    pub fn from_xml_as_with_namespaces(
+        xml: &[u8],
+        root_local_name: &[u8],
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
@@ -75,7 +119,35 @@ impl CT_TextBody {
                 Event::Start(element)
                     if matches_local_name(element.name().as_ref(), root_local_name) =>
                 {
-                    return Self::from_element(&mut reader, root_local_name);
+                    let scope = text_namespace_scope(&element, inherited)?;
+                    let name = element.name();
+                    let spelling = std::str::from_utf8(name.as_ref()).map_err(OxmlError::from)?;
+                    let prefix = spelling.split_once(':').map_or("", |(prefix, _)| prefix);
+                    if scope.iter().any(|(key, uri)| {
+                        key == prefix
+                            && uri != crate::namespace::A_NS
+                            && uri != "http://schemas.openxmlformats.org/presentationml/2006/main"
+                            && !(root_local_name == b"t"
+                                && uri
+                                    == "http://schemas.openxmlformats.org/drawingml/2006/diagram")
+                            && !(root_local_name == b"txPr"
+                                && uri == "http://schemas.openxmlformats.org/drawingml/2006/chart")
+                            && !(root_local_name == b"txBody"
+                                && uri
+                                    == "http://schemas.microsoft.com/office/powerpoint/2018/8/main")
+                    }) {
+                        return Err(TextError::UnexpectedElement(
+                            "foreign text body namespace".to_owned(),
+                        ));
+                    }
+                    let parsed = Self::from_element(
+                        &mut reader,
+                        root_local_name,
+                        &element,
+                        &TextNamespaceScope::inherited(inherited),
+                    )?;
+                    text_reject_trailing(&mut reader)?;
+                    return Ok(parsed);
                 }
                 Event::Empty(element)
                     if matches_local_name(element.name().as_ref(), root_local_name) =>
@@ -96,8 +168,20 @@ impl CT_TextBody {
         }
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, root_local_name: &[u8]) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        root_local_name: &[u8],
+        start: &BytesStart<'_>,
+        inherited: &TextNamespaceScope,
+    ) -> Result<Self> {
+        let namespaces = text_fragment_scope(start, inherited)?;
+        let source_root = text_root_spellings_scoped(
+            start,
+            inherited,
+            &capture_element(&mut reader.clone(), start)?,
+        )?;
         let mut body_properties = None;
+        let mut source_body_properties = None;
         let mut list_style = None;
         let mut paragraphs = Vec::new();
         let mut raw_children = OrderedRawChildren::default();
@@ -109,48 +193,70 @@ impl CT_TextBody {
                 .read_event_into(&mut buffer)
                 .map_err(OxmlError::from)?
             {
-                Event::Start(element) if matches_local_name(element.name().as_ref(), b"bodyPr") => {
+                Event::Start(element) if text_owned_name(&element, &namespaces)? == b"bodyPr" => {
                     if body_properties.is_some() {
                         return Err(TextError::DuplicateElement("bodyPr".to_owned()));
                     }
-                    body_properties = Some(CT_TextBodyProperties::from_element(reader, &element)?);
+                    let raw = capture_element(reader, &element)?;
+                    let parsed = CT_TextBodyProperties::from_xml(&raw)?;
+                    source_body_properties = Some(SourceBodyProperties {
+                        raw,
+                        original: parsed.clone(),
+                        _namespaces: namespaces.physical.clone(),
+                    });
+                    body_properties = Some(parsed);
                     boundary = boundary.max(1);
                 }
-                Event::Empty(element) if matches_local_name(element.name().as_ref(), b"bodyPr") => {
+                Event::Empty(element) if text_owned_name(&element, &namespaces)? == b"bodyPr" => {
                     if body_properties.is_some() {
                         return Err(TextError::DuplicateElement("bodyPr".to_owned()));
                     }
-                    body_properties = Some(CT_TextBodyProperties::from_start(&element)?);
+                    let raw = capture_empty_element(&element)?;
+                    let parsed = CT_TextBodyProperties::from_xml(&raw)?;
+                    source_body_properties = Some(SourceBodyProperties {
+                        raw,
+                        original: parsed.clone(),
+                        _namespaces: namespaces.physical.clone(),
+                    });
+                    body_properties = Some(parsed);
                     boundary = boundary.max(1);
                 }
-                Event::Start(element)
-                    if matches_local_name(element.name().as_ref(), b"lstStyle") =>
-                {
+                Event::Start(element) if text_owned_name(&element, &namespaces)? == b"lstStyle" => {
                     if list_style.is_some() {
                         return Err(TextError::DuplicateElement("lstStyle".to_owned()));
                     }
                     let raw = capture_element(reader, &element)?;
-                    list_style = Some(CT_TextListStyle::from_xml(&raw)?);
+                    list_style = Some(CT_TextListStyle::from_xml_with_namespaces(
+                        &raw,
+                        &namespaces,
+                    )?);
                     boundary = boundary.max(2);
                 }
-                Event::Empty(element)
-                    if matches_local_name(element.name().as_ref(), b"lstStyle") =>
-                {
+                Event::Empty(element) if text_owned_name(&element, &namespaces)? == b"lstStyle" => {
                     if list_style.is_some() {
                         return Err(TextError::DuplicateElement("lstStyle".to_owned()));
                     }
                     let raw = capture_empty_element(&element)?;
-                    list_style = Some(CT_TextListStyle::from_xml(&raw)?);
+                    list_style = Some(CT_TextListStyle::from_xml_with_namespaces(
+                        &raw,
+                        &namespaces,
+                    )?);
                     boundary = boundary.max(2);
                 }
-                Event::Start(element) if matches_local_name(element.name().as_ref(), b"p") => {
+                Event::Start(element) if text_owned_name(&element, &namespaces)? == b"p" => {
                     let raw = capture_element(reader, &element)?;
-                    paragraphs.push(CT_TextParagraph::from_xml(&raw)?);
+                    paragraphs.push(CT_TextParagraph::from_xml_with_namespaces(
+                        &raw,
+                        &namespaces,
+                    )?);
                     boundary = boundary.max(2 + paragraphs.len());
                 }
-                Event::Empty(element) if matches_local_name(element.name().as_ref(), b"p") => {
+                Event::Empty(element) if text_owned_name(&element, &namespaces)? == b"p" => {
                     let raw = capture_empty_element(&element)?;
-                    paragraphs.push(CT_TextParagraph::from_xml(&raw)?);
+                    paragraphs.push(CT_TextParagraph::from_xml_with_namespaces(
+                        &raw,
+                        &namespaces,
+                    )?);
                     boundary = boundary.max(2 + paragraphs.len());
                 }
                 Event::Start(element) => {
@@ -167,6 +273,9 @@ impl CT_TextBody {
                 Event::Eof => {
                     return Err(missing_end(&String::from_utf8_lossy(root_local_name)));
                 }
+                event @ (Event::Comment(_) | Event::PI(_) | Event::Text(_) | Event::CData(_)) => {
+                    raw_children.push(boundary, text_capture_opaque_event(event)?);
+                }
                 _ => {}
             }
             buffer.clear();
@@ -178,6 +287,11 @@ impl CT_TextBody {
             list_style,
             paragraphs,
             raw_children,
+            source_root,
+            source_tag: std::str::from_utf8(start.name().as_ref())
+                .map_err(OxmlError::from)?
+                .to_owned(),
+            source_body_properties,
         })
     }
 
@@ -195,18 +309,77 @@ impl CT_TextBody {
 
     /// Writes the text body using a caller-selected OOXML wrapper tag.
     pub fn write_xml_as<W: Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
+        let start = paragraph::text_wrapper_start(tag, &self.source_tag, &self.source_root)?;
+        let owned_tag = std::str::from_utf8(start.name().as_ref())
+            .map_err(OxmlError::from)?
+            .to_owned();
+        let tag = owned_tag.as_str();
+        let namespaces = paragraph::text_namespace_scope(&start, &[])?;
         writer
-            .write_event(Event::Start(BytesStart::new(tag)))
+            .write_event(Event::Start(start))
             .map_err(OxmlError::from)?;
         emit_raw(writer, self.raw_children.at(0))?;
-        self.body_properties.write_xml(writer)?;
+        if let Some(SourceBodyProperties {
+            raw,
+            original,
+            _namespaces,
+        }) = &self.source_body_properties
+        {
+            if &self.body_properties == original && !_namespaces.is_empty() {
+                writer.get_mut().write_all(raw).map_err(OxmlError::from)?;
+            } else {
+                {
+                    let mut child = Writer::new(Vec::new());
+                    self.body_properties.write_xml(&mut child)?;
+                    writer
+                        .get_mut()
+                        .write_all(&text_close_generated_child(
+                            &child.into_inner(),
+                            &namespaces,
+                        )?)
+                        .map_err(OxmlError::from)?;
+                }
+            }
+        } else {
+            {
+                let mut child = Writer::new(Vec::new());
+                self.body_properties.write_xml(&mut child)?;
+                writer
+                    .get_mut()
+                    .write_all(&text_close_generated_child(
+                        &child.into_inner(),
+                        &namespaces,
+                    )?)
+                    .map_err(OxmlError::from)?;
+            }
+        }
         emit_raw(writer, self.raw_children.at(1))?;
         if let Some(list_style) = &self.list_style {
-            list_style.write_xml(writer)?;
+            {
+                let mut child = Writer::new(Vec::new());
+                list_style.write_xml(&mut child)?;
+                writer
+                    .get_mut()
+                    .write_all(&text_close_generated_child(
+                        &child.into_inner(),
+                        &namespaces,
+                    )?)
+                    .map_err(OxmlError::from)?;
+            }
         }
         emit_raw(writer, self.raw_children.at(2))?;
         for (index, paragraph) in self.paragraphs.iter().enumerate() {
-            paragraph.write_xml(writer)?;
+            {
+                let mut child = Writer::new(Vec::new());
+                paragraph.write_xml(&mut child)?;
+                writer
+                    .get_mut()
+                    .write_all(&text_close_generated_child(
+                        &child.into_inner(),
+                        &namespaces,
+                    )?)
+                    .map_err(OxmlError::from)?;
+            }
             emit_raw(writer, self.raw_children.at(3 + index))?;
         }
         writer
@@ -303,6 +476,21 @@ impl CT_TextBody {
             list_style: self.list_style.clone(),
             paragraphs: vec![paragraph],
             raw_children: OrderedRawChildren::default(),
+            source_root: if self.body_properties.autofit_source.is_some() {
+                self.source_root.clone()
+            } else {
+                Vec::new()
+            },
+            source_tag: if self.body_properties.autofit_source.is_some() {
+                self.source_tag.clone()
+            } else {
+                String::new()
+            },
+            source_body_properties: if self.body_properties.autofit_source.is_some() {
+                self.source_body_properties.clone()
+            } else {
+                None
+            },
         }
     }
 
@@ -394,6 +582,47 @@ mod tests {
     use super::{CT_TextBody, CT_TextListStyle};
 
     #[test]
+    fn autofit_opaque_choice_keeps_inherited_wrapper_namespace_scope() {
+        let xml = br#"<q:txBody xmlns:q='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:e='urn:example'><q:bodyPr><q:normAutofit e:proof='keep&amp;exact'/></q:bodyPr><q:p/></q:txBody>"#;
+        let mut body = CT_TextBody::from_xml(xml).unwrap();
+        body.body_properties.autofit = Some(super::TextAutofit::NoAutofit);
+        let saved = body.to_xml().unwrap();
+        let saved = String::from_utf8(saved).unwrap();
+        assert!(saved.starts_with("<q:txBody xmlns:q='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:e='urn:example'>"));
+        assert!(saved.contains("<q:noAutofit e:proof='keep&amp;exact'/>"));
+        let empty = String::from_utf8(body.empty_like().to_xml().unwrap()).unwrap();
+        assert!(empty.contains("xmlns:q='http://schemas.openxmlformats.org/drawingml/2006/main'"));
+        assert!(empty.contains("xmlns:e='urn:example'"));
+        assert!(empty.contains("<q:noAutofit e:proof='keep&amp;exact'/>"));
+        assert_eq!(
+            CT_TextBody::from_xml(saved.as_bytes())
+                .unwrap()
+                .to_xml()
+                .unwrap(),
+            saved.as_bytes()
+        );
+
+        // The retained owner spelling remains qualified even when a is foreign.
+        // Generated canonical descendants close their own DrawingML binding.
+        let conflicting = String::from_utf8(xml.to_vec())
+            .unwrap()
+            .replace("xmlns:e=", "xmlns:a='urn:foreign' xmlns:e=");
+        let mut body = CT_TextBody::from_xml(conflicting.as_bytes()).unwrap();
+        body.body_properties.autofit = Some(super::TextAutofit::NoAutofit);
+        let saved = String::from_utf8(body.to_xml().unwrap()).unwrap();
+        assert!(saved.starts_with("<q:txBody"));
+        assert!(saved.contains("xmlns:a='urn:foreign'"));
+        assert!(saved.contains("<q:noAutofit e:proof='keep&amp;exact'/>"));
+        assert_eq!(
+            CT_TextBody::from_xml(saved.as_bytes())
+                .unwrap()
+                .to_xml()
+                .unwrap(),
+            saved.as_bytes()
+        );
+    }
+
+    #[test]
     fn text_body_reads_any_prefix_and_writes_the_fixed_a_prefix() {
         let xml = br#"<q:txBody><x:before/><q:bodyPr anchor="ctr"><q:noAutofit/></q:bodyPr><x:afterBody/><q:lstStyle><x:listChild/></q:lstStyle><x:beforeParagraph/><q:p><x:run>kept</x:run></q:p><x:afterParagraph/></q:txBody>"#;
         let body = CT_TextBody::from_xml(xml).unwrap();
@@ -439,14 +668,20 @@ mod tests {
         assert_eq!(
             String::from_utf8(body.to_xml().unwrap()).unwrap(),
             concat!(
-                r#"<a:txBody><a:bodyPr/>"#,
-                r#"<a:p><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t>one</a:t></a:r><x:in-paragraph/><a:endParaRPr sz="1200"/></a:p>"#,
+                r#"<a:txBody xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:x"><a:bodyPr/>"#,
+                r#"<a:p xmlns:x="urn:x"><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t>one</a:t></a:r><x:in-paragraph/><a:endParaRPr sz="1200"/></a:p>"#,
                 r#"<a:p><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t>two</a:t></a:r><a:br><a:rPr b="1"/></a:br><a:r><a:rPr b="1"/><a:t>soft</a:t></a:r><a:br><a:rPr b="1"/></a:br><a:endParaRPr sz="1200"/></a:p>"#,
                 r#"<a:p><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t/></a:r><a:endParaRPr sz="1200"/></a:p>"#,
                 r#"<x:after-paragraphs/></a:txBody>"#,
             )
         );
         assert_eq!(body.plain_text(), "one\ntwo\nsoft\n\n");
+
+        let saved = body.to_xml().unwrap();
+        assert_eq!(
+            CT_TextBody::from_xml(&saved).unwrap().to_xml().unwrap(),
+            saved
+        );
 
         let mut plain = CT_TextBody::new();
         plain.set_text("single line");
@@ -491,7 +726,9 @@ mod tests {
 
     #[test]
     fn list_style_rejects_nested_fixed_prefix_rebinding() {
-        let xml = br#"<p:defaultTextStyle xmlns:p="urn:presentation" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr xmlns:a="urn:producer"><a:raw/></d:lvl1pPr></p:defaultTextStyle>"#;
+        let positive = br#"<p:defaultTextStyle xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr/></p:defaultTextStyle>"#;
+        assert!(CT_TextListStyle::from_xml(positive).is_ok());
+        let xml = br#"<p:defaultTextStyle xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr xmlns:a="urn:producer"><a:raw/></d:lvl1pPr></p:defaultTextStyle>"#;
         assert!(CT_TextListStyle::from_xml(xml).is_err());
     }
 
@@ -510,7 +747,7 @@ mod tests {
         ];
 
         for descendant in descendants {
-            let mut xml = br#"<p:defaultTextStyle xmlns:p="urn:presentation" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr>"#.to_vec();
+            let mut xml = br#"<p:defaultTextStyle xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr>"#.to_vec();
             xml.extend_from_slice(descendant);
             xml.extend_from_slice(br#"</d:lvl1pPr></p:defaultTextStyle>"#);
             assert!(
@@ -524,7 +761,7 @@ mod tests {
     #[test]
     fn opaque_list_style_child_preserves_its_local_prefix_binding() {
         let opaque = br#"<x:extension xmlns:x="urn:extension" xmlns:a="urn:producer"><a:data/></x:extension>"#;
-        let xml = br#"<p:defaultTextStyle xmlns:p="urn:presentation" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><x:extension xmlns:x="urn:extension" xmlns:a="urn:producer"><a:data/></x:extension><d:lvl1pPr/></p:defaultTextStyle>"#;
+        let xml = br#"<p:defaultTextStyle xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><x:extension xmlns:x="urn:extension" xmlns:a="urn:producer"><a:data/></x:extension><d:lvl1pPr/></p:defaultTextStyle>"#;
         let parsed = CT_TextListStyle::from_xml(xml).unwrap();
         let written = parsed.to_xml().unwrap();
         assert!(
@@ -539,7 +776,7 @@ mod tests {
         let character_extension = br#"<x:extension xmlns:x="urn:extension" xmlns:a="urn:producer"><a:data/></x:extension>"#;
         let transform_with_content =
             br#"<d:alpha xmlns:a="urn:producer" val="50000"><a:data/></d:alpha>"#;
-        let xml = br#"<p:defaultTextStyle xmlns:p="urn:presentation" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr><d:defRPr><x:extension xmlns:x="urn:extension" xmlns:a="urn:producer"><a:data/></x:extension><d:solidFill><d:srgbClr val="102030"><d:alpha xmlns:a="urn:producer" val="50000"><a:data/></d:alpha></d:srgbClr></d:solidFill></d:defRPr></d:lvl1pPr></p:defaultTextStyle>"#;
+        let xml = br#"<p:defaultTextStyle xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr><d:defRPr><x:extension xmlns:x="urn:extension" xmlns:a="urn:producer"><a:data/></x:extension><d:solidFill><d:srgbClr val="102030"><d:alpha xmlns:a="urn:producer" val="50000"><a:data/></d:alpha></d:srgbClr></d:solidFill></d:defRPr></d:lvl1pPr></p:defaultTextStyle>"#;
 
         let written = CT_TextListStyle::from_xml(xml).unwrap().to_xml().unwrap();
         for opaque in [
@@ -569,6 +806,217 @@ mod tests {
             let result = panic::catch_unwind(|| CT_TextBody::from_xml(xml));
             assert!(result.is_ok(), "list-style parser panicked");
             assert!(result.unwrap().is_err(), "invalid list level parsed");
+        }
+    }
+
+    #[test]
+    fn fx206_text_body_inherited_link_namespace_and_opaque_owner_closure() {
+        let inherited = vec![
+            ("a".to_owned(), crate::namespace::A_NS.to_owned()),
+            (
+                "p".to_owned(),
+                "http://schemas.openxmlformats.org/presentationml/2006/main".to_owned(),
+            ),
+            ("q".to_owned(), crate::namespace::A_NS.to_owned()),
+            (
+                "rel".to_owned(),
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships".to_owned(),
+            ),
+            ("f".to_owned(), "urn:foreign".to_owned()),
+        ];
+        let xml = br#"<p:txBody f:body='&#65;'><q:bodyPr f:bodyPr='&#76;'/><q:lstStyle f:list='&#66;'><q:defPPr f:default='&#67;'><q:defRPr><q:hlinkClick rel:id='default'/></q:defRPr></q:defPPr></q:lstStyle><q:p f:paragraph='&#68;'><f:r><q:r><q:t>opaque</q:t></q:r></f:r><q:r f:run='&#69;'><q:rPr xmlns:a='urn:foreign-a' f:properties='&#70;'><a:opaque f:keep='&#80;'/><q:solidFill f:fill='&#79;'><q:srgbClr val='123456'/></q:solidFill><q:latin typeface='Arial' f:font='&#78;'/><f:hlinkClick f:keep='&#71;'><q:hlinkClick rel:id='shadow'/></f:hlinkClick><q:hlinkClick rel:id='owned' tooltip='&#72;'><f:payload f:keep='&#73;'/></q:hlinkClick></q:rPr><q:t f:text='&#77;'>visible</q:t></q:r><q:br xmlns:rel='urn:foreign' f:break='&#74;'><q:rPr><q:hlinkClick rel:id='opaque'/></q:rPr></q:br><q:fld id='{00000000-0000-0000-0000-000000000001}' f:field='&#75;'><q:rPr><q:hlinkClick rel:id='field'/></q:rPr><q:t>field</q:t></q:fld><q:endParaRPr><q:hlinkMouseOver rel:id='hover'/></q:endParaRPr></q:p></p:txBody>"#;
+        let mut body = CT_TextBody::from_xml_with_inherited_namespaces(xml, &inherited).unwrap();
+        assert_eq!(body.paragraphs.len(), 1);
+        assert_eq!(body.paragraphs[0].runs.len(), 3);
+        let default = body
+            .list_style
+            .as_ref()
+            .unwrap()
+            .default_paragraph_properties
+            .as_ref()
+            .unwrap()
+            .default_run_properties
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            default
+                .hyperlink_click
+                .as_ref()
+                .unwrap()
+                .relationship_id
+                .as_deref(),
+            Some("default")
+        );
+        let super::TextRun::Run(run) = &mut body.paragraphs[0].runs[0] else {
+            panic!("owned regular run");
+        };
+        let click = run
+            .properties
+            .as_mut()
+            .unwrap()
+            .hyperlink_click
+            .as_mut()
+            .unwrap();
+        assert_eq!(click.relationship_id.as_deref(), Some("owned"));
+        assert_eq!(click.tooltip.as_deref(), Some("H"));
+        click.relationship_id = Some("next".to_owned());
+        click.action = Some("ppaction://hlinksldjump".to_owned());
+        let super::TextRun::Break(br) = &body.paragraphs[0].runs[1] else {
+            panic!("owned break");
+        };
+        assert_eq!(
+            br.properties
+                .as_ref()
+                .unwrap()
+                .hyperlink_click
+                .as_ref()
+                .unwrap()
+                .relationship_id,
+            None
+        );
+        let super::TextRun::Field(field) = &body.paragraphs[0].runs[2] else {
+            panic!("owned field");
+        };
+        assert_eq!(
+            field
+                .run_properties
+                .as_ref()
+                .unwrap()
+                .hyperlink_click
+                .as_ref()
+                .unwrap()
+                .relationship_id
+                .as_deref(),
+            Some("field")
+        );
+        assert_eq!(
+            body.paragraphs[0]
+                .end_properties
+                .as_ref()
+                .unwrap()
+                .hyperlink_mouse_over
+                .as_ref()
+                .unwrap()
+                .relationship_id
+                .as_deref(),
+            Some("hover")
+        );
+        let saved = body.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        for token in [
+            "xmlns:a='urn:foreign-a'",
+            "<a:opaque f:keep='&#80;'/>",
+            "f:font='&#78;'",
+            "f:fill='&#79;'",
+            "f:bodyPr='&#76;'",
+            "f:text='&#77;'",
+            "f:body='&#65;'",
+            "f:list='&#66;'",
+            "f:default='&#67;'",
+            "f:paragraph='&#68;'",
+            "f:run='&#69;'",
+            "f:properties='&#70;'",
+            "tooltip='&#72;'",
+            "f:break='&#74;'",
+            "f:field='&#75;'",
+        ] {
+            assert!(text.contains(token), "{token}");
+        }
+        assert!(text.contains("<f:r><q:r><q:t>opaque</q:t></q:r></f:r>"));
+        assert!(text.contains(
+            "<f:hlinkClick f:keep='&#71;'><q:hlinkClick rel:id='shadow'/></f:hlinkClick>"
+        ));
+        assert!(text.contains("<f:payload f:keep='&#73;'/>"));
+        assert!(text.contains("rel:id=\"next\""));
+        assert!(text.contains("rel:id='opaque'"));
+        assert_eq!(
+            CT_TextBody::from_xml(&saved).unwrap().to_xml().unwrap(),
+            saved
+        );
+    }
+    #[test]
+    fn fx206_list_style_foreign_presentation_wrapper_is_not_owned() {
+        let input = br#"<p:defaultTextStyle xmlns:p="urn:presentation" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main"><d:lvl1pPr/></p:defaultTextStyle>"#;
+        assert!(CT_TextListStyle::from_xml(input).is_err());
+    }
+    #[test]
+    fn fx206_presentation_wrappers_preserve_alias_default_and_foreign_canonical_bindings() {
+        const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        for local in [
+            "defaultTextStyle",
+            "titleStyle",
+            "bodyStyle",
+            "otherStyle",
+            "notesStyle",
+        ] {
+            for prefix in ["q:", ""] {
+                let declaration = if prefix.is_empty() {
+                    "xmlns"
+                } else {
+                    "xmlns:q"
+                };
+                let input = format!(
+                    "<{prefix}{local} {declaration}=\"{P}\" xmlns:p='urn:foreign' xmlns:d=\"{A}\"><d:lvl1pPr algn='ctr'/><x:opaque xmlns:x='urn:opaque' x:keep='&#65;'/></{prefix}{local}>"
+                );
+                let parsed = CT_TextListStyle::from_xml(input.as_bytes()).unwrap();
+                let save = |value: &CT_TextListStyle| {
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    value
+                        .write_xml_as(&mut writer, &format!("p:{local}"))
+                        .unwrap();
+                    writer.into_inner()
+                };
+                let saved = save(&parsed);
+                let xml = std::str::from_utf8(&saved).unwrap();
+                assert!(xml.starts_with(&format!("<{prefix}{local} ")));
+                assert!(xml.contains("xmlns:p='urn:foreign'"));
+                assert!(xml.contains("<x:opaque xmlns:x='urn:opaque' x:keep='&#65;'/>"));
+                assert_eq!(
+                    parsed.level1.as_ref().unwrap().alignment,
+                    Some(super::paragraph::TextAlignment::Center)
+                );
+                assert_eq!(save(&CT_TextListStyle::from_xml(&saved).unwrap()), saved);
+                let foreign = input.replacen(P, "urn:not-presentation", 1);
+                assert!(CT_TextListStyle::from_xml(foreign.as_bytes()).is_err());
+            }
+        }
+    }
+    #[test]
+    fn fx206_requested_wrapper_namespace_converts_both_directions_without_rebinding_opaque_prefixes()
+     {
+        use quick_xml::{NsReader, Writer, events::Event, name::ResolveResult};
+        const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        for (source, requested, expected) in [(A, "p:txBody", P), (P, "a:txBody", A)] {
+            for alias in ["q:", ""] {
+                let declaration = if alias.is_empty() { "xmlns" } else { "xmlns:q" };
+                let input = format!(
+                    "<{alias}txBody {declaration}='{source}' xmlns:a='{A}' xmlns:p='urn:opaque'><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>retained text</a:t></a:r></a:p><p:opaque p:keep='&#65;'/></{alias}txBody>"
+                );
+                let parsed = CT_TextBody::from_xml(input.as_bytes()).unwrap();
+                let save = |value: &CT_TextBody| {
+                    let mut writer = Writer::new(Vec::new());
+                    value.write_xml_as(&mut writer, requested).unwrap();
+                    writer.into_inner()
+                };
+                let saved = save(&parsed);
+                let mut reader = NsReader::from_reader(saved.as_slice());
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                assert_eq!(
+                    namespace,
+                    ResolveResult::Bound(quick_xml::name::Namespace(expected.as_bytes()))
+                );
+                assert!(
+                    matches!(event, Event::Start(ref start) if start.local_name().as_ref() == b"txBody")
+                );
+                let xml = std::str::from_utf8(&saved).unwrap();
+                assert!(xml.contains("xmlns:p='urn:opaque'"));
+                assert!(xml.contains("<p:opaque p:keep='&#65;'/>"));
+                let reopened = CT_TextBody::from_xml(&saved).unwrap();
+                assert_eq!(reopened.plain_text(), "retained text");
+                assert_eq!(save(&reopened), saved);
+            }
         }
     }
 }

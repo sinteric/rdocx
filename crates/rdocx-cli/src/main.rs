@@ -18,7 +18,76 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum FontCommand {
+    /// List native font records and faces
+    List {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Embed one caller-owned font face with explicit license authorization
+    Embed {
+        file: PathBuf,
+        /// Exact font record/typeface name
+        #[arg(long)]
+        name: String,
+        /// Local TrueType or OpenType font file
+        #[arg(long)]
+        font: PathBuf,
+        #[arg(long, default_value = "regular", value_parser = ["regular", "bold", "italic", "bold-italic"])]
+        kind: String,
+        /// Explicitly authorize embedding under the identified license
+        #[arg(long, required = true)]
+        license_authorized: bool,
+        #[arg(long)]
+        license_identity: String,
+        /// Explicit OOXML font key, otherwise derived from checked font bytes
+        #[arg(long)]
+        font_key: Option<String>,
+        /// Mark this Word face as subsetted
+        #[arg(long)]
+        subsetted: bool,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a named font record, or only the selected embedded face
+    Remove {
+        file: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_parser = ["regular", "bold", "italic", "bold-italic"])]
+        kind: Option<String>,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read flags, or set explicitly named tri-state flags into a new output
+    Settings {
+        file: PathBuf,
+        #[arg(long, value_parser = ["true", "false", "none"])]
+        embed_true_type_fonts: Option<String>,
+        /// Include system fonts: true, false or none (remove setting)
+        #[arg(long, value_parser = ["true", "false", "none"])]
+        embed_system_fonts: Option<String>,
+        #[arg(long, value_parser = ["true", "false", "none"])]
+        save_subset_fonts: Option<String>,
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
+    /// List, embed, remove and configure explicitly licensed fonts
+    Font {
+        #[command(subcommand)]
+        command: FontCommand,
+    },
     /// Print document structure: paragraph/table count, styles, images, metadata
     Inspect {
         /// Path to the DOCX file
@@ -39,6 +108,9 @@ enum Command {
     Layout {
         /// Path to the DOCX file
         file: PathBuf,
+        /// Directory of caller fonts used before bundled fallback
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
         /// Output point-space body fragments as schema-1 JSON
         #[arg(long)]
         json: bool,
@@ -49,28 +121,31 @@ enum Command {
         file: PathBuf,
         /// Output format: pdf, html, md, png, jpeg, tiff
         #[arg(long, short = 't')]
-        to: String,
+        to: Option<String>,
         /// Output file path (defaults to input with new extension)
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// DOCX template for HTML or Markdown input
+        #[arg(long)]
+        template: Option<PathBuf>,
         /// Replace existing output files, but never the input file
         #[arg(long)]
         force: bool,
         /// DPI for image rendering (default: 150)
-        #[arg(long, default_value = "150")]
-        dpi: u32,
-        /// Directory containing font files (.ttf/.otf) to use for PDF rendering
+        #[arg(long)]
+        dpi: Option<u32>,
+        /// Directory containing caller font files (.ttf/.otf/.ttc)
         #[arg(long)]
         font_dir: Option<PathBuf>,
         /// Revision view for PDF and image output
-        #[arg(long, default_value = "accepted", value_parser = commands::parse_revision_view)]
-        revision_view: rdocx::RevisionView,
+        #[arg(long, value_parser = commands::parse_revision_view)]
+        revision_view: Option<rdocx::RevisionView>,
         /// One-based page range for image output, such as 1,3-5
         #[arg(long)]
         pages: Option<String>,
         /// JPEG quality from 1 through 100
-        #[arg(long, default_value = "90")]
-        quality: u8,
+        #[arg(long)]
+        quality: Option<u8>,
         /// Preserve unpainted PNG pixels as transparent
         #[arg(long)]
         transparent: bool,
@@ -97,21 +172,40 @@ enum Command {
         exit_code: bool,
     },
     /// Replace placeholders in a DOCX file
+    ///
+    /// Give one pair with -p and -v, or many with --map. Nothing is written
+    /// unless every pair with an expected count replaced exactly that count.
     Replace {
         /// Path to the DOCX file
         file: PathBuf,
-        /// Placeholder string
-        #[arg(long, short = 'p')]
-        placeholder: String,
-        /// Replacement value
-        #[arg(long, short = 'v')]
-        value: String,
+        /// Placeholder string, a regular expression with --regex
+        #[arg(
+            long,
+            short = 'p',
+            required_unless_present = "map",
+            requires = "value",
+            conflicts_with = "map"
+        )]
+        placeholder: Option<String>,
+        /// Replacement value, where $1 names a capture group with --regex
+        #[arg(long, short = 'v', requires = "placeholder")]
+        value: Option<String>,
+        /// JSON file holding an array of pairs, applied in order, such as
+        /// [{"placeholder": "{{name}}", "value": "Ada", "expect": 2}]
+        #[arg(long, value_name = "PAIRS_JSON")]
+        map: Option<PathBuf>,
+        /// Read each placeholder as a regular expression
+        #[arg(long)]
+        regex: bool,
         /// Output file path
         #[arg(long, short = 'o')]
         output: PathBuf,
         /// Require exactly this many replacements before publishing output
-        #[arg(long)]
+        #[arg(long, conflicts_with = "map")]
         expect: Option<usize>,
+        /// Output the count of each pair as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Validate OOXML conformance
     Validate {
@@ -122,6 +216,9 @@ enum Command {
     Render {
         /// Path to the DOCX file
         file: PathBuf,
+        /// Directory of caller fonts used before bundled fallback
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
         /// Output directory (defaults to current directory)
         #[arg(long, short = 'o')]
         output_dir: Option<PathBuf>,
@@ -212,6 +309,135 @@ enum Command {
         #[command(subcommand)]
         command: TocCommand,
     },
+    /// Update field results
+    Fields {
+        #[command(subcommand)]
+        command: FieldsCommand,
+    },
+    /// Extract physical pictures from supported story owners
+    Images {
+        #[command(subcommand)]
+        command: ImagesCommand,
+    },
+    /// Read and write core and custom document properties
+    Meta {
+        #[command(subcommand)]
+        command: MetaCommand,
+    },
+    /// Set the value of content controls by tag
+    ///
+    /// Every --tag must name at least one control of the body,
+    /// or nothing is written. A control bound to custom XML gets the value in
+    /// its bound part too.
+    Fill {
+        /// Path to the DOCX file
+        file: PathBuf,
+        /// Set every control whose tag is NAME, repeatable
+        #[arg(long = "tag", value_name = "NAME=VALUE", value_parser = commands::parse_assignment)]
+        tags: Vec<(String, String)>,
+        /// Output DOCX file
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the count of each assignment as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum FieldsCommand {
+    /// Update PAGE, NUMPAGES, PAGEREF, SECTIONPAGES, DATE, TIME, SEQ, REF and
+    /// the other supported field results
+    ///
+    /// Field results that need a value the document does not hold, such as a
+    /// mail-merge field, keep their cached result. Page numbers come from
+    /// rdocx's own pagination.
+    Update {
+        /// Path to the DOCX file
+        file: PathBuf,
+        /// Civil date and time for DATE and TIME fields, exactly
+        /// YYYY-MM-DDTHH:MM:SS, unresolved when absent
+        #[arg(long, value_parser = commands::parse_field_date_time)]
+        now: Option<rdocx::FieldDateTime>,
+        /// Output DOCX file
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImagesCommand {
+    /// Write each internal media part of supported physical pictures into a directory and list them
+    ///
+    /// Story ownership is reported. External links are listed without fetching.
+    Extract {
+        /// Path to the DOCX file
+        file: PathBuf,
+        /// Output directory, created when absent
+        dir: PathBuf,
+        /// Output the listing as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// Parsed once per run, so the size of the `set` variant costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum MetaCommand {
+    /// Print the core and custom properties
+    Get {
+        /// Path to the DOCX file
+        file: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set core properties and add, replace or remove custom properties
+    Set {
+        /// Path to the DOCX file
+        file: PathBuf,
+        #[command(flatten)]
+        core: CoreArgs,
+        /// Add or replace a custom property, repeatable. An existing number,
+        /// integer or Boolean property keeps its type
+        #[arg(long = "custom", value_name = "NAME=TYPE:VALUE", value_parser = commands::parse_assignment)]
+        custom: Vec<(String, String)>,
+        /// Remove a custom property, repeatable
+        #[arg(long = "remove-custom", value_name = "NAME")]
+        remove_custom: Vec<String>,
+        /// Output DOCX file
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the properties written as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args)]
+struct CoreArgs {
+    /// Title
+    #[arg(long)]
+    title: Option<String>,
+    /// Author (dc:creator)
+    #[arg(long)]
+    author: Option<String>,
+    /// Subject
+    #[arg(long)]
+    subject: Option<String>,
+    /// Keywords
+    #[arg(long)]
+    keywords: Option<String>,
+    /// Description (comments)
+    #[arg(long)]
+    description: Option<String>,
+    /// Category
+    #[arg(long)]
+    category: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -467,13 +693,69 @@ fn run_cli() {
     let mut diff_status = 0;
 
     let result = match cli.command {
+        Command::Font { command } => match command {
+            FontCommand::List { file, json } => commands::font_list(&file, json),
+            FontCommand::Embed {
+                file,
+                name,
+                font,
+                kind,
+                license_authorized,
+                license_identity,
+                font_key,
+                subsetted,
+                output,
+                json,
+            } => commands::font_embed(
+                &file,
+                &commands::FontEmbedOptions {
+                    name: &name,
+                    font: &font,
+                    kind: &kind,
+                    license_authorized,
+                    license_identity: &license_identity,
+                    font_key: font_key.as_deref(),
+                    subsetted,
+                    output: &output,
+                    json,
+                },
+            ),
+            FontCommand::Remove {
+                file,
+                name,
+                kind,
+                output,
+                json,
+            } => commands::font_remove(&file, &name, kind.as_deref(), &output, json),
+            FontCommand::Settings {
+                file,
+                embed_true_type_fonts,
+                embed_system_fonts,
+                save_subset_fonts,
+                output,
+                json,
+            } => commands::font_settings(
+                &file,
+                embed_true_type_fonts.as_deref(),
+                embed_system_fonts.as_deref(),
+                save_subset_fonts.as_deref(),
+                output.as_deref(),
+                json,
+            ),
+        },
+
         Command::Inspect { file, json } => commands::inspect(&file, json),
         Command::Text { file, json } => commands::text(&file, json),
-        Command::Layout { file, json } => commands::layout(&file, json),
+        Command::Layout {
+            file,
+            json,
+            font_dir,
+        } => commands::layout(&file, json, font_dir.as_deref()),
         Command::Convert {
             file,
             to,
             output,
+            template,
             force,
             dpi,
             font_dir,
@@ -481,17 +763,24 @@ fn run_cli() {
             pages,
             quality,
             transparent,
-        } => commands::convert(
+        } => commands::convert_input(
             &file,
-            &to,
+            to.as_deref(),
+            template.as_deref(),
+            dpi.is_some()
+                || revision_view.is_some()
+                || quality.is_some()
+                || pages.is_some()
+                || transparent
+                || font_dir.is_some(),
             output.as_deref(),
             force,
-            dpi,
+            dpi.unwrap_or(150),
             font_dir.as_deref(),
-            revision_view,
+            revision_view.unwrap_or(rdocx::RevisionView::Accepted),
             commands::ImageOptions {
                 pages: pages.as_deref(),
-                quality,
+                quality: quality.unwrap_or(90),
                 transparent,
             },
         ),
@@ -505,13 +794,27 @@ fn run_cli() {
             file,
             placeholder,
             value,
+            map,
+            regex,
             output,
             expect,
-        } => commands::replace(&file, &placeholder, &value, expect, &output),
+            json,
+        } => commands::replace(
+            &file,
+            commands::ReplaceInput {
+                pair: placeholder.zip(value),
+                map: map.as_deref(),
+                expect,
+                regex,
+            },
+            &output,
+            json,
+        ),
         // Handled above so its exit code can reflect the verdict.
         Command::Validate { .. } => unreachable!(),
         Command::Render {
             file,
+            font_dir,
             output_dir,
             force,
             dpi,
@@ -527,6 +830,7 @@ fn run_cli() {
             force,
             dpi,
             commands::RenderOptions {
+                font_dir: font_dir.as_deref(),
                 page,
                 pages: pages.as_deref(),
                 format: &format,
@@ -682,6 +986,50 @@ fn run_cli() {
             &output,
             json,
         ),
+        Command::Fields { command } => match command {
+            FieldsCommand::Update {
+                file,
+                now,
+                output,
+                json,
+            } => commands::fields_update(&file, now, &output, json),
+        },
+        Command::Images { command } => match command {
+            ImagesCommand::Extract { file, dir, json } => {
+                commands::images_extract(&file, &dir, json)
+            }
+        },
+        Command::Meta { command } => match command {
+            MetaCommand::Get { file, json } => commands::meta_get(&file, json),
+            MetaCommand::Set {
+                file,
+                core,
+                custom,
+                remove_custom,
+                output,
+                json,
+            } => commands::meta_set(
+                &file,
+                &commands::MetaChanges {
+                    title: core.title,
+                    author: core.author,
+                    subject: core.subject,
+                    keywords: core.keywords,
+                    description: core.description,
+                    category: core.category,
+                    custom,
+                    remove_custom,
+                },
+                &output,
+                json,
+            ),
+        },
+        Command::Fill {
+            file,
+            tags,
+            output,
+            json,
+        } => commands::fill(&file, &tags, &output, json),
         Command::Toc { command } => match command {
             TocCommand::Rebuild { file, output, json } => {
                 commands::toc_rebuild(&file, &output, json)

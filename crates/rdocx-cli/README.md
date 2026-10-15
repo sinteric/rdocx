@@ -25,7 +25,7 @@ and produces fixed or flow output without an Office host.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 72,961 compressed bytes, 326,473 member bytes, 8 members | 0.16.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: rdocx-cli | 97,670 compressed bytes, 451,125 member bytes, 8 members | 0.16.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
@@ -41,7 +41,7 @@ conventions with `rpptx-cli` through `oxml-cli-support`.
 ## Example
 
 ```sh
-cargo install rdocx-cli --version '^0.16.0'
+cargo install rdocx-cli --version '^0.16.1'
 
 rdocx inspect report.docx
 rdocx text report.docx
@@ -236,3 +236,115 @@ paragraphs, heading level gaps, and missing metadata are warnings only.
 
 
 Run `rdocx --help` or `rdocx <command> --help` for the complete option set.
+
+## Ordered one-shot edits
+
+`replace INPUT -p OLD -v NEW -o OUTPUT` retains the single-pair command.
+`replace INPUT --map PAIRS.json -o OUTPUT --json` reads a UTF-8 JSON array:
+
+```json
+[
+  {"placeholder": "A", "value": "B", "expect": 2},
+  {"placeholder": "B", "value": "C", "expect": null}
+]
+```
+
+Pairs run in array order, including repeated placeholders. Each later pair
+searches the earlier result. An omitted or null `expect` is unrestricted.
+An empty array succeeds with empty counts and publishes the unchanged document
+to the required output. Unknown keys, wrong types, invalid replacement text,
+negative or fractional counts and late expected-count mismatches refuse the
+whole edit. Duplicate object keys follow serde_json's last occurrence wins
+policy. `--map` cannot be combined with `-p`, `-v` or command-line `--expect`.
+
+`--regex` uses native Rust regex syntax and capture substitutions such as `$1`.
+Patterns match replaceable stretches of adjacent ordinary runs within one
+paragraph. Wrapper, field-instruction, deleted-revision and paragraph boundaries
+remain boundaries. Supported body, table, control, header, footer, note and
+textbox stories participate. Chart labels are excluded. Zero-width matches are
+skipped. Every pattern and replacement is validated before publishing one
+candidate. JSON success carries schema1, operation, mode, ordered pairs with
+index, placeholder, value, count and nullable expected count, total_count and
+output. Errors go to stderr with a nonzero exit and no success JSON.
+
+```bash
+rdocx fields update input.docx --now 2026-10-10T08:30:00 -o fields.docx --json
+rdocx fill input.docx --tag client=Ada --tag status=ready -o filled.docx --json
+rdocx meta get input.docx --json
+rdocx meta set input.docx --title Report --custom count=int:4 -o metadata.docx --json
+rdocx images extract input.docx images --json
+```
+
+`fields update` atomically combines ordinary and deterministic layout cache
+updates through the native facade. Omitted `--now` stays unresolved, preserving
+stored DATE/TIME caches and retention diagnostics. Explicit dates use checked
+Gregorian wall-clock values without time-zone conversion. The record reports
+ordinary and per-kind page-cache counts, complete ordered evaluation facts,
+combined diagnostics, total_updated and saved_cache_scope. The selected input
+basename and canonical full path supply FILENAME context. Dynamic header/footer
+PAGE and NUMPAGES caches retain their provider policy. Unsupported switches do
+not become successful updates.
+
+`fill --tag NAME=VALUE` selects tags only, never aliases. Values retain every
+character after the first `=`. Duplicate tags, a missing tag, invalid text or
+an unsupported bound owner refuse the complete batch. Each matching main-body
+control and its supported custom XML binding changes together. Counts follow
+the supplied tag order.
+
+`meta set` changes supplied core fields and preserves unspecified metadata.
+An empty core string removes that value. Custom syntax is `NAME=TYPE:VALUE`:
+`str`, signed32 `int`, finite64 `float`, `bool` with true/false, `filetime` with
+a checked Gregorian RFC3339 value and explicit timezone, or `empty` with no
+payload. Strings retain additional `:` and `=` characters. Existing property
+PID, fmtid, position and string subtype remain preserved. Duplicate custom
+names and set/remove collisions refuse. `--remove-custom NAME` is a no-op when
+absent. Reads include immutable typed property identity and preserved raw data.
+
+`inspect --json` retains existing schema1 keys and adds word, Unicode scalar
+character and deterministic page counts, their accepted-main-body scope and
+layout diagnostics. Spaces contribute to character_count. Pictures come from
+the existing physical occurrence provider, including supported related story
+owners. Occurrences retain story identity, index path, ordinal, relationship,
+EMU dimensions, description, title and decorative state.
+
+`images extract` writes each unique internal media part once, in first
+occurrence order. Generated flat names such as `image-000001.png` use a bounded
+content-type mapping, with `bin` for an unknown image type. Shared media has one
+file and multiple occurrence records. Distinct parts remain distinct even when
+bytes are equal. Embedded bytes are preserved exactly. External linked images
+are listed with status external, URL metadata and file null, without fetching.
+Their native media_part_name is null and bytes/content_type are empty.
+Unsupported physical ownership and missing internal media refuse through the
+checked provider. Linked occurrence resizing retains its existing refusal.
+
+Extraction rejects symlink directories and existing file collisions and has no
+`--force`. It preloads and stages the complete output set before publishing.
+Recoverable publication failure removes this invocation's files and a newly
+created directory only if empty. Existing unrelated files remain. This is
+recoverable rollback, not crash-atomic multi-file replacement. Empty extraction
+creates no directory. JSON is printed only after publication.
+
+Every mutation requires an output and refuses existing outputs, input identity,
+symlink aliases and hard links. Native package-class, VBA and signature checks
+remain authoritative. No success report precedes publication.
+
+## Licensed font embedding
+
+Use caller-owned font files only after confirming their embedding license.
+Embedding requires explicit authorization and exact license identity. Commands
+write a new output and refuse input/font aliases or existing destinations.
+
+```bash
+rdocx font embed input.docx --name "My Face" --font ./MyFace-Regular.ttf \
+  --license-authorized --license-identity "SIL Open Font License 1.1" \
+  --output embedded.docx
+rdocx font list embedded.docx --json
+rdocx font settings embedded.docx --embed-true-type-fonts false --output disabled.docx
+rdocx font remove embedded.docx --name "My Face" --kind regular --output removed.docx
+```
+
+The four CLI kinds are regular, bold, italic and bold-italic. Settings accept
+true, false or none, with none removing the owned value. Listing reports actual
+native part, format and byte-length facts in the schema1 JSON envelope.
+Word also accepts --font-key and --subsetted, and its settings include
+--embed-system-fonts and --save-subset-fonts.

@@ -17,5 +17,6 @@ tag-name = "v{{version}}"
 
 [dependencies]
 oxml-core = { workspace = true }
+pyo3 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }

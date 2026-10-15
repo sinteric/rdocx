@@ -96,6 +96,7 @@ impl CT_Footnotes {
 
     /// Parse from XML bytes (the content of footnotes.xml).
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
 
@@ -176,6 +177,11 @@ impl CT_Footnotes {
     }
 
     fn to_xml_root(&self, root_tag: &str, item_tag: &str) -> Result<Vec<u8>> {
+        for note in &self.footnotes {
+            for paragraph in &note.paragraphs {
+                paragraph.validate_resource_limits()?;
+            }
+        }
         let _binding_scope = root_binding_scope(ROOT_R_BINDING);
         let mut writer = Writer::new(Vec::new());
 

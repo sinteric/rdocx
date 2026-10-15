@@ -211,15 +211,23 @@ pub struct TimingMediaCommand {
     pub command: MediaCommandKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TimingUnsupported {
     pub local_name: String,
-    raw_xml: Vec<u8>,
+    raw_source: std::sync::Arc<[u8]>,
+    raw_range: std::ops::Range<usize>,
 }
+
+impl PartialEq for TimingUnsupported {
+    fn eq(&self, other: &Self) -> bool {
+        self.local_name == other.local_name && self.raw_xml() == other.raw_xml()
+    }
+}
+impl Eq for TimingUnsupported {}
 
 impl TimingUnsupported {
     pub fn raw_xml(&self) -> &[u8] {
-        &self.raw_xml
+        &self.raw_source[self.raw_range.clone()]
     }
 }
 
@@ -284,7 +292,7 @@ impl CT_Timing {
                     validate_element(&start, &namespaces, b"timing")?;
                     let (nodes, builds) = parse_timing_children(&mut reader, &namespaces)?;
                     let condition_target_presence =
-                        collect_condition_target_presence(xml, inherited)?;
+                        collect_condition_target_presence(xml, inherited)?.values;
                     return Ok(Self {
                         nodes,
                         builds,
@@ -1178,6 +1186,9 @@ pub enum TransitionEffect {
     Wipe,
     Push,
     Zoom,
+    Split,
+    Cover,
+    Uncover,
     Morph,
     Other(String),
 }
@@ -1321,6 +1332,53 @@ impl CT_SlideTransition {
         &self.raw_xml
     }
 
+    /// Applies owned effect and advance settings without replacing retained siblings.
+    pub fn with_settings(
+        &self,
+        effect: Option<(&str, &[(&str, &str)])>,
+        duration_ms: Option<u64>,
+        advance_on_click: Option<bool>,
+        advance_after_ms: Option<u64>,
+    ) -> Result<Self> {
+        let inherited = NamespaceBindings::from_entries(&self.inherited_namespaces);
+        let selected = if root_is(&self.raw_xml, &inherited, MC_NS, b"AlternateContent")? {
+            selected_transition_fragment(&self.raw_xml, &inherited)?
+                .ok_or_else(|| OxmlError::MissingElement("selected transition".into()))?
+        } else {
+            SelectedFragment {
+                xml: self.raw_xml.clone(),
+                parent_namespaces: inherited.clone(),
+                range: 0..self.raw_xml.len(),
+            }
+        };
+        let mut raw = edit_transition_settings(
+            &selected.xml,
+            &selected.parent_namespaces,
+            effect,
+            duration_ms,
+            advance_on_click,
+            advance_after_ms,
+        )?;
+        if selected.range != (0..self.raw_xml.len()) {
+            let mut retained = self.raw_xml[..selected.range.start].to_vec();
+            retained.append(&mut raw);
+            retained.extend_from_slice(&self.raw_xml[selected.range.end..]);
+            raw = retained;
+        }
+        Self::from_retained_fragment(&raw, &inherited)
+    }
+
+    /// Builds a new canonical transition with explicit namespace ownership.
+    pub fn authored(
+        effect: Option<(&str, &[(&str, &str)])>,
+        duration_ms: Option<u64>,
+        advance_on_click: Option<bool>,
+        advance_after_ms: Option<u64>,
+    ) -> Result<Self> {
+        let empty = Self::from_xml(format!("<p:transition xmlns:p=\"{P_NS}\"/>").as_bytes())?;
+        empty.with_settings(effect, duration_ms, advance_on_click, advance_after_ms)
+    }
+
     /// Changes the transition speed while preserving every child subtree.
     pub fn set_speed(&mut self, speed: TransitionSpeed) -> Result<()> {
         let value = match &speed {
@@ -1439,46 +1497,248 @@ fn parse_timing_children(
     }
 }
 
+// Only these concrete schema paths select recursive time owners. Everything
+// else is a leaf operand or opaque source, captured without opening its descendants.
+fn timing_cursor_child(parent: &[u8], child: &[u8]) -> bool {
+    match parent {
+        b"timing" => child == b"tnLst",
+        b"tnLst" | b"childTnLst" | b"subTnLst" => matches!(
+            child,
+            b"par"
+                | b"seq"
+                | b"set"
+                | b"anim"
+                | b"animEffect"
+                | b"animMotion"
+                | b"audio"
+                | b"video"
+                | b"cmd"
+        ),
+        b"par" | b"seq" | b"cBhvr" | b"cMediaNode" => child == b"cTn",
+        b"set" | b"anim" | b"animEffect" | b"animMotion" | b"cmd" => child == b"cBhvr",
+        b"audio" | b"video" => child == b"cMediaNode",
+        b"cTn" => matches!(child, b"childTnLst" | b"subTnLst"),
+        _ => false,
+    }
+}
+
+// A frame owns only its immediate XML. Nested node ranges are omitted from
+// the shallow parser operand and their completed projections are attached once.
+// This keeps retained work linear instead of copying every ancestor subtree.
+struct TimingParseFrame {
+    inherited: NamespaceBindings,
+    namespaces: NamespaceBindings,
+    element_depth: usize,
+    source_start: usize,
+    next_source: usize,
+    immediate_xml: Vec<u8>,
+    children: Vec<TimingNode>,
+    projected: bool,
+}
+
+fn timing_common_mut(node: &mut TimingNode) -> Option<&mut CommonTimeNode> {
+    match node {
+        TimingNode::Parallel(v) => Some(&mut v.common),
+        TimingNode::Sequence(v) => Some(&mut v.common),
+        TimingNode::Set(v) => Some(&mut v.common),
+        TimingNode::Animate(v) => Some(&mut v.common),
+        TimingNode::Effect(v) => Some(&mut v.common),
+        TimingNode::Motion(v) => Some(&mut v.common),
+        TimingNode::Audio(v) | TimingNode::Video(v) => Some(&mut v.common.common),
+        TimingNode::MediaCommand(v) => Some(&mut v.common),
+        TimingNode::Unsupported(_) => None,
+    }
+}
+
 fn parse_node_list(
     xml: &[u8],
     inherited: &NamespaceBindings,
     expected: &[u8],
 ) -> Result<Vec<TimingNode>> {
+    parse_node_frames(xml, inherited, expected).map(|(nodes, _, _)| nodes)
+}
+
+fn parse_node_frames(
+    xml: &[u8],
+    inherited: &NamespaceBindings,
+    expected: &[u8],
+) -> Result<(Vec<TimingNode>, usize, usize)> {
     let mut reader = Reader::from_reader(xml);
     let mut buffer = Vec::new();
-    let mut root = None;
+    let mut elements: Vec<(NamespaceBindings, Vec<u8>, bool, bool)> = Vec::new();
+    let mut frames: Vec<TimingParseFrame> = Vec::new();
     let mut nodes = Vec::new();
+    let source: std::sync::Arc<[u8]> = std::sync::Arc::from(xml);
+    let mut visits = 0;
+    let mut immediate_bytes = 0;
     loop {
-        match reader.read_event_into(&mut buffer)? {
-            Event::Start(start) if root.is_none() => {
-                let namespaces = inherited.with_start(&start)?;
-                validate_element(&start, &namespaces, expected)?;
-                root = Some(namespaces);
+        let before = reader.buffer_position() as usize;
+        let event = reader.read_event_into(&mut buffer)?;
+        visits += 1;
+        let empty = matches!(&event, Event::Empty(_));
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let parent = elements.last().map(|v| &v.0).unwrap_or(inherited);
+                let scope = parent.with_start(&start)?;
+                let local = local_name(start.name().as_ref()).to_vec();
+                if elements.is_empty() {
+                    validate_element(&start, &scope, expected)?;
+                    if empty {
+                        return Ok((nodes, visits, immediate_bytes));
+                    }
+                    elements.push((scope, local, true, false));
+                } else {
+                    let list = elements.last().expect("open root");
+                    let direct_list = elements.len() == 1
+                        || (list.2
+                            && matches!(list.1.as_slice(), b"childTnLst" | b"subTnLst")
+                            && elements.len() >= 2
+                            && elements[elements.len() - 2].3);
+                    let qualified = scope.element_uri(start.name().as_ref()) == Some(P_NS);
+                    let recognized = qualified
+                        && matches!(
+                            local.as_slice(),
+                            b"par"
+                                | b"seq"
+                                | b"set"
+                                | b"anim"
+                                | b"animEffect"
+                                | b"animMotion"
+                                | b"audio"
+                                | b"video"
+                                | b"cmd"
+                        );
+                    if direct_list && !recognized {
+                        let raw = if empty {
+                            capture_empty_element(&start)?
+                        } else {
+                            capture_element(&mut reader, &start)?
+                        };
+                        immediate_bytes += raw.len();
+                        let node = parse_timing_node(&raw, parent, &scope)?;
+                        if let Some(frame) = frames.last_mut() {
+                            frame
+                                .immediate_xml
+                                .extend_from_slice(&xml[frame.next_source..before]);
+                            frame.next_source = reader.buffer_position() as usize;
+                            if list.1.as_slice() == b"childTnLst" {
+                                frame.children.push(node);
+                            }
+                        } else {
+                            nodes.push(node);
+                        }
+                        buffer.clear();
+                        continue;
+                    }
+                    if (!qualified || !list.2 || !timing_cursor_child(&list.1, &local)) && !empty {
+                        capture_element(&mut reader, &start)?;
+                        buffer.clear();
+                        continue;
+                    }
+                    if direct_list && recognized {
+                        crate::check_presentation_nesting("time node", frames.len() + 1)?;
+                        if let Some(parent_frame) = frames.last_mut() {
+                            parent_frame
+                                .immediate_xml
+                                .extend_from_slice(&xml[parent_frame.next_source..before]);
+                        }
+                        let projected = elements.len() == 1 || list.1.as_slice() == b"childTnLst";
+                        let frame = TimingParseFrame {
+                            inherited: parent.clone(),
+                            namespaces: scope.clone(),
+                            element_depth: elements.len() + 1,
+                            source_start: before,
+                            next_source: before,
+                            immediate_xml: Vec::new(),
+                            children: Vec::new(),
+                            projected,
+                        };
+                        frames.push(frame);
+                    }
+                    if !empty {
+                        let qualified = scope.element_uri(start.name().as_ref()) == Some(P_NS);
+                        let common = qualified
+                            && local.as_slice() == b"cTn"
+                            && frames.last().is_some_and(|f| {
+                                elements.len() == f.element_depth
+                                    || (elements.len() == f.element_depth + 1
+                                        && list.2
+                                        && matches!(list.1.as_slice(), b"cBhvr" | b"cMediaNode"))
+                            });
+                        elements.push((scope, local, qualified, common));
+                    }
+                    if empty
+                        && frames
+                            .last()
+                            .is_some_and(|f| f.element_depth == elements.len() + 1)
+                    {
+                        finish_timing_frame(
+                            &mut frames,
+                            &mut nodes,
+                            &source,
+                            &mut immediate_bytes,
+                            xml,
+                            reader.buffer_position() as usize,
+                        )?;
+                    }
+                }
             }
-            Event::Start(child) => {
-                let namespaces = root.as_ref().expect("root set").with_start(&child)?;
-                let raw = capture_element(&mut reader, &child)?;
-                nodes.push(parse_timing_node(
-                    &raw,
-                    root.as_ref().expect("root set"),
-                    &namespaces,
-                )?);
+            Event::End(_) => {
+                if frames
+                    .last()
+                    .is_some_and(|f| f.element_depth == elements.len())
+                {
+                    finish_timing_frame(
+                        &mut frames,
+                        &mut nodes,
+                        &source,
+                        &mut immediate_bytes,
+                        xml,
+                        reader.buffer_position() as usize,
+                    )?;
+                }
+                elements.pop();
+                if elements.is_empty() {
+                    return Ok((nodes, visits, immediate_bytes));
+                }
             }
-            Event::Empty(child) => {
-                let namespaces = root.as_ref().expect("root set").with_start(&child)?;
-                let raw = capture_empty_element(&child)?;
-                nodes.push(parse_timing_node(
-                    &raw,
-                    root.as_ref().expect("root set"),
-                    &namespaces,
-                )?);
-            }
-            Event::End(end) if local_name(end.name().as_ref()) == expected => return Ok(nodes),
-            Event::Eof => return Ok(nodes),
+            Event::Eof => return Err(OxmlError::MissingElement("closing timing list".to_owned())),
             _ => {}
         }
         buffer.clear();
     }
+}
+
+fn finish_timing_frame(
+    frames: &mut Vec<TimingParseFrame>,
+    nodes: &mut Vec<TimingNode>,
+    source: &std::sync::Arc<[u8]>,
+    immediate_bytes: &mut usize,
+    xml: &[u8],
+    end: usize,
+) -> Result<()> {
+    let mut frame = frames.pop().expect("completed timing frame");
+    frame
+        .immediate_xml
+        .extend_from_slice(&xml[frame.next_source..end]);
+    *immediate_bytes += frame.immediate_xml.len();
+    let mut node = parse_timing_node(&frame.immediate_xml, &frame.inherited, &frame.namespaces)?;
+    if let TimingNode::Unsupported(unsupported) = &mut node {
+        unsupported.raw_source = std::sync::Arc::clone(source);
+        unsupported.raw_range = frame.source_start..end;
+    }
+    if let Some(common) = timing_common_mut(&mut node) {
+        common.children = frame.children;
+    }
+    if let Some(parent) = frames.last_mut() {
+        parent.next_source = end;
+        if frame.projected {
+            parent.children.push(node);
+        }
+    } else {
+        nodes.push(node);
+    }
+    Ok(())
 }
 
 fn parse_timing_node(
@@ -1967,6 +2227,9 @@ fn parse_container_common(xml: &[u8], inherited: &NamespaceBindings) -> Result<C
                     passed_common_slot = true;
                 }
             }
+            Event::Empty(_) if root.is_none() => {
+                return Err(OxmlError::MissingElement("p:cTn".to_owned()));
+            }
             Event::Empty(child) => {
                 let scope = root.as_ref().expect("root").with_start(&child)?;
                 if scope.element_uri(child.name().as_ref()) == Some(P_NS)
@@ -2352,61 +2615,87 @@ fn parse_condition_list(
     }
 }
 
+struct ConditionPresenceCursor {
+    values: HashMap<(u32, bool, usize), bool>,
+    visits: usize,
+    captured_bytes: usize,
+    maximum_open: usize,
+}
+
 fn collect_condition_target_presence(
     xml: &[u8],
     inherited: &NamespaceBindings,
-) -> Result<HashMap<(u32, bool, usize), bool>> {
-    let mut presence = HashMap::new();
-    collect_condition_target_presence_in_element(xml, inherited, &mut presence)?;
-    Ok(presence)
-}
-
-fn collect_condition_target_presence_in_element(
-    xml: &[u8],
-    inherited: &NamespaceBindings,
-    presence: &mut HashMap<(u32, bool, usize), bool>,
-) -> Result<()> {
+) -> Result<ConditionPresenceCursor> {
+    let mut work = ConditionPresenceCursor {
+        values: HashMap::new(),
+        visits: 0,
+        captured_bytes: 0,
+        maximum_open: 0,
+    };
     let mut reader = Reader::from_reader(xml);
     let mut buffer = Vec::new();
-    let mut root = None;
-    let mut node_id = None;
+    // This stack contains schema-selected owners only. An opaque subtree may
+    // contain arbitrary prefixes or lookalike common nodes without entering it.
+    let mut open: Vec<(NamespaceBindings, Vec<u8>, Option<u32>)> = Vec::new();
     loop {
-        match reader.read_event_into(&mut buffer)? {
-            Event::Start(start) if root.is_none() => {
-                let namespaces = inherited.with_start(&start)?;
-                if namespaces.element_uri(start.name().as_ref()) == Some(P_NS)
-                    && local_name(start.name().as_ref()) == b"cTn"
-                {
-                    let attrs = all_attributes(&start)?;
-                    node_id = attribute(&attrs, "id").and_then(|value| value.parse().ok());
-                }
-                root = Some(namespaces);
-            }
-            Event::Start(child) => {
-                let namespaces = root.as_ref().expect("root set").with_start(&child)?;
-                let local = local_name(child.name().as_ref()).to_vec();
-                let raw = capture_element(&mut reader, &child)?;
-                if let Some(node_id) = node_id
-                    && namespaces.element_uri(child.name().as_ref()) == Some(P_NS)
+        let event = reader.read_event_into(&mut buffer)?;
+        work.visits += 1;
+        let empty = matches!(&event, Event::Empty(_));
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let parent = open.last().map(|v| &v.0).unwrap_or(inherited);
+                let namespaces = parent.with_start(&start)?;
+                let qualified = namespaces.element_uri(start.name().as_ref()) == Some(P_NS);
+                let local = local_name(start.name().as_ref()).to_vec();
+                if open.is_empty() {
+                    validate_element(&start, &namespaces, b"timing")?;
+                    if !empty {
+                        open.push((namespaces, local, None));
+                    }
+                } else if let Some((parent, name, Some(id))) = open.last()
+                    && qualified
+                    && name.as_slice() == b"cTn"
                     && matches!(local.as_slice(), b"stCondLst" | b"endCondLst")
                 {
+                    let raw = if empty {
+                        capture_empty_element(&start)?
+                    } else {
+                        capture_element(&mut reader, &start)?
+                    };
+                    work.captured_bytes += raw.len();
                     collect_condition_list_target_presence(
                         &raw,
-                        root.as_ref().expect("root set"),
-                        node_id,
+                        parent,
+                        *id,
                         local == b"endCondLst",
-                        presence,
+                        &mut work.values,
                     )?;
-                } else {
-                    collect_condition_target_presence_in_element(
-                        &raw,
-                        root.as_ref().expect("root set"),
-                        presence,
-                    )?;
+                } else if qualified
+                    && timing_cursor_child(&open.last().expect("open timing owner").1, &local)
+                {
+                    let id = if local == b"cTn" {
+                        attribute(&all_attributes(&start)?, "id").and_then(|v| v.parse().ok())
+                    } else {
+                        None
+                    };
+                    if !empty {
+                        open.push((namespaces, local, id));
+                    }
+                } else if !empty {
+                    let raw = capture_element(&mut reader, &start)?;
+                    work.captured_bytes += raw.len();
                 }
+                work.maximum_open = work.maximum_open.max(open.len());
             }
-            Event::Empty(_) => {}
-            Event::End(_) | Event::Eof => return Ok(()),
+            Event::End(_) => {
+                open.pop();
+            }
+            Event::Eof => {
+                debug_assert!(work.visits <= xml.len() + 1);
+                debug_assert!(work.captured_bytes <= xml.len());
+                debug_assert!(work.maximum_open <= 4 * crate::MAX_PRESENTATION_NESTING + 2);
+                return Ok(work);
+            }
             _ => {}
         }
         buffer.clear();
@@ -2429,6 +2718,7 @@ fn collect_condition_list_target_presence(
             Event::Start(start) if root.is_none() => {
                 root = Some(inherited.with_start(&start)?);
             }
+            Event::Empty(_) if root.is_none() => return Ok(()),
             Event::Start(child) => {
                 let namespaces = root.as_ref().expect("root set").with_start(&child)?;
                 let raw = capture_element(&mut reader, &child)?;
@@ -3748,6 +4038,15 @@ fn replace_tag_attribute(
     attribute_name: &str,
     value: &str,
 ) -> Result<Vec<u8>> {
+    patch_tag_attribute(xml, range, attribute_name, Some(value))
+}
+
+fn patch_tag_attribute(
+    xml: &[u8],
+    range: std::ops::Range<usize>,
+    attribute_name: &str,
+    value: Option<&str>,
+) -> Result<Vec<u8>> {
     let tag = &xml[range.clone()];
     let mut index = 1usize;
     while index < tag.len()
@@ -3800,6 +4099,11 @@ fn replace_tag_attribute(
             ));
         }
         if &tag[name_start..name_end] == attribute_name.as_bytes() {
+            let Some(value) = value else {
+                let mut output = xml[..range.start + name_start].to_vec();
+                output.extend_from_slice(&xml[range.start + index + 1..]);
+                return Ok(output);
+            };
             let mut output = Vec::with_capacity(xml.len() + value.len());
             output.extend_from_slice(&xml[..range.start + value_start]);
             output.extend_from_slice(escaped_attribute(value, quote).as_bytes());
@@ -3808,6 +4112,9 @@ fn replace_tag_attribute(
         }
         index += 1;
     }
+    let Some(value) = value else {
+        return Ok(xml.to_vec());
+    };
     let insertion = insertion
         .ok_or_else(|| OxmlError::InvalidValue("missing start-tag terminator".to_owned()))?;
     let mut output = Vec::with_capacity(xml.len() + attribute_name.len() + value.len() + 4);
@@ -3819,6 +4126,231 @@ fn replace_tag_attribute(
     output.extend_from_slice(b"\"");
     output.extend_from_slice(&xml[range.start + insertion..]);
     Ok(output)
+}
+
+fn edit_transition_settings(
+    xml: &[u8],
+    inherited: &NamespaceBindings,
+    effect: Option<(&str, &[(&str, &str)])>,
+    duration: Option<u64>,
+    click: Option<bool>,
+    after: Option<u64>,
+) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml);
+    let root = loop {
+        match reader.read_event()? {
+            Event::Start(start) | Event::Empty(start) => break start.into_owned(),
+            Event::Eof => return Err(OxmlError::MissingElement("transition".into())),
+            _ => {}
+        }
+    };
+    let scope = inherited.with_start(&root)?;
+    let root_end = reader.buffer_position() as usize;
+    let mut raw = xml.to_vec();
+    // Reuse a bound duration alias. A new prefix is chosen outside every retained scope.
+    let attributes = all_attributes(&root)?;
+    let existing_duration = attributes
+        .iter()
+        .find(|(key, _)| {
+            local_name(key.as_bytes()) == b"dur"
+                && scope.attribute_uri(key.as_bytes()) == Some(P14_NS)
+        })
+        .map(|(key, _)| key.clone());
+    let duration_key = match existing_duration {
+        Some(key) => key,
+        None => {
+            let mut serial = 0usize;
+            let prefix = loop {
+                let prefix = format!("fx208dur{serial}");
+                if !String::from_utf8_lossy(xml).contains(&format!("{prefix}:"))
+                    && !scope.entries().iter().any(|(key, _)| key == &prefix)
+                {
+                    break prefix;
+                }
+                serial += 1;
+            };
+            if duration.is_some() {
+                raw = patch_tag_attribute(
+                    &raw,
+                    0..root_end,
+                    &format!("xmlns:{prefix}"),
+                    Some(P14_NS),
+                )?;
+            }
+            format!("{prefix}:dur")
+        }
+    };
+    for (key, value) in [
+        (duration_key.as_str(), duration.map(|n| n.to_string())),
+        (
+            "advClick",
+            click.map(|n| if n { "1" } else { "0" }.to_owned()),
+        ),
+        ("advTm", after.map(|n| n.to_string())),
+    ] {
+        let mut r = Reader::from_reader(raw.as_slice());
+        loop {
+            if matches!(r.read_event()?, Event::Start(_) | Event::Empty(_)) {
+                break;
+            }
+        }
+        let end = r.buffer_position() as usize;
+        raw = patch_tag_attribute(&raw, 0..end, key, value.as_deref())?;
+    }
+    replace_transition_effect(&raw, inherited, effect)
+}
+
+fn replace_transition_effect(
+    xml: &[u8],
+    inherited: &NamespaceBindings,
+    effect: Option<(&str, &[(&str, &str)])>,
+) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml);
+    let mut scope = None;
+    let mut root_end = 0usize;
+    let mut insertion = None;
+    loop {
+        let begin = reader.buffer_position() as usize;
+        match reader.read_event()? {
+            Event::Start(start) if scope.is_none() => {
+                scope = Some(inherited.with_start(&start)?);
+                root_end = reader.buffer_position() as usize;
+            }
+            Event::Empty(start) if scope.is_none() => {
+                let end = reader.buffer_position() as usize;
+                let name = start.name().as_ref().to_vec();
+                let mut expanded = xml[..end - 2].to_vec();
+                expanded.extend_from_slice(b">");
+                expanded.extend_from_slice(b"</");
+                expanded.extend_from_slice(&name);
+                expanded.extend_from_slice(b">");
+                expanded.extend_from_slice(&xml[end..]);
+                return replace_transition_effect(&expanded, inherited, effect);
+            }
+            Event::Start(child) | Event::Empty(child) => {
+                let empty = xml[begin..reader.buffer_position() as usize].ends_with(b"/>");
+                let parent = scope.as_ref().expect("transition root");
+                let child_scope = parent.with_start(&child)?;
+                let raw = if empty {
+                    xml[begin..reader.buffer_position() as usize].to_vec()
+                } else {
+                    capture_element(&mut reader, &child)?
+                };
+                let end = reader.buffer_position() as usize;
+                match transition_child_projection(&child, &child_scope, Some(&raw))? {
+                    Some(TransitionChild::Effect(..))
+                    | Some(TransitionChild::UnsupportedEffect) => {
+                        let replacement =
+                            if child_scope.element_uri(child.name().as_ref()) == Some(MC_NS) {
+                                let selected =
+                                    selected_effect_fragment(&raw, parent)?.ok_or_else(|| {
+                                        OxmlError::InvalidValue(
+                                            "cannot edit an unselected transition choice".into(),
+                                        )
+                                    })?;
+                                let replacement =
+                                    edit_transition_effect_fragment(&selected.xml, effect)?;
+                                let mut branch = raw[..selected.range.start].to_vec();
+                                branch.extend_from_slice(&replacement);
+                                branch.extend_from_slice(&raw[selected.range.end..]);
+                                branch
+                            } else {
+                                edit_transition_effect_fragment(&raw, effect)?
+                            };
+                        let mut output = xml[..begin].to_vec();
+                        output.extend_from_slice(&replacement);
+                        output.extend_from_slice(&xml[end..]);
+                        return Ok(output);
+                    }
+                    Some(TransitionChild::SoundAction | TransitionChild::ExtensionList) => {
+                        insertion.get_or_insert(begin);
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(_) => {
+                insertion.get_or_insert(begin);
+                break;
+            }
+            Event::Eof => return Err(OxmlError::MissingElement("closing transition".into())),
+            _ => {}
+        }
+    }
+    let replacement = transition_effect_xml(effect)?;
+    let index = insertion.unwrap_or(root_end);
+    let mut output = xml[..index].to_vec();
+    output.extend_from_slice(&replacement);
+    output.extend_from_slice(&xml[index..]);
+    Ok(output)
+}
+
+fn edit_transition_effect_fragment(
+    xml: &[u8],
+    effect: Option<(&str, &[(&str, &str)])>,
+) -> Result<Vec<u8>> {
+    let Some((name, parameters)) = effect else {
+        return Ok(Vec::new());
+    };
+    let mut reader = Reader::from_reader(xml);
+    let (start, empty) = loop {
+        match reader.read_event()? {
+            Event::Start(start) => break (start.into_owned(), false),
+            Event::Empty(start) => break (start.into_owned(), true),
+            Event::Eof => return Err(OxmlError::MissingElement("transition effect".into())),
+            _ => {}
+        }
+    };
+    if local_name(start.name().as_ref()) != name.as_bytes() {
+        let attrs = all_attributes(&start)?;
+        if !empty
+            || attrs
+                .iter()
+                .any(|(key, _)| key != "dir" && key != "orient" && !key.starts_with("xmlns"))
+        {
+            return Err(OxmlError::InvalidValue(
+                "transition type change cannot discard retained effect payload".into(),
+            ));
+        }
+        return transition_effect_xml(effect);
+    }
+    let mut raw = xml.to_vec();
+    for key in ["dir", "orient"] {
+        let value = parameters
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| *value);
+        let mut reader = Reader::from_reader(raw.as_slice());
+        loop {
+            if matches!(reader.read_event()?, Event::Start(_) | Event::Empty(_)) {
+                break;
+            }
+        }
+        let end = reader.buffer_position() as usize;
+        raw = patch_tag_attribute(&raw, 0..end, key, value)?;
+    }
+    Ok(raw)
+}
+
+fn transition_effect_xml(effect: Option<(&str, &[(&str, &str)])>) -> Result<Vec<u8>> {
+    let Some((name, parameters)) = effect else {
+        return Ok(Vec::new());
+    };
+    if !matches!(
+        name,
+        "fade" | "push" | "wipe" | "split" | "cover" | "pull" | "cut" | "zoom"
+    ) {
+        return Err(OxmlError::InvalidValue(
+            "unsupported authored transition".into(),
+        ));
+    }
+    let mut start = BytesStart::new(format!("p:{name}"));
+    start.push_attribute(("xmlns:p", P_NS));
+    for (key, value) in parameters {
+        start.push_attribute((*key, *value));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer.write_event(Event::Empty(start))?;
+    Ok(writer.into_inner())
 }
 
 fn escaped_attribute(value: &str, quote: u8) -> String {
@@ -3977,6 +4509,9 @@ fn parse_transition_effect(value: &[u8]) -> TransitionEffect {
         b"wipe" => TransitionEffect::Wipe,
         b"push" => TransitionEffect::Push,
         b"zoom" => TransitionEffect::Zoom,
+        b"split" => TransitionEffect::Split,
+        b"cover" => TransitionEffect::Cover,
+        b"pull" => TransitionEffect::Uncover,
         value => TransitionEffect::Other(String::from_utf8_lossy(value).into_owned()),
     }
 }
@@ -3984,7 +4519,8 @@ fn parse_transition_effect(value: &[u8]) -> TransitionEffect {
 fn unsupported(local: &[u8], xml: &[u8]) -> TimingNode {
     TimingNode::Unsupported(TimingUnsupported {
         local_name: String::from_utf8_lossy(local).into_owned(),
-        raw_xml: xml.to_vec(),
+        raw_source: std::sync::Arc::from(xml),
+        raw_range: 0..xml.len(),
     })
 }
 
@@ -3998,4 +4534,162 @@ fn out_of_order(name: &str) -> OxmlError {
 
 fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+#[cfg(test)]
+mod fx214_timing_frames {
+    use super::*;
+    fn nested(depth: usize, sub: bool) -> String {
+        let list = if sub { "subTnLst" } else { "childTnLst" };
+        let mut xml = String::new();
+        for id in 1..=depth {
+            xml.push_str(&format!("<q:par><q:cTn id='{id}'>"));
+            if id < depth {
+                xml.push_str(&format!("<q:{list}>"));
+            }
+        }
+        for id in (1..=depth).rev() {
+            if id < depth {
+                xml.push_str(&format!("</q:{list}>"));
+            }
+            xml.push_str("</q:cTn></q:par>");
+        }
+        xml
+    }
+    fn timing(nodes: &str) -> String {
+        format!(
+            r#"<q:timing xmlns:q="{P_NS}" xmlns:f="urn:foreign"><q:tnLst>{nodes}</q:tnLst></q:timing>"#
+        )
+    }
+    #[test]
+    fn fx214_timing_alias_default_rebound_sublist_and_raw_sources() {
+        for sub in [false, true] {
+            let original = timing(&nested(32, sub));
+            let parsed = CT_Timing::from_xml(original.as_bytes()).unwrap();
+            assert_eq!(parsed.to_xml(), original.as_bytes());
+            let default = original
+                .replace("<q:", "<")
+                .replace("</q:", "</")
+                .replace("xmlns:q=", "xmlns=");
+            assert_eq!(
+                CT_Timing::from_xml(default.as_bytes()).unwrap().to_xml(),
+                default.as_bytes()
+            );
+            let original = timing(&nested(33, sub));
+            let error = CT_Timing::from_xml(original.as_bytes())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("time node nesting exceeds limit 32, offending depth 33"),
+                "{error}"
+            );
+        }
+        let payload = r#"<q:par xmlns:q='urn:foreign' f:keep='&#65;'><q:par/></q:par><!--between--><f:par><f:par/></f:par>"#;
+        let original = timing(payload);
+        let parsed = CT_Timing::from_xml(original.as_bytes()).unwrap();
+        assert_eq!(parsed.to_xml(), original.as_bytes());
+        let TimingNode::Unsupported(first) = &parsed.nodes()[0] else {
+            panic!("foreign payload");
+        };
+        assert_eq!(
+            first.raw_xml(),
+            &payload.as_bytes()[..payload.find("<!--between-->").unwrap()]
+        );
+        assert_eq!(parsed.nodes().len(), 2);
+        let same = CT_Timing::from_xml(original.as_bytes()).unwrap();
+        assert_eq!(same, parsed);
+    }
+    #[test]
+    fn fx214_empty_condition_lists_return_the_existing_empty_model_without_panic() {
+        for name in ["stCondLst", "endCondLst"] {
+            let source = timing(&format!("<q:par><q:cTn id='1'><q:{name}/></q:cTn></q:par>"));
+            let parsed = CT_Timing::from_xml(source.as_bytes()).unwrap();
+            assert_eq!(parsed.condition_has_explicit_target(1, false, 0), None);
+            assert_eq!(parsed.condition_has_explicit_target(1, true, 0), None);
+            assert_eq!(parsed.to_xml(), source.as_bytes());
+        }
+    }
+    #[test]
+    fn fx214_opaque_time_lookalikes_cannot_override_selected_condition_metadata() {
+        let real = "<q:par><q:cTn id='1'><q:stCondLst><q:cond evt='onBegin' delay='0'><q:tn val='2'/></q:cond></q:stCondLst></q:cTn></q:par>";
+        let good = timing(real);
+        assert_eq!(
+            CT_Timing::from_xml(good.as_bytes())
+                .unwrap()
+                .condition_has_explicit_target(1, false, 0),
+            Some(true)
+        );
+        for owner in ["f:opaque", "q:extLst"] {
+            let lookalike = format!(
+                "<{owner}><q:cTn id='1'><q:stCondLst><q:cond/></q:stCondLst></q:cTn></{owner}>"
+            );
+            let source = good.replace("</q:timing>", &format!("{lookalike}</q:timing>"));
+            let parsed = CT_Timing::from_xml(source.as_bytes()).unwrap();
+            assert_eq!(
+                parsed.condition_has_explicit_target(1, false, 0),
+                Some(true),
+                "{owner}"
+            );
+            assert_eq!(parsed.to_xml(), source.as_bytes());
+        }
+    }
+
+    #[test]
+    fn fx214_opaque_depth_does_not_retain_growing_namespace_stack() {
+        let input = |count| {
+            let mut payload = String::new();
+            for index in 0..count {
+                payload.push_str(&format!("<f:opaque xmlns:x{index:08}='urn:opaque'>"));
+            }
+            payload.push_str("<q:cTn id='777'><q:stCondLst><q:cond/></q:stCondLst></q:cTn>");
+            payload.push_str(&"</f:opaque>".repeat(count));
+            timing(&payload)
+        };
+        let small = input(256);
+        let large = input(512);
+        let a = collect_condition_target_presence(small.as_bytes(), &NamespaceBindings::default())
+            .unwrap();
+        let b = collect_condition_target_presence(large.as_bytes(), &NamespaceBindings::default())
+            .unwrap();
+        assert!(a.values.is_empty() && b.values.is_empty());
+        assert_eq!(a.maximum_open, 2);
+        assert_eq!(b.maximum_open, 2);
+        assert_eq!(a.visits, b.visits);
+        let common_bytes = "<q:cTn id='777'><q:stCondLst><q:cond/></q:stCondLst></q:cTn>".len();
+        assert_eq!(
+            b.captured_bytes - common_bytes,
+            2 * (a.captured_bytes - common_bytes)
+        );
+        assert_eq!(
+            CT_Timing::from_xml(large.as_bytes()).unwrap().to_xml(),
+            large.as_bytes()
+        );
+    }
+
+    #[test]
+    fn fx214_timing_immediate_operands_and_cursor_work_are_linear() {
+        let scope = NamespaceBindings::from_entries(&[("q".to_owned(), P_NS.to_owned())]);
+        let list = |breadth| {
+            format!(
+                "<q:tnLst>{}</q:tnLst>",
+                (0..breadth)
+                    .map(|index| format!("<q:par><q:cTn id='{:010}'/></q:par>", index + 1))
+                    .collect::<String>()
+            )
+        };
+        let (_, base_events, base_bytes) =
+            parse_node_frames(list(0).as_bytes(), &scope, b"tnLst").unwrap();
+        let (small, small_events, small_bytes) =
+            parse_node_frames(list(64).as_bytes(), &scope, b"tnLst").unwrap();
+        let (large, large_events, large_bytes) =
+            parse_node_frames(list(128).as_bytes(), &scope, b"tnLst").unwrap();
+        assert_eq!(small.len(), 64);
+        assert_eq!(large.len(), 128);
+        assert_eq!(large_events - base_events, 2 * (small_events - base_events));
+        assert_eq!(large_bytes - base_bytes, 2 * (small_bytes - base_bytes));
+        let nested_list = format!("<q:tnLst>{}</q:tnLst>", nested(32, false));
+        let (_, _, immediate_bytes) =
+            parse_node_frames(nested_list.as_bytes(), &scope, b"tnLst").unwrap();
+        assert!(immediate_bytes <= nested_list.len());
+    }
 }

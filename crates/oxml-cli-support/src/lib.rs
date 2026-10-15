@@ -24,6 +24,77 @@ pub enum Error {
     /// A JSON envelope payload tried to define the reserved schema field.
     #[error("JSON payload must not define reserved field \"schema\"")]
     ReservedSchemaField,
+    /// A replacement map violates the ordered typed array schema.
+    #[error("invalid replacement map: {0}")]
+    InvalidReplacementMap(String),
+}
+
+/// One pair of a replacement map: the text to find, its replacement, and
+/// the count the caller expects, when it gives one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplacementPair {
+    pub placeholder: String,
+    pub value: String,
+    pub expect: Option<usize>,
+}
+
+/// Parses a replacement map, a JSON array of objects such as
+/// `{"placeholder": "{{name}}", "value": "Ada", "expect": 2}`.
+///
+/// `expect` is optional. The pairs keep their order, because a later pair
+/// sees the text an earlier one wrote. Empty arrays succeed. Duplicate object keys
+/// follow serde_json last occurrence wins. A missing or non-string field, a negative or
+/// fractional `expect`, and any other key are refused, naming the
+/// zero-based pair.
+pub fn parse_replacement_map(json: &str) -> Result<Vec<ReplacementPair>, Error> {
+    let invalid = |message: String| Error::InvalidReplacementMap(message);
+    let value: Value =
+        serde_json::from_str(json).map_err(|error| invalid(format!("not JSON: {error}")))?;
+    let Value::Array(entries) = value else {
+        return Err(invalid(
+            "expected an array of {\"placeholder\", \"value\", \"expect\"} objects".to_owned(),
+        ));
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let Value::Object(fields) = entry else {
+                return Err(invalid(format!("pair {index} is not an object")));
+            };
+            if let Some(key) = fields
+                .keys()
+                .find(|key| !matches!(key.as_str(), "placeholder" | "value" | "expect"))
+            {
+                return Err(invalid(format!(
+                    "pair {index} has unknown key \"{key}\" (use placeholder, value, expect)"
+                )));
+            }
+            let text = |key: &str| match fields.get(key) {
+                Some(Value::String(text)) => Ok(text.clone()),
+                _ => Err(invalid(format!("pair {index} needs a string \"{key}\""))),
+            };
+            let placeholder = text("placeholder")?;
+            let expect = match fields.get("expect") {
+                None | Some(Value::Null) => None,
+                Some(count) => Some(
+                    count
+                        .as_u64()
+                        .and_then(|count| usize::try_from(count).ok())
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "pair {index} needs a non-negative integer \"expect\""
+                            ))
+                        })?,
+                ),
+            };
+            Ok(ReplacementPair {
+                placeholder,
+                value: text("value")?,
+                expect,
+            })
+        })
+        .collect()
 }
 
 /// Parses positive one-based values and inclusive ranges.
@@ -623,5 +694,26 @@ mod tests {
         assert_eq!(fs::read(blocked.join("keep")).unwrap(), b"keep");
         assert!(temp_entries(&temp).is_empty());
         fs::remove_dir_all(&temp).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn fx204_maps_preserve_empty_order_null_and_duplicate_key_policy() {
+    assert!(parse_replacement_map("[]").unwrap().is_empty());
+    let pairs=parse_replacement_map(r#"[{"placeholder":"A","value":"first","value":"second","expect":null},{"placeholder":"A","value":"third","expect":0}]"#).unwrap();
+    assert_eq!(pairs[0].value, "second");
+    assert_eq!(pairs[0].expect, None);
+    assert_eq!(pairs[1].expect, Some(0));
+    for value in [
+        r#"{}"#,
+        r#"[null]"#,
+        r#"[{"placeholder":"A","value":3}]"#,
+        r#"[{"placeholder":"A","value":"B","extra":0}]"#,
+        r#"[{"placeholder":"A","value":"B","expect":true}]"#,
+        r#"[{"placeholder":"A","value":"B","expect":-1}]"#,
+        r#"[{"placeholder":"A","value":"B","expect":1.2}]"#,
+    ] {
+        assert!(parse_replacement_map(value).is_err(), "{value}");
     }
 }

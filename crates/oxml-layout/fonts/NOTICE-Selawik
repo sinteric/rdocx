@@ -1,0 +1,8 @@
+Selawik
+Copyright 2015 Microsoft Corporation, Reserved Font Name Selawik.
+Official release: https://github.com/microsoft/Selawik/releases/tag/1.01
+Tag commit: b65ff9ce7c4673e75ec5c622924a6b6f61f2f876
+Archive members: selawk.ttf and selawkb.ttf. Version 1.01.
+Licensed under SIL Open Font License 1.1, see LICENSE-Selawik.
+Upstream documents missing matching Segoe UI kerning and incomplete hinting.
+No genuine italic is included in the official release.

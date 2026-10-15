@@ -20,7 +20,7 @@ replaces text, and produces deterministic fixed output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 40,862 compressed bytes, 179,250 member bytes, 8 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: rpptx-cli | 62,325 compressed bytes, 287,308 member bytes, 8 members | 0.14.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
@@ -33,7 +33,7 @@ It uses `oxml-cli-support` for shared command conventions and the real `rpptx` f
 ## Example
 
 ```sh
-cargo install rpptx-cli --version '^0.14.0'
+cargo install rpptx-cli --version '^0.14.1'
 rpptx inspect deck.pptx --json
 rpptx text deck.pptx --json
 rpptx outline deck.pptx --notes
@@ -98,3 +98,99 @@ becomes a presentation, and a deck that carries a VBA project cannot change to
 a macro-free extension.
 
 Run `rpptx --help` or `rpptx <command> --help` for the complete command surface.
+
+## One-shot editing and fit reports
+
+```sh
+rpptx replace deck.pptx --map pairs.json --json -o filled.pptx
+rpptx slide add deck.pptx --layout 7 --at 1 --json -o added.pptx
+rpptx slide duplicate deck.pptx 2 -o copied.pptx
+rpptx slide remove deck.pptx 2 -o removed.pptx
+rpptx slide move deck.pptx 3 --to 1 -o reordered.pptx
+rpptx slide hide deck.pptx 2 -o hidden.pptx
+rpptx slide show hidden.pptx 2 -o shown.pptx
+rpptx notes set deck.pptx 1 --from-file notes.txt -o noted.pptx
+rpptx fit deck.pptx --json
+rpptx meta get deck.pptx --json
+rpptx meta set deck.pptx --title "Quarterly report" --author Ada -o titled.pptx
+```
+
+Replacement maps are ordered JSON arrays of objects with `placeholder`,
+`value` and optional `expect`. Unknown fields and invalid types refuse.
+An absent or null expectation permits any count, including zero. Each pair
+searches the preceding pair's result, so repeated pairs and cascades are
+meaningful. An empty array succeeds unchanged. Empty placeholders refuse.
+Single `-p/-v` and `--map` are mutually exclusive, and map mode refuses a
+command-line `--expect`. Single replacement retains its refusal on zero matches
+unless `--expect 0` is supplied. Slides and speaker notes share the native
+literal scope. All pairs run in one checked native candidate. A later count
+mismatch or malformed input creates no output and leaves the source unchanged.
+
+Replacement JSON has schema1, action, mode, ordered pairs with index,
+placeholder, value, count and nullable expected, total_count and output.
+Every mutation prints JSON only after publication. New editing commands require
+an output, refuse an existing destination and protect input aliases, symlinks
+and hard links. They use the native extension-based package class and VBA
+contracts. Recoverable staging failures remove this invocation's new files.
+Filesystem cleanup remains best effort rather than crash-atomic publication.
+
+Slide and numeric layout positions are one-based. A decimal layout selects its
+checked numeric index. Other layout values require an exact unique name.
+`--at` is the final insertion position, including append, and defaults to
+append. Creation and placement form one shared native transaction. Duplicate
+inserts directly after its source. Move uses the final destination position,
+and moving to the same position succeeds unchanged. Hide and show also retain
+no-op behavior. Mutation JSON records action, selected slide, resulting slide
+count, output and changed where applicable.
+
+Notes require exactly one of `--text` and `--from-file`. Complete UTF-8 input
+is read before editing. LF, CRLF, carriage returns, leading/trailing spaces,
+Unicode and empty text are retained without trimming or an added newline.
+Existing notes body formatting and opaque payload stay preserved. JSON reports
+the selected slide and Unicode scalar character_count.
+
+`fit` is read-only and consumes the native all-owner `fit_report`, including
+its inherited contexts, admitted table cells and diagnostics. It uses bundled
+deterministic fonts or the strict caller loader through `--font-dir`.
+Frames carry owner part, child path, cell, shape identity/name, context, mode,
+status, current stored values, overflow, needed total scale/reduction and the
+provider's quantized and persisted trials. Dimensions/heights are points,
+old/new bounds are EMU, and needed scale/reduction use hundred-thousandths.
+No permitted fitting trial means nullable needed_scale with
+`reason=unfit-at-floor`. Empty frames remain accounted for. Unsupported
+mandatory owners refuse with diagnostics instead of disappearing. Exit0 means
+all admitted frames were assessed without overflow, exit1 means overflow,
+and exit2 means a checked error. The command does not modify autofit or save.
+
+Core metadata get includes every native core field. Set accepts title, author,
+subject, keywords, description and category, preserving all unspecified fields
+and opaque imported metadata. An empty supplied value removes that field.
+Duplicate flags and an empty set request refuse before publication.
+
+The same common operations are exposed in Python as
+`Presentation.replace_all`, `SlideCollection.add_slide_at` and
+`Presentation.fit_report`. Ordered counts are tuples, count mismatches retain
+index/placeholder/expected/found, and failed or actual no-op batches preserve
+held content handles. FitReport, FitFrameReport and FitTrial are frozen
+snapshots rather than mutable owner selectors.
+
+## Licensed font embedding
+
+Use caller-owned font files only after confirming their embedding license.
+Embedding requires explicit authorization and exact license identity. Commands
+write a new output and refuse input/font aliases or existing destinations.
+
+```bash
+rpptx font embed input.pptx --name "My Face" --font ./MyFace-Regular.ttf \
+  --license-authorized --license-identity "SIL Open Font License 1.1" \
+  --output embedded.pptx
+rpptx font list embedded.pptx --json
+rpptx font settings embedded.pptx --embed-true-type-fonts false --output disabled.pptx
+rpptx font remove embedded.pptx --name "My Face" --kind regular --output removed.pptx
+```
+
+The four CLI kinds are regular, bold, italic and bold-italic. Settings accept
+true, false or none, with none removing the owned value. Listing reports actual
+native part, format and byte-length facts in the schema1 JSON envelope.
+PowerPoint preserves compressed/unknown imported font data and reports absent
+decoded bytes. save-subset-fonts is the other presence-sensitive setting.

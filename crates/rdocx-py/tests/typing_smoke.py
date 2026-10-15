@@ -13,18 +13,23 @@ from rdocx import (
     ContentFragment,
     CoreProperties,
     Document,
+    HtmlDiagnostic,
     Font,
     HeaderFooterVariant,
     Hyperlink,
     Inches,
     Length,
     LayoutFragment,
+    FieldEvaluation,
+    FieldsUpdateReport,
     LayoutBackedFieldUpdateReport,
     LayoutPage,
     ListLevel,
     RGBColor,
     ReplacementCountError,
     Paragraph,
+    Picture,
+    PictureOptions,
     ParagraphCollection,
     ParagraphFormat,
     Revision,
@@ -85,12 +90,15 @@ def exercise_rdocx_types(path: Path) -> None:
     for item in paragraphs:
         item.text
     table: Table = document.add_table(1, 1)
+    assert_type(table.indent, Length | None)
+    table.indent = Inches(-0.25)
+    table.indent = None
     row: Row = table.rows[0]
     cloned_row: Row = table.clone_row(0)
     table.remove_row(0)
     cell: Cell = row.cells[0]
     cell.text = first.text
-    assert_type(table.border("top"), tuple[str, int | None, str | None] | None)
+    assert_type(table.border("top"), tuple[str, int | None, RGBColor | Literal["auto"] | None] | None)
     table.set_borders("single", size=4, color="000000")
     table.set_border("insideV", "dashed", size=8, color="FF0000")
     assert_type(
@@ -109,8 +117,8 @@ def exercise_rdocx_types(path: Path) -> None:
     row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
     row.cant_split = True
     row.is_header = None
-    assert_type(cell.shading, str | None)
-    assert_type(cell.border("bottom"), tuple[str, int | None, str | None] | None)
+    assert_type(cell.shading, RGBColor | Literal["auto"] | None)
+    assert_type(cell.border("bottom"), tuple[str, int | None, RGBColor | Literal["auto"] | None] | None)
     assert_type(
         cell.margins,
         tuple[Length | None, Length | None, Length | None, Length | None] | None,
@@ -206,11 +214,21 @@ def exercise_rdocx_types(path: Path) -> None:
     image_data: bytes | None = document.image_data("rId1")
     document.replace_image("rId1", b"image")
     document.replace_image_for_story(stories[0], "rId1", b"image")
-    resized: int = document.set_picture_size("rId1", width=Inches(1), height=Inches(1))
+    resized: int = document.set_picture_sizes_for_relationship("rId1", width=Inches(1), height=Inches(1))
     story_items: tuple[StoryItem, ...] = document.story_items
-    inserted_picture: StoryItem = document.add_picture(
+    inserted_picture: Picture = document.add_picture(
         b"png", "image.png", Inches(1), Inches(1), after=story_items[0]
     )
+    assert_type(document.pictures(), tuple[Picture, ...])
+    assert_type(document.set_picture_size(inserted_picture, Inches(1), Inches(1)), None)
+    assert_type(inserted_picture.bytes, bytes)
+    assert_type(inserted_picture.title, str | None)
+    assert_type(inserted_picture.decorative, bool)
+    options = PictureOptions(title="owned", decorative=True, crop=(0.1, 0.0, 0.1, 0.0))
+    assert_type(document.paragraphs[0].runs[0].add_picture(path, width=Inches(1), height=Inches(1), options=options), Picture)
+    assert_type(document.tables[0].cell(0, 0).add_picture(b"png", width=Inches(1), height=Inches(1)), Picture)
+    assert_type(document.paragraphs[0].add_internal_hyperlink("jump", "Target", tooltip="tip"), Run)
+    assert_type(document.add_heading_hyperlink(document.paragraphs[0], document.paragraphs[1], "jump"), Run)
     story_position = StoryRunPosition(item=story_items[0], run_index=0)
     handle_position = StoryRunPosition(paragraph=document.paragraphs[0], run_index=0)
     story_range = StoryRunRange(start=story_position, end=handle_position)
@@ -371,3 +389,163 @@ def scoped_replacement_signatures_cover_paragraph_cell_and_story_item(document: 
 def whole_story_setter_signatures(document: Document) -> None:
     assert_type(document.set_header(text="header"), None)
     assert_type(document.set_footer(text="footer"), None)
+
+
+def colour_formats() -> None:
+    from rdocx import Document, MSO_THEME_COLOR, RGBColor
+    from rdocx._rdocx import ColorFormat
+    document = Document()
+    font = document.add_paragraph("").add_run("colour").font
+    assert_type(font.color, ColorFormat)
+    assert_type(font.color.rgb, RGBColor | None)
+    assert_type(font.color.theme_color, str | None)
+    font.color = "#123456"
+    font.color = (1, 2, 3)
+    font.color.rgb = RGBColor(1, 2, 3)
+    font.color.rgb = None
+    font.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+
+
+def fx195_caller_font_render_signatures(document: Document, directory: Path) -> None:
+    from rdocx import SvgRenderResult
+    fonts: list[tuple[str, bytes]] = [("caller", b"font")]
+    dirs: list[str | Path] = [directory, str(directory)]
+    assert_type(document.to_pdf(fonts=fonts, font_dirs=dirs), bytes)
+    assert_type(document.render_page_to_png(0, fonts=fonts, font_dirs=dirs), bytes | None)
+    assert_type(document.render_page_to_svg(0, fonts=fonts, font_dirs=dirs), SvgRenderResult | None)
+    assert_type(document.render_all_pages(fonts=fonts, font_dirs=dirs), list[bytes])
+    assert_type(document.render_pages(pages=None, fonts=fonts, font_dirs=dirs), list[bytes] | bytes)
+    assert_type(document.layout(fonts=fonts, font_dirs=dirs), tuple[LayoutFragment, ...])
+    assert_type(document.layout_page(0, fonts=fonts, font_dirs=dirs), LayoutPage | None)
+    assert_type(document.to_pdf(font_dir=directory), bytes)
+
+
+def fx200_checked_list_factory_signatures(document: Document) -> None:
+    assert_type(document.add_bullet_list_item("item"), Paragraph)
+    assert_type(document.add_bullet_list_item("item", level=8), Paragraph)
+    assert_type(document.add_numbered_list_item("item"), Paragraph)
+    assert_type(document.add_numbered_list_item("item", level=8), Paragraph)
+
+
+def fx203_owned_document_operations(document: Document, paragraph: Paragraph, path: Path) -> None:
+    from rdocx import (
+        ContentControl, CustomFileTime, CustomProperty, DocumentFragment,
+        ContentLocation, Equation, EquationConversionResult, EquationInsertResult,
+        FragmentConflictPolicy, OdtExportResult, RtfExportResult, EpubExportResult,
+        TextReport, ValidationReport, validate_bytes, validate_file,
+    )
+    assert_type(document.text_report(), TextReport)
+    assert_type(document.validate(), ValidationReport)
+    assert_type(validate_bytes(document.to_bytes()), ValidationReport)
+    assert_type(validate_file(path), ValidationReport)
+    assert_type(document.to_odt(), OdtExportResult)
+    assert_type(document.to_rtf(), RtfExportResult)
+    assert_type(document.to_epub(), EpubExportResult)
+    assert_type(document.word_count(), int)
+    assert_type(document.character_count(include_spaces=False), int)
+    assert_type(document.render_template({"name": "Ada", "flag": True, "items": [1, None]}), int)
+    document.settings.track_revisions = None
+    document.app_properties.company = "Example"
+    document.custom_properties.set("date", CustomFileTime("2026-10-12T12:00:00Z"))
+    assert_type(document.custom_properties.get("date"), CustomProperty | None)
+    assert_type(document.custom_properties.delete("absent"), bool)
+    policy = FragmentConflictPolicy.reuse_equivalent().with_style_reuse(False)
+    story = document.stories[0]
+    start = ContentLocation(story, "paragraph", [0])
+    end = ContentLocation.end(story)
+    fragment = DocumentFragment.from_range(document, start, end)
+    assert_type(document.import_fragment(end, fragment, policy=policy), None)
+    assert_type(document.insert_document(Document(), at=0, policy=policy), None)
+    assert_type(document.content_controls(), tuple[ContentControl, ...])
+    assert_type(document.set_content_control_value_by_tag("check", "true"), int)
+    assert_type(paragraph.equations(), tuple[Equation, ...])
+    inserted = paragraph.add_equation("x+1", format="latex")
+    assert_type(inserted, EquationInsertResult)
+    assert_type(inserted.equation.to_latex(), EquationConversionResult)
+
+
+def fx204_shared_operation_types(document: Document) -> None:
+    assert_type(document.replace_all_regex_expected([("x", "y", 1)]), tuple[int, ...])
+    assert_type(document.fill_content_control_tags([("tag", "value")]), tuple[int, ...])
+    fields_report = document.update_all_fields()
+    assert_type(fields_report, FieldsUpdateReport)
+    assert_type(fields_report.ordinary_updated, int)
+    assert_type(fields_report.layout, LayoutBackedFieldUpdateReport)
+    assert_type(fields_report.evaluations, tuple[FieldEvaluation, ...])
+    assert_type(fields_report.total_updated, int)
+    assert_type(fields_report.diagnostics, tuple[str, ...])
+    assert_type(fields_report.saved_cache_scope, str)
+
+
+def html_markdown_imports(source: Path, template: Document, paragraph: Paragraph, image: bytes) -> None:
+    created, notes = Document.from_html("<p>Body</p>", images=(("face.png", image, "face.png"),))
+    assert_type(created, Document)
+    assert_type(notes, tuple[HtmlDiagnostic, ...])
+    assert_type(Document.open_html(source), tuple[Document, tuple[HtmlDiagnostic, ...]])
+    assert_type(Document.from_markdown("# Title", template=template), tuple[Document, tuple[HtmlDiagnostic, ...]])
+    assert_type(Document.open_markdown(source, template=source), tuple[Document, tuple[HtmlDiagnostic, ...]])
+    assert_type(template.insert_html("<p>New</p>", after=paragraph), tuple[HtmlDiagnostic, ...])
+
+
+def check_fx220_font_embedding_types() -> None:
+    from rdocx import Document, FontEmbeddingLicense, FontDefinition, EmbeddedFont
+    from typing import assert_type
+    value = Document()
+    license = FontEmbeddingLicense(authorized=True, identity="OFL 1.1")
+    assert_type(license.authorized, bool)
+    assert_type(license.identity, str)
+    value.embed_font("typed face", b"font", license=license)
+    assert_type(value.fonts, tuple[FontDefinition, ...])
+    assert_type(value.remove_embedded_font("typed face"), EmbeddedFont | None)
+    assert_type(value.remove_font("typed face"), FontDefinition | None)
+    value.set_font(FontDefinition("typed face", family="swiss"))
+    value.embed_system_fonts = None
+    assert_type(value.embed_true_type_fonts, bool | None)
+    value.embed_true_type_fonts = True
+    value.save_subset_fonts = False
+
+
+def fx220_licensed_embedding_recipe(font_path: Path, output_path: Path) -> None:
+    from rdocx import FontEmbeddingLicense, FontDefinition
+    value = Document()
+    license = FontEmbeddingLicense(authorized=True, identity="SIL Open Font License 1.1")
+    value.embed_font("My Face", font_path, "regular", license=license)
+    value.save(output_path)
+    assert_type(value.fonts, tuple[FontDefinition, ...])
+    value.embed_true_type_fonts = False
+    value.remove_embedded_font("My Face", "regular")
+
+
+def fx215_chart_typing() -> None:
+    from rdocx import CategoryChartData, XyChartData, XL_CHART_TYPE
+    data = CategoryChartData()
+    data.categories = ["East", "West"]
+    series = data.add_series("Sales", [11.0, 23.0])
+    assert_type(series.values, tuple[float, ...])
+    xy = XyChartData()
+    xy.add_series("A").add_data_point(1.0, 2.0)
+    document = Document()
+    paragraph = document.add_chart(XL_CHART_TYPE.LINE, data, Inches(4), Inches(2))
+    assert_type(paragraph, Paragraph)
+
+
+def fx211a_checked_word_element_types(document: Document) -> None:
+    paragraph = document.paragraphs[0]
+    assert_type(paragraph.element, Paragraph)
+    assert_type(paragraph.element.xml, str)
+    assert_type(paragraph.element.replace_xml(paragraph.element.xml), None)
+    run = paragraph.runs[0]
+    assert_type(run.element, Run)
+    assert_type(run.element.xml, str)
+    assert_type(run.element.replace_xml(run.element.xml), None)
+    table = document.tables[0]
+    assert_type(table.element, Table)
+    assert_type(table.element.xml, str)
+    assert_type(table.element.replace_xml(table.element.xml), None)
+    cell = table.cell(0, 0)
+    assert_type(cell.element, Cell)
+    assert_type(cell.element.xml, str)
+    assert_type(cell.element.replace_xml(cell.element.xml), None)
+    section = document.section(0)
+    assert_type(section.element.xml, str)
+    assert_type(section.element.replace_xml(section.element.xml), None)

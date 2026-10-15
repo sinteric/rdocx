@@ -11,6 +11,7 @@ use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
 use rdocx_oxml::drawing::{CT_Drawing, CT_Inline};
 use rdocx_oxml::numbering::{CT_AbstractNum, CT_Lvl, CT_Num, CT_Numbering, ST_NumberFormat};
+use rdocx_oxml::properties::CT_PPr;
 use rdocx_oxml::revision::CT_Revision;
 use rdocx_oxml::styles::{CT_Style, CT_Styles, StyleType};
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
@@ -156,15 +157,20 @@ impl<'a> EpubWriter<'a> {
             .iter()
             .map(|heading| (heading.body_index, heading.anchor.clone()))
             .collect::<HashMap<_, _>>();
-        let mut list_counters = HashMap::new();
+        let list_values = selected_epub_list_values(
+            &body,
+            &self.document.styles,
+            self.document.numbering.as_ref(),
+        );
 
         for item in &mut spine {
             let fragment = emit_spine_fragment(
                 &body,
                 &mut input,
+                &self.document.styles,
                 &media,
                 &heading_anchors,
-                &mut list_counters,
+                &list_values,
                 item.start,
                 item.end,
             );
@@ -643,7 +649,13 @@ impl<'a> EpubWriter<'a> {
     }
 
     fn scan_cell_paragraph(&mut self, paragraph: &CT_P, path: &str) -> Result<()> {
-        if detect_list(paragraph, self.document.numbering.as_ref()).is_some() {
+        if detect_list(
+            paragraph,
+            &self.document.styles,
+            self.document.numbering.as_ref(),
+        )
+        .is_some()
+        {
             self.diagnose(
                 format!("{path}/properties/numbering"),
                 "table-cell list semantics were flattened during EPUB export".to_owned(),
@@ -2232,12 +2244,14 @@ fn build_nav_tree(headings: &[Heading]) -> Vec<NavNode> {
     parse(headings, &mut next, 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_spine_fragment(
     content: &[BodyContent],
     input: &mut rdocx_html::HtmlInput,
+    source_styles: &rdocx_oxml::styles::CT_Styles,
     media: &[MediaItem],
     heading_anchors: &HashMap<usize, String>,
-    list_counters: &mut HashMap<(u32, u32), u32>,
+    list_values: &HashMap<usize, u32>,
     start: usize,
     end: usize,
 ) -> Result<String> {
@@ -2252,15 +2266,16 @@ fn emit_spine_fragment(
             continue;
         }
         if let BodyContent::Paragraph(paragraph) = &content[index]
-            && let Some(list) = detect_list(paragraph, input.numbering.as_ref())
+            && let Some(list) = detect_list(paragraph, source_styles, input.numbering.as_ref())
         {
             emit_list_level(
                 &mut output,
                 content,
                 input,
+                source_styles,
                 media,
                 heading_anchors,
-                list_counters,
+                list_values,
                 &mut index,
                 end,
                 list,
@@ -2281,9 +2296,10 @@ fn emit_list_level(
     output: &mut String,
     content: &[BodyContent],
     input: &mut rdocx_html::HtmlInput,
+    source_styles: &rdocx_oxml::styles::CT_Styles,
     media: &[MediaItem],
     heading_anchors: &HashMap<usize, String>,
-    list_counters: &mut HashMap<(u32, u32), u32>,
+    list_values: &HashMap<usize, u32>,
     index: &mut usize,
     end: usize,
     list: ListInfo,
@@ -2293,11 +2309,8 @@ fn emit_list_level(
         return Err(epub_error("list nesting exceeds the EPUB depth limit"));
     }
     let tag = list.kind.tag();
-    let counter_key = (list.num_id, list.level);
-    let effective_start = list_counters
-        .get(&counter_key)
-        .copied()
-        .unwrap_or(list.start);
+    let effective_start = list_values.get(index).copied().unwrap_or(list.start);
+    let mut expected_value = effective_start;
     let mut opening = format!("<{tag}");
     if list.kind == ListKind::None {
         opening.push_str(" class=\"no-marker\"");
@@ -2318,7 +2331,7 @@ fn emit_list_level(
         let BodyContent::Paragraph(paragraph) = &content[*index] else {
             break;
         };
-        let Some(item) = detect_list(paragraph, input.numbering.as_ref()) else {
+        let Some(item) = detect_list(paragraph, source_styles, input.numbering.as_ref()) else {
             break;
         };
         if item.level < list.level
@@ -2334,9 +2347,10 @@ fn emit_list_level(
                 output,
                 content,
                 input,
+                source_styles,
                 media,
                 heading_anchors,
-                list_counters,
+                list_values,
                 index,
                 end,
                 item,
@@ -2348,13 +2362,25 @@ fn emit_list_level(
         if item_open {
             push_bounded_xhtml(output, "</li>\n")?;
         }
-        list_counters.retain(|(num_id, level), _| *num_id != list.num_id || *level <= list.level);
         let anchor = heading_anchors.get(index).map(String::as_str);
         let preserve_heading = projects_as_heading(paragraph, &input.styles);
-        push_bounded_xhtml(output, "<li>")?;
+        let value = list_values.get(index).copied().unwrap_or(expected_value);
+        if list.kind == ListKind::Ordered && value != expected_value {
+            push_bounded_xhtml(output, &format!("<li value=\"{value}\">"))?;
+        } else {
+            push_bounded_xhtml(output, "<li>")?;
+        }
+        // The HTML delegate reads only direct numPr. Materialize the already
+        // selected source list identity on this detached paragraph projection,
+        // because projected styles intentionally omit numbering inheritance.
+        // The original paragraph and the selected counter state stay untouched.
+        let mut projected_paragraph = paragraph.clone();
+        let properties = projected_paragraph.properties.get_or_insert_default();
+        properties.num_id = Some(item.num_id);
+        properties.num_ilvl = Some(item.level);
         let fragment = render_source_block(
             input,
-            &content[*index],
+            &BodyContent::Paragraph(projected_paragraph),
             media,
             if preserve_heading { anchor } else { None },
             preserve_heading,
@@ -2366,8 +2392,7 @@ fn emit_list_level(
         }
         item_open = true;
         if list.kind == ListKind::Ordered {
-            let next = list_counters.entry(counter_key).or_insert(effective_start);
-            *next = next
+            expected_value = value
                 .checked_add(1)
                 .ok_or_else(|| epub_error("list counter overflow during EPUB export"))?;
         }
@@ -2661,6 +2686,22 @@ fn render_drawing_projection(drawing: &CT_Drawing) -> CT_Drawing {
         link_id: None,
         chart_rel_id: chart_rel_id.cloned(),
         description: description.cloned(),
+        title: drawing
+            .inline
+            .as_ref()
+            .and_then(|inline| inline.title.clone())
+            .or_else(|| {
+                drawing
+                    .anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.title.clone())
+            }),
+        decorative: drawing
+            .inline
+            .as_ref()
+            .map(|inline| inline.decorative)
+            .or_else(|| drawing.anchor.as_ref().map(|anchor| anchor.decorative))
+            .unwrap_or(false),
         name: None,
         source_rect: None,
         raw_xml: None,
@@ -2798,8 +2839,66 @@ struct ListInfo {
     marker_style: Option<&'static str>,
 }
 
-fn detect_list(paragraph: &CT_P, numbering: Option<&CT_Numbering>) -> Option<ListInfo> {
-    let properties = paragraph.properties.as_ref()?;
+// Use the same selected native counter state once in source order, rather
+// than restarting a second numbering algorithm at each XHTML list/spine.
+fn effective_epub_list_properties(paragraph: &CT_P, styles: &CT_Styles) -> CT_PPr {
+    let direct = paragraph.properties.as_ref();
+    let mut properties = rdocx_layout::style_resolver::resolve_paragraph_properties(
+        direct.and_then(|value| value.style_id.as_deref()),
+        styles,
+    );
+    if let Some(direct) = direct {
+        properties.merge_from(direct);
+    }
+    properties
+}
+
+fn selected_epub_list_values(
+    content: &[BodyContent],
+    styles: &CT_Styles,
+    numbering: Option<&CT_Numbering>,
+) -> HashMap<usize, u32> {
+    let mut values = HashMap::new();
+    let Some(numbering) = numbering else {
+        return values;
+    };
+    let mut state = rdocx_layout::style_resolver::NumberingState::new();
+    for (index, block) in content.iter().enumerate() {
+        let mut advance = |paragraph: &CT_P, properties: CT_PPr| {
+            if let Some(num_id) = properties.num_id.filter(|value| *value != 0) {
+                let level = properties.num_ilvl.unwrap_or(0);
+                rdocx_layout::style_resolver::generate_marker(num_id, level, numbering, &mut state);
+                if matches!(block, BodyContent::Paragraph(root) if std::ptr::eq(root, paragraph)) {
+                    values.insert(index, state.current(num_id, level));
+                }
+            }
+            if properties.sect_pr.is_some() {
+                state.restart_after_section_break(numbering);
+            }
+        };
+        if let BodyContent::Table(table) = block {
+            // Reuse actual cell styles and accepted native source selection,
+            // even where EPUB intentionally flattens the visual table lists.
+            for (paragraph, properties) in
+                rdocx_layout::table::effective_table_paragraph_properties(table, styles)
+            {
+                advance(paragraph, properties);
+            }
+        } else {
+            visit_body_paragraphs(std::slice::from_ref(block), true, &mut |paragraph| {
+                advance(paragraph, effective_epub_list_properties(paragraph, styles));
+            });
+        }
+    }
+    values
+}
+
+fn detect_list(
+    paragraph: &CT_P,
+    styles: &CT_Styles,
+    numbering: Option<&CT_Numbering>,
+) -> Option<ListInfo> {
+    let properties = effective_epub_list_properties(paragraph, styles);
     let num_id = properties.num_id?;
     let level = properties.num_ilvl.unwrap_or(0);
     if num_id == 0 {
@@ -2815,10 +2914,19 @@ fn detect_list(paragraph: &CT_P, numbering: Option<&CT_Numbering>) -> Option<Lis
         .abstract_nums
         .iter()
         .find(|numbering| numbering.abstract_num_id == abstract_id)?;
-    let definition = abstract_numbering
+    let base = abstract_numbering
         .levels
         .iter()
         .find(|definition| definition.ilvl == level)?;
+    let definition = numbering
+        .nums
+        .iter()
+        .find(|instance| instance.num_id == num_id)?
+        .level_overrides
+        .iter()
+        .find(|value| value.ilvl == level)
+        .and_then(|value| value.level.as_ref())
+        .unwrap_or(base);
     let (kind, marker_style) = epub_list_semantics(definition.num_fmt.as_ref())?;
     Some(ListInfo {
         num_id,
@@ -5908,6 +6016,7 @@ mod tests {
         let mut document = Document::new();
         document.document.background_xml = Some(b"<w:background w:color=\"F0F0F0\"/>".to_vec());
         document.styles.doc_defaults = Some(rdocx_oxml::styles::CT_DocDefaults {
+            source_xml: None,
             ppr: Some(CT_PPr {
                 space_after: Some(Twips(120)),
                 ..Default::default()
@@ -6199,5 +6308,378 @@ mod tests {
         );
         assert!(checked.status.success(), "{report}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn fx200_epub_selected_counter_continues_definition_across_instances_and_spine() {
+        let mut document = Document::new();
+        let definition = document
+            .add_numbering_definition(&[ListLevel::decimal()])
+            .unwrap();
+        let first = document.add_numbering_instance(definition, &[]).unwrap();
+        let second = document.add_numbering_instance(definition, &[]).unwrap();
+        let restarted = document
+            .add_numbering_instance(
+                definition,
+                &[crate::NumberingLevelOverride::new(0).start(5)],
+            )
+            .unwrap();
+        for (index, (text, id)) in [
+            ("first", first),
+            ("second", first),
+            ("third", second),
+            ("fourth", second),
+            ("override five", restarted),
+            ("return six", first),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index == 2 {
+                document.add_paragraph("new spine").set_style("Heading1");
+            }
+            document.add_paragraph(text).set_numbering(id, 0);
+        }
+        let before = document.to_bytes().unwrap();
+        let first_export = document.to_epub_bytes().unwrap();
+        let entries = archive_entries(&first_export.bytes);
+        let body = entry_text(&entries, "EPUB/front.xhtml")
+            + &entry_text(&entries, "EPUB/chapter-001.xhtml");
+        assert!(body.contains("<ol start=\"3\">"), "{body}");
+        assert!(body.contains("<ol start=\"5\">"), "{body}");
+        assert!(body.contains("<ol start=\"6\">"), "{body}");
+        for text in [
+            "first",
+            "second",
+            "third",
+            "fourth",
+            "override five",
+            "return six",
+        ] {
+            assert!(body.contains(text));
+        }
+        assert_eq!(document.to_bytes().unwrap(), before);
+        let reopened = Document::from_bytes(&before).unwrap();
+        assert_eq!(reopened.to_epub_bytes().unwrap().bytes, first_export.bytes);
+        assert_eq!(document.to_epub_bytes().unwrap().bytes, first_export.bytes);
+    }
+
+    #[test]
+    fn fx200_epub_selected_counter_visits_nested_table_paragraphs_without_claiming_table_list_parity()
+     {
+        let mut document = Document::new();
+        let definition = document
+            .add_numbering_definition(&[ListLevel::decimal()])
+            .unwrap();
+        let first = document.add_numbering_instance(definition, &[]).unwrap();
+        let second = document.add_numbering_instance(definition, &[]).unwrap();
+        document
+            .add_paragraph("before table")
+            .set_numbering(first, 0);
+        let mut table = document.add_table(1, 1);
+        table
+            .cell(0, 0)
+            .unwrap()
+            .paragraph_mut(0)
+            .unwrap()
+            .set_numbering(second, 0);
+        document
+            .add_paragraph("after table")
+            .set_numbering(first, 0);
+        let before = document.to_bytes().unwrap();
+        let result = document.to_epub_bytes().unwrap();
+        let entries = archive_entries(&result.bytes);
+        let body = entry_text(&entries, "EPUB/document.xhtml");
+        assert!(body.contains("<ol start=\"3\">"), "{body}");
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("table-cell list semantics were flattened")
+        }));
+        assert_eq!(document.to_bytes().unwrap(), before);
+        assert_eq!(
+            Document::from_bytes(&before)
+                .unwrap()
+                .to_epub_bytes()
+                .unwrap()
+                .bytes,
+            result.bytes
+        );
+    }
+
+    #[test]
+    fn fx200_epub_source_style_base_and_defaults_share_counter_with_direct_and_table_items() {
+        for layer in ["direct", "style", "base", "default"] {
+            let mut document = Document::new();
+            let definition = document
+                .add_numbering_definition(&[ListLevel::decimal()])
+                .unwrap();
+            let number = document.add_numbering_instance(definition, &[]).unwrap();
+            let num = format!("<w:numPr><w:ilvl w:val='0'/><w:numId w:val='{number}'/></w:numPr>");
+            let (defaults, base, selected) = match layer {
+                "style" => (
+                    String::new(),
+                    String::new(),
+                    format!("<w:pPr>{num}</w:pPr>"),
+                ),
+                "base" => (
+                    String::new(),
+                    format!(
+                        "<w:style w:type='paragraph' w:styleId='Base'><w:pPr>{num}</w:pPr></w:style>"
+                    ),
+                    "<w:basedOn w:val='Base'/>".to_owned(),
+                ),
+                "default" => (
+                    format!(
+                        "<w:docDefaults><w:pPrDefault><w:pPr>{num}</w:pPr></w:pPrDefault></w:docDefaults>"
+                    ),
+                    String::new(),
+                    String::new(),
+                ),
+                _ => (String::new(), String::new(), String::new()),
+            };
+            document.styles = rdocx_oxml::styles::CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{defaults}{base}<w:style w:type='paragraph' w:styleId='Selected'>{selected}</w:style></w:styles>"#).as_bytes()).unwrap();
+            let mut first = document.add_paragraph("first source item");
+            first.set_style("Selected");
+            if layer == "direct" {
+                first.set_numbering(number, 0);
+            }
+            // An explicit numId=0 must remain outside the list and must not
+            // consume the definition counter, including inherited defaults.
+            let mut suppressed = document.add_paragraph("suppressed source item");
+            suppressed.set_style("Selected");
+            suppressed.set_numbering(0, 0);
+            // The second item inherits through the same four layers inside
+            // a content control in an inner table, not a direct cell numPr.
+            // The required outer trailing paragraph explicitly disables list
+            // inheritance so pPrDefault cannot consume a fourth counter item.
+            let direct = if layer == "direct" { num.as_str() } else { "" };
+            let nested = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="720"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:sdt><w:sdtContent><w:p><w:pPr><w:pStyle w:val="Selected"/>{direct}</w:pPr><w:r><w:t>nested inherited source item</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:p><w:pPr><w:numPr><w:numId w:val="0"/></w:numPr></w:pPr></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#).as_bytes()).unwrap();
+            let BodyContent::Table(table) = nested.body.content.into_iter().next().unwrap() else {
+                panic!("qualified nested table fixture must remain a typed owner");
+            };
+            document
+                .document
+                .body
+                .content
+                .push(BodyContent::Table(table));
+            document
+                .add_paragraph("third source item")
+                .set_numbering(number, 0);
+            let before = document.to_bytes().unwrap();
+            let export = document
+                .to_epub_bytes()
+                .unwrap_or_else(|error| panic!("{layer}: {error}"));
+            let body = entry_text(&archive_entries(&export.bytes), "EPUB/document.xhtml");
+            assert!(body.contains("<ol>"), "{layer}: {body}");
+            assert!(
+                body.contains("<p>suppressed source item</p>"),
+                "{layer}: explicit numId=0 must remain an ordinary paragraph: {body}"
+            );
+            assert!(
+                !body.contains("<li>suppressed source item"),
+                "{layer}: explicit numId=0 must not become a list item: {body}"
+            );
+            assert!(body.contains("<ol start=\"3\">"), "{layer}: {body}");
+            assert!(
+                body.contains("nested inherited source item"),
+                "{layer}: {body}"
+            );
+            assert!(
+                export.diagnostics.iter().any(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains("table-cell list semantics were flattened")
+                }),
+                "{layer}: real nested inherited list flattening must stay diagnostic"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+            assert_eq!(document.to_epub_bytes().unwrap().bytes, export.bytes);
+            assert_eq!(
+                Document::from_bytes(&before)
+                    .unwrap()
+                    .to_epub_bytes()
+                    .unwrap()
+                    .bytes,
+                export.bytes
+            );
+        }
+    }
+    #[test]
+    fn fx200_epub_table_style_counter_context_matches_native_and_preserves_source() {
+        for case in [
+            "base",
+            "default",
+            "first-row-mask",
+            "first-row-disabled",
+            "cnf-first-row",
+            "direct-zero",
+            "nested",
+            "override-start",
+            "grid-before",
+            "vmerge-continue",
+            "direct-level",
+            "foreign-num",
+        ] {
+            let mut document = Document::new();
+            let definition = document
+                .add_numbering_definition(&[
+                    ListLevel::decimal(),
+                    ListLevel::decimal().level_text("%1.%2."),
+                ])
+                .unwrap();
+            let number = document.add_numbering_instance(definition, &[]).unwrap();
+            let table_number = if case == "override-start" {
+                document
+                    .add_numbering_instance(
+                        definition,
+                        &[crate::NumberingLevelOverride::new(0).start(7)],
+                    )
+                    .unwrap()
+            } else {
+                number
+            };
+            let num =
+                format!("<w:numPr><w:ilvl w:val='0'/><w:numId w:val='{table_number}'/></w:numPr>");
+            let conditional = matches!(
+                case,
+                "first-row-mask" | "first-row-disabled" | "cnf-first-row" | "grid-before"
+            );
+            let style_body = if conditional {
+                let region = if case == "grid-before" {
+                    "firstCol"
+                } else {
+                    "firstRow"
+                };
+                format!("<w:tblStylePr w:type='{region}'><w:pPr>{num}</w:pPr></w:tblStylePr>")
+            } else if case == "foreign-num" {
+                format!("<w:pPr><z:numPr><z:numId z:val='{table_number}'/></z:numPr></w:pPr>")
+            } else {
+                format!("<w:pPr>{num}</w:pPr>")
+            };
+            let default = if case == "default" {
+                " w:default='1'"
+            } else {
+                ""
+            };
+            let base = if case == "base" {
+                format!("<w:style w:type='table' w:styleId='BaseTable'>{style_body}</w:style>")
+            } else {
+                String::new()
+            };
+            let selected = if case == "base" {
+                "<w:basedOn w:val='BaseTable'/>".to_owned()
+            } else {
+                style_body
+            };
+            document.styles = CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:z="urn:table-counter-preservation">{base}<w:style w:type='table' w:styleId='SelectedTable'{default} xmlns:z='urn:table-counter-preservation' z:keep='style'>{selected}<z:stylePayload>exact</z:stylePayload></w:style></w:styles>"#).as_bytes()).unwrap();
+            document
+                .add_paragraph("first source item")
+                .set_numbering(number, 0);
+            let style = if case == "default" {
+                ""
+            } else {
+                "<w:tblStyle w:val='SelectedTable'/>"
+            };
+            let look = match case {
+                "first-row-mask" => "<w:tblLook w:val='0020'/>",
+                "first-row-disabled" | "cnf-first-row" => {
+                    "<w:tblLook w:val='0000' w:firstRow='0'/>"
+                }
+                "grid-before" => "<w:tblLook w:val='0080'/>",
+                _ => "",
+            };
+            let ppr = match case {
+                "direct-zero" => "<w:numPr><w:numId w:val='0'/></w:numPr>",
+                "direct-level" => "<w:numPr><w:ilvl w:val='1'/></w:numPr>",
+
+                _ => "",
+            };
+            let trpr = if case == "grid-before" {
+                "<w:trPr><w:gridBefore w:val='1'/></w:trPr>"
+            } else {
+                ""
+            };
+            let tcpr = match case {
+                "vmerge-continue" => "<w:vMerge/>",
+                "cnf-first-row" => "<w:cnfStyle w:val='100000000000'/>",
+                _ => "",
+            };
+            let grid = if case == "grid-before" {
+                "<w:gridCol w:w='720'/><w:gridCol w:w='720'/>"
+            } else {
+                "<w:gridCol w:w='1440'/>"
+            };
+            let inner = format!(
+                r#"<w:tbl><w:tblPr>{style}{look}<z:tablePayload xmlns:z="urn:table-counter-preservation"/></w:tblPr><w:tblGrid>{grid}</w:tblGrid><w:tr>{trpr}<w:tc><w:tcPr>{tcpr}</w:tcPr><w:sdt><w:sdtContent><w:p><w:pPr>{ppr}</w:pPr><w:r><w:t>table source item</w:t></w:r><z:paragraphPayload xmlns:z="urn:table-counter-preservation">exact</z:paragraphPayload></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>"#
+            );
+            // The outer table explicitly suppresses its trailing paragraph.
+            // Its own style must not leak into the separately styled inner table.
+            let table_xml = if case == "nested" {
+                format!(
+                    r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w='2000'/></w:tblGrid><w:tr><w:tc><w:tcPr/>{inner}<w:p><w:pPr><w:numPr><w:numId w:val='0'/></w:numPr></w:pPr></w:p></w:tc></w:tr></w:tbl>"#
+                )
+            } else {
+                inner
+            };
+            let parsed = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:z="urn:table-counter-preservation"><w:body>{table_xml}</w:body></w:document>"#).as_bytes()).unwrap();
+            let BodyContent::Table(table) = parsed.body.content.into_iter().next().unwrap() else {
+                panic!("typed table owner required");
+            };
+            document
+                .document
+                .body
+                .content
+                .push(BodyContent::Table(table));
+            document
+                .add_paragraph("third source item")
+                .set_numbering(number, 0);
+            let expected = match case {
+                "first-row-disabled" | "direct-zero" | "grid-before" | "vmerge-continue"
+                | "direct-level" | "foreign-num" => 2,
+                "override-start" => 8,
+                _ => 3,
+            };
+            let before = document.to_bytes().unwrap();
+            let styles_before = document.styles.to_xml().unwrap();
+            // Independent existing native layout, before the EPUB assertion.
+            let native = document.layout_deterministic().unwrap();
+            assert_eq!(
+                native
+                    .document_body_paragraph_numbering(2)
+                    .unwrap()
+                    .number_current,
+                expected.to_string(),
+                "native {case}"
+            );
+            let export = document.to_epub_bytes().unwrap();
+            let body = entry_text(&archive_entries(&export.bytes), "EPUB/document.xhtml");
+            assert!(
+                body.contains(&format!("<ol start=\"{expected}\">")),
+                "{case}: {body}"
+            );
+            assert!(body.contains("third source item"), "{case}: {body}");
+            assert_eq!(
+                document.styles.to_xml().unwrap(),
+                styles_before,
+                "style source mutated: {case}"
+            );
+            assert_eq!(
+                document.to_bytes().unwrap(),
+                before,
+                "package source mutated: {case}"
+            );
+            assert_eq!(document.to_epub_bytes().unwrap().bytes, export.bytes);
+            let reopened = Document::from_bytes(&before).unwrap();
+            assert_eq!(
+                reopened.to_epub_bytes().unwrap().bytes,
+                export.bytes,
+                "reopen {case}"
+            );
+            assert_eq!(
+                reopened.styles.to_xml().unwrap(),
+                styles_before,
+                "opaque style source {case}"
+            );
+        }
     }
 }

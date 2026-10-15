@@ -8,6 +8,9 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::fill::{Fill, FillError};
+use crate::namespace::{
+    property_is_drawing, property_namespace_scope, property_reject_writer_conflicts,
+};
 use crate::order::OrderedRawChildren;
 
 const MAX_LINE_WIDTH_EMU: u32 = 20_116_800;
@@ -370,6 +373,14 @@ pub struct CT_LineProperties {
 impl CT_LineProperties {
     /// Parses one complete `a:ln` element with any namespace prefix.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        Self::from_xml_with_inherited_namespaces(xml, &[])
+    }
+
+    /// Parses a property fragment in its actual enclosing namespace scope.
+    pub fn from_xml_with_inherited_namespaces(
+        xml: &[u8],
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
@@ -378,9 +389,14 @@ impl CT_LineProperties {
                 .map_err(OxmlError::from)?
             {
                 Event::Start(element) if matches_local_name(element.name().as_ref(), b"ln") => {
-                    return Self::from_element(&mut reader, &element);
+                    let scope = property_namespace_scope(&element, inherited)?;
+                    property_reject_writer_conflicts(&scope)?;
+                    return Self::from_element(&mut reader, &element, &scope);
                 }
                 Event::Empty(element) if matches_local_name(element.name().as_ref(), b"ln") => {
+                    property_reject_writer_conflicts(&property_namespace_scope(
+                        &element, inherited,
+                    )?)?;
                     return Self::from_start(&element);
                 }
                 Event::Start(element) | Event::Empty(element) => {
@@ -410,15 +426,40 @@ impl CT_LineProperties {
         })
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        start: &BytesStart<'_>,
+        namespaces: &[(String, String)],
+    ) -> Result<Self> {
         let mut line = Self::from_start(start)?;
         let mut boundary = 0;
         let mut buffer = Vec::new();
         loop {
-            match reader
+            let event = reader
                 .read_event_into(&mut buffer)
-                .map_err(OxmlError::from)?
-            {
+                .map_err(OxmlError::from)?;
+            if let Event::Start(element) | Event::Empty(element) = &event {
+                let name = element.name();
+                let local = local_name(name.as_ref());
+                if property_is_drawing(element, namespaces)?
+                    && (is_fill(name.as_ref())
+                        || is_join(name.as_ref())
+                        || matches!(local, b"prstDash" | b"custDash" | b"headEnd" | b"tailEnd"))
+                {
+                    property_reject_writer_conflicts(&property_namespace_scope(
+                        element, namespaces,
+                    )?)?;
+                }
+            }
+            match event {
+                Event::Start(element) if !property_is_drawing(&element, namespaces)? => {
+                    line.raw_children
+                        .push(boundary, capture_element(reader, &element)?);
+                }
+                Event::Empty(element) if !property_is_drawing(&element, namespaces)? => {
+                    line.raw_children
+                        .push(boundary, capture_empty_element(&element)?);
+                }
                 Event::Start(element) if is_fill(element.name().as_ref()) => {
                     line.fill = Some(Fill::from_element(reader, &element)?);
                     boundary = 1;

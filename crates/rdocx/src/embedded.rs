@@ -2004,7 +2004,7 @@ fn namespace_prefix_is_valid(reader: &NsReader<&[u8]>, prefix: &str) -> bool {
     namespace_for_prefix(reader, prefix).is_some()
 }
 
-fn must_understand_prefix_is_valid(reader: &NsReader<&[u8]>, prefix: &str) -> bool {
+pub(crate) fn must_understand_prefix_is_valid(reader: &NsReader<&[u8]>, prefix: &str) -> bool {
     namespace_for_prefix(reader, prefix).is_some_and(|namespace| {
         [
             W_NS,

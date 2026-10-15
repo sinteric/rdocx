@@ -18,7 +18,7 @@ rendering pipelines.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-render | 64,985 compressed bytes, 351,896 member bytes, 8 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx-render` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: rpptx-render | 84,438 compressed bytes, 460,463 member bytes, 8 members | 0.14.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx-render` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
@@ -42,4 +42,4 @@ let missing = relationships.get(RelScope::Slide, "rId1");
 assert!(missing.is_err());
 ```
 
-Add `rpptx-render = "0.14.0"` to your dependencies. See the [rendering API](https://docs.rs/rpptx-render) for input and output types.
+Add `rpptx-render = "0.14.1"` to your dependencies. See the [rendering API](https://docs.rs/rpptx-render) for input and output types.

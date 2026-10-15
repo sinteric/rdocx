@@ -19,6 +19,9 @@ use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::theme::Theme;
 use rdocx_oxml::units::Twips;
 
+/// One checked physical embedded font body and its owned source aliases.
+pub type EmbeddedFontSource = (Vec<String>, Arc<[u8]>);
+
 /// The tracked-revision projection used for Word layout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RevisionView {
@@ -228,9 +231,10 @@ pub struct LayoutInput {
     pub endnotes: Option<CT_Footnotes>,
     /// Document theme (colors + fonts).
     pub theme: Option<Theme>,
-    /// User-provided or DOCX-embedded font files.
-    /// These are loaded before system fonts, so they take priority.
+    /// Genuine caller font files, with priority over embedded and fallback faces.
     pub fonts: Vec<FontFile>,
+    /// Checked physical embedded font bodies with every owned source alias.
+    pub embedded_fonts: Vec<EmbeddedFontSource>,
 }
 
 #[cfg(test)]

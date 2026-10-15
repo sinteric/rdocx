@@ -11,6 +11,7 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import textwrap
 import tomllib
 import unittest
 import zipfile
@@ -26,6 +27,131 @@ from scripts import sprint_workflow as workflow
 
 
 class SprintWorkflowTests(unittest.TestCase):
+    def test_cli_archive_validator_rejects_duplicate_member_payloads(self) -> None:
+        import warnings
+
+        publish = (workflow.REPO / ".github/workflows/wheels.yml").read_text()
+        job = publish[publish.index("  cli-assets:"):]
+        start = job.index("          import os\n")
+        end = job.index("\n          PY", start)
+        consumer = textwrap.dedent(job[start:end])
+        self.assertIn("members =", consumer)
+        repository = workflow.REPO
+        readmes = {family: (repository / f"crates/{family}-cli/README.md").read_bytes()
+                   for family in ("rdocx", "rpptx")}
+        license_bytes = (repository / "LICENSE").read_bytes()
+        targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                   "x86_64-unknown-linux-musl", "x86_64-apple-darwin",
+                   "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+        outcomes = []
+        real_tar_open = tarfile.open
+
+        class MemoryArchive(io.BytesIO):
+            def __init__(self, name, data):
+                super().__init__(data)
+                self.name = name
+                self.suffix = ".zip" if name.endswith(".zip") else ".gz"
+            def is_file(self):
+                return True
+            def __lt__(self, other):
+                return self.name < other.name
+
+        def evaluate(event, duplicate_format=None, duplicate_name=None):
+            families = ("rdocx", "rpptx") if event == "workflow_dispatch" else ("rdocx",)
+            archives = []
+            for family in families:
+                for target in targets:
+                    windows = target.endswith("msvc")
+                    executable = family + (".exe" if windows else "")
+                    members = [(executable, b"synthetic nonempty executable bytes"),
+                               ("README.md", readmes[family]), ("LICENSE", license_bytes)]
+                    chosen = family == "rdocx" and target == (
+                        targets[-1] if duplicate_format == "zip" else targets[0])
+                    if duplicate_format and chosen:
+                        # Invalid earlier payload hidden by the old dictionary collapse.
+                        selected = executable if duplicate_name == "binary" else duplicate_name
+                        members.insert(0, (selected, b"hidden earlier conflicting payload"))
+                    stream = io.BytesIO()
+                    if windows:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", UserWarning)
+                            with zipfile.ZipFile(stream, "w") as archive:
+                                for name, payload in members:
+                                    archive.writestr(name, payload)
+                        suffix = ".zip"
+                    else:
+                        with real_tar_open(fileobj=stream, mode="w:gz") as archive:
+                            for name, payload in members:
+                                entry = tarfile.TarInfo(name)
+                                entry.size = len(payload)
+                                entry.mode = 0o755 if name == executable else 0o644
+                                archive.addfile(entry, io.BytesIO(payload))
+                        suffix = ".tar.gz"
+                    archives.append(MemoryArchive(f"{family}-{target}{suffix}", stream.getvalue()))
+
+            test_receiver = self
+
+            class MemoryPath:
+                def __init__(self, name):
+                    self.name = name
+                def iterdir(self):
+                    test_receiver.assertEqual(self.name, "dist")
+                    return iter(archives)
+                def read_bytes(self):
+                    if self.name == "LICENSE":
+                        return license_bytes
+                    return readmes[self.name.split("/")[1].removesuffix("-cli")]
+
+            def memory_tar_open(name, mode):
+                return real_tar_open(fileobj=name, mode=mode)
+
+            namespace = {}
+            # Replace imported Path locally, keeping every consumer assertion intact.
+            imports, body = consumer.split('tag = os.environ["GITHUB_REF_NAME"]', 1)
+            exec(imports, namespace)
+            namespace["Path"] = MemoryPath
+            with patch.dict(os.environ, GITHUB_EVENT_NAME=event, GITHUB_REF_NAME="v0.16.1"), \
+                 patch.object(tarfile, "open", memory_tar_open):
+                exec('tag = os.environ["GITHUB_REF_NAME"]' + body, namespace)
+            return len(archives)
+
+        for event, expected in [("workflow_dispatch", 12), ("push", 6)]:
+            self.assertEqual(evaluate(event), expected)
+            outcomes.append({"event": event, "clean_archives": expected, "passed": True})
+        for archive_format in ("zip", "tar"):
+            for duplicate_name in ("binary", "README.md", "LICENSE"):
+                with self.assertRaises(AssertionError):
+                    evaluate("workflow_dispatch", archive_format, duplicate_name)
+
+    def test_s91_release_families_match_reviewed_versions(self) -> None:
+        expected = {"rdocx": ("0.16.1", "v0.16.1", 7),
+                    "rpptx": ("0.14.1", "rpptx-v0.14.1", 15)}
+        workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
+        self.assertEqual(workspace["workspace"]["package"]["version"], "0.16.1")
+        locked = {(p["name"], p["version"]) for p in
+                  tomllib.loads((workflow.REPO / "Cargo.lock").read_text())["package"]}
+        changelog = (workflow.REPO / "CHANGELOG.md").read_text()
+        for distribution, (version, tag, count) in expected.items():
+            with self.subTest(distribution=distribution):
+                self.assertEqual(len(workflow.RELEASE_CRATES[distribution]), count)
+                self.assertEqual(workflow.validate_unified_release_family(tag)["version"], version)
+                for name in (*workflow.RELEASE_CRATES[distribution], f"{distribution}-py"):
+                    self.assertIn((name, version), locked)
+                notes = workflow.render_release_notes(changelog, tag)
+                for section in ("Highlights", "Added", "Fixed", "Compatibility", "Contributors"):
+                    self.assertIn(f"### {section}", notes)
+                expected_records = {'rdocx': {'issue': [296, 297, 298, 299, 300, 301, 303, 304, 305, 306, 307, 313, 314, 316, 321, 331, 332, 334, 337, 339, 340, 345, 350, 351, 360, 362], 'pr': [294, 302, 315, 317, 319, 320, 322, 325, 328, 330, 333, 336, 338, 341, 342, 343, 354, 356, 359, 361, 363]}, 'rpptx': {'issue': [295, 296, 297, 299, 307, 308, 309, 310, 311, 312, 313, 314, 316, 323, 344, 345, 346, 347, 348, 349, 352, 353, 360], 'pr': [315, 317, 318, 319, 324, 326, 327, 329, 330, 333, 335, 355, 356, 357, 358, 361]}}[distribution]
+                actual_records = {(kind, int(number)) for kind, number in re.findall(
+                    r"https://github.com/tensorbee/rdocx/(issues|pull)/(\d+)", notes)}
+                self.assertEqual(actual_records, {
+                    ("issues" if kind == "issue" else "pull", number)
+                    for kind, numbers in expected_records.items() for number in numbers})
+        for name in ("rdocx-py", "rpptx-py", "rdocx-wasm", "oxml-py-support"):
+            manifest = tomllib.loads((workflow.REPO / "crates" / name / "Cargo.toml").read_text())
+            self.assertFalse(manifest["package"]["publish"])
+        wasm = tomllib.loads((workflow.REPO / "crates/rpptx-wasm/Cargo.toml").read_text())
+        self.assertEqual(wasm["package"]["version"], "0.12.1")
+
     def test_s90_release_families_match_reviewed_versions(self) -> None:
         expected = {
             "rdocx": ("0.16.0", "v0.16.0", {
@@ -48,11 +174,15 @@ class SprintWorkflowTests(unittest.TestCase):
         for distribution, (version, tag, selected) in expected.items():
             with self.subTest(distribution=distribution):
                 self.assertEqual(set(workflow.RELEASE_CRATES[distribution]), selected)
-                family = workflow.validate_unified_release_family(tag)
-                self.assertEqual(family["version"], version)
+                current_version = (workspace["workspace"]["package"]["version"]
+                                   if distribution == "rdocx" else
+                                   tomllib.loads((workflow.REPO / "crates/rpptx/Cargo.toml").read_text())["package"]["version"])
+                current_tag = ("v" if distribution == "rdocx" else "rpptx-v") + current_version
+                family = workflow.validate_unified_release_family(current_tag)
+                self.assertEqual(family["version"], current_version)
                 self.assertEqual(family["distribution"], distribution)
                 for name in selected | {f"{distribution}-py"}:
-                    self.assertIn((name, version), locked)
+                    self.assertIn((name, current_version), locked)
                 notes = workflow.render_release_notes(changelog, tag)
                 for section in ("Highlights", "Added", "Fixed", "Compatibility", "Contributors"):
                     self.assertIn(f"### {section}", notes)
@@ -79,12 +209,14 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assertIs(manifest["package"]["publish"], False)
             carrier = manifest["package"]["version"]
             actual = workspace["workspace"]["package"]["version"] if isinstance(carrier, dict) else carrier
-            target = "0.12.1" if name == "rpptx-wasm" else "0.14.0" if name == "rpptx-py" else "0.16.0"
+            target = ("0.12.1" if name == "rpptx-wasm" else
+                      tomllib.loads((workflow.REPO / "crates/rpptx/Cargo.toml").read_text())["package"]["version"]
+                      if name == "rpptx-py" else workspace["workspace"]["package"]["version"])
             self.assertEqual(actual, target)
             self.assertIn((name, target), locked)
         ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
         self.assertIn("cargo install wasm-pack --version 0.15.0 --locked", ci)
-        self.assertIn('"0.16.0" "rdocx_wasm"', ci)
+        self.assertIn(f'"{workspace["workspace"]["package"]["version"]}" "rdocx_wasm"', ci)
         self.assertIn('"0.12.1" "rpptx_wasm"', ci)
 
     LARGE_DOCUMENT_TEST = (
@@ -629,8 +761,8 @@ class SprintWorkflowTests(unittest.TestCase):
             f"fonts/{path.name}"
             for path in sorted((*fonts.glob("LICENSE-*"), *fonts.glob("NOTICE-*")))
         )
-        self.assertEqual(len(expected_fonts), 27)
-        self.assertEqual(len(expected_legal), 6)
+        self.assertEqual(len(expected_fonts), 32)
+        self.assertEqual(len(expected_legal), 10)
         self.assertEqual(listed_fonts, expected_fonts)
         self.assertEqual(listed_legal, expected_legal)
         self.assertIn("diff -u", script)
@@ -960,9 +1092,16 @@ class SprintWorkflowTests(unittest.TestCase):
             "Install pinned LibreOffice 26.2.5.2",
             "Create isolated binding environment",
             "Build Python extension",
+            "Prepare independent font acceptance inputs",
             "Run full Python binding suite",
+            "Validate retained compatibility report contracts",
         )
         self.assertEqual(identities, required_order)
+        report = self.yaml_step(job, "Validate retained compatibility report contracts")
+        self.assertEqual(self.yaml_direct_lines(report, 8), (
+            "if: matrix.package.distribution == 'rdocx'",
+            "run: python3 -m unittest -v scripts.test_sprint_workflow.CompatibilityReportTests",
+        ))
         viewer = self.yaml_step(job, "Install pinned LibreOffice 26.2.5.2")
         self.assertEqual(
             self.yaml_direct_lines(viewer, 8),
@@ -1026,7 +1165,7 @@ class SprintWorkflowTests(unittest.TestCase):
             (
                 "brew install \\",
                 "cmake ninja pkg-config fontconfig freetype jpeg-turbo \\",
-                "libpng libtiff little-cms2 openjpeg",
+                "libpng libtiff little-cms2 openjpeg cairo glib",
                 "python3 scripts/install_pinned_poppler.py",
             ),
         )
@@ -1041,6 +1180,8 @@ class SprintWorkflowTests(unittest.TestCase):
                 '"$binding_python" -m pip install \\',
                 'maturin==1.13.3 \\',
                 'pytest==9.1.1 \\',
+                'Pillow==12.3.0 \\',
+                'meson==1.9.1 \\',
                 '"${{ matrix.package.oracle }}"',
             ),
         )
@@ -1057,6 +1198,20 @@ class SprintWorkflowTests(unittest.TestCase):
                 '--manifest-path "crates/${{ matrix.package.crate }}/Cargo.toml"',
             ),
         )
+
+        bootstrap = self.yaml_step(job, "Prepare independent font acceptance inputs")
+        self.assertEqual(self.yaml_direct_lines(bootstrap, 8), ("shell: bash", "env:", "run: |"))
+        self.assertEqual(self.yaml_direct_lines(self.yaml_block(bootstrap, "        env:"), 10), ('CARGO_BUILD_JOBS: "4"',))
+        self.assertEqual(self.yaml_run_lines(bootstrap), (
+            'binding_venv="${RUNNER_TEMP}/${{ matrix.package.distribution }}-venv"',
+            'binding_python="$binding_venv/bin/python"',
+            'export PATH="$binding_venv/bin:$PATH"',
+            '"$binding_python" -I -B crates/rdocx-py/tests/test_rendering_threads.py \\',
+            '--prepare-fx195-inputs "${RUNNER_TEMP}/${{ matrix.package.distribution }}-font-inputs" \\',
+            '--family "${{ matrix.package.distribution }}"',
+        ))
+        self.assertNotIn("continue-on-error", bootstrap)
+        self.assert_no_success_short_circuit(self.yaml_run_lines(bootstrap))
 
         tests = self.yaml_step(job, "Run full Python binding suite")
         self.assertEqual(
@@ -1087,6 +1242,70 @@ class SprintWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assert_python_pr_job_contract(ci)
+
+    def test_python_font_bootstrap_cannot_be_skipped_or_narrowed(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        job = self.yaml_block(ci, "  python-bindings:")
+        bootstrap = self.yaml_step(job, "Prepare independent font acceptance inputs")
+        mutations = {
+            "missing-bootstrap": ci.replace(bootstrap, "", 1),
+            "wrong-family": ci.replace(bootstrap, bootstrap.replace(
+                '--family "${{ matrix.package.distribution }}"', '--family "rdocx"'), 1),
+            "failure-swallowed": ci.replace(bootstrap, bootstrap.replace(
+                '        shell: bash', '        continue-on-error: true\n        shell: bash'), 1),
+            "pillow-missing": ci.replace('            Pillow==12.3.0 \\\n', '', 1),
+        }
+        for name, changed in mutations.items():
+            self.assertNotEqual(ci, changed, name)
+            with self.subTest(mutation=name), self.assertRaises(AssertionError):
+                self.assert_python_pr_job_contract(changed)
+
+    def test_poppler_source_build_requires_source_compiler_and_tool_custody(self) -> None:
+        digest = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source, compiler = directory / "source.tar.xz", directory / "compiler"
+            source.write_bytes(b"bounded test source archive")
+            compiler.write_bytes(b"test compiler bytes")
+            tools = {}
+            for name in install_pinned_poppler.TOOLS:
+                path = directory / name
+                path.write_bytes(("test executable " + name).encode())
+                tools[name] = {"path": str(path), "sha256": digest(path)}
+            receipt = {
+                "status": "actual-source-build",
+                "sourceURL": install_pinned_poppler.POPLER_URL,
+                "sourceArchiveSHA256": digest(source), "sourceArchive": str(source),
+                "installerSHA256": digest(install_pinned_poppler.__file__),
+                "configureExit": 0, "compileExit": 0,
+                "sourceAndCompilerGuardsPassed": True,
+                "configureArgv": ["cmake", "-S", "source"],
+                "compileArgv": ["cmake", "--build", "build"],
+                "compiler": str(compiler), "compilerSHA256": digest(compiler),
+                "compilerVersion": "test compiler identity", "tools": tools,
+            }
+            record = directory / "receipt.json"
+            executable = Path(tools["pdftoppm"]["path"])
+            def authenticate(value):
+                record.write_text(json.dumps(value))
+                install_pinned_poppler.authenticated_tool(record, digest(record), executable)
+            with patch.object(install_pinned_poppler, "POPLER_SHA256", digest(source)):
+                authenticate(receipt)
+                for key, bad in [("status", "version-only"), ("sourceArchiveSHA256", "0" * 64),
+                                 ("compilerSHA256", "0" * 64), ("compileExit", 1),
+                                 ("sourceAndCompilerGuardsPassed", False)]:
+                    with self.subTest(field=key), self.assertRaises(RuntimeError):
+                        authenticate({**receipt, key: bad})
+                authenticate(receipt)
+                with self.assertRaisesRegex(RuntimeError, "receipt changed"):
+                    install_pinned_poppler.authenticated_tool(record, "0" * 64, executable)
+                executable.write_bytes(b"substituted same-version executable")
+                with self.assertRaisesRegex(RuntimeError, "executable"):
+                    authenticate(receipt)
+                executable.write_bytes(b"test executable pdftoppm")
+                source.write_bytes(b"substituted archive")
+                with self.assertRaises(RuntimeError):
+                    authenticate(receipt)
 
     def test_pinned_poppler_installer_contract(self) -> None:
         installer_path = workflow.REPO / "scripts/install_pinned_poppler.py"
@@ -2083,7 +2302,12 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assertIn(old, python_job)
             return ci.replace(python_job, python_job.replace(old, new, 1), 1)
 
+        report = self.yaml_step(python_job, "Validate retained compatibility report contracts")
         mutations = {
+            "missing-compatibility-contract-step": ci.replace(report, "", 1),
+            "wrong-compatibility-matrix-cell": ci.replace(report, report.replace("== 'rdocx'", "== 'rpptx'"), 1),
+            "narrowed-compatibility-contracts": ci.replace(report, report.replace("CompatibilityReportTests", "CompatibilityReportTests.test_assertion_exits_do_not_manufacture_correct_file_credit"), 1),
+            "swallowed-compatibility-contract-failure": ci.replace(report, report.replace("        if:", "        continue-on-error: true\n        if:"), 1),
             "missing-pull-request-trigger": ci.replace(
                 "  pull_request:\n", "", 1
             ),
@@ -2432,7 +2656,7 @@ class SprintWorkflowTests(unittest.TestCase):
             "wasm-pack build --target bundler --scope tensorbee --release "
             '--out-dir "$package_root/rpptx-wasm" crates/rpptx-wasm --locked',
             'verify_package "$package_root/rdocx-wasm" "@tensorbee/rdocx-wasm" '
-            '"0.16.0" "rdocx_wasm"',
+            '"0.16.1" "rdocx_wasm"',
             'verify_package "$package_root/rpptx-wasm" "@tensorbee/rpptx-wasm" '
             '"0.12.1" "rpptx_wasm"',
             "npm install --prefix \"$consumer_root\" --cache \"$npm_cache\" "
@@ -2754,6 +2978,69 @@ class SprintWorkflowTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(AssertionError):
                 self.assert_wasm_pr_job_contract(mutated)
 
+    def assert_wheel_priority_routes(self, job: str) -> dict[str, list[str]]:
+        environment = self.yaml_block(job, "    env:")
+        marker = "      WHEEL_TEST_NODES: >-\n"
+        self.assertEqual(environment.count(marker), 1)
+        inventory = json.loads(textwrap.dedent(environment.split(marker, 1)[1]))
+        self.assertEqual(set(inventory), {"rdocx", "rpptx"})
+        for family, count in (("rdocx", 37), ("rpptx", 41)):
+            nodes = inventory[family]
+            self.assertEqual(len(nodes), count)
+            self.assertEqual(len(set(nodes)), count)
+            self.assertTrue(all(node.startswith(f"crates/{family}-py/tests/") for node in nodes))
+        identity = hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(identity, "28abec50e648f84c3072d224c947d81bc1cb2d9cc1766cccd61022046a3fa2b8")
+        expected = ('import json\nimport os\nimport subprocess\nimport sys\n\n'
+                    'nodes = json.loads(os.environ["WHEEL_TEST_NODES"])[os.environ["PACKAGE_DISTRIBUTION"]]\n'
+                    'subprocess.run([sys.executable, "-m", "pytest", *nodes], check=True)')
+        native = self.yaml_step(job, "Install and test native wheel")
+        musl = self.yaml_step(job, "Install and test musllinux wheel")
+        for step in (native, musl):
+            start = step.index("          import json\n")
+            end = step.index("\n          PY", start)
+            self.assertEqual(textwrap.dedent(step[start:end]), expected)
+            self.assertEqual(step.count('subprocess.run([sys.executable, "-m", "pytest", *nodes], check=True)'), 1)
+            self.assertNotIn("-k ", step)
+            self.assertNotIn('"$venv_python" -m pytest', step)
+        self.assertIn('PACKAGE_DISTRIBUTION="${{ matrix.package.distribution }}" "$venv_python" - <<\'PY\'', self.yaml_run_lines(native))
+        self.assertIn('-e WHEEL_TEST_NODES \\', self.yaml_run_lines(musl))
+        self.assertIn('"$venv_python" - << "PY"', self.yaml_run_lines(musl))
+        self.assertIn("sh -euxc '", self.yaml_run_lines(musl))
+        return inventory
+
+    def test_wheel_priority_routes_preserve_exact_membership_and_both_consumers(self) -> None:
+        import sys
+        ci = (workflow.REPO / ".github/workflows/wheels.yml").read_text()
+        job = self.yaml_block(ci, "  build-wheels:")
+        inventory = self.assert_wheel_priority_routes(job)
+        native = self.yaml_step(job, "Install and test native wheel")
+        start = native.index("          import json\n")
+        end = native.index("\n          PY", start)
+        consumer = textwrap.dedent(native[start:end])
+        for family in inventory:
+            with patch.dict(os.environ, {"WHEEL_TEST_NODES": json.dumps(inventory), "PACKAGE_DISTRIBUTION": family}), patch("subprocess.run") as run:
+                exec(compile(consumer, "wheels.yml installed priority consumer", "exec"), {})
+                run.assert_called_once_with([sys.executable, "-m", "pytest", *inventory[family]], check=True)
+        changed = {}
+        for name, mutate in (("missing", lambda nodes: nodes.pop()),
+                             ("extra", lambda nodes: nodes.append("crates/rdocx-py/tests/test_core.py::unreviewed")),
+                             ("duplicate", lambda nodes: nodes.__setitem__(0, nodes[1]))):
+            value = json.loads(json.dumps(inventory))
+            mutate(value["rdocx"])
+            old = self.yaml_block(job, "    env:")
+            replacement = '    env:\n      WHEEL_TEST_NODES: >-\n' + ''.join('        ' + line + '\n' for line in json.dumps(value, indent=2).splitlines())
+            changed[name] = job.replace(old, replacement, 1)
+        changed["musl-env-missing"] = job.replace('            -e WHEEL_TEST_NODES \\\n', '', 1)
+        changed["native-ignores-inventory"] = job.replace('PACKAGE_DISTRIBUTION="${{ matrix.package.distribution }}" "$venv_python" - <<\'PY\'', '"$venv_python" -c "pass" #', 1)
+        changed["musl-env-commented"] = job.replace('            -e WHEEL_TEST_NODES', '            # -e WHEEL_TEST_NODES', 1)
+        changed["musl-consumer-commented"] = job.replace('              "$venv_python" - << "PY"', '              # "$venv_python" - << "PY"', 1)
+        changed["both-ignore-failure"] = job.replace('"pytest", *nodes], check=True)', '"pytest", *nodes], check=False)')
+        for name, value in changed.items():
+            self.assertNotEqual(job, value, name)
+            with self.subTest(mutation=name), self.assertRaises((AssertionError, ValueError)):
+                self.assert_wheel_priority_routes(value)
+
     def assert_wheels_workflow_contract(self, workflow_bytes: bytes) -> None:
         wheels = workflow_bytes.decode("utf-8", errors="strict")
         self.assertIn('tags: ["v*", "rpptx-v*"]', wheels)
@@ -2809,12 +3096,7 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn("Install and test native wheel", wheel_build)
         self.assertIn("Install and test musllinux wheel", wheel_build)
         self.assertIn("Validate installed typing surface", wheel_build)
-        self.assertEqual(wheel_build.count('-k "not test_issue_158_deck_fixture_acceptance"'), 1)
-        self.assertEqual(wheel_build.count('-k "not test_issue_158_deck_fixture_acceptance and not test_issue_217_complete_deck_chain"'), 1)
-        self.assertIn("The SHA-bound Issue 158 viewer oracle runs in pinned CI", wheel_build)
-        self.assertEqual(wheel_build.count('-k "not test_issue_253_pdf_text_view"'), 1)
-        self.assertEqual(wheel_build.count('-k "not test_issue_253_pdf_text_view and not test_issue_158_complete_word_workflow"'), 1)
-        self.assertIn("The Issue 253 PDF text oracle requires pinned Poppler 26.01.0 in CI", wheel_build)
+        self.assert_wheel_priority_routes(wheel_build)
         self.assertIn("needs: build-cli-assets", cli_review)
         self.assertIn("expected_members = {executable, \"README.md\", \"LICENSE\"}", cli_review)
         self.assertIn("needs: [cli-assets, build-wheels, build-sdists]", aggregate)
@@ -2853,8 +3135,20 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertLess(release.index("Verify selected registry publication"), release.index("Create GitHub Release from reviewed notes"))
         self.assertIn('gh release create "${{ github.ref_name }}"', release)
         self.assertIn('"${RUNNER_TEMP}/family-assets/"*', release)
-        for job in (cli_build, cli_review, aggregate, crates, pypi, release):
-            self.assertIn("if: github.event_name == 'push'", job)
+        for job in (cli_build, cli_review):
+            self.assertEqual(
+                [line.strip() for line in job.splitlines() if line.startswith("    if:")],
+                ["if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'"],
+            )
+        for job in (aggregate, crates, release):
+            self.assertEqual(
+                [line.strip() for line in job.splitlines() if line.startswith("    if:")],
+                ["if: github.event_name == 'push'"],
+            )
+        self.assertEqual(
+            [line.strip() for line in pypi.splitlines() if line.startswith("    if:")],
+            ["if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/rpptx-v'))"],
+        )
 
     def test_wheels_workflow_covers_every_package_target_and_clean_install(
         self,
@@ -2892,6 +3186,15 @@ class SprintWorkflowTests(unittest.TestCase):
             "unpinned-action": ('actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8', 'actions/attest-build-provenance@v4'),
             "fallback": ('cargo publish -p rdocx-opc', 'cargo publish -p rdocx-opc || true'),
         }
+        for header in ("build-cli-assets", "cli-assets", "release-assets", "publish-crates", "publish-pypi", "release"):
+            original_job = self.yaml_block(wheels, f"  {header}:")
+            condition = next(line for line in original_job.splitlines(keepends=True) if line.startswith("    if:"))
+            for replacement in ("    if: github.event_name == 'workflow_dispatch'\n",
+                                "    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'\n"):
+                with self.subTest(job=header, condition=replacement):
+                    changed_job = original_job.replace(condition, replacement, 1)
+                    with self.assertRaises(AssertionError):
+                        self.assert_wheels_workflow_contract(wheels.replace(original_job, changed_job, 1).encode())
         for name, (before, after) in mutations.items():
             with self.subTest(name=name):
                 self.assertIn(before, wheels)
@@ -3732,7 +4035,7 @@ class SprintWorkflowTests(unittest.TestCase):
         return notes
 
     def test_stable_release_family_is_prepared_at_0_15_0(self) -> None:
-        expected_version = "0.16.0"
+        expected_version = "0.16.1"
         stable_members = (
             "oxml-py-support",
             "rdocx-opc",
@@ -3827,7 +4130,7 @@ class SprintWorkflowTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(rpptx_pyproject["project"]["version"], "0.14.0")
+        self.assertEqual(rpptx_pyproject["project"]["version"], "0.14.1")
 
         migration = (
             workflow.REPO / "docs/hld/11-migration-plan.md"
@@ -3862,13 +4165,13 @@ class SprintWorkflowTests(unittest.TestCase):
             )
 
         readme_requirements = {
-            "README.md": ('rdocx = "0.16.0"', 'version = "0.16.0"'),
-            "crates/rdocx-cli/README.md": ("--version '^0.16.0'",),
-            "crates/rdocx-html/README.md": ('rdocx-html = "0.16.0"',),
-            "crates/rdocx-layout/README.md": ('rdocx-layout = "0.16.0"',),
-            "crates/rdocx-opc/README.md": ('rdocx-opc = "0.16.0"',),
-            "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.16.0"',),
-            "crates/rdocx-pdf/README.md": ('rdocx-pdf = "0.16.0"',),
+            "README.md": ('rdocx = "0.16.1"', 'version = "0.16.1"'),
+            "crates/rdocx-cli/README.md": ("--version '^0.16.1'",),
+            "crates/rdocx-html/README.md": ('rdocx-html = "0.16.1"',),
+            "crates/rdocx-layout/README.md": ('rdocx-layout = "0.16.1"',),
+            "crates/rdocx-opc/README.md": ('rdocx-opc = "0.16.1"',),
+            "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.16.1"',),
+            "crates/rdocx-pdf/README.md": ('rdocx-pdf = "0.16.1"',),
         }
         for path, requirements in readme_requirements.items():
             text = (workflow.REPO / path).read_text(encoding="utf-8")
@@ -3888,7 +4191,7 @@ class SprintWorkflowTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            expected_incubating_version = "0.12.1" if name == "rpptx-wasm" else "0.14.0"
+            expected_incubating_version = "0.12.1" if name == "rpptx-wasm" else "0.14.1"
             self.assertEqual(manifest["package"]["version"], expected_incubating_version, name)
             self.assertIs(
                 manifest["package"].get("publish", True),
@@ -4000,8 +4303,8 @@ class SprintWorkflowTests(unittest.TestCase):
     def test_s73_release_contract_requires_four_version_aligned_families(
         self,
     ) -> None:
-        stable_version = "0.16.0"
-        incubating_version = "0.14.0"
+        stable_version = "0.16.1"
+        incubating_version = "0.14.1"
         stable_publishable = {
             "rdocx-opc",
             "rdocx-oxml",
@@ -4679,13 +4982,13 @@ rdocx-layout = "=0.10.1"
         readme = (workflow.REPO / "README.md").read_text(encoding="utf-8")
         self.assertTrue(readme_doctests.validate_root_versions(readme, metadata))
         for requirement in (
-            'rdocx = "0.16.0"',
-            'rdocx = { version = "0.16.0", default-features = false }',
-            "cargo install rdocx-cli --version '^0.16.0'",
+            'rdocx = "0.16.1"',
+            'rdocx = { version = "0.16.1", default-features = false }',
+            "cargo install rdocx-cli --version '^0.16.1'",
         ):
             with self.subTest(requirement=requirement):
                 mutation = readme.replace(
-                    requirement, requirement.replace("0.16.0", "9.9.9")
+                    requirement, requirement.replace("0.16.1", "9.9.9")
                 )
                 self.assertFalse(
                     readme_doctests.validate_root_versions(mutation, metadata)
@@ -4859,7 +5162,7 @@ rdocx-layout = "=0.10.1"
         mutations = (
             text.replace("| 2026-09-19 |", "|  |", 1),
             text.replace("| 2026-09-19 |", "| 19 September 2026 |", 1),
-            text.replace("| 0.16.0 |", "| 9.9.9 |", 1),
+            text.replace("| 0.16.1 |", "| 9.9.9 |", 1),
             text.replace("| rdocx 0.14.0 |", "| rdocx 9.9.9 |", 1),
         )
         self.assertFalse(readme_doctests.valid_measurement_date("2026-99-99"))
@@ -5066,9 +5369,9 @@ rdocx-layout = "=0.10.1"
             "rpptx-cli",
         )
         preparation_packages = (*incubating_packages, "rpptx-wasm")
-        expected_version = "0.14.0"
+        expected_version = "0.14.1"
         root = tomllib.loads((workflow.REPO / "Cargo.toml").read_text(encoding="utf-8"))
-        self.assertEqual(root["workspace"]["package"]["version"], "0.16.0")
+        self.assertEqual(root["workspace"]["package"]["version"], "0.16.1")
         dependencies = root["workspace"]["dependencies"]
         lock = tomllib.loads((workflow.REPO / "Cargo.lock").read_text(encoding="utf-8"))
         lock_versions = {
@@ -5101,21 +5404,21 @@ rdocx-layout = "=0.10.1"
         self.assertEqual(lock_versions["rpptx-wasm"], "0.12.1")
 
         readme_requirements = {
-            "crates/oxml-core/README.md": ('oxml-core = "0.14.0"',),
-            "crates/oxml-drawing/README.md": ('oxml-drawing = "0.14.0"',),
-            "crates/oxml-layout/README.md": ('version = "0.14.0"',),
-            "crates/oxml-media/README.md": ('oxml-media = "0.14.0"',),
-            "crates/oxml-opc/README.md": ('oxml-opc = "0.14.0"',),
+            "crates/oxml-core/README.md": ('oxml-core = "0.14.1"',),
+            "crates/oxml-drawing/README.md": ('oxml-drawing = "0.14.1"',),
+            "crates/oxml-layout/README.md": ('version = "0.14.1"',),
+            "crates/oxml-media/README.md": ('oxml-media = "0.14.1"',),
+            "crates/oxml-opc/README.md": ('oxml-opc = "0.14.1"',),
             "crates/oxml-pdf/README.md": (
-                'oxml-pdf = "0.14.0"',
-                'oxml-layout = "0.14.0"',
+                'oxml-pdf = "0.14.1"',
+                'oxml-layout = "0.14.1"',
             ),
-            "crates/oxml-chart/README.md": ('oxml-chart = "0.14.0"',),
-            "crates/rpptx-chart/README.md": ('rpptx-chart = "0.14.0"',),
-            "crates/rpptx-cli/README.md": ("--version '^0.14.0'",),
-            "crates/rpptx-layout/README.md": ('rpptx-layout = "0.14.0"',),
-            "crates/rpptx-oxml/README.md": ('rpptx-oxml = "0.14.0"',),
-            "crates/rpptx-render/README.md": ('rpptx-render = "0.14.0"',),
+            "crates/oxml-chart/README.md": ('oxml-chart = "0.14.1"',),
+            "crates/rpptx-chart/README.md": ('rpptx-chart = "0.14.1"',),
+            "crates/rpptx-cli/README.md": ("--version '^0.14.1'",),
+            "crates/rpptx-layout/README.md": ('rpptx-layout = "0.14.1"',),
+            "crates/rpptx-oxml/README.md": ('rpptx-oxml = "0.14.1"',),
+            "crates/rpptx-render/README.md": ('rpptx-render = "0.14.1"',),
         }
         for path, requirements in readme_requirements.items():
             text = (workflow.REPO / path).read_text(encoding="utf-8")
@@ -5124,29 +5427,29 @@ rdocx-layout = "=0.10.1"
 
         source_requirements = {
             "crates/oxml-chart/src/lib.rs": (
-                'manifest.contains("version = \\"0.14.0\\"")',
+                'manifest.contains("version = \\"0.14.1\\"")',
             ),
             "crates/oxml-drawing/src/lib.rs": (
-                'manifest.contains("version = \\"0.14.0\\"")',
+                'manifest.contains("version = \\"0.14.1\\"")',
             ),
             "crates/rdocx-wasm/src/lib.rs": (
                 'oxml-layout = { path = \\"crates/oxml-layout\\", '
-                'version = \\"0.14.0\\", default-features = false }',
+                'version = \\"0.14.1\\", default-features = false }',
             ),
             "crates/rpptx-oxml/tests/integration.rs": (
-                'manifest.contains("version = \\"0.14.0\\"")',
+                'manifest.contains("version = \\"0.14.1\\"")',
             ),
             "crates/rpptx-render/src/lib.rs": (
-                'manifest.contains("version = \\"0.14.0\\"")',
+                'manifest.contains("version = \\"0.14.1\\"")',
             ),
             "crates/rpptx-wasm/src/lib.rs": (
-                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.0\\", '
+                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.1\\", '
                 'default-features = false }',
             ),
             "crates/rpptx/tests/integration.rs": (
-                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.0\\", '
+                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.1\\", '
                 'default-features = false }',
-                'manifest.contains("version = \\"0.14.0\\"")',
+                'manifest.contains("version = \\"0.14.1\\"")',
             ),
         }
         for path, requirements in source_requirements.items():
@@ -5579,8 +5882,8 @@ rdocx-layout = "=0.10.1"
         self,
     ) -> None:
         expected = {
-            "rdocx": ("rdocx-py", "0.16.0", "v0.16.0"),
-            "rpptx": ("rpptx-py", "0.14.0", "rpptx-v0.14.0"),
+            "rdocx": ("rdocx-py", "0.16.1", "v0.16.1"),
+            "rpptx": ("rpptx-py", "0.14.1", "rpptx-v0.14.1"),
         }
         workspace = tomllib.loads(
             (workflow.REPO / "Cargo.toml").read_text(encoding="utf-8")
@@ -5705,9 +6008,9 @@ rdocx-layout = "=0.10.1"
             self.assertIn("## Project links", readme)
 
     def test_rdocx_v0_15_0_unified_family_contract(self) -> None:
-        family = workflow.validate_unified_release_family("v0.16.0")
+        family = workflow.validate_unified_release_family("v0.16.1")
         self.assertEqual(family["distribution"], "rdocx")
-        self.assertEqual(family["version"], "0.16.0")
+        self.assertEqual(family["version"], "0.16.1")
         self.assertEqual(
             set(workflow.RELEASE_CRATES["rdocx"]),
             {
@@ -5718,7 +6021,7 @@ rdocx-layout = "=0.10.1"
         project = tomllib.loads(
             (workflow.REPO / "crates/rdocx-py/pyproject.toml").read_text()
         )
-        self.assertEqual(project["project"]["version"], "0.16.0")
+        self.assertEqual(project["project"]["version"], "0.16.1")
 
     def test_unified_release_family_rejects_mismatched_version_carriers(self) -> None:
         workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
@@ -5782,9 +6085,9 @@ rdocx-layout = "=0.10.1"
                     workflow.validate_unified_release_family(f"v{stable}")
 
     def test_rpptx_v0_13_1_unified_family_contract(self) -> None:
-        family = workflow.validate_unified_release_family("rpptx-v0.14.0")
+        family = workflow.validate_unified_release_family("rpptx-v0.14.1")
         self.assertEqual(family["distribution"], "rpptx")
-        self.assertEqual(family["version"], "0.14.0")
+        self.assertEqual(family["version"], "0.14.1")
         self.assertEqual(len(workflow.RELEASE_CRATES["rpptx"]), 15)
         self.assertTrue(set(workflow.RELEASE_CRATES["rpptx"]).isdisjoint(
             workflow.RELEASE_CRATES["rdocx"]
@@ -6771,7 +7074,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertIn("crates/oxml-chart", root["members"])
         self.assertEqual(
             root["dependencies"]["oxml-chart"],
-            {"path": "crates/oxml-chart", "version": "0.14.0"},
+            {"path": "crates/oxml-chart", "version": "0.14.1"},
         )
 
         shim = tomllib.loads(
@@ -6866,7 +7169,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertEqual(normalized(b"reviewed\r\ntext\r\n"), b"reviewed\ntext\n")
         self.assertNotEqual(normalized(b"changed\r\ntext\r\n"), b"reviewed\ntext\n")
 
-        expected_version = "0.14.0"
+        expected_version = "0.14.1"
         for member in (
             "oxml-core",
             "oxml-opc",
@@ -7535,7 +7838,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertIn("system-fonts", features)
         self.assertNotIn("bundled-fonts", features)
         claimed_font_count = re.findall(r"([0-9]+) bundled TTFs", claude)
-        self.assertEqual(claimed_font_count, ["27"])
+        self.assertEqual(claimed_font_count, ["32"])
         fonts = font_path / "fonts"
         self.assertEqual(len(tuple(fonts.glob("*.ttf"))), int(claimed_font_count[0]))
         for legal_file in (
@@ -7614,7 +7917,7 @@ Pedro Assumpcao and the rdocx maintainers.
             ),
             "version": (
                 claude.replace(
-                    "prepared at\n  0.16.0",
+                    "prepared at\n  0.16.1",
                     "prepared at\n  0.2.0",
                     1,
                 ),
@@ -7933,18 +8236,17 @@ Pedro Assumpcao and the rdocx maintainers.
                 else len(sprint_plan)
             )
             section = sprint_plan[marker.start() : end]
-            for fid, title, size in re.findall(
-                r"^\| (F-\d{3}) \| ([^|]+?) \| ([SML]) \|$",
-                section,
-                re.MULTILINE,
-            ):
+            row_pattern = r"^\| (F-\d{3}) \| ([^|]+?) \| ([SML]) \|$"
+            if "| F-ID | Title | Size | Delivery status |" in section:
+                row_pattern = row_pattern.removesuffix("$") + r" [^|\n]+ \|$"
+            for fid, title, size in re.findall(row_pattern, section, re.MULTILINE):
                 if fid in placements:
                     placements[fid].append((int(marker.group(1)), title.strip(), size))
         self.assertTrue(all(value for value in placements.values()))
         self.assertTrue(all(len(value) == 1 for value in placements.values()))
         self.assertEqual(
             {sprint for value in placements.values() for sprint, _, _ in value},
-            set(range(70, 75)) | {86} | set(range(89, 95)),
+            set(range(70, 75)) | {86, 89, 90} | set(range(92, 96)),
         )
 
         backlog_rows: dict[str, list[tuple[int, str, str, str]]] = {
@@ -8222,6 +8524,336 @@ class DocxAuthoringConformanceTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+
+class CompatibilityReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.records = []
+        for family, allocation in (("W", {"BASE": 17, "XML": 5, "LIFE": 7, "AREA": 20}),
+                                   ("P", {"BASE": 7, "XML": 9, "LIFE": 9, "AREA": 26})):
+            for area, count in allocation.items():
+                self.records.extend({"id": f"{family}-{area}-{i:02}", "family": family,
+                                     "area": area, "script_sha256": "1" * 64}
+                                    for i in range(1, count + 1))
+        manifest = self.artifact("manifest.json", {"records": self.records})
+        bodies = self.artifact("bodies.json", {"unit_test_only": True})
+        self.enterContext(patch.object(workflow, "COMPATIBILITY_MANIFEST_SHA", manifest["sha256"]))
+        self.enterContext(patch.object(workflow, "COMPATIBILITY_BODY_SHA", bodies["sha256"]))
+        self.evidence = self.artifact("evidence.json", {"unit_test_only": True})
+        self.attempts = [dict(row, attempt_number=1, exit_code=0, timed_out=False, evidence=[self.evidence])
+                         for row in self.records]
+        self.source = self.artifact("source.json", {"tracked-file": {"mode": "100644", "sha256": "2" * 64}})
+        provenance = self.artifact("provenance.json", {
+            "source_kind": "working-copy", "dirty": True, "base": "3" * 40,
+            "head": "4" * 40, "index_sha256": "5" * 64,
+            "source_manifest": self.source, "evidence": [self.evidence]})
+        dependencies = {"F-X211a", "F-X211b", "F-X211d", "F-X215", "F-X217", "F-X218", "F-X220"}
+        dependencies.update(f"F-X{number}" for number in range(200, 211))
+        self.packet = {"manifest": manifest, "body_manifest": bodies,
+                       "attempts": self.artifact("attempts.json", self.attempts),
+                       "provenance": provenance,
+                       "dependencies": {name: self.evidence for name in dependencies}}
+
+    def artifact(self, name: str, value: object) -> dict:
+        path = self.root / name
+        raw = json.dumps(value, sort_keys=True).encode()
+        path.write_bytes(raw)
+        return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
+
+    def qualify(self) -> None:
+        observations = [{"observation": "Unit fixture only, never native acceptance", "kind": "source-model",
+                         "expected": "unit", "actual": "unit", "evidence": [self.evidence]}]
+        facts = {"source_manifest_sha256": self.source["sha256"],
+                 "attempts_sha256": self.packet["attempts"]["sha256"],
+                 "cases": [dict(id=row["id"], status="unqualified" if row["id"] in workflow.COMPATIBILITY_DIVERGENCES else "qualified",
+                                evidence=[self.evidence], source_model=observations, save_reopen=[dict(observations[0], kind="save-reopen")])
+                           for row in self.records],
+                 "hard_gates": {row["id"]: {"status": "qualified", "evidence": [self.evidence], "observations": observations}
+                                for row in self.records if row["area"] in ("XML", "LIFE") or row["id"] == "P-AREA-10"}}
+        facts["native_obligations"] = {}
+        for row in self.records:
+            texts = row.get("additional_native_obligations", [])
+            if isinstance(texts, str):
+                texts = [texts]
+            if texts:
+                clauses = [clause.strip() for text in texts for clause in text.split(";") if clause.strip()]
+                facts["native_obligations"][row["id"]] = [
+                    {"obligation": text, "obligation_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                     "status": "qualified", "observations": [dict(observations[0], kind="native")]}
+                    for text in clauses]
+        self.facts = facts
+        self.rebind_qualification()
+
+    def rebind_qualification(self) -> None:
+        qualification = self.artifact("facts.json", self.facts)
+        self.packet["qualification"] = qualification
+        self.packet["qualification_admission"] = self.artifact("admission.json", {
+            "qualification_sha256": qualification["sha256"], "source_manifest_sha256": self.source["sha256"],
+            "attempts_sha256": self.packet["attempts"]["sha256"], "status": "admitted"})
+
+    def test_assertion_exits_do_not_manufacture_correct_file_credit(self) -> None:
+        result = workflow.compatibility_report(self.packet)
+        self.assertIsNone(result["full_acceptance_percent"])
+        self.assertFalse(result["threshold_met"])
+        self.assertEqual(result["total"]["correct_file"], 0)
+        self.assertEqual(result["total"]["assertions_exit_zero"], 100)
+        self.assertEqual(result["documentation_subset"]["attempted"], 24)
+        self.assertEqual(result["total"]["deliberate_divergence"], 2)
+        self.assertEqual({area: row["attempted"] for area, row in result["by_area"].items()}, workflow.COMPATIBILITY_COUNTS)
+
+    def test_duplicate_attempt_and_changed_script_are_refused(self) -> None:
+        for change in ("duplicate", "script"):
+            with self.subTest(change=change):
+                rows = [dict(row) for row in self.attempts]
+                if change == "duplicate":
+                    rows[-1] = rows[0]
+                else:
+                    rows[0]["script_sha256"] = "f" * 64
+                self.packet["attempts"] = self.artifact("attempts.json", rows)
+                with self.assertRaises(ValueError):
+                    workflow.compatibility_report(self.packet)
+
+    def test_retry_and_unqualified_ci_check_are_refused(self) -> None:
+        self.packet["attempts"] = self.artifact("attempts.json", [dict(row, attempt_number=2) for row in self.attempts])
+        with self.assertRaisesRegex(ValueError, "immutable first attempt"):
+            workflow.compatibility_report(self.packet)
+        self.packet["attempts"] = self.artifact("attempts.json", self.attempts)
+        packet = self.artifact("packet.json", self.packet)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(workflow.cmd_compatibility_report(argparse.Namespace(packet=packet["path"], check=True)), 1)
+            self.assertEqual(workflow.cmd_compatibility_report(argparse.Namespace(packet=packet["path"], check=False)), 0)
+
+    def test_changed_evidence_and_missing_provider_are_refused(self) -> None:
+        Path(self.evidence["path"]).write_text("changed")
+        with self.assertRaisesRegex(ValueError, "evidence changed"):
+            workflow.compatibility_report(self.packet)
+        self.evidence = self.artifact("evidence.json", {"unit_test_only": True})
+        del self.packet["dependencies"]["F-X211a"]
+        with self.assertRaisesRegex(ValueError, "dependency identities"):
+            workflow.compatibility_report(self.packet)
+
+    def test_qualified_facts_require_bound_admission_and_all_owner_safety_gates(self) -> None:
+        self.qualify()
+        result = workflow.compatibility_report(self.packet)
+        self.assertEqual(result["full_acceptance_percent"], 98)
+        del self.facts["hard_gates"]["W-LIFE-07"]
+        self.rebind_qualification()
+        with self.assertRaisesRegex(ValueError, "hard gates"):
+            workflow.compatibility_report(self.packet)
+
+    def test_pending_native_fact_keeps_full_metric_unset(self) -> None:
+        self.qualify()
+        self.facts["hard_gates"]["P-AREA-10"]["status"] = "pending"
+        self.rebind_qualification()
+        result = workflow.compatibility_report(self.packet)
+        self.assertIsNone(result["full_acceptance_percent"])
+        self.assertFalse(result["threshold_met"])
+
+    def test_nested_boolean_observations_are_not_qualification(self) -> None:
+        for field in ("source_model", "save_reopen", "hard_gate"):
+            with self.subTest(field=field):
+                self.qualify()
+                if field == "hard_gate":
+                    self.facts["hard_gates"]["W-LIFE-07"]["observations"] = [{"observation": True}]
+                else:
+                    self.facts["cases"][0][field] = [{"observation": True}]
+                self.rebind_qualification()
+                with self.assertRaises(ValueError):
+                    workflow.compatibility_report(self.packet)
+
+    def test_each_declared_native_obligation_needs_its_own_bound_proof(self) -> None:
+        for selected in ("W-LIFE-07", "P-AREA-10"):
+            with self.subTest(selected=selected):
+                for row in self.records:
+                    if row["id"] == selected:
+                        row["additional_native_obligations"] = (
+                            ["Native common-serial overflow preflight requires source-level fault injection, unavailable through public constructor",
+                             "Weak Arc-state reclamation requires existing native test instrumentation, not invented Python access"]
+                            if selected == "W-LIFE-07" else
+                            ["Media removal/poster pruning/shared reference refusal native riders; frozen MP4 fixture must have independently authenticated actual playable sample before render acceptance"])
+                manifest = self.artifact("manifest.json", {"records": self.records})
+                self.packet["manifest"] = manifest
+                self.enterContext(patch.object(workflow, "COMPATIBILITY_MANIFEST_SHA", manifest["sha256"]))
+                self.qualify()
+                # Retain the first real obligation and omit just the second.
+                # The generic case-level native gate is still qualified.
+                self.assertEqual(len(self.facts["native_obligations"][selected]), 2)
+                self.facts["native_obligations"][selected].pop(1)
+                self.rebind_qualification()
+                with self.assertRaisesRegex(ValueError, "obligation proofs are missing"):
+                    workflow.compatibility_report(self.packet)
+
+    def test_boolean_prose_or_failed_script_is_not_correct_file_evidence(self) -> None:
+        self.qualify()
+        self.facts["cases"][0]["source_model"] = True
+        self.rebind_qualification()
+        with self.assertRaisesRegex(ValueError, "concrete typed observations"):
+            workflow.compatibility_report(self.packet)
+        self.qualify()
+        self.attempts[0]["exit_code"] = 1
+        self.packet["attempts"] = self.artifact("attempts.json", self.attempts)
+        self.facts["attempts_sha256"] = self.packet["attempts"]["sha256"]
+        self.rebind_qualification()
+        with self.assertRaisesRegex(ValueError, "failed or divergent"):
+            workflow.compatibility_report(self.packet)
+
+    def declare_named_non_successes(self) -> None:
+        assertions = {
+            "W-AREA-19": (18, "assert any('Gelasio' in x for x in names)"),
+            "P-AREA-02": (40, "assert len(updates)==1"),
+            "P-AREA-14": (17, "assert nv.get('descr')=='Description' and nv.get('title')=='Title'"),
+        }
+        observations = [{"observation": "Unit fixture only, never native acceptance", "kind": "source-model",
+                         "expected": "unit", "actual": "unit", "evidence": [self.evidence]}]
+        cases = []
+        for case_id, (line, assertion) in assertions.items():
+            path = self.root / f"{case_id}-stderr.log"
+            path.write_text(f'Traceback (most recent call last):\n  File "/frozen/scripts/{case_id}.py", line {line}, in <module>\n    {assertion}\nAssertionError\n')
+            evidence = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            attempt = next(row for row in self.attempts if row["id"] == case_id)
+            attempt.update(exit_code=1, evidence=[evidence], cleanup={"groupGone": True,
+                           "leaderReaped": True, "leaseReleaseSafe": True, "signals": []})
+            cases.append({"id": case_id, "failure_evidence": evidence,
+                          "source_model": observations, "save_reopen": [dict(observations[0], kind="save-reopen")]})
+        self.packet["attempts"] = self.artifact("attempts.json", self.attempts)
+        self.named = {"source_manifest_sha256": self.source["sha256"],
+                      "attempts_sha256": self.packet["attempts"]["sha256"], "cases": cases}
+        self.rebind_named_non_successes()
+
+    def rebind_named_non_successes(self) -> None:
+        facts = self.artifact("named-non-successes.json", self.named)
+        self.packet["named_non_successes"] = facts
+        self.packet["non_success_admission"] = self.artifact("non-success-admission.json", {
+            "disposition_sha256": facts["sha256"], "source_manifest_sha256": self.source["sha256"],
+            "attempts_sha256": self.packet["attempts"]["sha256"], "status": "admitted"})
+
+    def test_named_non_successes_preserve_denominator_without_success_credit(self) -> None:
+        self.declare_named_non_successes()
+        result = workflow.compatibility_report(self.packet)
+        self.assertEqual(result["total"]["unexpected_failure_ids"], [])
+        self.assertEqual(result["total"]["deliberate_divergence"], 5)
+        self.assertEqual(result["denominator"], 100)
+        self.assertEqual(result["total"]["correct_file"], 0)
+        self.assertIsNone(result["full_acceptance_percent"])
+        self.qualify()
+        for row in self.facts["cases"]:
+            if row["id"] in {"W-AREA-19", "P-AREA-02", "P-AREA-14"}:
+                row["status"] = "unqualified"
+        self.rebind_qualification()
+        result = workflow.compatibility_report(self.packet)
+        self.assertEqual(result["full_acceptance_percent"], 95)
+        self.assertTrue(result["threshold_met"])
+        for row in self.facts["cases"]:
+            if row["id"] in {f"W-BASE-{i:02}" for i in range(1, 6)}:
+                row["status"] = "unqualified"
+        self.rebind_qualification()
+        self.assertTrue(workflow.compatibility_report(self.packet)["threshold_met"])
+        self.assertEqual(workflow.compatibility_report(self.packet)["full_acceptance_percent"], 90)
+        next(row for row in self.facts["cases"] if row["id"] == "W-BASE-06")["status"] = "unqualified"
+        self.rebind_qualification()
+        self.assertFalse(workflow.compatibility_report(self.packet)["threshold_met"])
+        del self.facts["hard_gates"]["W-LIFE-07"]
+        self.rebind_qualification()
+        with self.assertRaisesRegex(ValueError, "hard gates"):
+            workflow.compatibility_report(self.packet)
+
+    def test_named_non_successes_require_candidate_admission_and_concrete_companions(self) -> None:
+        for change in ("source", "attempts", "arbitrary", "duplicate", "source-model", "save-reopen", "boolean", "scope", "unadmitted", "missing-admission", "wrong-log"):
+            with self.subTest(change=change):
+                self.declare_named_non_successes()
+                if change in ("source", "attempts"):
+                    self.named[f"{change if change == 'attempts' else 'source_manifest'}_sha256"] = "f" * 64
+                elif change == "arbitrary":
+                    self.named["cases"][0]["id"] = "W-BASE-01"
+                elif change == "duplicate":
+                    self.named["cases"].append(self.named["cases"][0])
+                elif change in ("source-model", "save-reopen"):
+                    del self.named["cases"][0][change.replace("-", "_")]
+                elif change == "boolean":
+                    self.named["cases"][0]["source_model"] = [{"observation": True}]
+                elif change == "scope":
+                    self.named["cases"][0]["source_model"] = self.named["cases"][0]["save_reopen"]
+                elif change == "wrong-log":
+                    self.named["cases"][0]["failure_evidence"] = self.evidence
+                self.rebind_named_non_successes()
+                if change == "unadmitted":
+                    value = json.loads(Path(self.packet["non_success_admission"]["path"]).read_text())
+                    value["status"] = "pending"
+                    self.packet["non_success_admission"] = self.artifact("non-success-admission.json", value)
+                elif change == "missing-admission":
+                    del self.packet["non_success_admission"]
+                with self.assertRaises((ValueError, KeyError)):
+                    workflow.compatibility_report(self.packet)
+
+    def test_named_non_successes_cannot_hide_earlier_provider_or_process_failures(self) -> None:
+        for change in ("early-provider", "wrong-line", "wrong-script", "wrong-assertion", "timeout", "signal", "cleanup", "success"):
+            with self.subTest(change=change):
+                self.declare_named_non_successes()
+                row = next(value for value in self.named["cases"] if value["id"] == "P-AREA-14")
+                attempt = next(value for value in self.attempts if value["id"] == row["id"])
+                reference = row["failure_evidence"]
+                path = Path(reference["path"])
+                text = path.read_text()
+                if change == "early-provider":
+                    text = 'Traceback (most recent call last):\n  File "/frozen/scripts/P-AREA-14.py", line 11, in <module>\n    shape.alt_text="Description"\nAttributeError: Shape has no alt_text\n'
+                elif change == "wrong-line":
+                    text = text.replace("line 17", "line 11")
+                elif change == "wrong-script":
+                    text = text.replace("P-AREA-14.py", "P-AREA-13.py")
+                elif change == "wrong-assertion":
+                    text = text.replace("assert nv.get('descr')", "assert another.get('descr')")
+                elif change == "timeout":
+                    attempt["timed_out"] = True
+                elif change == "signal":
+                    attempt["cleanup"]["signals"] = ["SIGTERM"]
+                elif change == "cleanup":
+                    attempt["cleanup"]["groupGone"] = False
+                elif change == "success":
+                    attempt["exit_code"] = 0
+                path.write_text(text)
+                reference["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                self.packet["attempts"] = self.artifact("attempts.json", self.attempts)
+                self.named["attempts_sha256"] = self.packet["attempts"]["sha256"]
+                self.rebind_named_non_successes()
+                with self.assertRaisesRegex(ValueError, "named non-success"):
+                    workflow.compatibility_report(self.packet)
+
+    def test_named_non_successes_never_qualify_failed_cases_or_waive_native_gates(self) -> None:
+        self.declare_named_non_successes()
+        self.qualify()
+        with self.assertRaisesRegex(ValueError, "failed or divergent"):
+            workflow.compatibility_report(self.packet)
+        for row in self.facts["cases"]:
+            if row["id"] in {"W-AREA-19", "P-AREA-02", "P-AREA-14"}:
+                row["status"] = "unqualified"
+        self.facts["hard_gates"]["P-AREA-10"]["status"] = "pending"
+        self.rebind_qualification()
+        result = workflow.compatibility_report(self.packet)
+        self.assertIsNone(result["full_acceptance_percent"])
+        self.assertFalse(result["threshold_met"])
+
+    def test_corrective_word_child_is_a_mandatory_provider(self) -> None:
+        self.packet["dependencies"].pop("F-X211d", None)
+        with self.assertRaisesRegex(ValueError, "dependency identities"):
+            workflow.compatibility_report(self.packet)
+        self.packet["dependencies"]["F-X211d"] = self.evidence
+        self.assertEqual(workflow.compatibility_report(self.packet)["denominator"], 100)
+
+    def test_full_qualification_requires_explicit_admitted_status(self) -> None:
+        for status in ("pending", None):
+            with self.subTest(status=status):
+                self.qualify()
+                value = json.loads(Path(self.packet["qualification_admission"]["path"]).read_text())
+                if status is None:
+                    del value["status"]
+                else:
+                    value["status"] = status
+                self.packet["qualification_admission"] = self.artifact("admission.json", value)
+                with self.assertRaisesRegex(ValueError, "qualification is not admitted"):
+                    workflow.compatibility_report(self.packet)
 
 
 if __name__ == "__main__":

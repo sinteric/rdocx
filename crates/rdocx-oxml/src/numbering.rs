@@ -1897,7 +1897,7 @@ struct OccurrenceOverlay {
 
 fn occurrence_overlay(raw: &[u8], word_prefixes: &[String]) -> Result<OccurrenceOverlay> {
     let mut reader = Reader::from_reader(raw);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let start = loop {
         match reader.read_event_into(&mut buf) {
@@ -1942,7 +1942,11 @@ fn occurrence_overlay(raw: &[u8], word_prefixes: &[String]) -> Result<Occurrence
                 break;
             }
             Err(error) => return Err(error.into()),
-            _ => {}
+            Ok(event) => {
+                let mut writer = Writer::new(Vec::new());
+                writer.write_event(event.into_owned())?;
+                pending.push(writer.into_inner());
+            }
         }
     }
     Ok(OccurrenceOverlay {
@@ -2044,6 +2048,228 @@ fn match_occurrences(
     (matches, work)
 }
 
+/// Read exact tokens from an owned tab occurrence, retaining unsupported source elsewhere.
+pub(crate) fn tabs_source_tokens(
+    raw: &[u8],
+    occurrence: usize,
+) -> Result<(crate::shared::ST_TabJc, Option<crate::shared::ST_TabLeader>)> {
+    let overlay = occurrence_overlay(raw, &[])?;
+    let tab = overlay
+        .modelled
+        .get(occurrence)
+        .ok_or_else(|| OxmlError::InvalidValue("owned tab source occurrence missing".to_owned()))?;
+    let (start, _) = first_element_start(tab)?;
+    let prefixes = word_prefixes_at(&start, &overlay.word_prefixes)?;
+    let mut alignment = None;
+    let mut leader = None;
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        let key = attribute.key.as_ref();
+        let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
+        if !is_word_property_attribute(key, &prefixes) {
+            continue;
+        }
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?;
+        match local {
+            b"val" => {
+                if alignment.is_some() {
+                    return Err(OxmlError::InvalidValue(
+                        "duplicate owned tab alignment".to_owned(),
+                    ));
+                }
+                alignment = Some(crate::shared::ST_TabJc::from_str(&value)?);
+            }
+            b"leader" => {
+                if leader.is_some() {
+                    return Err(OxmlError::InvalidValue(
+                        "duplicate owned tab leader".to_owned(),
+                    ));
+                }
+                leader = Some(crate::shared::ST_TabLeader::from_str(&value)?);
+            }
+            _ => {}
+        }
+    }
+    alignment
+        .map(|alignment| (alignment, leader))
+        .ok_or_else(|| OxmlError::InvalidValue("owned tab alignment missing".to_owned()))
+}
+
+/// Merge a direct tabs edit through the existing occurrence-preservation writer.
+/// Unchanged modeled tokens retain even unsupported source spellings. An explicit
+/// replacement names its source occurrence so an unsupported Left projection is
+/// not mistaken for an unchanged known Left assignment.
+pub(crate) fn merge_tabs_source(
+    original: &[u8],
+    current: Option<&crate::borders::CT_Tabs>,
+    forced_occurrence: Option<usize>,
+) -> Result<Vec<u8>> {
+    let original_typed = crate::borders::CT_Tabs::from_source_xml(original)?;
+    let current = current.cloned().unwrap_or_default();
+    if forced_occurrence.is_none()
+        && original_typed == current
+        && original_typed
+            .tabs
+            .iter()
+            .map(|tab| tab.source_occurrence)
+            .eq(current.tabs.iter().map(|tab| tab.source_occurrence))
+    {
+        return Ok(original.to_vec());
+    }
+    let overlay = occurrence_overlay(original, &[])?;
+    let mut generated = Writer::new(Vec::new());
+    generated.write_event(Event::Start(BytesStart::new("w:tabs")))?;
+    for tab in &current.tabs {
+        let mut start = BytesStart::new("w:tab");
+        let mut alignment = tab.val.to_str().to_owned();
+        let mut leader = tab.leader.map(|value| value.to_str().to_owned());
+        if let Some(index) = tab
+            .source_occurrence
+            .filter(|index| Some(*index) != forced_occurrence)
+            && let (Some(old), Some(raw)) =
+                (original_typed.tabs.get(index), overlay.modelled.get(index))
+        {
+            let (old_start, _) = first_element_start(raw)?;
+            let prefixes = word_prefixes_at(&old_start, &overlay.word_prefixes)?;
+            for attribute in old_start.attributes() {
+                let attribute = attribute?;
+                let key = attribute.key.as_ref();
+                let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
+                if !is_word_property_attribute(key, &prefixes) {
+                    continue;
+                }
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, old_start.decoder())?
+                    .into_owned();
+                if local == b"val" && tab.val == old.val {
+                    alignment = value;
+                } else if local == b"leader" && tab.leader == old.leader {
+                    leader = Some(value);
+                }
+            }
+        }
+        start.push_attribute(("w:val", alignment.as_str()));
+        let position = tab.pos.0.to_string();
+        start.push_attribute(("w:pos", position.as_str()));
+        if let Some(leader) = leader.as_ref() {
+            start.push_attribute(("w:leader", leader.as_str()));
+        }
+        generated.write_event(Event::Empty(start))?;
+    }
+    generated.write_event(Event::End(BytesEnd::new("w:tabs")))?;
+    let (original_start, _) = first_element_start(original)?;
+    let prefix = element_prefix(&original_start)?;
+    let generated = rewrite_generated_prefix(&generated.into_inner(), &prefix)?;
+    let sources = current
+        .tabs
+        .iter()
+        .map(|tab| tab.source_occurrence)
+        .collect::<Vec<_>>();
+    merge_repeated_property(
+        original,
+        &generated,
+        &overlay.word_prefixes,
+        PropertyKind::Paragraph,
+        0,
+        Some(&sources),
+        (&PreservationPrefixes::new(&[]), true),
+    )
+}
+
+/// Update only the three owned tab attributes. Retained producer attribute
+/// slices include their whitespace, quote style and entity spelling. The owned
+/// child's QName stays in its actual local namespace context.
+fn merge_direct_tab_attributes(
+    original: &BytesStart<'_>,
+    generated: &[u8],
+    inherited_prefixes: &[String],
+) -> Result<BytesStart<'static>> {
+    let prefixes = word_prefixes_at(original, inherited_prefixes)?;
+    for attribute in original.attributes() {
+        attribute?;
+    }
+    let name = original.name();
+    let name = std::str::from_utf8(name.as_ref())?;
+    let attribute_prefix = name
+        .split_once(':')
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| prefixes.iter().any(|owned| owned.as_str() == *prefix))
+        .or_else(|| {
+            prefixes
+                .iter()
+                .find(|prefix| !prefix.is_empty() && split_namespace_binding(prefix).is_none())
+                .map(String::as_str)
+        })
+        .ok_or_else(|| OxmlError::InvalidValue("owned tab attribute prefix missing".to_owned()))?;
+    let raw = original.attributes_raw();
+    let mut content = name.as_bytes().to_vec();
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        let begin = cursor;
+        while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if cursor == raw.len() {
+            content.extend_from_slice(&raw[begin..]);
+            break;
+        }
+        let key_begin = cursor;
+        while raw
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'=')
+        {
+            cursor += 1;
+        }
+        let key = &raw[key_begin..cursor];
+        while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if raw.get(cursor) != Some(&b'=') {
+            return Err(OxmlError::InvalidValue(
+                "tab attribute equals missing".to_owned(),
+            ));
+        }
+        cursor += 1;
+        while raw.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let quote = raw
+            .get(cursor)
+            .copied()
+            .filter(|byte| *byte == b'\'' || *byte == b'"')
+            .ok_or_else(|| OxmlError::InvalidValue("tab attribute quote missing".to_owned()))?;
+        cursor += 1;
+        while raw.get(cursor).is_some_and(|byte| *byte != quote) {
+            cursor += 1;
+        }
+        if cursor == raw.len() {
+            return Err(OxmlError::InvalidValue(
+                "tab attribute quote unclosed".to_owned(),
+            ));
+        }
+        cursor += 1;
+        let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
+        if !is_word_property_attribute(key, &prefixes)
+            || ![b"val".as_slice(), b"pos".as_slice(), b"leader".as_slice()].contains(&local)
+        {
+            content.extend_from_slice(&raw[begin..cursor]);
+        }
+    }
+    let mut start = BytesStart::from_content(std::str::from_utf8(&content)?.to_owned(), name.len());
+    let (generated, _) = first_element_start(generated)?;
+    for attribute in generated.attributes() {
+        let attribute = attribute?;
+        let key = attribute.key.as_ref();
+        let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
+        let value =
+            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, generated.decoder())?;
+        let key = qualified(attribute_prefix, std::str::from_utf8(local)?);
+        start.push_attribute((key.as_str(), value.as_ref()));
+    }
+    Ok(start.into_owned())
+}
+
 fn merge_repeated_property(
     original: &[u8],
     generated: &[u8],
@@ -2051,7 +2277,7 @@ fn merge_repeated_property(
     kind: PropertyKind,
     depth: usize,
     generated_sources: Option<&[Option<usize>]>,
-    preservation_prefixes: &PreservationPrefixes,
+    preservation: (&PreservationPrefixes, bool),
 ) -> Result<Vec<u8>> {
     Ok(merge_repeated_property_with_work(
         original,
@@ -2060,7 +2286,7 @@ fn merge_repeated_property(
         kind,
         depth,
         generated_sources,
-        preservation_prefixes,
+        preservation,
     )?
     .0)
 }
@@ -2072,12 +2298,17 @@ fn merge_repeated_property_with_work(
     kind: PropertyKind,
     depth: usize,
     generated_sources: Option<&[Option<usize>]>,
-    preservation_prefixes: &PreservationPrefixes,
+    preservation: (&PreservationPrefixes, bool),
 ) -> Result<(Vec<u8>, usize)> {
+    let (preservation_prefixes, preserve_direct_source) = preservation;
     let overlay = occurrence_overlay(original, word_prefixes)?;
-    let merged_generated =
-        merge_property_child_attributes(original, generated, word_prefixes, kind)?;
-    let (merged_start, _) = first_element_start(&merged_generated)?;
+    let merged_start = if preserve_direct_source {
+        first_element_start(original)?.0
+    } else {
+        let merged_generated =
+            merge_property_child_attributes(original, generated, word_prefixes, kind)?;
+        first_element_start(&merged_generated)?.0
+    };
     let generated_tabs = generated_children(generated, TABS_CHILDREN)?;
     let default_sources = vec![None; generated_tabs.len()];
     let generated_sources = generated_sources.unwrap_or(&default_sources);
@@ -2102,16 +2333,54 @@ fn merge_repeated_property_with_work(
                 next_boundary += 1;
                 work += 1;
             }
-            let merged = merge_property_child(
-                &overlay.modelled[index],
-                generated_tab,
-                &overlay.word_prefixes,
-                kind,
-                depth + 1,
-                None,
-                preservation_prefixes,
-            )?;
-            write_xml_events(&mut writer, &merged)?;
+            let merged = if preserve_direct_source {
+                let (start, _) = first_element_start(&overlay.modelled[index])?;
+                let start =
+                    merge_direct_tab_attributes(&start, generated_tab, &overlay.word_prefixes)?;
+                let mut writer = Writer::new(Vec::new());
+                writer.write_event(Event::Empty(start))?;
+                writer.into_inner()
+            } else {
+                merge_property_child(
+                    &overlay.modelled[index],
+                    generated_tab,
+                    &overlay.word_prefixes,
+                    kind,
+                    depth + 1,
+                    None,
+                    preservation_prefixes,
+                )?
+            };
+            // A modeled tab is a leaf, but its unmodelled source children are not ours to delete.
+            let (_, original_empty) = first_element_start(&overlay.modelled[index])?;
+            let (merged_start, merged_empty) = first_element_start(&merged)?;
+            if !original_empty && merged_empty {
+                let raw = &overlay.modelled[index];
+                let mut reader = Reader::from_reader(raw.as_slice());
+                reader.read_event()?;
+                let begin = reader.buffer_position() as usize;
+                let mut level = 0usize;
+                let finish = loop {
+                    let before = reader.buffer_position() as usize;
+                    match reader.read_event()? {
+                        Event::Start(_) => level += 1,
+                        Event::End(_) if level == 0 => break before,
+                        Event::End(_) => level -= 1,
+                        Event::Eof => {
+                            return Err(OxmlError::InvalidValue(
+                                "tab source end missing".to_owned(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                };
+                let end = std::str::from_utf8(merged_start.name().as_ref())?.to_owned();
+                writer.write_event(Event::Start(merged_start))?;
+                writer.get_mut().extend_from_slice(&raw[begin..finish]);
+                writer.write_event(Event::End(BytesEnd::new(end)))?;
+            } else {
+                write_xml_events(&mut writer, &merged)?;
+            }
         } else {
             write_xml_events(&mut writer, generated_tab)?;
         }
@@ -2157,7 +2426,7 @@ fn merge_property_child(
             kind,
             depth,
             tab_sources,
-            preservation_prefixes,
+            (preservation_prefixes, false),
         );
     }
     let schema_children = nested_property_schema(local.as_ref());
@@ -6295,7 +6564,7 @@ mod tests {
             PropertyKind::Paragraph,
             0,
             Some(&sources),
-            &preservation_prefixes,
+            (&preservation_prefixes, false),
         )
         .unwrap();
         assert!(writer_work <= 4 * (TAB_COUNT * 3 + 1));

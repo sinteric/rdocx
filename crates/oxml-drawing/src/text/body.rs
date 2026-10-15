@@ -3,7 +3,7 @@ use std::io::Write;
 
 use oxml_core::OxmlError;
 use oxml_core::raw_xml::{capture_element, capture_empty_element};
-use oxml_core::xml::{get_attr, local_name, matches_local_name};
+use oxml_core::xml::{local_name, matches_local_name};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
@@ -135,7 +135,7 @@ pub enum TextAnchor {
 }
 
 impl TextAnchor {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "t" => Some(Self::Top),
             "ctr" => Some(Self::Center),
@@ -146,7 +146,7 @@ impl TextAnchor {
         }
     }
 
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Top => "t",
             Self::Center => "ctr",
@@ -264,8 +264,8 @@ impl TextAutofit {
             b"noAutofit" => Ok(Self::NoAutofit),
             b"spAutoFit" => Ok(Self::ShapeAutofit),
             b"normAutofit" => {
-                let font_scale = get_attr(start, b"fontScale");
-                let line_spacing_reduction = get_attr(start, b"lnSpcReduction");
+                let font_scale = get_body_attr(start, b"fontScale");
+                let line_spacing_reduction = get_body_attr(start, b"lnSpcReduction");
                 if let Some(value) = font_scale.as_deref() {
                     validate_autofit_percent("fontScale", value, PercentKind::FontScale)?;
                 }
@@ -319,6 +319,7 @@ pub struct CT_TextBodyProperties {
     pub autofit: Option<TextAutofit>,
     raw_attributes: Vec<(String, String)>,
     raw_children: OrderedRawChildren,
+    pub(super) autofit_source: Option<Vec<u8>>,
 }
 
 impl CT_TextBodyProperties {
@@ -401,6 +402,7 @@ impl CT_TextBodyProperties {
             autofit: None,
             raw_attributes: capture_raw_attributes(start)?,
             raw_children: OrderedRawChildren::default(),
+            autofit_source: None,
         })
     }
 
@@ -421,6 +423,27 @@ impl CT_TextBodyProperties {
         }
         if is_autofit(name) {
             self.autofit = Some(TextAutofit::from_xml(&raw)?);
+            let mut reader = Reader::from_reader(raw.as_slice());
+            let has_unknown_attributes = match reader.read_event().map_err(OxmlError::from)? {
+                Event::Start(start) | Event::Empty(start) => start.attributes().any(|attribute| {
+                    attribute.is_ok_and(|attribute| {
+                        !matches!(attribute.key.as_ref(), b"fontScale" | b"lnSpcReduction")
+                    })
+                }),
+                _ => false,
+            };
+            let has_comments = loop {
+                match reader.read_event().map_err(OxmlError::from)? {
+                    Event::Comment(_) => break true,
+                    Event::Eof => break false,
+                    _ => {}
+                }
+            };
+            // Pure modeled choices retain the established canonical writer.
+            // Only a choice owning opaque facts needs lexical provenance.
+            if has_unknown_attributes || has_comments {
+                self.autofit_source = Some(raw);
+            }
             *boundary = (*boundary).max(2);
             return Ok(());
         }
@@ -496,7 +519,11 @@ impl CT_TextBodyProperties {
         emit_raw(writer, self.raw_children.at(0))?;
         emit_raw(writer, self.raw_children.at(1))?;
         if let Some(autofit) = &self.autofit {
-            autofit.write_xml(writer)?;
+            if let Some(source) = &self.autofit_source {
+                write_source_autofit(writer, autofit, source)?;
+            } else {
+                autofit.write_xml(writer)?;
+            }
         }
         for boundary in 2..=5 {
             emit_raw(writer, self.raw_children.at(boundary))?;
@@ -510,6 +537,112 @@ impl CT_TextBodyProperties {
     pub fn raw_children(&self) -> &OrderedRawChildren {
         &self.raw_children
     }
+}
+
+/// Retains the imported empty choice, changing only owned names and values.
+/// Attribute byte ranges come from the validated quick-xml start, so foreign
+/// attributes retain their entities, quoting, ordering and local declarations.
+fn write_source_autofit<W: Write>(
+    writer: &mut Writer<W>,
+    autofit: &TextAutofit,
+    source: &[u8],
+) -> Result<()> {
+    if TextAutofit::from_xml(source)?.eq(autofit) {
+        writer
+            .get_mut()
+            .write_all(source)
+            .map_err(OxmlError::from)?;
+        return Ok(());
+    }
+    let mut validation = Writer::new(Vec::new());
+    autofit.write_xml(&mut validation)?;
+    let mut reader = Reader::from_reader(source);
+    let event = reader.read_event().map_err(OxmlError::from)?;
+    let (start, empty) = match event {
+        Event::Start(start) => (start, false),
+        Event::Empty(start) => (start, true),
+        _ => return Err(TextError::UnexpectedElement("autofit source".to_owned())),
+    };
+    let old_name = start.name().as_ref().to_vec();
+    let local = match autofit {
+        TextAutofit::Normal(_) => b"normAutofit".as_slice(),
+        TextAutofit::NoAutofit => b"noAutofit".as_slice(),
+        TextAutofit::ShapeAutofit => b"spAutoFit".as_slice(),
+    };
+    let prefix_end = old_name
+        .iter()
+        .rposition(|byte| *byte == b':')
+        .map_or(0, |i| i + 1);
+    let mut name = old_name[..prefix_end].to_vec();
+    name.extend_from_slice(local);
+    let mut edits = vec![(1, 1 + old_name.len(), name.clone())];
+    let values = match autofit {
+        TextAutofit::Normal(normal) => [
+            normal.font_scale.as_deref(),
+            normal.line_spacing_reduction.as_deref(),
+        ],
+        _ => [None, None],
+    };
+    let keys = [b"fontScale".as_slice(), b"lnSpcReduction".as_slice()];
+    let mut found = [false; 2];
+    let content: &[u8] = start.as_ref();
+    for attribute in start.attributes() {
+        let attribute = attribute.map_err(OxmlError::from)?;
+        let Some(index) = keys.iter().position(|key| *key == attribute.key.as_ref()) else {
+            continue;
+        };
+        found[index] = true;
+        let key_at = (attribute.key.as_ref().as_ptr() as usize)
+            .checked_sub(content.as_ptr() as usize)
+            .filter(|offset| *offset + attribute.key.as_ref().len() <= content.len())
+            .ok_or_else(|| TextError::UnexpectedElement("autofit attribute source".to_owned()))?
+            + 1;
+        let value_at = (attribute.value.as_ptr() as usize)
+            .checked_sub(content.as_ptr() as usize)
+            .filter(|offset| *offset + attribute.value.len() <= content.len())
+            .ok_or_else(|| TextError::UnexpectedElement("autofit value source".to_owned()))?
+            + 1;
+        let value_end = value_at + attribute.value.len();
+        if let Some(value) = values[index] {
+            edits.push((value_at, value_end, value.as_bytes().to_vec()));
+        } else {
+            // Remove only the owned attribute, keeping all surrounding source.
+            edits.push((key_at, value_end + 1, Vec::new()));
+        }
+    }
+    let mut added = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        if !found[index]
+            && let Some(value) = value
+        {
+            added.extend_from_slice(b" ");
+            added.extend_from_slice(keys[index]);
+            added.extend_from_slice(b"=\"");
+            added.extend_from_slice(value.as_bytes());
+            added.extend_from_slice(b"\"");
+        }
+    }
+    let start_end = reader.buffer_position() as usize;
+    let insertion = start_end - if empty { 2 } else { 1 };
+    edits.push((insertion, insertion, added));
+    if !empty {
+        let close = source
+            .windows(2)
+            .rposition(|bytes| bytes == b"</")
+            .ok_or_else(|| missing_end("autofit"))?
+            + 2;
+        edits.push((close, close + old_name.len(), name));
+    }
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
+    let mut output = source.to_vec();
+    for (start, end, bytes) in edits {
+        output.splice(start..end, bytes);
+    }
+    writer
+        .get_mut()
+        .write_all(&output)
+        .map_err(OxmlError::from)?;
+    Ok(())
 }
 
 /// The attributes `from_start` models, which the raw list must not repeat.
@@ -839,6 +972,40 @@ mod tests {
             CT_TextBodyProperties::from_xml(&written).unwrap(),
             properties
         );
+    }
+
+    #[test]
+    fn autofit_owned_updates_preserve_opaque_lexical_attributes_and_comments() {
+        let source = br#"<q:bodyPr xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main"><q:normAutofit xmlns:e='urn:example' e:proof='keep&amp;&#x21;' e:fontScale='foreign' fontScale='62500' lnSpcReduction = "20000"><!--keep opaque--></q:normAutofit></q:bodyPr>"#;
+        let mut body = CT_TextBodyProperties::from_xml(source).unwrap();
+        let opaque = "xmlns:e='urn:example' e:proof='keep&amp;&#x21;' e:fontScale='foreign'";
+        let unchanged = String::from_utf8(body.to_xml().unwrap()).unwrap();
+        assert!(unchanged.contains(opaque));
+        assert!(unchanged.contains("<!--keep opaque-->"));
+        body.autofit = Some(TextAutofit::Normal(super::NormalAutofit {
+            font_scale: Some("85000".to_owned()),
+            line_spacing_reduction: Some("10000".to_owned()),
+        }));
+        let updated = body.to_xml().unwrap();
+        let xml = String::from_utf8(updated.clone()).unwrap();
+        assert!(xml.contains(opaque));
+        assert!(xml.contains("fontScale='85000' lnSpcReduction = \"10000\""));
+        assert!(xml.contains("<!--keep opaque-->"));
+        assert_eq!(
+            CT_TextBodyProperties::from_xml(&updated).unwrap().autofit,
+            body.autofit
+        );
+        body.autofit = Some(TextAutofit::NoAutofit);
+        let removed = body.to_xml().unwrap();
+        let xml = String::from_utf8(removed.clone()).unwrap();
+        assert!(xml.contains("<q:noAutofit"));
+        assert!(xml.contains(opaque));
+        assert!(!xml.contains(" fontScale="));
+        assert!(!xml.contains("lnSpcReduction"));
+        assert!(xml.contains("<!--keep opaque--></q:noAutofit>"));
+        let reopened = CT_TextBodyProperties::from_xml(&removed).unwrap();
+        assert_eq!(reopened.autofit, Some(TextAutofit::NoAutofit));
+        assert_eq!(removed, reopened.to_xml().unwrap());
     }
 
     #[test]

@@ -8,9 +8,7 @@ use rpptx_layout::timeline::{EvaluatedTransition, ResolvedTimelineSlide};
 use rpptx_layout::{ResolvedGeometry, ResolvedShape, ResolvedSlideTextDirections};
 use rpptx_oxml::timing::TransitionEffect;
 
-use crate::{
-    RenderInput, RenderInputError, layout_resolved_slide_with_fonts_text_directions_and_states,
-};
+use crate::{RenderInput, RenderInputError, layout_resolved_slide_with_diagnostics};
 
 /// One composed page plus stable approximation diagnostics.
 #[derive(Clone, Debug)]
@@ -47,20 +45,74 @@ pub fn layout_timeline_slide_with_font_manager(
     text_directions: Option<&ResolvedSlideTextDirections>,
     fonts: &mut FontManager,
 ) -> Result<PageFrame, RenderInputError> {
+    layout_timeline_slide_with_diagnostics(input, index, timeline, text_directions, fonts)
+        .map(|frame| frame.page)
+}
+
+/// Facade hook retaining text approximation diagnostics alongside the evaluated page.
+#[doc(hidden)]
+pub fn layout_timeline_slide_with_diagnostics(
+    input: &RenderInput,
+    index: usize,
+    timeline: &ResolvedTimelineSlide,
+    text_directions: Option<&ResolvedSlideTextDirections>,
+    fonts: &mut FontManager,
+) -> Result<TimelinePageFrame, RenderInputError> {
+    layout_timeline_slide_with_displayed_number(input, index, timeline, text_directions, fonts, 1)
+}
+
+/// Lowers a timeline frame using the same explicit displayed-number context as
+/// static layout, retaining the physical frame ordinal for selection and output.
+pub fn layout_timeline_slide_with_displayed_number(
+    input: &RenderInput,
+    index: usize,
+    timeline: &ResolvedTimelineSlide,
+    text_directions: Option<&ResolvedSlideTextDirections>,
+    fonts: &mut FontManager,
+    first_slide_number: usize,
+) -> Result<TimelinePageFrame, RenderInputError> {
     if index >= input.slides.len() {
         return Err(RenderInputError::SlideIndexOutOfBounds {
             index,
             slide_count: input.slides.len(),
         });
     }
-    layout_resolved_slide_with_fonts_text_directions_and_states(
+    // Owner facts lead shaping diagnostics in the same order as static rendering.
+    let mut owner_diagnostics = Vec::new();
+    if timeline.slide.unresolved_member_count > 0 {
+        owner_diagnostics.push(Diagnostic {
+            message: format!(
+                "slide {} incomplete: {} unresolved members",
+                index + 1,
+                timeline.slide.unresolved_member_count
+            ),
+        });
+    }
+    owner_diagnostics.extend(timeline.slide.diagnostics.iter().cloned());
+    let mut diagnostics = Vec::new();
+    let mut page = layout_resolved_slide_with_diagnostics(
         input,
         &timeline.slide,
-        index + 1,
+        first_slide_number
+            .checked_add(index)
+            .ok_or_else(|| RenderInputError::TextLayout {
+                detail: "displayed slide number overflow".into(),
+            })?,
         fonts,
         text_directions.map(Vec::as_slice),
         Some(&timeline.shape_states),
-    )
+        &mut diagnostics,
+    )?;
+    page.page_number = index + 1;
+    owner_diagnostics.extend(
+        diagnostics
+            .into_iter()
+            .map(|message| Diagnostic { message }),
+    );
+    Ok(TimelinePageFrame {
+        page,
+        diagnostics: owner_diagnostics,
+    })
 }
 
 /// Compose an evaluated incoming page with an optional outgoing page.
@@ -142,6 +194,81 @@ pub fn compose_transition(
                 None,
             ),
         ],
+        TransitionEffect::Cover => vec![
+            page_group(outgoing_elements, Transform::IDENTITY, 1.0, None),
+            page_group(
+                incoming_elements,
+                push_translation(incoming.width, incoming.height, progress, direction, true),
+                1.0,
+                None,
+            ),
+        ],
+        TransitionEffect::Uncover => vec![
+            page_group(incoming_elements, Transform::IDENTITY, 1.0, None),
+            page_group(
+                outgoing_elements,
+                push_translation(incoming.width, incoming.height, progress, direction, false),
+                1.0,
+                None,
+            ),
+        ],
+        TransitionEffect::Split => {
+            let vertical = transition
+                .parameters
+                .iter()
+                .any(|p| p.name == "orient" && p.value == "vert");
+            let rect = if vertical {
+                Rect {
+                    x: incoming.width * (1.0 - progress) / 2.0,
+                    y: 0.0,
+                    width: incoming.width * progress,
+                    height: incoming.height,
+                }
+            } else {
+                Rect {
+                    x: 0.0,
+                    y: incoming.height * (1.0 - progress) / 2.0,
+                    width: incoming.width,
+                    height: incoming.height * progress,
+                }
+            };
+            if direction == "in" {
+                let remainder = if vertical {
+                    Rect {
+                        x: incoming.width * progress / 2.0,
+                        y: 0.0,
+                        width: incoming.width * (1.0 - progress),
+                        height: incoming.height,
+                    }
+                } else {
+                    Rect {
+                        x: 0.0,
+                        y: incoming.height * progress / 2.0,
+                        width: incoming.width,
+                        height: incoming.height * (1.0 - progress),
+                    }
+                };
+                vec![
+                    page_group(incoming_elements, Transform::IDENTITY, 1.0, None),
+                    page_group(
+                        outgoing_elements,
+                        Transform::IDENTITY,
+                        1.0,
+                        Some(Path::rect(remainder)),
+                    ),
+                ]
+            } else {
+                vec![
+                    page_group(outgoing_elements, Transform::IDENTITY, 1.0, None),
+                    page_group(
+                        incoming_elements,
+                        Transform::IDENTITY,
+                        1.0,
+                        Some(Path::rect(rect)),
+                    ),
+                ]
+            }
+        }
         TransitionEffect::Zoom => vec![
             if direction == "out" {
                 page_group(
@@ -204,7 +331,11 @@ fn transition_direction(transition: &EvaluatedTransition) -> Result<&str, String
         .map(|parameter| parameter.value.as_str());
     let (default, supported): (&str, &[&str]) = match transition.effect {
         TransitionEffect::Wipe | TransitionEffect::Push => ("l", &["l", "r", "u", "d"]),
-        TransitionEffect::Zoom => ("in", &["in", "out"]),
+        TransitionEffect::Zoom => ("out", &["in", "out"]),
+        TransitionEffect::Split => ("out", &["in", "out"]),
+        TransitionEffect::Cover | TransitionEffect::Uncover => {
+            ("l", &["l", "r", "u", "d", "lu", "ru", "ld", "rd"])
+        }
         _ => return Ok(""),
     };
     let direction = explicit.unwrap_or(default);
@@ -217,6 +348,9 @@ fn transition_direction(transition: &EvaluatedTransition) -> Result<&str, String
                 TransitionEffect::Wipe => "wipe",
                 TransitionEffect::Push => "push",
                 TransitionEffect::Zoom => "zoom",
+                TransitionEffect::Split => "split",
+                TransitionEffect::Cover => "cover",
+                TransitionEffect::Uncover => "uncover",
                 _ => unreachable!("non-directional transition returned above"),
             }
         ))
@@ -267,6 +401,14 @@ fn push_translation(
         ("u", true) => (0.0, height * remaining),
         ("d", false) => (0.0, height * progress),
         ("d", true) => (0.0, -height * remaining),
+        ("lu", false) => (-width * progress, -height * progress),
+        ("lu", true) => (width * remaining, height * remaining),
+        ("ru", false) => (width * progress, -height * progress),
+        ("ru", true) => (-width * remaining, height * remaining),
+        ("ld", false) => (-width * progress, height * progress),
+        ("ld", true) => (width * remaining, -height * remaining),
+        ("rd", false) => (width * progress, height * progress),
+        ("rd", true) => (-width * remaining, -height * remaining),
         (_, false) => (-width * progress, 0.0),
         (_, true) => (width * remaining, 0.0),
     };
@@ -753,11 +895,98 @@ mod tests {
     }
 
     #[test]
+    fn fx208_split_cover_uncover_sample_every_direction_and_boundary() {
+        let outgoing = PageFrame::new(1, 100.0, 50.0, Vec::new());
+        let incoming = PageFrame::new(2, 100.0, 50.0, Vec::new());
+        for (effect, directions) in [
+            (
+                TransitionEffect::Cover,
+                &["l", "r", "u", "d", "lu", "ru", "ld", "rd"][..],
+            ),
+            (
+                TransitionEffect::Uncover,
+                &["l", "r", "u", "d", "lu", "ru", "ld", "rd"][..],
+            ),
+            (TransitionEffect::Split, &["in", "out"][..]),
+        ] {
+            for direction in directions {
+                for orient in ["horz", "vert"] {
+                    for progress in [0.0, 0.5, 1.0] {
+                        let frame = compose_transition(
+                            incoming.clone(),
+                            Some(&outgoing),
+                            Some(&EvaluatedTransition {
+                                effect: effect.clone(),
+                                progress,
+                                duration_ms: 1000,
+                                parameters: vec![
+                                    TransitionParameter {
+                                        name: "dir".to_owned(),
+                                        value: (*direction).to_owned(),
+                                    },
+                                    TransitionParameter {
+                                        name: "orient".to_owned(),
+                                        value: orient.to_owned(),
+                                    },
+                                ],
+                                morph_option: None,
+                            }),
+                        );
+                        assert!(frame.diagnostics.is_empty());
+                        assert_eq!(frame.page.page_number, 2);
+                        if progress == 1.0 {
+                            assert_eq!(frame.page.elements, incoming.elements);
+                            continue;
+                        }
+                        assert_eq!(frame.page.elements.len(), 2);
+                        let PositionedElement::Group(first) = &frame.page.elements[0] else {
+                            panic!("first page group")
+                        };
+                        let PositionedElement::Group(second) = &frame.page.elements[1] else {
+                            panic!("second page group")
+                        };
+                        assert_eq!(first.transform, Transform::IDENTITY);
+                        if effect == TransitionEffect::Split {
+                            assert!(first.clip.is_none());
+                            assert!(second.clip.is_some());
+                            assert_eq!(second.transform, Transform::IDENTITY);
+                        } else {
+                            let x = match *direction {
+                                "r" | "ru" | "rd" => -100.0,
+                                "u" | "d" => 0.0,
+                                _ => 100.0,
+                            };
+                            let y = match *direction {
+                                "u" | "lu" | "ru" => 50.0,
+                                "d" | "ld" | "rd" => -50.0,
+                                _ => 0.0,
+                            };
+                            let factor = if effect == TransitionEffect::Cover {
+                                1.0 - f64::from(progress)
+                            } else {
+                                -f64::from(progress)
+                            };
+                            assert_eq!(
+                                (second.transform.e, second.transform.f),
+                                (x * factor, y * factor)
+                            );
+                            assert!(first.clip.is_none() && second.clip.is_none());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn invalid_transition_directions_diagnose_without_composition() {
         for (effect, name) in [
             (TransitionEffect::Wipe, "wipe"),
             (TransitionEffect::Push, "push"),
             (TransitionEffect::Zoom, "zoom"),
+            (TransitionEffect::Split, "split"),
+            (TransitionEffect::Cover, "cover"),
+            (TransitionEffect::Uncover, "uncover"),
         ] {
             for progress in [0.5, 1.0] {
                 let incoming = PageFrame::new(
@@ -968,6 +1197,18 @@ mod tests {
         assert_eq!(in_incoming.transform.a, 0.75);
         assert_eq!(out_outgoing.transform.a, 0.75);
         assert_eq!(out_incoming.transform.a, 1.0);
+        let default = compose_transition(
+            PageFrame::new(2, 100.0, 50.0, Vec::new()),
+            Some(&PageFrame::new(1, 100.0, 50.0, Vec::new())),
+            Some(&EvaluatedTransition {
+                effect: TransitionEffect::Zoom,
+                progress: 0.5,
+                duration_ms: 1000,
+                parameters: Vec::new(),
+                morph_option: None,
+            }),
+        );
+        assert_eq!(default.page.elements, zoom_out.page.elements);
     }
 
     #[test]
@@ -1057,6 +1298,7 @@ mod tests {
     fn timeline_slide(name: &str, x: f64) -> ResolvedTimelineSlide {
         ResolvedTimelineSlide {
             slide: ResolvedSlide {
+                unresolved_member_count: 0,
                 size: (100.0, 50.0),
                 background: None,
                 shapes: vec![ResolvedShape {
@@ -1127,5 +1369,75 @@ mod tests {
             children: Vec::new(),
         }));
         page
+    }
+
+    #[test]
+    fn fx206_recovery_timeline_companion_reports_count_and_owner_order_once() {
+        for placed in [false, true] {
+            let mut timeline = timeline_slide("failed", 0.0);
+            if placed {
+                timeline.slide.shapes[0].geometry = ResolvedGeometry::BoundsFallback;
+                timeline.slide.shapes[0].unsupported = Some("unresolved shape");
+            } else {
+                timeline.slide.shapes.clear();
+                timeline.identities.clear();
+                timeline.shape_states.clear();
+            }
+            timeline.slide.unresolved_member_count = 1;
+            timeline.slide.diagnostics = vec![
+                oxml_layout::Diagnostic {
+                    message: "valid sibling diagnostic".into(),
+                },
+                oxml_layout::Diagnostic {
+                    message: "unresolved member slide shape 2 \"failed\"".into(),
+                },
+            ];
+            let original = timeline.slide.diagnostics.clone();
+            let input = crate::RenderInput {
+                slides: vec![timeline.slide.clone(), timeline.slide.clone()],
+                media: std::collections::HashMap::new(),
+                fonts: Vec::new(),
+                metadata: None,
+            };
+            let mut fonts = oxml_layout::FontManager::new_deterministic().unwrap();
+            let frame = super::layout_timeline_slide_with_diagnostics(
+                &input, 1, &timeline, None, &mut fonts,
+            )
+            .unwrap();
+            assert_eq!(
+                frame
+                    .diagnostics
+                    .iter()
+                    .map(|d| d.message.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "slide 2 incomplete: 1 unresolved members",
+                    "valid sibling diagnostic",
+                    "unresolved member slide shape 2 \"failed\""
+                ]
+            );
+            assert_eq!(timeline.slide.diagnostics, original);
+            assert_eq!(frame.page.elements.is_empty(), !placed);
+            assert!(
+                super::layout_timeline_slide_with_diagnostics(
+                    &input, 2, &timeline, None, &mut fonts
+                )
+                .is_err()
+            );
+        }
+        let timeline = timeline_slide("valid", 0.0);
+        let input = crate::RenderInput {
+            slides: vec![timeline.slide.clone()],
+            media: std::collections::HashMap::new(),
+            fonts: Vec::new(),
+            metadata: None,
+        };
+        let mut fonts = oxml_layout::FontManager::new_deterministic().unwrap();
+        assert!(
+            super::layout_timeline_slide_with_diagnostics(&input, 0, &timeline, None, &mut fonts)
+                .unwrap()
+                .diagnostics
+                .is_empty()
+        );
     }
 }

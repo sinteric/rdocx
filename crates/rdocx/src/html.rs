@@ -127,6 +127,7 @@ struct HtmlProjection {
 struct EmbeddedHtmlImage {
     rel_id: String,
     drawing_id: Option<u32>,
+    description: Option<String>,
     width: Length,
     height: Length,
 }
@@ -165,6 +166,8 @@ impl Default for Limits {
 #[derive(Debug, Clone, Default)]
 struct ComputedStyle {
     font: Option<String>,
+    code: bool,
+    character_style: Option<String>,
     size: Option<f64>,
     bold: Option<bool>,
     italic: Option<bool>,
@@ -172,6 +175,7 @@ struct ComputedStyle {
     strike: Option<bool>,
     color: Option<String>,
     background: Option<String>,
+    mark_highlight: Option<String>,
     alignment: Option<Alignment>,
     space_before: Option<Length>,
     space_after: Option<Length>,
@@ -186,12 +190,15 @@ impl ComputedStyle {
     fn inherited(&self) -> Self {
         Self {
             font: self.font.clone(),
+            code: self.code,
+            character_style: self.character_style.clone(),
             size: self.size,
             bold: self.bold,
             italic: self.italic,
             underline: self.underline,
             strike: self.strike,
             color: self.color.clone(),
+            mark_highlight: self.mark_highlight.clone(),
             alignment: self.alignment,
             vertical: self.vertical,
             hyperlink: self.hyperlink.clone(),
@@ -290,13 +297,29 @@ struct ActiveSpan {
 }
 
 fn from_html_with_limits(html: &str, limits: Limits) -> Result<HtmlReadResult> {
-    from_html_with_resources(html, limits, None)
+    if html.len() > limits.input_bytes {
+        return Err(html_error("input", "HTML input exceeds the 64 MiB limit"));
+    }
+    preflight_markup(html, limits)?;
+    let dom = Html::parse_fragment(html);
+    validate_dom(&dom, limits)?;
+    let projection = fragment_projection(&dom, &[], limits)?;
+    from_html_with_resources(html, limits, Some(&projection))
 }
 
 fn from_html_with_resources(
     html: &str,
     limits: Limits,
     projection: Option<&HtmlProjection>,
+) -> Result<HtmlReadResult> {
+    from_html_in_document(html, limits, projection, Document::new())
+}
+
+fn from_html_in_document(
+    html: &str,
+    limits: Limits,
+    projection: Option<&HtmlProjection>,
+    mut document: Document,
 ) -> Result<HtmlReadResult> {
     if html.len() > limits.input_bytes {
         return Err(html_error("input", "HTML input exceeds the 64 MiB limit"));
@@ -312,12 +335,13 @@ fn from_html_with_resources(
     };
     validate_dom(&dom, limits)?;
 
-    let mut document = Document::new();
     let importer = Importer {
         dom: &dom,
         document: &mut document,
         story: None,
         output: Vec::new(),
+        container_styles: HashSet::new(),
+        quote_owners: HashMap::new(),
         diagnostics: Vec::new(),
         diagnostic_keys: HashSet::new(),
         rules: Vec::new(),
@@ -367,6 +391,8 @@ pub(crate) fn project_html_fragment(
         document,
         story: Some(story),
         output: Vec::new(),
+        container_styles: HashSet::new(),
+        quote_owners: HashMap::new(),
         diagnostics: Vec::new(),
         diagnostic_keys: HashSet::new(),
         rules: Vec::new(),
@@ -518,7 +544,440 @@ fn fragment_projection(
     })
 }
 
+/// Bound the escaped CommonMark projection before retaining any output bytes.
+struct MarkdownHtmlBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for MarkdownHtmlBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other(
+                "Markdown HTML projection exceeds its byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct MarkdownHtmlProjection {
+    html: String,
+    diagnostics: Vec<HtmlDiagnostic>,
+    source_elements: Vec<(&'static str, Range<usize>)>,
+}
+
+fn project_markdown(markdown: &str, limits: Limits) -> Result<MarkdownHtmlProjection> {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    if markdown.len() > limits.input_bytes {
+        return Err(html_error("input", "Markdown input exceeds its byte limit"));
+    }
+    let mut events = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut depth = 0_usize;
+    let mut retained_text = 0_usize;
+    let mut event_count = 0_usize;
+    let mut image_depth = 0_usize;
+    let mut source_elements = Vec::new();
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
+        event_count = event_count
+            .checked_add(1)
+            .ok_or_else(|| html_error("input", "Markdown event count overflowed"))?;
+        if event_count > limits.nodes {
+            return Err(html_error("input", "Markdown exceeds its event limit"));
+        }
+        match &event {
+            Event::Start(_) => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| html_error("input", "Markdown nesting overflowed"))?;
+                if depth > limits.depth {
+                    return Err(html_error("input", "Markdown exceeds its nesting limit"));
+                }
+            }
+            Event::End(_) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| html_error("input", "Markdown event nesting is unbalanced"))?;
+            }
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                retained_text = retained_text
+                    .checked_add(text.len())
+                    .ok_or_else(|| html_error("input", "Markdown retained text overflowed"))?;
+                if retained_text > limits.retained_text {
+                    return Err(html_error(
+                        "input",
+                        "Markdown exceeds its retained text limit",
+                    ));
+                }
+            }
+            _ => {}
+        }
+        match &event {
+            Event::Start(Tag::Image { .. }) => {
+                if image_depth == 0 {
+                    source_elements.push(("img", range.clone()));
+                }
+                image_depth += 1;
+            }
+            Event::End(TagEnd::Image) => image_depth -= 1,
+            Event::Start(Tag::Link { .. }) if image_depth == 0 => {
+                source_elements.push(("a", range.clone()));
+            }
+            _ => {}
+        }
+        if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
+            if diagnostics.len() >= limits.diagnostics {
+                return Err(html_error("input", "Markdown exceeds its diagnostic limit"));
+            }
+            diagnostics.push(HtmlDiagnostic {
+                location: format!("bytes {}..{}", range.start, range.end),
+                property: None,
+                message: "dropped raw Markdown HTML".to_owned(),
+            });
+        } else {
+            events.push(event);
+        }
+    }
+    if depth != 0 {
+        return Err(html_error("input", "Markdown event nesting is unbalanced"));
+    }
+    let mut output = MarkdownHtmlBuffer {
+        bytes: Vec::new(),
+        limit: limits.input_bytes,
+    };
+    pulldown_cmark::html::write_html_io(&mut output, events.into_iter())
+        .map_err(|error| html_error("input", error.to_string()))?;
+    let html = String::from_utf8(output.bytes)
+        .map_err(|_| html_error("input", "Markdown projection is not UTF-8"))?;
+    Ok(MarkdownHtmlProjection {
+        html,
+        diagnostics,
+        source_elements,
+    })
+}
+
+fn html_style_id(document: &Document, id: &str) -> String {
+    if document.styles.get_by_id(id).is_some() {
+        return id.to_owned();
+    }
+    let name = if let Some(level) = id.strip_prefix("Heading") {
+        format!("Heading {level}")
+    } else {
+        match id {
+            "HTMLPreformatted" => "HTML Preformatted".to_owned(),
+            "HTMLQuotedPreformatted" => "HTML Quoted Preformatted".to_owned(),
+            "HTMLCode" => "HTML Code".to_owned(),
+            _ => id.to_owned(),
+        }
+    };
+    document
+        .styles
+        .styles
+        .iter()
+        .find(|style| {
+            style
+                .name
+                .as_deref()
+                .is_some_and(|existing| existing.eq_ignore_ascii_case(&name))
+        })
+        .map_or_else(|| id.to_owned(), |style| style.style_id.clone())
+}
+
+fn ensure_markdown_styles(document: &mut Document) -> Result<()> {
+    use crate::StyleBuilder;
+
+    for (id, name) in [
+        ("Normal", "Normal"),
+        ("Quote", "Quote"),
+        ("HTMLPreformatted", "HTML Preformatted"),
+        ("HTMLQuotedPreformatted", "HTML Quoted Preformatted"),
+    ] {
+        if document
+            .styles
+            .get_by_id(&html_style_id(document, id))
+            .is_none()
+        {
+            let mut builder = StyleBuilder::paragraph(id, name);
+            if matches!(id, "HTMLPreformatted" | "HTMLQuotedPreformatted") {
+                builder = builder.font("Courier New").size(10.0);
+            }
+            document.add_style(builder)?;
+        }
+    }
+    for level in 1..=6 {
+        let id = format!("Heading{level}");
+        if document
+            .styles
+            .get_by_id(&html_style_id(document, &id))
+            .is_none()
+        {
+            let properties = rdocx_oxml::properties::CT_PPr {
+                outline_lvl: Some(level - 1),
+                ..Default::default()
+            };
+            document.add_style(
+                StyleBuilder::paragraph(&id, &format!("Heading {level}"))
+                    .paragraph_properties(properties)
+                    .bold(true)
+                    .size(24.0 - level as f64 * 2.0),
+            )?;
+        }
+    }
+    if document.styles.get_by_id("HTMLThematicBreak").is_none() {
+        document.add_style(StyleBuilder::paragraph(
+            "HTMLThematicBreak",
+            "HTML Thematic Break",
+        ))?;
+    }
+    if document
+        .styles
+        .get_by_id(&html_style_id(document, "HTMLCode"))
+        .is_none()
+    {
+        document.add_style(StyleBuilder::character("HTMLCode", "HTML Code").font("Courier New"))?;
+    }
+    Ok(())
+}
+
+fn open_local_import(
+    path: &Path,
+    template: Option<&Document>,
+    markdown: bool,
+) -> Result<HtmlReadResult> {
+    let mut input = File::open(path)?;
+    let size = usize::try_from(input.metadata()?.len())
+        .map_err(|_| html_error("input", "text input size is not representable"))?;
+    let bytes = read_bounded(&mut input, size, MAX_INPUT_BYTES)?;
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| html_error("input", "text input must be UTF-8"))?;
+    let projection;
+    let html = if markdown {
+        projection = project_markdown(text, Limits::default())?;
+        projection.html.as_str()
+    } else {
+        preflight_markup(text, Limits::default())?;
+        text
+    };
+    let dom = Html::parse_fragment(html);
+    validate_dom(&dom, Limits::default())?;
+    let selector = Selector::parse("img[src]").expect("constant image selector");
+    let root = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()?;
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
+    let mut total = 0_usize;
+    for element in dom.select(&selector) {
+        let source = element.value().attr("src").expect("selected source");
+        if source.starts_with("data:") || !seen.insert(source.to_owned()) {
+            continue;
+        }
+        if seen.len() > MAX_MHTML_PARTS {
+            return Err(html_error("images", "local image count exceeds the limit"));
+        }
+        let raw = source.split(['?', '#']).next().unwrap_or(source).as_bytes();
+        let mut decoded = Vec::with_capacity(raw.len());
+        let mut index = 0;
+        while index < raw.len() {
+            if raw[index] == b'%' {
+                let pair = raw.get(index + 1..index + 3).ok_or_else(|| {
+                    html_error("images", "image path has incomplete percent encoding")
+                })?;
+                let hex = std::str::from_utf8(pair)
+                    .map_err(|_| html_error("images", "invalid image path encoding"))?;
+                decoded.push(
+                    u8::from_str_radix(hex, 16)
+                        .map_err(|_| html_error("images", "invalid image path encoding"))?,
+                );
+                index += 3;
+            } else {
+                decoded.push(raw[index]);
+                index += 1;
+            }
+        }
+        let name = String::from_utf8(decoded)
+            .map_err(|_| html_error("images", "image path must be UTF-8"))?;
+        let relative = Path::new(&name);
+        if name.is_empty()
+            || name.contains(':')
+            || relative.components().any(|c| {
+                !matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(html_error(
+                format!("images/{source}"),
+                "only relative image files within the input directory are allowed",
+            ));
+        }
+        let resolved = match root.join(relative).canonicalize() {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !resolved.starts_with(&root) {
+            return Err(html_error(
+                format!("images/{source}"),
+                "image path leaves the input directory",
+            ));
+        }
+        let mut file = File::open(&resolved)?;
+        let size = usize::try_from(file.metadata()?.len())
+            .map_err(|_| html_error("images", "image size is not representable"))?;
+        let remaining = MAX_INPUT_BYTES
+            .checked_sub(total)
+            .ok_or_else(|| html_error("images", "image byte count overflowed"))?;
+        let data = read_bounded(&mut file, size, remaining)?;
+        total = total
+            .checked_add(data.len())
+            .ok_or_else(|| html_error("images", "image byte count overflowed"))?;
+        let filename = resolved
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or_else(|| html_error("images", "image filename must be UTF-8"))?
+            .to_owned();
+        images.push((source.to_owned(), data, filename));
+    }
+    let resources = images
+        .iter()
+        .map(|(source, bytes, filename)| HtmlImageResource {
+            source,
+            bytes,
+            filename,
+        })
+        .collect::<Vec<_>>();
+    if markdown {
+        Document::from_markdown_with_options(text, template, &resources)
+    } else {
+        Document::from_html_with_options(text, template, &resources)
+    }
+}
+
 impl Document {
+    /// Read HTML and explicit local image files beneath the input directory.
+    pub fn open_html_with_local_images(
+        path: impl AsRef<Path>,
+        template: Option<&Document>,
+    ) -> Result<HtmlReadResult> {
+        open_local_import(path.as_ref(), template, false)
+    }
+
+    /// Read Markdown and explicit local image files beneath the input directory.
+    pub fn open_markdown_with_local_images(
+        path: impl AsRef<Path>,
+        template: Option<&Document>,
+    ) -> Result<HtmlReadResult> {
+        open_local_import(path.as_ref(), template, true)
+    }
+
+    /// Import bounded CommonMark with tables and strikethrough into native Word content.
+    pub fn from_markdown(markdown: &str) -> Result<HtmlReadResult> {
+        Self::from_markdown_with_options(markdown, None, &[])
+    }
+
+    /// Import CommonMark while preserving the supplied template's non-body package graph.
+    pub fn from_markdown_with_options(
+        markdown: &str,
+        template: Option<&Document>,
+        images: &[HtmlImageResource<'_>],
+    ) -> Result<HtmlReadResult> {
+        let projection = project_markdown(markdown, Limits::default())?;
+        let mut result = Self::from_html_with_options(&projection.html, template, images)?;
+        let dom = Html::parse_fragment(&projection.html);
+        let selector = Selector::parse("a, img").expect("constant Markdown element selector");
+        let elements = dom.select(&selector).collect::<Vec<_>>();
+        if elements.len() != projection.source_elements.len() {
+            return Err(html_error(
+                "input",
+                "Markdown source element projection is inconsistent",
+            ));
+        }
+        let mut source_locations = HashMap::new();
+        for (element, (tag, range)) in elements.into_iter().zip(projection.source_elements) {
+            if element.value().name() != tag {
+                return Err(html_error(
+                    "input",
+                    "Markdown source element order is inconsistent",
+                ));
+            }
+            source_locations.insert(element_path(element), range);
+        }
+        for diagnostic in &mut result.diagnostics {
+            if let Some(range) = source_locations.get(&diagnostic.location) {
+                diagnostic.location = format!("bytes {}..{}", range.start, range.end);
+            }
+        }
+        let mut diagnostics = projection.diagnostics;
+        if diagnostics
+            .len()
+            .checked_add(result.diagnostics.len())
+            .is_none_or(|count| count > Limits::default().diagnostics)
+        {
+            return Err(html_error(
+                "input",
+                "Markdown exceeds its combined diagnostic limit",
+            ));
+        }
+        diagnostics.append(&mut result.diagnostics);
+        diagnostics.sort_by_key(|diagnostic| {
+            diagnostic
+                .location
+                .strip_prefix("bytes ")
+                .and_then(|range| range.split_once(".."))
+                .and_then(|(start, _)| start.parse::<usize>().ok())
+                .unwrap_or(usize::MAX)
+        });
+        result.diagnostics = diagnostics;
+        Ok(result)
+    }
+
+    /// Read bounded UTF-8 Markdown without resolving filesystem or network resources.
+    pub fn open_markdown<P: AsRef<Path>>(path: P) -> Result<HtmlReadResult> {
+        let path = path.as_ref();
+        let expected_size = usize::try_from(std::fs::metadata(path)?.len())
+            .map_err(|_| html_error("input", "Markdown input size is not representable"))?;
+        let bytes = read_bounded(&mut File::open(path)?, expected_size, MAX_INPUT_BYTES)?;
+        let markdown = std::str::from_utf8(&bytes)
+            .map_err(|_| html_error("input", "Markdown input is not UTF-8"))?;
+        Self::from_markdown(markdown)
+    }
+
+    /// Import HTML with explicit images and an optional preserved template.
+    pub fn from_html_with_options(
+        html: &str,
+        template: Option<&Document>,
+        images: &[HtmlImageResource<'_>],
+    ) -> Result<HtmlReadResult> {
+        let limits = Limits::default();
+        if html.len() > limits.input_bytes {
+            return Err(html_error("input", "HTML input exceeds the 64 MiB limit"));
+        }
+        preflight_markup(html, limits)?;
+        let dom = Html::parse_fragment(html);
+        validate_dom(&dom, limits)?;
+        let projection = fragment_projection(&dom, images, limits)?;
+        let mut document = if let Some(template) = template {
+            template.clone_for_staging().prepare_and_reopen_staged()?
+        } else {
+            Document::new()
+        };
+        document.document.body.content.clear();
+        ensure_markdown_styles(&mut document)?;
+        from_html_in_document(html, limits, Some(&projection), document)
+    }
+
     pub fn from_html(html: &str) -> Result<HtmlReadResult> {
         from_html_with_limits(html, Limits::default())
     }
@@ -2384,6 +2843,8 @@ struct Importer<'a> {
     document: &'a mut Document,
     story: Option<&'a StoryId>,
     output: Vec<BodyContent>,
+    container_styles: HashSet<String>,
+    quote_owners: HashMap<String, u32>,
     diagnostics: Vec<HtmlDiagnostic>,
     diagnostic_keys: HashSet<HtmlDiagnostic>,
     rules: Vec<CssRule>,
@@ -2615,10 +3076,69 @@ impl Importer<'_> {
     fn project_block(&mut self, element: ElementRef<'_>, inherited: &ComputedStyle) -> Result<()> {
         let name = element.value().name();
         match name {
-            "ul" | "ol" => self.project_list(element, inherited, 0, None),
+            "ul" | "ol" => {
+                let level = element
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .filter(|ancestor| ancestor.value().name() == "li")
+                    .count() as u32;
+                self.project_list(element, inherited, level, None)
+            }
             "table" => self.project_table(element, inherited),
+            "hr" => {
+                let style = self.computed_style(element, inherited)?;
+                let mut paragraph = self.build_paragraph(ParagraphModel {
+                    pieces: Vec::new(),
+                    style,
+                    paragraph_style: Some("HTMLThematicBreak".to_owned()),
+                    numbering: None,
+                })?;
+                Paragraph {
+                    inner: &mut paragraph,
+                }
+                .set_border_bottom(crate::BorderStyle::Single, 4, "000000");
+                self.output.push(BodyContent::Paragraph(paragraph));
+                Ok(())
+            }
             "div" => self.project_container(element, inherited),
-            "p" | "blockquote" | "pre" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            "blockquote" => {
+                let start = self.output.len();
+                self.project_container(element, inherited)?;
+                let depth = element
+                    .ancestors()
+                    .filter_map(ElementRef::wrap)
+                    .filter(|ancestor| ancestor.value().name() == "blockquote")
+                    .count()
+                    + 1;
+                let container_path = self.html_container_path(element);
+                let quote_id = html_style_id(self.document, "Quote");
+                let pre_id = html_style_id(self.document, "HTMLPreformatted");
+                let quoted_pre_id = html_style_id(self.document, "HTMLQuotedPreformatted");
+                for content in &mut self.output[start..] {
+                    if let BodyContent::Paragraph(inner) = content {
+                        let mut paragraph = Paragraph { inner };
+                        let style_id = paragraph
+                            .inner
+                            .properties
+                            .as_ref()
+                            .and_then(|properties| properties.style_id.as_deref());
+                        if style_id != Some(quote_id.as_str())
+                            && style_id != Some(quoted_pre_id.as_str())
+                            && !style_id.is_some_and(|id| self.container_styles.contains(id))
+                        {
+                            if style_id == Some(pre_id.as_str()) {
+                                paragraph.set_style(&quoted_pre_id);
+                            } else if style_id != Some("HTMLThematicBreak") {
+                                paragraph.set_style(&quote_id);
+                            }
+                            paragraph.set_indent_left(Length::inches(depth as f64 * 0.25));
+                        }
+                    }
+                }
+                self.retain_container_path(start, &container_path)?;
+                Ok(())
+            }
+            "p" | "pre" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let style = self.computed_style(element, inherited)?;
                 let mut pieces = Vec::new();
                 let pre = name == "pre";
@@ -2630,7 +3150,7 @@ impl Importer<'_> {
                     "h4" => Some("Heading4".to_string()),
                     "h5" => Some("Heading5".to_string()),
                     "h6" => Some("Heading6".to_string()),
-                    "blockquote" => Some("Quote".to_string()),
+                    "pre" => Some("HTMLPreformatted".to_string()),
                     _ => None,
                 };
                 let model = ParagraphModel {
@@ -2654,27 +3174,140 @@ impl Importer<'_> {
         }
     }
 
-    fn project_list(
-        &mut self,
-        list: ElementRef<'_>,
-        inherited: &ComputedStyle,
-        level: u32,
-        list_id: Option<u32>,
-    ) -> Result<()> {
-        for model in self.list_models(list, inherited, level, list_id)? {
-            let paragraph = self.build_paragraph(model)?;
-            self.output.push(BodyContent::Paragraph(paragraph));
+    fn html_container_path(&mut self, element: ElementRef<'_>) -> String {
+        let mut ancestors: Vec<_> = element.ancestors().filter_map(ElementRef::wrap).collect();
+        ancestors.reverse();
+        ancestors.push(element);
+        let path: String = ancestors
+            .iter()
+            .filter_map(|ancestor| match ancestor.value().name() {
+                "blockquote" => Some('q'),
+                "li" => Some('l'),
+                _ => None,
+            })
+            .collect();
+        let quote = ancestors
+            .iter()
+            .find(|ancestor| ancestor.value().name() == "blockquote");
+        let compound = quote.is_some_and(|quote| {
+            self.quote_owners.contains_key(&format!("{:?}", quote.id()))
+                || quote
+                    .descendants()
+                    .filter_map(ElementRef::wrap)
+                    .any(|child| matches!(child.value().name(), "ul" | "ol" | "table" | "hr"))
+        });
+        if compound {
+            let mut owners = Vec::new();
+            for quote in ancestors
+                .iter()
+                .filter(|ancestor| ancestor.value().name() == "blockquote")
+            {
+                let next = self.quote_owners.len() as u32 + 1;
+                let owner = *self
+                    .quote_owners
+                    .entry(format!("{:?}", quote.id()))
+                    .or_insert(next);
+                owners.push(owner.to_string());
+            }
+            format!("{path}|{}", owners.join("."))
+        } else {
+            path
+        }
+    }
+
+    fn retain_container_path(&mut self, start: usize, path: &str) -> Result<()> {
+        if !path.contains('q') {
+            return Ok(());
+        }
+        for index in start..self.output.len() {
+            let (base, table) = match &self.output[index] {
+                BodyContent::Paragraph(paragraph) => (
+                    paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.style_id.clone()),
+                    false,
+                ),
+                BodyContent::Table(table) => (
+                    table.properties.as_ref().and_then(|p| p.style_id.clone()),
+                    true,
+                ),
+                _ => continue,
+            };
+            if base
+                .as_deref()
+                .is_some_and(|id| self.container_styles.contains(id))
+            {
+                continue;
+            }
+            if !path.contains('|')
+                && path.bytes().all(|b| b == b'q')
+                && !table
+                && base.as_deref() != Some("HTMLThematicBreak")
+            {
+                continue;
+            }
+            let name = format!("RDOCX HTML containers {path}");
+            let stem = format!(
+                "RDOCXHTMLContainers{}{}",
+                path.replace('|', "Owner"),
+                if table { "Table" } else { "Paragraph" }
+            );
+            let mut suffix = 0u32;
+            let id = loop {
+                let id = format!("{stem}{suffix}");
+                let mut builder = if table {
+                    crate::StyleBuilder::table(&id, &name)
+                } else {
+                    crate::StyleBuilder::paragraph(&id, &name)
+                };
+                if let Some(base) = &base {
+                    builder = builder.based_on(base);
+                }
+                let expected = builder.build().0;
+                match self.document.styles.get_by_id(&id) {
+                    Some(style) if *style == expected => break id,
+                    Some(_) => suffix += 1,
+                    None => {
+                        let mut builder = if table {
+                            crate::StyleBuilder::table(&id, &name)
+                        } else {
+                            crate::StyleBuilder::paragraph(&id, &name)
+                        };
+                        if let Some(base) = &base {
+                            builder = builder.based_on(base);
+                        }
+                        self.document.add_style(builder)?;
+                        break id;
+                    }
+                }
+            };
+            self.container_styles.insert(id.clone());
+            match &mut self.output[index] {
+                BodyContent::Paragraph(paragraph) => {
+                    paragraph
+                        .properties
+                        .get_or_insert_with(Default::default)
+                        .style_id = Some(id)
+                }
+                BodyContent::Table(table) => {
+                    table
+                        .properties
+                        .get_or_insert_with(Default::default)
+                        .style_id = Some(id)
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
 
-    fn list_models(
+    fn list_definition(
         &mut self,
         list: ElementRef<'_>,
-        inherited: &ComputedStyle,
         level: u32,
         list_id: Option<u32>,
-    ) -> Result<Vec<ParagraphModel>> {
+    ) -> Result<u32> {
         if level > 8 {
             return Err(html_error(
                 element_path(list),
@@ -2726,6 +3359,151 @@ impl Importer<'_> {
                 "could not define list level",
             ));
         }
+        Ok(list_id)
+    }
+
+    fn attach_list_paragraph(paragraph: &mut CT_P, list_id: u32, level: u32, first: &mut bool) {
+        let properties = paragraph.properties.get_or_insert_with(Default::default);
+        properties.num_id = Some(if *first { list_id } else { 0 });
+        properties.num_ilvl = Some(level);
+        if !*first {
+            let mut paragraph = Paragraph { inner: paragraph };
+            paragraph.set_indent_left(Length::inches((level + 1) as f64 * 0.25));
+        }
+        *first = false;
+    }
+
+    fn flush_list_inline(
+        &mut self,
+        pieces: &mut Vec<InlinePiece>,
+        style: &ComputedStyle,
+        list_id: u32,
+        level: u32,
+        first: &mut bool,
+    ) -> Result<()> {
+        if pieces.iter().any(inline_piece_is_visible) {
+            let mut paragraph = self.build_paragraph(ParagraphModel {
+                pieces: std::mem::take(pieces),
+                style: style.clone(),
+                paragraph_style: None,
+                numbering: None,
+            })?;
+            Self::attach_list_paragraph(&mut paragraph, list_id, level, first);
+            self.output.push(BodyContent::Paragraph(paragraph));
+        } else {
+            pieces.clear();
+        }
+        Ok(())
+    }
+
+    fn project_list(
+        &mut self,
+        list: ElementRef<'_>,
+        inherited: &ComputedStyle,
+        level: u32,
+        list_id: Option<u32>,
+    ) -> Result<()> {
+        let list_id = self.list_definition(list, level, list_id)?;
+        let style = self.computed_style(list, inherited)?;
+        for item in list
+            .child_elements()
+            .filter(|child| child.value().name() == "li")
+        {
+            let item_style = self.computed_style(item, &style)?;
+            let start = self.output.len();
+            let mut first = true;
+            let mut pieces = Vec::new();
+            for child in item.children() {
+                match child.value() {
+                    Node::Text(text) => pieces.push(InlinePiece::Text(
+                        text.to_string(),
+                        Box::new(item_style.clone()),
+                        false,
+                    )),
+                    Node::Element(_) => {
+                        let element = ElementRef::wrap(child).expect("element checked");
+                        let name = element.value().name();
+                        if is_block(name) {
+                            self.flush_list_inline(
+                                &mut pieces,
+                                &item_style,
+                                list_id,
+                                level,
+                                &mut first,
+                            )?;
+                            if matches!(name, "ul" | "ol" | "table") && first {
+                                let mut paragraph = self.build_paragraph(ParagraphModel {
+                                    pieces: Vec::new(),
+                                    style: item_style.clone(),
+                                    paragraph_style: None,
+                                    numbering: None,
+                                })?;
+                                Self::attach_list_paragraph(
+                                    &mut paragraph,
+                                    list_id,
+                                    level,
+                                    &mut first,
+                                );
+                                self.output.push(BodyContent::Paragraph(paragraph));
+                            }
+                            if matches!(name, "ul" | "ol") {
+                                // Separate nested definitions preserve mixed ordered/unordered siblings.
+                                self.project_list(element, &item_style, level + 1, None)?;
+                            } else {
+                                let start = self.output.len();
+                                self.project_block(element, &item_style)?;
+                                for content in &mut self.output[start..] {
+                                    if let BodyContent::Paragraph(paragraph) = content {
+                                        if !paragraph
+                                            .properties
+                                            .as_ref()
+                                            .is_some_and(|p| p.num_id.is_some_and(|id| id != 0))
+                                        {
+                                            Self::attach_list_paragraph(
+                                                paragraph, list_id, level, &mut first,
+                                            );
+                                        }
+                                    } else if let BodyContent::Table(table) = content {
+                                        table
+                                            .properties
+                                            .get_or_insert_with(Default::default)
+                                            .indent =
+                                            Some(CT_TblWidth::dxa((level + 1) as i32 * 360));
+                                    }
+                                }
+                            }
+                        } else {
+                            self.collect_inline(element, &item_style, false, &mut pieces)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.flush_list_inline(&mut pieces, &item_style, list_id, level, &mut first)?;
+            if first {
+                let mut paragraph = self.build_paragraph(ParagraphModel {
+                    pieces: Vec::new(),
+                    style: item_style,
+                    paragraph_style: None,
+                    numbering: None,
+                })?;
+                Self::attach_list_paragraph(&mut paragraph, list_id, level, &mut first);
+                self.output.push(BodyContent::Paragraph(paragraph));
+            }
+            let path = self.html_container_path(item);
+            self.retain_container_path(start, &path)?;
+        }
+        Ok(())
+    }
+
+    fn list_models(
+        &mut self,
+        list: ElementRef<'_>,
+        inherited: &ComputedStyle,
+        level: u32,
+        list_id: Option<u32>,
+    ) -> Result<Vec<ParagraphModel>> {
+        let list_id = self.list_definition(list, level, list_id)?;
         let style = self.computed_style(list, inherited)?;
         let mut models = Vec::new();
         for item in list
@@ -3194,6 +3972,7 @@ impl Importer<'_> {
                             .story
                             .map(|story| self.document.reserve_html_drawing_id(story))
                             .transpose()?,
+                        description: element.attr("alt").map(str::to_owned),
                         width,
                         height,
                     };
@@ -3285,7 +4064,7 @@ impl Importer<'_> {
                 ));
             }
         }
-        self.collect_inline_children(element, &style, pre, pieces)
+        self.collect_inline_children(element, &style, pre || name == "code", pieces)
     }
 
     fn computed_style(
@@ -3301,7 +4080,15 @@ impl Importer<'_> {
             "s" | "strike" | "del" => style.strike = Some(true),
             "sup" => style.vertical = Some(VerticalText::Superscript),
             "sub" => style.vertical = Some(VerticalText::Subscript),
-            "code" | "kbd" | "samp" => style.font = Some("Courier New".to_string()),
+            "code" | "kbd" | "samp" => {
+                let id = html_style_id(self.document, "HTMLCode");
+                if self.document.styles.get_by_id(&id).is_some() {
+                    style.character_style = Some(id);
+                } else {
+                    style.font = Some("Courier New".to_string());
+                }
+                style.code = true;
+            }
             "mark" => style.background = Some("FFFF00".to_string()),
             _ => {}
         }
@@ -3329,6 +4116,9 @@ impl Importer<'_> {
                 change.apply(&mut style);
             }
         }
+        if element.value().name() == "mark" {
+            style.mark_highlight = style.background.clone();
+        }
         Ok(style)
     }
 
@@ -3354,7 +4144,18 @@ impl Importer<'_> {
             let mut paragraph = Paragraph { inner: &mut output };
             apply_paragraph_style(&mut paragraph, &model.style);
             if let Some(style) = model.paragraph_style {
-                paragraph.set_style(&style);
+                paragraph.set_style(&html_style_id(self.document, &style));
+                if let Some(level) = style
+                    .strip_prefix("Heading")
+                    .and_then(|level| level.parse::<u32>().ok())
+                    && (1..=6).contains(&level)
+                {
+                    paragraph
+                        .inner
+                        .properties
+                        .get_or_insert_with(Default::default)
+                        .outline_lvl = Some(level - 1);
+                }
             }
             if let Some((list_id, level)) = model.numbering
                 && !paragraph.set_numbering(list_id, level)
@@ -3363,17 +4164,25 @@ impl Importer<'_> {
             }
             let mut emitted = false;
             let mut pending_space = false;
+            let mut space_style: Option<Box<ComputedStyle>> = None;
+            let mut space_ends_last_run = false;
             for piece in model.pieces {
                 match piece {
                     InlinePiece::Break => {
                         self.bump_runs()?;
                         paragraph.add_line_break();
-                        emitted = true;
+                        emitted = false;
                         pending_space = false;
+                        space_style = None;
                     }
                     InlinePiece::Image(image) => {
                         self.bump_runs()?;
                         let run = paragraph.add_picture(&image.rel_id, image.width, image.height);
+                        if let Some(RunContent::Drawing(drawing)) = run.content.last_mut()
+                            && let Some(inline) = drawing.inline.as_mut()
+                        {
+                            inline.description = image.description;
+                        }
                         if let Some(drawing_id) = image.drawing_id
                             && let Some(RunContent::Drawing(drawing)) = run.content.last_mut()
                             && let Some(inline) = drawing.inline.as_mut()
@@ -3384,6 +4193,25 @@ impl Importer<'_> {
                         pending_space = false;
                     }
                     InlinePiece::Text(text, style, true) => {
+                        if pending_space
+                            && emitted
+                            && let Some(space) = space_style.take()
+                        {
+                            if space_ends_last_run
+                                && let Some(last) = paragraph.inner.runs.last_mut()
+                            {
+                                let mut run = Run { inner: last };
+                                run.set_text(&format!("{} ", run.text()));
+                            } else {
+                                self.bump_runs()?;
+                                let mut run = if let Some(url) = &space.hyperlink {
+                                    paragraph.add_hyperlink(" ", &hyperlink_ids[url])
+                                } else {
+                                    paragraph.add_run(" ")
+                                };
+                                apply_run_style(&mut run, &space);
+                            }
+                        }
                         let mut lines = text.split('\n').peekable();
                         while let Some(line) = lines.next() {
                             if !line.is_empty() {
@@ -3405,7 +4233,37 @@ impl Importer<'_> {
                         pending_space = false;
                     }
                     InlinePiece::Text(text, style, false) => {
-                        let normalized = collapse_text(&text, &mut pending_space, emitted);
+                        let mut text = text.as_str();
+                        if pending_space
+                            && emitted
+                            && let Some(space) = space_style.take_if(|space| {
+                                !same_run_format(space, &style)
+                                    && text
+                                        .chars()
+                                        .any(|character| !character.is_ascii_whitespace())
+                            })
+                        {
+                            if space_ends_last_run
+                                && let Some(last) = paragraph.inner.runs.last_mut()
+                            {
+                                let mut run = Run { inner: last };
+                                run.set_text(&format!("{} ", run.text()));
+                            } else {
+                                self.bump_runs()?;
+                                let mut run = if let Some(url) = &space.hyperlink {
+                                    paragraph.add_hyperlink(" ", &hyperlink_ids[url])
+                                } else {
+                                    paragraph.add_run(" ")
+                                };
+                                apply_run_style(&mut run, &space);
+                            }
+                            pending_space = false;
+                            text = text.trim_start_matches(|character: char| {
+                                character.is_ascii_whitespace()
+                            });
+                        }
+                        let was_pending = pending_space;
+                        let normalized = collapse_text(text, &mut pending_space, emitted);
                         if !normalized.is_empty() {
                             self.bump_runs()?;
                             let mut run = if let Some(url) = &style.hyperlink {
@@ -3415,6 +4273,10 @@ impl Importer<'_> {
                             };
                             apply_run_style(&mut run, &style);
                             emitted = true;
+                        }
+                        if pending_space && (!was_pending || !normalized.is_empty()) {
+                            space_ends_last_run = !normalized.is_empty();
+                            space_style = Some(style);
                         }
                     }
                 }
@@ -3506,6 +4368,9 @@ fn apply_paragraph_style(paragraph: &mut Paragraph<'_>, style: &ComputedStyle) {
 }
 
 fn apply_run_style(run: &mut Run<'_>, style: &ComputedStyle) {
+    if let Some(id) = &style.character_style {
+        run.set_style(id);
+    }
     if let Some(font) = &style.font {
         run.set_font(font);
     }
@@ -3527,7 +4392,7 @@ fn apply_run_style(run: &mut Run<'_>, style: &ComputedStyle) {
     if let Some(color) = &style.color {
         run.set_color(color);
     }
-    if let Some(background) = &style.background {
+    if let Some(background) = style.background.as_ref().or(style.mark_highlight.as_ref()) {
         run.set_highlight(background);
     }
     match style.vertical {
@@ -3537,11 +4402,35 @@ fn apply_run_style(run: &mut Run<'_>, style: &ComputedStyle) {
     }
 }
 
+fn same_run_format(left: &ComputedStyle, right: &ComputedStyle) -> bool {
+    left.font == right.font
+        && left.code == right.code
+        && left.character_style == right.character_style
+        && left.size == right.size
+        && left.bold == right.bold
+        && left.italic == right.italic
+        && left.underline == right.underline
+        && left.strike == right.strike
+        && left.color == right.color
+        && left.background == right.background
+        && left.mark_highlight == right.mark_highlight
+        && matches!(
+            (left.vertical, right.vertical),
+            (None, None)
+                | (
+                    Some(VerticalText::Superscript),
+                    Some(VerticalText::Superscript)
+                )
+                | (Some(VerticalText::Subscript), Some(VerticalText::Subscript))
+        )
+        && left.hyperlink == right.hyperlink
+}
+
 fn collapse_text(text: &str, pending_space: &mut bool, already_emitted: bool) -> String {
     let mut output = String::new();
     let mut emitted = already_emitted;
     for character in text.chars() {
-        if character.is_whitespace() {
+        if character.is_ascii_whitespace() {
             *pending_space = true;
         } else {
             if *pending_space && emitted {
@@ -3557,7 +4446,11 @@ fn collapse_text(text: &str, pending_space: &mut bool, already_emitted: bool) ->
 
 fn inline_piece_is_visible(piece: &InlinePiece) -> bool {
     match piece {
-        InlinePiece::Text(text, _, pre) => *pre || !text.trim().is_empty(),
+        InlinePiece::Text(text, _, pre) => {
+            *pre || !text
+                .trim_matches(|c: char| c.is_ascii_whitespace())
+                .is_empty()
+        }
         InlinePiece::Break => true,
         InlinePiece::Image(_) => true,
     }
@@ -3579,6 +4472,7 @@ fn is_block(name: &str) -> bool {
             | "h5"
             | "h6"
             | "header"
+            | "hr"
             | "main"
             | "nav"
             | "ol"
@@ -3890,11 +4784,631 @@ mod tests {
 
     use base64::Engine as _;
     use oxml_opc::OpcPackage;
+    use rdocx_oxml::document::BodyContent;
 
     use super::{
         Document, Length, Limits, MhtmlLimits, from_html_with_limits, from_mhtml_with_limits,
         parse_mhtml, preflight_markup, read_bounded, to_mhtml_with_limits,
     };
+
+    #[test]
+    fn fx217_markdown_all_supported_constructs() {
+        let markdown = "# Heading\n\n**bold** *em* ~~strike~~ `a  b`\n\n> First\n>\n> Second\n\n3. Third\n4. Fourth\n\n| Head | Right |\n| --- | ---: |\n| A | B |\n\n[link](https://example.com)\n";
+        let mut document = Document::from_markdown(markdown).unwrap().document;
+        let bytes = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.paragraph(0).unwrap().text(), "Heading");
+        assert_eq!(reopened.paragraph(1).unwrap().text(), "bold em strike a  b");
+        assert_eq!(reopened.paragraph(2).unwrap().text(), "First");
+        assert_eq!(reopened.paragraph(3).unwrap().text(), "Second");
+        assert_eq!(reopened.table(0).unwrap().cell(1, 0).unwrap().text(), "A");
+        let paragraph = reopened.paragraph(1).unwrap();
+        let runs = paragraph.runs().collect::<Vec<_>>();
+        assert!(runs.iter().any(|run| run.bold_value() == Some(true)));
+        assert!(runs.iter().any(|run| run.italic_value() == Some(true)));
+        assert!(runs.iter().any(|run| run.strike_value() == Some(true)));
+        assert!(runs.iter().any(|run| run.style_id() == Some("HTMLCode")));
+    }
+
+    #[test]
+    fn fx217_import_diagnostics_and_limits_are_atomic() {
+        let projection = super::project_markdown(
+            "<b>raw</b>\n\n<script>ignored</script>\n",
+            Limits::default(),
+        )
+        .unwrap();
+        assert!(!projection.diagnostics.is_empty());
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .all(|item| item.property.is_none() && item.location.starts_with("bytes "))
+        );
+        for limits in [
+            Limits {
+                input_bytes: 2,
+                ..Limits::default()
+            },
+            Limits {
+                nodes: 1,
+                ..Limits::default()
+            },
+            Limits {
+                retained_text: 1,
+                ..Limits::default()
+            },
+            Limits {
+                depth: 0,
+                ..Limits::default()
+            },
+        ] {
+            assert!(super::project_markdown("ordinary", limits).is_err());
+        }
+        assert!(
+            super::project_markdown(
+                "<b>raw</b>",
+                Limits {
+                    diagnostics: 0,
+                    ..Limits::default()
+                }
+            )
+            .is_err()
+        );
+        let mut template = Document::new();
+        template.add_paragraph("Template content");
+        let before = template.to_bytes().unwrap();
+        assert!(
+            Document::from_markdown_with_options(
+                "# Heading",
+                Some(&template),
+                &[super::HtmlImageResource {
+                    source: "x",
+                    bytes: b"invalid",
+                    filename: "x.png",
+                }]
+            )
+            .is_err()
+        );
+        assert_eq!(before, template.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn fx217_template_body_is_replaced_without_mutating_template() {
+        let mut template = Document::new();
+        template.add_paragraph("Template sample content");
+        let before = template.to_bytes().unwrap();
+        let mut imported =
+            Document::from_markdown_with_options("# Replacement\n\nBody", Some(&template), &[])
+                .unwrap()
+                .document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.text(), "Replacement\nBody\n");
+        assert_eq!(before, template.to_bytes().unwrap());
+        assert_eq!(
+            reopened.document.body.sect_pr,
+            Document::from_bytes(&before).unwrap().document.body.sect_pr
+        );
+    }
+
+    #[test]
+    fn fx217_markdown_diagnostics_use_original_source_order_and_byte_spans() {
+        let parsed = Document::from_markdown("![alt](missing.png)\n\n<br>\n").unwrap();
+        assert_eq!(parsed.diagnostics.len(), 2);
+        assert!(
+            parsed.diagnostics[0]
+                .message
+                .contains("unresolved HTML image")
+        );
+        assert_eq!(parsed.diagnostics[0].location, "bytes 0..19");
+        assert!(parsed.diagnostics[1].message.contains("raw Markdown HTML"));
+        assert_eq!(parsed.diagnostics[1].location, "bytes 21..26");
+    }
+
+    #[test]
+    fn fx217_markdown_image_alt_does_not_create_phantom_resource_locations() {
+        let parsed = Document::from_markdown(
+            "![outer [link](https://example.com) ![inner](inner.png)](outer.png)",
+        )
+        .unwrap();
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(
+            parsed.diagnostics[0]
+                .message
+                .contains("unresolved HTML image")
+        );
+        assert!(parsed.diagnostics[0].location.starts_with("bytes 0.."));
+    }
+
+    fn review_roundtrip(markdown: &str) -> String {
+        let mut document = Document::from_markdown(markdown).unwrap().document;
+        Document::from_bytes(&document.to_bytes().unwrap())
+            .unwrap()
+            .to_markdown()
+    }
+
+    #[test]
+    fn fx217_review_escaped_block_prefixes_and_continuations() {
+        for source in [
+            "\\# literal heading\n\n",
+            "\\> literal quote\n\n",
+            "1\\. literal item\n\n",
+            "text  \n\\# continued\n\n",
+        ] {
+            assert_eq!(review_roundtrip(source), source);
+        }
+    }
+
+    #[test]
+    fn fx217_review_headings_stay_in_list_items() {
+        assert_eq!(review_roundtrip("- # Heading\n"), "- # Heading\n");
+    }
+
+    #[test]
+    fn fx217_review_quotes_keep_outer_list_order() {
+        assert_eq!(
+            review_roundtrip("> - First\n> - Second\n"),
+            "> - First\n> - Second\n"
+        );
+    }
+
+    #[test]
+    fn fx217_review_quote_rule_and_table_owners_survive() {
+        let source = "> ---\n\n> | Head |\n> | --- |\n> | Cell |\n\n";
+        assert_eq!(review_roundtrip(source), source);
+    }
+
+    #[test]
+    fn fx217_review_nonbreaking_space_only_content_survives() {
+        for source in ["<ul><li>&nbsp;</li></ul>", "&nbsp;"] {
+            let document = Document::from_html(source).unwrap().document;
+            assert_eq!(document.paragraph(0).unwrap().text(), "\u{a0}");
+        }
+        let document = Document::from_markdown("- \u{a0}\n").unwrap().document;
+        assert_eq!(document.paragraph(0).unwrap().text(), "\u{a0}");
+        assert_eq!(review_roundtrip("- \u{a0}\n"), "- \u{a0}\n");
+    }
+
+    #[test]
+    fn fx217_review_quote_keeps_list_and_following_paragraph_in_one_owner() {
+        for source in [
+            "> - First\n> - Second\n>\n> Following\n",
+            "> - First\n>\n> Following\n>\n> ---\n>\n> ```\n> code\n> ```\n>\n> | Head |\n> | --- |\n> | Cell |\n",
+            "> - First\n\n> - Second\n",
+            "> - First\n>\n> | Head |\n> | --- |\n> | Cell |\n",
+            "- First\n\n  > - Inner\n  >\n  > Following\n  >\n  > Last\n",
+        ] {
+            let exported = review_roundtrip(source);
+            let options = pulldown_cmark::Options::ENABLE_TABLES;
+            let original: Vec<_> = pulldown_cmark::Parser::new_ext(source, options).collect();
+            let actual: Vec<_> = pulldown_cmark::Parser::new_ext(&exported, options).collect();
+            assert_eq!(actual, original, "{source:?} exported as {exported:?}");
+            assert_eq!(review_roundtrip(&exported), exported);
+        }
+    }
+
+    #[test]
+    fn fx217_review_nested_quote_owners_survive_paragraph_joins() {
+        for source in [
+            "> - First\n>\n> > Inner A\n> >\n> > Inner B\n",
+            "> - First\n>\n> > Inner A\n>\n> > Inner B\n",
+            "> - First\n>\n> > > Deep A\n> > >\n> > > Deep B\n> >\n> > Outer Inner\n>\n> Last\n",
+        ] {
+            let exported = review_roundtrip(source);
+            let original: Vec<_> = pulldown_cmark::Parser::new(source).collect();
+            let actual: Vec<_> = pulldown_cmark::Parser::new(&exported).collect();
+            assert_eq!(actual, original, "{source:?} exported as {exported:?}");
+            assert_eq!(review_roundtrip(&exported), exported);
+        }
+    }
+
+    #[test]
+    fn fx217_review_nested_container_order_and_collision_roundtrip() {
+        for source in [
+            "> - # Heading\n",
+            "> - First\n>\n>   > Inner\n\n",
+            "> \\# literal\n\n",
+            "> - First\n>\n>   ```\n>   code\n>   ```\n\n",
+            "- First\n\n  ## Next\n\n",
+            "> - First\n>\n>   | Head |\n>   | --- |\n>   | Cell |\n\n",
+        ] {
+            let exported = review_roundtrip(source);
+            let options = pulldown_cmark::Options::ENABLE_TABLES
+                | pulldown_cmark::Options::ENABLE_STRIKETHROUGH;
+            let original: Vec<_> = pulldown_cmark::Parser::new_ext(source, options).collect();
+            let actual: Vec<_> = pulldown_cmark::Parser::new_ext(&exported, options).collect();
+            assert_eq!(actual, original, "{source:?} exported as {exported:?}");
+            assert_eq!(review_roundtrip(&exported), exported);
+        }
+        let mut template = Document::new();
+        template
+            .add_style(
+                crate::StyleBuilder::paragraph(
+                    "RDOCXHTMLContainersqlOwner1Paragraph0",
+                    "RDOCX HTML containers ql",
+                )
+                .bold(true),
+            )
+            .unwrap();
+        let before = template.to_bytes().unwrap();
+        let mut imported =
+            Document::from_markdown_with_options("> - First\n", Some(&template), &[])
+                .unwrap()
+                .document;
+        assert_eq!(template.to_bytes().unwrap(), before);
+        let reopened = Document::from_bytes(&imported.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.to_markdown(), "> - First\n");
+        assert!(
+            reopened
+                .styles
+                .get_by_id("RDOCXHTMLContainersqlOwner1Paragraph1")
+                .is_some()
+        );
+        assert_eq!(
+            reopened
+                .styles
+                .get_by_id("RDOCXHTMLContainersqlOwner1Paragraph0")
+                .unwrap()
+                .rpr
+                .as_ref()
+                .unwrap()
+                .bold,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn fx217_canonical_markdown_keeps_heading_and_code_inside_quotes() {
+        const CANONICAL: &str = "> # Heading\n\n> ```\n> a  b\n> ```\n\n";
+        let mut imported = Document::from_markdown(CANONICAL).unwrap().document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.to_markdown(), CANONICAL);
+    }
+
+    #[test]
+    fn fx217_canonical_markdown_keeps_code_and_quotes_inside_list_items() {
+        const CANONICAL: &str = "- First\n\n  ```\n  a  b\n  ```\n\n  > quoted\n\n- Last\n";
+        let mut imported = Document::from_markdown(CANONICAL).unwrap().document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.to_markdown(), CANONICAL);
+    }
+
+    #[test]
+    fn fx217_canonical_markdown_keeps_ordered_starts_and_table_alignment() {
+        const CANONICAL: &str =
+            "3. Third\n1. Fourth\n\n| Head | Right |\n| --- | ---: |\n| A\\|B | `x y` |\n\n";
+        let mut imported = Document::from_markdown(CANONICAL).unwrap().document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.to_markdown(), CANONICAL);
+    }
+
+    #[test]
+    fn fx217_template_styles_headers_footers_and_opaque_parts() {
+        let mut template = Document::new();
+        template.add_paragraph("Discarded sample body");
+        let list = template.add_list_definition(&[crate::ListLevel::decimal().start(7)]);
+        template
+            .add_paragraph("Old numbered sample")
+            .set_numbering(list, 0);
+        template.set_header_image(
+            &one_pixel_png(),
+            "header.png",
+            Length::inches(0.2),
+            Length::inches(0.2),
+        );
+        template.set_footer("Preserved footer");
+        let header = template
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == crate::StoryKind::Header)
+            .unwrap();
+        template
+            .add_hyperlink_to_story(&header, "Header link", "https://example.com")
+            .unwrap();
+        let mut header_xml = String::from_utf8(
+            template
+                .package
+                .get_part(header.part_name())
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        header_xml = header_xml.replace("</w:hdr>", "<w:p><w:fldSimple w:instr=\"PAGE\"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:hdr>");
+        template
+            .package
+            .set_part(header.part_name(), header_xml.into_bytes());
+        template
+            .package
+            .set_part("/custom/opaque.bin", vec![0, 1, 2, 255]);
+        template
+            .package
+            .content_types
+            .add_override("/custom/opaque.bin", "application/octet-stream");
+        let before = template.to_bytes().unwrap();
+        let source = OpcPackage::from_reader(Cursor::new(&before)).unwrap();
+        let loaded = Document::from_bytes(&before).unwrap();
+        let old_numbering = loaded.numbering.clone().unwrap();
+        let mut imported = Document::from_markdown_with_options(
+            "# Replacement\n\n3. New item\n4. Next item",
+            Some(&loaded),
+            &[],
+        )
+        .unwrap()
+        .document;
+        let bytes = imported.to_bytes().unwrap();
+        let output = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+        assert_eq!(template.to_bytes().unwrap(), before);
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert!(!reopened.text().contains("Discarded"));
+        assert!(!reopened.text().contains("Old numbered"));
+        assert_eq!(reopened.document.body.sect_pr, loaded.document.body.sect_pr);
+        for part in source.parts.keys() {
+            if part.as_str() != loaded.doc_part_name
+                && !part.ends_with("styles.xml")
+                && !part.ends_with("numbering.xml")
+            {
+                assert_eq!(
+                    output.get_part(part),
+                    source.get_part(part),
+                    "template part {part}"
+                );
+            }
+        }
+        let numbering = reopened.numbering.as_ref().unwrap();
+        for definition in &old_numbering.abstract_nums {
+            assert!(numbering.abstract_nums.contains(definition));
+        }
+        for instance in &old_numbering.nums {
+            assert!(numbering.nums.contains(instance));
+        }
+        assert!(numbering.nums.len() > old_numbering.nums.len());
+    }
+
+    #[test]
+    fn fx217_supported_markdown_docx_markdown_canonical_round_trip() {
+        const CANONICAL: &str = "# Heading\n\nBody **bold** *em* ~~strike~~ `a  b`.\n\n> First\n\n> Second\n\n```\nx  y\n```\n\n---\n\n";
+        let mut imported = Document::from_markdown(CANONICAL).unwrap().document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.to_markdown(), CANONICAL);
+    }
+
+    #[test]
+    fn fx217_markdown_images_keep_bytes_and_per_occurrence_alternate_text() {
+        let png = one_pixel_png();
+        let images = [super::HtmlImageResource {
+            source: "pixel.png",
+            bytes: &png,
+            filename: "pixel.png",
+        }];
+        let mut imported = Document::from_markdown_with_options(
+            "![first](pixel.png) ![second](pixel.png)",
+            None,
+            &images,
+        )
+        .unwrap()
+        .document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        let markdown = reopened.to_markdown();
+        assert!(markdown.contains("![first](data:image/png;base64,"));
+        assert!(markdown.contains("![second](data:image/png;base64,"));
+        let again = Document::from_markdown(&markdown).unwrap().document;
+        assert_eq!(again.document.body.content.len(), 1);
+        assert_eq!(again.to_markdown(), markdown);
+    }
+
+    #[test]
+    fn fx217_multiblock_list_items_retain_ordered_blocks_and_nested_tables() {
+        let markdown =
+            "- First\n\n  Second\n\n  | Head |\n  | --- |\n  | Cell |\n\n  - Nested\n\n- Last\n";
+        let imported = Document::from_markdown(markdown).unwrap().document;
+        let text = imported
+            .paragraphs()
+            .into_iter()
+            .map(|paragraph| paragraph.text())
+            .collect::<Vec<_>>();
+        assert_eq!(text, ["First", "Second", "Nested", "Last"]);
+        assert_eq!(
+            imported.table(0).unwrap().cell(0, 0).unwrap().text(),
+            "Head"
+        );
+        assert_eq!(
+            imported.table(0).unwrap().cell(1, 0).unwrap().text(),
+            "Cell"
+        );
+        assert!(matches!(
+            imported.document.body.content[2],
+            BodyContent::Table(_)
+        ));
+        assert_eq!(imported.tables().len(), 1);
+        let BodyContent::Paragraph(first) = &imported.document.body.content[0] else {
+            panic!("first item")
+        };
+        let BodyContent::Paragraph(second) = &imported.document.body.content[1] else {
+            panic!("continuation")
+        };
+        assert!(
+            first
+                .properties
+                .as_ref()
+                .unwrap()
+                .num_id
+                .is_some_and(|id| id > 0)
+        );
+        assert_eq!(second.properties.as_ref().unwrap().num_id, Some(0));
+    }
+
+    #[test]
+    fn fx217_named_template_styles_keep_their_existing_identities() {
+        use crate::StyleBuilder;
+        let mut template = Document::new();
+        template
+            .styles
+            .styles
+            .retain(|style| style.style_id != "Quote" && style.style_id != "Heading1");
+        template
+            .add_style(
+                StyleBuilder::paragraph("CustomHeading", "Heading 1")
+                    .font("Gelasio")
+                    .size(18.0),
+            )
+            .unwrap();
+        template
+            .add_style(StyleBuilder::paragraph("CustomQuote", "Quote").font("Gelasio"))
+            .unwrap();
+        template
+            .add_style(StyleBuilder::character("CustomCode", "HTML Code").font("Selawik"))
+            .unwrap();
+        let imported = Document::from_markdown_with_options(
+            "# Heading\n\n> Quote\n\n`code`",
+            Some(&template),
+            &[],
+        )
+        .unwrap()
+        .document;
+        assert_eq!(imported.document.body.content.len(), 3);
+        for (index, expected) in [(0, "CustomHeading"), (1, "CustomQuote")] {
+            let BodyContent::Paragraph(paragraph) = &imported.document.body.content[index] else {
+                panic!("paragraph expected")
+            };
+            assert_eq!(
+                paragraph.properties.as_ref().unwrap().style_id.as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            imported.paragraph(2).unwrap().run(0).unwrap().style_id(),
+            Some("CustomCode")
+        );
+    }
+
+    #[test]
+    fn fx217_html_nested_block_containers_keep_distinct_paragraphs() {
+        let mut imported = Document::from_html(
+            "<blockquote><p>First</p><p>Second</p><blockquote><p>Nested</p></blockquote></blockquote>",
+        ).unwrap().document;
+        let bytes = imported.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        let texts = reopened
+            .paragraphs()
+            .into_iter()
+            .map(|paragraph| paragraph.text())
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["First", "Second", "Nested"]);
+    }
+
+    #[test]
+    fn mark_highlight_reaches_formatted_children_without_leaking_to_siblings() {
+        let parsed = Document::from_html(
+            "<p>Before <mark>key <strong>fact</strong> <em>here</em></mark> after</p>",
+        )
+        .unwrap();
+        let paragraph = parsed.document.paragraph(0).unwrap();
+        let runs = paragraph.runs().collect::<Vec<_>>();
+        assert_eq!(
+            runs.iter().map(|run| run.text()).collect::<Vec<_>>(),
+            ["Before ", "key ", "fact", " ", "here", " after"]
+        );
+        assert_eq!(runs[0].highlight(), None);
+        for run in &runs[1..5] {
+            assert_eq!(run.highlight().as_deref(), Some("FFFF00"));
+        }
+        assert_eq!(runs[5].highlight(), None);
+        assert_eq!(runs[2].bold_value(), Some(true));
+        assert_eq!(runs[3].bold_value(), None);
+        assert_eq!(runs[3].italic_value(), None);
+        assert_eq!(runs[4].italic_value(), Some(true));
+    }
+
+    #[test]
+    fn semantic_marks_preserve_css_precedence_without_inheriting_ordinary_backgrounds() {
+        let parsed = Document::from_html(concat!(
+            r#"<p><mark style="background-color:#112233">A<strong>B</strong>"#,
+            r#"<mark style="background-color:#445566"><em>C</em></mark>"#,
+            r#"<span style="background-color:#0000FF">D<b>E</b></span>F</mark>"#,
+            r#"<span style="background-color:#ABCDEF">G<em>H</em></span>I</p>"#,
+        ))
+        .unwrap();
+        let paragraph = parsed.document.paragraph(0).unwrap();
+        let actual = paragraph
+            .runs()
+            .map(|run| (run.text(), run.highlight()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("A".into(), Some("112233".into())),
+                ("B".into(), Some("112233".into())),
+                ("C".into(), Some("445566".into())),
+                ("D".into(), Some("0000FF".into())),
+                ("E".into(), Some("112233".into())),
+                ("F".into(), Some("112233".into())),
+                ("G".into(), Some("ABCDEF".into())),
+                ("H".into(), None),
+                ("I".into(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_mark_highlights_reopen_with_nested_run_formatting() {
+        let mut imported = Document::from_html(
+            "<p>before<mark>key<strong>bold</strong><em>italic</em></mark>after</p>",
+        )
+        .unwrap()
+        .document;
+        let formats = |document: &Document| {
+            document
+                .paragraph(0)
+                .unwrap()
+                .runs()
+                .map(|run| {
+                    (
+                        run.text(),
+                        run.highlight(),
+                        run.bold_value(),
+                        run.italic_value(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = formats(&imported);
+        assert_eq!(expected[2].1.as_deref(), Some("FFFF00"));
+        assert_eq!(expected[2].2, Some(true));
+        assert_eq!(expected[3].1.as_deref(), Some("FFFF00"));
+        assert_eq!(expected[3].3, Some(true));
+        let mut package =
+            OpcPackage::from_reader(Cursor::new(imported.to_bytes().unwrap())).unwrap();
+        let opaque =
+            r#"<x:opaque xmlns:x="urn:mark-regression" x:keep="exact"><x:child /></x:opaque>"#;
+        let document_xml =
+            String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+                .unwrap()
+                .replace("</w:body>", &format!("{opaque}</w:body>"));
+        package.set_part("/word/document.xml", document_xml.into_bytes());
+        let opaque_part = b"<producer xmlns='urn:mark-regression' keep='exact' />";
+        package.set_part("/customXml/mark-control.xml", opaque_part.to_vec());
+        let mut source = Cursor::new(Vec::new());
+        package.write_to(&mut source).unwrap();
+        let mut preserved = Document::from_bytes(source.get_ref()).unwrap();
+        let saved = preserved.to_bytes().unwrap();
+        let saved_package = OpcPackage::from_reader(Cursor::new(&saved)).unwrap();
+        assert_eq!(
+            saved_package.get_part("/customXml/mark-control.xml"),
+            Some(opaque_part.as_slice())
+        );
+        assert!(
+            String::from_utf8_lossy(saved_package.get_part("/word/document.xml").unwrap())
+                .contains(opaque)
+        );
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(formats(&reopened), expected);
+    }
 
     fn one_pixel_png() -> Vec<u8> {
         vec![

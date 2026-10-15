@@ -239,7 +239,7 @@ pub(crate) fn raw_is_modeled_attribute_carrier(position: (u8, usize)) -> bool {
     position.1 & RAW_MODELED_ATTRIBUTES_FLAG != 0
 }
 
-fn modeled_attribute_carrier_occurrence(occurrence: usize) -> usize {
+pub(crate) fn modeled_attribute_carrier_occurrence(occurrence: usize) -> usize {
     occurrence | RAW_MODELED_ATTRIBUTES_FLAG
 }
 

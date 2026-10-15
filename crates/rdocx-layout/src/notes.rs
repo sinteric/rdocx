@@ -449,6 +449,7 @@ mod tests {
             endnotes: None,
             theme: None,
             fonts: Vec::new(),
+            embedded_fonts: Vec::new(),
         }
     }
 

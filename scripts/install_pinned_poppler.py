@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -108,11 +109,47 @@ def verify_tools(prefix: Path) -> None:
             raise RuntimeError(f"unexpected {tool} identity: {lines[:1]}")
 
 
+def authenticated_tool(receipt_path: Path, receipt_sha: str, executable: Path) -> None:
+    """Authenticate a fresh source build without assuming a host binary hash."""
+    digest = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    if digest(receipt_path) != receipt_sha:
+        raise RuntimeError("Poppler build receipt changed")
+    receipt = json.loads(receipt_path.read_text())
+    if (
+        receipt["status"] != "actual-source-build"
+        or receipt["sourceURL"] != POPLER_URL
+        or receipt["sourceArchiveSHA256"] != POPLER_SHA256
+        or digest(receipt["sourceArchive"]) != POPLER_SHA256
+        or receipt["installerSHA256"] != digest(__file__)
+        or receipt["configureExit"] != 0 or receipt["compileExit"] != 0
+        or receipt["sourceAndCompilerGuardsPassed"] is not True
+        or receipt["configureArgv"][0] != "cmake"
+        or receipt["compileArgv"][:2] != ["cmake", "--build"]
+        or digest(receipt["compiler"]) != receipt["compilerSHA256"]
+        or not receipt["compilerVersion"]
+        or set(receipt["tools"]) != set(TOOLS)
+    ):
+        raise RuntimeError("Poppler source-build provenance is not qualified")
+    tool = receipt["tools"]["pdftoppm"]
+    if tool["path"] != str(executable) or digest(executable) != tool["sha256"]:
+        raise RuntimeError("Poppler executable does not match its source build")
+
+
 def expose_tools(prefix: Path) -> None:
     github_path = os.environ.get("GITHUB_PATH")
     if github_path:
         with Path(github_path).open("a", encoding="utf-8") as path_file:
             path_file.write(f"{prefix / 'bin'}\n")
+    github_env = os.environ.get("GITHUB_ENV")
+    if github_env:
+        receipt = prefix / "source-build-receipt.json"
+        with Path(github_env).open("a", encoding="utf-8") as env_file:
+            env_file.write(f"F_X195_POPPLER={prefix / 'bin/pdftoppm'}\n")
+            env_file.write(f"F_X195_POPPLER_BUILD_RECEIPT={receipt}\n")
+            env_file.write(
+                "F_X195_POPPLER_BUILD_RECEIPT_SHA="
+                + hashlib.sha256(receipt.read_bytes()).hexdigest() + "\n"
+            )
 
 
 def build(prefix: Path) -> None:
@@ -158,9 +195,15 @@ def build(prefix: Path) -> None:
             "-DRUN_GPERF_IF_PRESENT=OFF",
         ]
         run(configure)
+        cache = (build_root / "CMakeCache.txt").read_text()
+        compiler = Path(next(
+            line.split("=", 1)[1] for line in cache.splitlines()
+            if line.startswith("CMAKE_CXX_COMPILER:FILEPATH=")
+        ))
+        compiler_sha = hashlib.sha256(compiler.read_bytes()).hexdigest()
+        compiler_version = subprocess.check_output([str(compiler), "--version"], text=True)
         jobs = max(1, min(os.cpu_count() or 1, 4))
-        run(
-            [
+        compile_command = [
                 "cmake",
                 "--build",
                 str(build_root),
@@ -169,11 +212,33 @@ def build(prefix: Path) -> None:
                 "--target",
                 *TOOLS,
             ]
-        )
+        run(compile_command)
         binary_root = prefix / "bin"
         binary_root.mkdir(parents=True, exist_ok=True)
         for tool in TOOLS:
             shutil.copy2(build_root / "utils" / tool, binary_root / tool)
+        source_archive = prefix / archive_path.name
+        shutil.copy2(archive_path, source_archive)
+        verify_tools(prefix)
+        assert hashlib.sha256(source_archive.read_bytes()).hexdigest() == POPLER_SHA256
+        assert hashlib.sha256(compiler.read_bytes()).hexdigest() == compiler_sha
+        receipt = {
+            "status": "actual-source-build",
+            "sourceURL": POPLER_URL,
+            "sourceArchive": str(source_archive),
+            "sourceArchiveSHA256": POPLER_SHA256,
+            "installerSHA256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "compiler": str(compiler), "compilerSHA256": compiler_sha,
+            "compilerVersion": compiler_version,
+            "configureArgv": configure, "compileArgv": compile_command,
+            "configureExit": 0, "compileExit": 0,
+            "sourceAndCompilerGuardsPassed": True,
+            "tools": {tool: {
+                "path": str(binary_root / tool),
+                "sha256": hashlib.sha256((binary_root / tool).read_bytes()).hexdigest(),
+            } for tool in TOOLS},
+        }
+        (prefix / "source-build-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
     verify_tools(prefix)
     expose_tools(prefix)

@@ -11,8 +11,8 @@ pub mod transform;
 
 pub use error::{LayoutError, Result};
 pub use font::{
-    FontFile, FontManager, FontMetrics, GlyphCluster, MultilingualTextSegment, ShapedText,
-    TextDirection, TextScript,
+    FontContribution, FontContributionScope, FontFile, FontManager, FontMetrics, FontTraceEvent,
+    GlyphCluster, MultilingualTextSegment, ShapedText, TextDirection, TextScript,
 };
 pub use line::{
     Align, ForcedBreakKind, InlineItem, LayoutLine, LineBreakParams, LineItem, LineSpacing,

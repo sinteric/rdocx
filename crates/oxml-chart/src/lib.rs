@@ -22,7 +22,7 @@ use oxml_layout::{
     Color, FillRule, FontManager, GlyphRun, GroupElement, Paint, Path, PathCommand, PathElement,
     Point, PositionedElement, Rect, Stroke, Transform,
 };
-use oxml_sml::{Column, Workbook};
+use oxml_sml::{ChartCellValue, ChartRange, ChartRangeUpdate, Column, Workbook};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
@@ -286,6 +286,700 @@ pub fn authored_chart_parts(
     let chart_xml = chart_space.to_xml()?;
     let workbook_bytes = workbook.to_xlsx_bytes().map_err(invalid_authoring_value)?;
     Ok((chart_xml, workbook_bytes))
+}
+
+/// Project one supported chart family and its cached data without changing source.
+/// Sparse numeric cache entries remain NaN, and sparse labels remain empty.
+/// Unsupported plots and incompatible category vectors return contextual errors.
+pub fn read_chart_data(chart_xml: &[u8]) -> Result<(ChartKind, ChartData)> {
+    let space = CT_ChartSpace::from_xml(chart_xml)?;
+    let [plot] = space.chart.plot_area.plots()? else {
+        return Err(invalid_authoring_value(
+            "chart data projection requires one supported plot",
+        ));
+    };
+    let (kind, series) = match plot {
+        Plot::Bar { series, .. } => (ChartKind::Bar, series),
+        Plot::Line { series, .. } => (ChartKind::Line, series),
+        Plot::Pie { series, .. } => (ChartKind::Pie, series),
+        Plot::Doughnut { series, .. } => (ChartKind::Doughnut, series),
+        Plot::Area { series, .. } => (ChartKind::Area, series),
+        Plot::Scatter { series, .. } => (ChartKind::Scatter, series),
+        Plot::Radar { series, .. } => (ChartKind::Radar, series),
+    };
+    let first = series
+        .first()
+        .ok_or_else(|| invalid_authoring_value("chart has no series"))?;
+    let categories = chart_category_labels(first)?;
+    let mut projected = Vec::with_capacity(series.len());
+    for item in series {
+        if chart_category_labels(item)? != categories {
+            return Err(invalid_authoring_value(
+                "chart series use different category or X vectors",
+            ));
+        }
+        let name = match &item.name {
+            Some(name) => name.values.first().cloned().unwrap_or_default(),
+            None if item.opaque_name => chart_literal_name(item)?,
+            None => String::new(),
+        };
+        projected.push((name, chart_dense_numbers(&item.values)?));
+    }
+    Ok((
+        kind,
+        ChartData {
+            categories,
+            series: projected,
+            number_format: (first.values.format_code != "General")
+                .then(|| first.values.format_code.clone()),
+            ..ChartData::default()
+        },
+    ))
+}
+
+fn chart_dense_numbers(data: &NumericData) -> Result<Vec<f64>> {
+    let (count, indexes) = cache_layout(&data.markup, data.values.len())?;
+    let count = chart_projection_count(count)?;
+    let mut values = vec![f64::NAN; count];
+    for (index, value) in indexes.into_iter().zip(&data.values) {
+        values[index as usize] = *value;
+    }
+    Ok(values)
+}
+
+fn chart_projection_count(count: u32) -> Result<usize> {
+    if count > 1_048_576 {
+        return Err(invalid_attribute("ptCount", "val", count.to_string()));
+    }
+    Ok(count as usize)
+}
+
+fn chart_category_labels(series: &Series) -> Result<Vec<String>> {
+    let (markup, labels) = match &series.categories {
+        Some(AxisData::String(data)) => (&data.markup, data.values.clone()),
+        Some(AxisData::Numeric(data)) => (
+            &data.markup,
+            data.values.iter().map(|value| value.to_string()).collect(),
+        ),
+        None if series.opaque_categories => {
+            return Err(invalid_authoring_value(
+                "unsupported literal or multilevel category projection",
+            ));
+        }
+        None => return Ok(Vec::new()),
+    };
+    let (count, indexes) = cache_layout(markup, labels.len())?;
+    let mut values = vec![String::new(); chart_projection_count(count)?];
+    for (index, value) in indexes.into_iter().zip(labels) {
+        values[index as usize] = value;
+    }
+    Ok(values)
+}
+
+fn chart_literal_name(series: &Series) -> Result<String> {
+    for raw in series.raw_children.at(2) {
+        let inherited = series
+            .namespace_declarations
+            .iter()
+            .filter_map(|(name, value)| {
+                let prefix = if name == "xmlns" {
+                    ""
+                } else {
+                    name.strip_prefix("xmlns:")?
+                };
+                Some((prefix.as_bytes().to_vec(), value.clone()))
+            })
+            .collect::<NamespaceBindings>();
+        let mut reader = Reader::from_reader(raw);
+        let mut buffer = Vec::new();
+        let mut namespaces = inherited;
+        let mut depth = 0usize;
+        loop {
+            match reader
+                .read_event_into(&mut buffer)
+                .map_err(OxmlError::from)?
+            {
+                Event::Start(element) => {
+                    if depth == 0 {
+                        if chart_child_local(&element, &namespaces)?.as_deref() != Some(b"tx") {
+                            break;
+                        }
+                        namespaces = chart_bindings(&namespaces, &element)?;
+                    }
+                    if depth == 1
+                        && chart_child_local(&element, &namespaces)?.as_deref() == Some(b"v")
+                    {
+                        let value = capture_element(&mut reader, &element)?;
+                        return Ok(parse_text_element(&value, b"v", &namespaces)?.0);
+                    }
+                    depth += 1;
+                }
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+    Err(invalid_authoring_value(
+        "unsupported series name projection",
+    ))
+}
+
+/// Resolve only the root-owned ChartML externalData relationships attribute.
+pub fn chart_workbook_relationship_id(chart_xml: &[u8]) -> Result<Option<String>> {
+    use quick_xml::name::ResolveResult;
+    use quick_xml::reader::NsReader;
+    CT_ChartSpace::from_xml(chart_xml)?;
+    let mut reader = NsReader::from_reader(chart_xml);
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut result = None;
+    loop {
+        let (namespace, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(OxmlError::from)?;
+        let empty = matches!(&event, Event::Empty(_));
+        match (namespace, event) {
+            (namespace, Event::Start(element) | Event::Empty(element)) => {
+                if depth == 1
+                    && matches!(namespace, ResolveResult::Bound(value) if value.as_ref() == C_NS.as_bytes())
+                    && element.local_name().as_ref() == b"externalData"
+                {
+                    if result.is_some() {
+                        return Err(ChartError::DuplicateElement("c:externalData".into()));
+                    }
+                    for attribute in element.attributes() {
+                        let attribute = attribute.map_err(OxmlError::from)?;
+                        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                        if matches!(namespace, ResolveResult::Bound(value) if value.as_ref() == R_NS.as_bytes())
+                            && local.as_ref() == b"id"
+                        {
+                            result = Some(
+                                attribute
+                                    .decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        reader.decoder(),
+                                    )
+                                    .map_err(OxmlError::from)?
+                                    .into_owned(),
+                            );
+                        }
+                    }
+                    if result.is_none() {
+                        return Err(ChartError::MissingElement("c:externalData/@r:id".into()));
+                    }
+                }
+                if !empty {
+                    depth += 1;
+                }
+            }
+            (_, Event::End(_)) => {
+                depth = depth.saturating_sub(1);
+            }
+            (_, Event::DocType(_)) => {
+                return Err(invalid_authoring_value(
+                    "DOCTYPE is unsupported in chart data",
+                ));
+            }
+            (_, Event::Eof) => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(result)
+}
+
+#[derive(Debug)]
+struct ChartSourceNode {
+    local: Vec<u8>,
+    qualified: bool,
+    parent: Option<usize>,
+    start: usize,
+    end: usize,
+}
+
+fn chart_source_nodes(xml: &[u8]) -> Result<Vec<ChartSourceNode>> {
+    use quick_xml::name::ResolveResult;
+    use quick_xml::reader::NsReader;
+    let mut reader = NsReader::from_reader(xml);
+    let mut nodes: Vec<ChartSourceNode> = Vec::new();
+    let mut stack = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(OxmlError::from)?;
+        let end = reader.buffer_position() as usize;
+        let empty = matches!(&event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let (namespace, local) = reader.resolver().resolve_element(element.name());
+                let qualified = matches!(namespace,ResolveResult::Bound(value) if value.as_ref()==C_NS.as_bytes());
+                let local = local.as_ref().to_vec();
+                let index = nodes.len();
+                if index >= 1_000_000 {
+                    return Err(invalid_authoring_value("chart XML node limit"));
+                }
+                nodes.push(ChartSourceNode {
+                    local,
+                    qualified,
+                    parent: stack.last().copied(),
+                    start,
+                    end,
+                });
+                if !empty {
+                    stack.push(index);
+                }
+            }
+            Event::End(_) => {
+                let index = stack
+                    .pop()
+                    .ok_or_else(|| invalid_authoring_value("unbalanced chart source"))?;
+                nodes[index].end = end;
+            }
+            Event::DocType(_) => {
+                return Err(invalid_authoring_value(
+                    "DOCTYPE is unsupported in chart source",
+                ));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if !stack.is_empty() {
+        return Err(invalid_authoring_value("truncated chart source"));
+    }
+    Ok(nodes)
+}
+
+fn chart_child_node(nodes: &[ChartSourceNode], parent: usize, local: &[u8]) -> Result<usize> {
+    let found = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.parent == Some(parent) && node.qualified && node.local == local)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [index] = found.as_slice() else {
+        return Err(invalid_authoring_value(format!(
+            "chart data requires one owned {}",
+            String::from_utf8_lossy(local)
+        )));
+    };
+    Ok(*index)
+}
+
+fn chart_source_series(xml: &[u8]) -> Result<Vec<Series>> {
+    CT_ChartSpace::from_xml(xml)?.chart.plot_area.series()
+}
+
+fn resized_chart_range(original: &ChartRange, count: usize) -> Result<ChartRange> {
+    let mut range = original.clone();
+    range.last_row = range
+        .first_row
+        .checked_add(
+            count
+                .checked_sub(1)
+                .ok_or_else(|| invalid_authoring_value("empty chart data range"))?,
+        )
+        .ok_or_else(|| invalid_authoring_value("chart data row overflow"))?;
+    range.formula().map_err(invalid_authoring_value)?;
+    Ok(range)
+}
+
+fn replaced_string_reference(
+    original: &StringRef,
+    formula: String,
+    values: Vec<String>,
+) -> StringRef {
+    let mut result = original.clone();
+    result.formula = formula;
+    result.values = values;
+    result.markup.declared_point_count = None;
+    result.markup.point_indexes.clear();
+    result
+}
+
+fn replaced_numeric_reference(
+    original: &NumericData,
+    formula: String,
+    values: Vec<f64>,
+    number_format: Option<&str>,
+) -> NumericData {
+    let mut result = original.clone();
+    result.formula = formula;
+    result.values = values;
+    if let Some(format) = number_format {
+        result.format_code = format.to_owned();
+    }
+    result.markup.declared_point_count = None;
+    result.markup.point_indexes.clear();
+    result
+}
+
+/// Stage replacement chart caches and only their formula-owned workbook cells.
+/// The caller publishes both returned parts together after proving package owners.
+/// Original root, plot, axes, legend and surviving series formatting stay exact.
+pub fn replace_chart_data(
+    chart_xml: &[u8],
+    workbook: &[u8],
+    data: &ChartData,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let (kind, current) = read_chart_data(chart_xml)?;
+    validate_chart_data(kind, data)?;
+    if data.category_axis_title.is_some()
+        || data.value_axis_title.is_some()
+        || !data.palette.is_empty()
+    {
+        return Err(invalid_authoring_value(
+            "replace_data changes chart data, not axis titles or palette",
+        ));
+    }
+    let workbook_id = chart_workbook_relationship_id(chart_xml)?
+        .ok_or_else(|| invalid_authoring_value("chart has no embedded workbook reference"))?;
+    let old_series = chart_source_series(chart_xml)?;
+    let first = old_series
+        .first()
+        .ok_or_else(|| invalid_authoring_value("chart has no editable series"))?;
+    let first_name = first
+        .name
+        .as_ref()
+        .ok_or_else(|| invalid_authoring_value("series title needs an owned workbook formula"))?;
+    let name_origin =
+        ChartRange::from_formula(&first_name.formula).map_err(invalid_authoring_value)?;
+    let values_origin =
+        ChartRange::from_formula(&first.values.formula).map_err(invalid_authoring_value)?;
+    if name_origin.first_row != name_origin.last_row || name_origin.sheet != values_origin.sheet {
+        return Err(invalid_authoring_value(
+            "series title and values must own one embedded worksheet",
+        ));
+    }
+    let category_origin = match first.categories.as_ref() {
+        Some(AxisData::String(reference)) => ChartRange::from_formula(&reference.formula),
+        Some(AxisData::Numeric(reference)) => ChartRange::from_formula(&reference.formula),
+        None => {
+            return Err(invalid_authoring_value(
+                "categories need an owned workbook formula",
+            ));
+        }
+    }
+    .map_err(invalid_authoring_value)?;
+    if category_origin.sheet != values_origin.sheet {
+        return Err(invalid_authoring_value(
+            "chart data must own one embedded worksheet",
+        ));
+    }
+    // Validate every formula boundary before an unchanged-data fast path.
+    for series in &old_series {
+        for formula in [
+            series.name.as_ref().map(|r| r.formula.as_str()),
+            Some(series.values.formula.as_str()),
+            series.categories.as_ref().map(|r| match r {
+                AxisData::String(r) => r.formula.as_str(),
+                AxisData::Numeric(r) => r.formula.as_str(),
+            }),
+        ] {
+            let formula = formula.ok_or_else(|| {
+                invalid_authoring_value("series needs ordinary formula-backed data")
+            })?;
+            let range = ChartRange::from_formula(formula).map_err(invalid_authoring_value)?;
+            if range.sheet != values_origin.sheet {
+                return Err(invalid_authoring_value(
+                    "series formula refers to a different worksheet",
+                ));
+            }
+        }
+    }
+    if data.categories == current.categories
+        && data.series == current.series
+        && data.number_format.as_ref().is_none_or(|format| {
+            Some(format) == current.number_format.as_ref()
+                || (format == "General" && current.number_format.is_none())
+        })
+    {
+        oxml_sml::chart_unused_columns(workbook, &values_origin.sheet, 0)
+            .map_err(invalid_authoring_value)?;
+        return Ok((chart_xml.to_vec(), workbook.to_vec()));
+    }
+    let nodes = chart_source_nodes(chart_xml)?;
+    let chart = chart_child_node(&nodes, 0, b"chart")?;
+    let plot_area = chart_child_node(&nodes, chart, b"plotArea")?;
+    let plot_local = match kind {
+        ChartKind::Bar => b"barChart".as_slice(),
+        ChartKind::Line => b"lineChart",
+        ChartKind::Pie => b"pieChart",
+        ChartKind::Doughnut => b"doughnutChart",
+        ChartKind::Area => b"areaChart",
+        ChartKind::Scatter => b"scatterChart",
+        ChartKind::Radar => b"radarChart",
+    };
+    let plot = chart_child_node(&nodes, plot_area, plot_local)?;
+    let series_nodes = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.parent == Some(plot) && node.qualified && node.local == b"ser")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if series_nodes.len() != old_series.len() {
+        return Err(invalid_authoring_value(
+            "editable series source inventory disagrees",
+        ));
+    }
+    let mut updates = Vec::new();
+    let mut patches = Vec::new();
+    for (ordinal, (old, &source_index)) in old_series.iter().zip(&series_nodes).enumerate() {
+        let old_name = old
+            .name
+            .as_ref()
+            .ok_or_else(|| invalid_authoring_value("series title needs formula-backed data"))?;
+        let old_name_range =
+            ChartRange::from_formula(&old_name.formula).map_err(invalid_authoring_value)?;
+        if old_name_range.first_row != old_name_range.last_row {
+            return Err(invalid_authoring_value(
+                "series title formula must own one cell",
+            ));
+        }
+        let old_value_range =
+            ChartRange::from_formula(&old.values.formula).map_err(invalid_authoring_value)?;
+        let categories = old
+            .categories
+            .as_ref()
+            .ok_or_else(|| invalid_authoring_value("series categories are missing"))?;
+        let old_category_range = ChartRange::from_formula(match categories {
+            AxisData::String(r) => &r.formula,
+            AxisData::Numeric(r) => &r.formula,
+        })
+        .map_err(invalid_authoring_value)?;
+        let Some((name, values)) = data.series.get(ordinal) else {
+            for original in [old_name_range, old_value_range, old_category_range] {
+                updates.push(ChartRangeUpdate {
+                    number_format: None,
+                    original: Some(original),
+                    target: None,
+                    values: Vec::new(),
+                });
+            }
+            patches.push((
+                nodes[source_index].start,
+                nodes[source_index].end,
+                Vec::new(),
+            ));
+            continue;
+        };
+        let new_value_range = resized_chart_range(&old_value_range, values.len())?;
+        let new_category_range = resized_chart_range(&old_category_range, data.categories.len())?;
+        updates.push(ChartRangeUpdate {
+            number_format: None,
+            original: Some(old_name_range.clone()),
+            target: Some(old_name_range.clone()),
+            values: vec![ChartCellValue::Text(name.clone())],
+        });
+        updates.push(ChartRangeUpdate {
+            number_format: Some(
+                data.number_format
+                    .as_deref()
+                    .unwrap_or(&old.values.format_code)
+                    .to_owned(),
+            ),
+            original: Some(old_value_range),
+            target: Some(new_value_range.clone()),
+            values: values.iter().copied().map(ChartCellValue::Number).collect(),
+        });
+        let category_cells = if matches!(categories, AxisData::Numeric(_)) {
+            data.categories
+                .iter()
+                .map(|value| {
+                    value
+                        .parse::<f64>()
+                        .map(ChartCellValue::Number)
+                        .map_err(invalid_authoring_value)
+                })
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            data.categories
+                .iter()
+                .cloned()
+                .map(ChartCellValue::Text)
+                .collect()
+        };
+        updates.push(ChartRangeUpdate {
+            number_format: None,
+            original: Some(old_category_range),
+            target: Some(new_category_range.clone()),
+            values: category_cells,
+        });
+        let tx = chart_child_node(&nodes, source_index, b"tx")?;
+        let name_ref = chart_child_node(&nodes, tx, b"strRef")?;
+        let name_reference = replaced_string_reference(
+            old_name,
+            old_name_range.formula().map_err(invalid_authoring_value)?,
+            vec![name.clone()],
+        );
+        patches.push((
+            nodes[name_ref].start,
+            nodes[name_ref].end,
+            name_reference.to_xml()?,
+        ));
+        let value_wrapper = chart_child_node(
+            &nodes,
+            source_index,
+            if kind == ChartKind::Scatter {
+                b"yVal"
+            } else {
+                b"val"
+            },
+        )?;
+        let value_ref = chart_child_node(&nodes, value_wrapper, b"numRef")?;
+        let value_reference = replaced_numeric_reference(
+            &old.values,
+            new_value_range.formula().map_err(invalid_authoring_value)?,
+            values.clone(),
+            data.number_format.as_deref(),
+        );
+        patches.push((
+            nodes[value_ref].start,
+            nodes[value_ref].end,
+            value_reference.to_xml()?,
+        ));
+        let category_wrapper = chart_child_node(
+            &nodes,
+            source_index,
+            if kind == ChartKind::Scatter {
+                b"xVal"
+            } else {
+                b"cat"
+            },
+        )?;
+        let (local, bytes) = match categories {
+            AxisData::String(reference) => (
+                b"strRef".as_slice(),
+                replaced_string_reference(
+                    reference,
+                    new_category_range
+                        .formula()
+                        .map_err(invalid_authoring_value)?,
+                    data.categories.clone(),
+                )
+                .to_xml()?,
+            ),
+            AxisData::Numeric(reference) => (
+                b"numRef".as_slice(),
+                replaced_numeric_reference(
+                    reference,
+                    new_category_range
+                        .formula()
+                        .map_err(invalid_authoring_value)?,
+                    data.categories
+                        .iter()
+                        .map(|v| v.parse::<f64>().map_err(invalid_authoring_value))
+                        .collect::<Result<Vec<_>>>()?,
+                    None,
+                )
+                .to_xml()?,
+            ),
+        };
+        let category_ref = chart_child_node(&nodes, category_wrapper, local)?;
+        patches.push((nodes[category_ref].start, nodes[category_ref].end, bytes));
+    }
+    let added = data.series.len().saturating_sub(old_series.len());
+    if added > 0 {
+        let free = oxml_sml::chart_unused_columns(workbook, &values_origin.sheet, added)
+            .map_err(invalid_authoring_value)?;
+        let (default_xml, _) = authored_chart_parts(kind, data, &workbook_id)?;
+        let defaults = chart_source_series(&default_xml)?;
+        let max_index = old_series.iter().map(|s| s.index).max().unwrap();
+        let max_order = old_series.iter().map(|s| s.order).max().unwrap();
+        let mut bytes = Vec::new();
+        for (offset, column) in free.into_iter().enumerate() {
+            let ordinal = old_series.len() + offset;
+            let (name, values) = &data.series[ordinal];
+            let mut series = defaults[ordinal].clone();
+            let step = u32::try_from(offset + 1).map_err(invalid_authoring_value)?;
+            series.index = max_index
+                .checked_add(step)
+                .ok_or_else(|| invalid_authoring_value("chart series index overflow"))?;
+            series.order = max_order
+                .checked_add(step)
+                .ok_or_else(|| invalid_authoring_value("chart series order overflow"))?;
+            let mut title = name_origin.clone();
+            title.column = column;
+            let mut numbers = resized_chart_range(&values_origin, values.len())?;
+            numbers.column = column;
+            let category = resized_chart_range(&category_origin, data.categories.len())?;
+            series.name = Some(StringRef::new(
+                title.formula().map_err(invalid_authoring_value)?,
+                vec![name.clone()],
+            )?);
+            series.values = NumericData::new(
+                numbers.formula().map_err(invalid_authoring_value)?,
+                data.number_format
+                    .as_deref()
+                    .unwrap_or(&first.values.format_code)
+                    .to_owned(),
+                values.clone(),
+            )?;
+            series.categories = Some(if kind == ChartKind::Scatter {
+                AxisData::Numeric(NumericData::new(
+                    category.formula().map_err(invalid_authoring_value)?,
+                    "General".into(),
+                    data.categories
+                        .iter()
+                        .map(|v| v.parse::<f64>().map_err(invalid_authoring_value))
+                        .collect::<Result<Vec<_>>>()?,
+                )?)
+            } else {
+                AxisData::String(StringRef::new(
+                    category.formula().map_err(invalid_authoring_value)?,
+                    data.categories.clone(),
+                )?)
+            });
+            updates.push(ChartRangeUpdate {
+                number_format: None,
+                original: None,
+                target: Some(title),
+                values: vec![ChartCellValue::Text(name.clone())],
+            });
+            updates.push(ChartRangeUpdate {
+                number_format: Some(
+                    data.number_format
+                        .as_deref()
+                        .unwrap_or(&first.values.format_code)
+                        .to_owned(),
+                ),
+                original: None,
+                target: Some(numbers),
+                values: values.iter().copied().map(ChartCellValue::Number).collect(),
+            });
+            bytes.extend(series.to_xml_for_plot(kind == ChartKind::Scatter)?);
+        }
+        let position = nodes[*series_nodes.last().unwrap()].end;
+        patches.push((position, position, bytes));
+    }
+    let updated_workbook =
+        oxml_sml::merge_chart_ranges(workbook, &updates).map_err(invalid_authoring_value)?;
+    patches.sort_by_key(|(start, end, _)| (*start, *end));
+    for pair in patches.windows(2) {
+        if pair[0].1 > pair[1].0 {
+            return Err(invalid_authoring_value(
+                "overlapping chart data source edits",
+            ));
+        }
+    }
+    let mut updated_chart = chart_xml.to_vec();
+    for (start, end, bytes) in patches.into_iter().rev() {
+        updated_chart.splice(start..end, bytes);
+    }
+    let (_, projected) = read_chart_data(&updated_chart)?;
+    if projected.categories != data.categories || projected.series != data.series {
+        return Err(invalid_authoring_value(
+            "replacement chart cache projection disagrees with requested data",
+        ));
+    }
+    Ok((updated_chart, updated_workbook))
 }
 
 fn validate_chart_data(kind: ChartKind, data: &ChartData) -> Result<()> {
@@ -4693,12 +5387,7 @@ impl SeriesParseState {
                 self.boundary = self.boundary.max(3);
             }
             b"spPr" => {
-                reject_conflicting_prefix_in_xml(&raw, b"a", A_NS)?;
-                let properties = CT_ShapeProperties::from_xml(&raw)?;
-                let mut writer = Writer::new(Vec::new());
-                properties.write_xml_as(&mut writer, "c:spPr")?;
-                reject_rewritten_foreign_elements(&raw, &writer.into_inner(), namespaces, b"spPr")?;
-                set_once(&mut self.sp_pr, properties, "c:spPr")?;
+                parse_chart_shape_properties(&raw, namespaces, &mut self.sp_pr)?;
                 self.boundary = self.boundary.max(4);
             }
             b"dLbls" => {
@@ -7233,17 +7922,23 @@ impl AxisParseState {
                 self.boundary = self.boundary.max(11);
             }
             b"spPr" => {
-                reject_conflicting_prefix_in_xml(&raw, b"a", A_NS)?;
-                let properties = CT_ShapeProperties::from_xml(&raw)?;
-                let mut writer = Writer::new(Vec::new());
-                properties.write_xml_as(&mut writer, "c:spPr")?;
-                reject_rewritten_foreign_elements(&raw, &writer.into_inner(), namespaces, b"spPr")?;
-                set_once(&mut self.sp_pr, properties, "c:spPr")?;
+                parse_chart_shape_properties(&raw, namespaces, &mut self.sp_pr)?;
                 self.boundary = self.boundary.max(12);
             }
             b"txPr" => {
                 reject_conflicting_prefix_in_xml(&raw, b"a", A_NS)?;
-                let text = CT_TextBody::from_xml_as(&raw, b"txPr")?;
+                let inherited = namespaces
+                    .iter()
+                    .map(|(prefix, uri)| {
+                        Ok((
+                            std::str::from_utf8(prefix)
+                                .map_err(OxmlError::from)?
+                                .to_owned(),
+                            uri.clone(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let text = CT_TextBody::from_xml_as_with_namespaces(&raw, b"txPr", &inherited)?;
                 let mut writer = Writer::new(Vec::new());
                 text.write_xml_as(&mut writer, "c:txPr")?;
                 reject_rewritten_foreign_elements(&raw, &writer.into_inner(), namespaces, b"txPr")?;
@@ -7584,7 +8279,7 @@ impl ChartLines {
                                 let name = chart_child_local(&child, &namespaces)?;
                                 let raw = capture_element(&mut reader, &child)?;
                                 if name.as_deref() == Some(b"spPr") {
-                                    parse_chart_lines_shape(&raw, &namespaces, &mut sp_pr)?;
+                                    parse_chart_shape_properties(&raw, &namespaces, &mut sp_pr)?;
                                     boundary = 1;
                                 } else {
                                     raw_children.push(boundary, raw);
@@ -7594,7 +8289,7 @@ impl ChartLines {
                                 let name = chart_child_local(&child, &namespaces)?;
                                 let raw = capture_empty_element(&child)?;
                                 if name.as_deref() == Some(b"spPr") {
-                                    parse_chart_lines_shape(&raw, &namespaces, &mut sp_pr)?;
+                                    parse_chart_shape_properties(&raw, &namespaces, &mut sp_pr)?;
                                     boundary = 1;
                                 } else {
                                     raw_children.push(boundary, raw);
@@ -7672,13 +8367,24 @@ impl ChartLines {
     }
 }
 
-fn parse_chart_lines_shape(
+fn parse_chart_shape_properties(
     raw: &[u8],
     namespaces: &NamespaceBindings,
     slot: &mut Option<CT_ShapeProperties>,
 ) -> Result<()> {
     reject_conflicting_prefix_in_xml(raw, b"a", A_NS)?;
-    let properties = CT_ShapeProperties::from_xml(raw)?;
+    let inherited = namespaces
+        .iter()
+        .map(|(prefix, uri)| {
+            Ok((
+                std::str::from_utf8(prefix)
+                    .map_err(OxmlError::from)?
+                    .to_owned(),
+                uri.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let properties = CT_ShapeProperties::from_xml_with_inherited_namespaces(raw, &inherited)?;
     let mut writer = Writer::new(Vec::new());
     properties.write_xml_as(&mut writer, "c:spPr")?;
     reject_rewritten_foreign_elements(raw, &writer.into_inner(), namespaces, b"spPr")?;
@@ -10694,17 +11400,23 @@ impl ChartSpaceParseState {
                 self.boundary = self.boundary.max(8);
             }
             b"spPr" => {
-                reject_conflicting_prefix_in_xml(&raw, b"a", A_NS)?;
-                let properties = CT_ShapeProperties::from_xml(&raw)?;
-                let mut writer = Writer::new(Vec::new());
-                properties.write_xml_as(&mut writer, "c:spPr")?;
-                reject_rewritten_foreign_elements(&raw, &writer.into_inner(), namespaces, b"spPr")?;
-                set_once(&mut self.sp_pr, properties, "c:spPr")?;
+                parse_chart_shape_properties(&raw, namespaces, &mut self.sp_pr)?;
                 self.boundary = self.boundary.max(9);
             }
             b"txPr" => {
                 reject_conflicting_prefix_in_xml(&raw, b"a", A_NS)?;
-                let text = CT_TextBody::from_xml_as(&raw, b"txPr")?;
+                let inherited = namespaces
+                    .iter()
+                    .map(|(prefix, uri)| {
+                        Ok((
+                            std::str::from_utf8(prefix)
+                                .map_err(OxmlError::from)?
+                                .to_owned(),
+                            uri.clone(),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let text = CT_TextBody::from_xml_as_with_namespaces(&raw, b"txPr", &inherited)?;
                 let mut writer = Writer::new(Vec::new());
                 text.write_xml_as(&mut writer, "c:txPr")?;
                 reject_rewritten_foreign_elements(&raw, &writer.into_inner(), namespaces, b"txPr")?;
@@ -11290,8 +12002,10 @@ mod tests {
         CT_ChartSpace, CT_DLbls, CT_ShapeProperties, CT_TextBody, ChartData, ChartGeometry,
         ChartKind, DataLabelPosition, DispBlanksAs, Domain, Grouping, NumberFormat, NumericData,
         Orientation, Plot, R_NS, ScatterStyle, Series, StringRef, TickLabelPosition, TickMark,
-        authored_chart_parts, capture_event, local_name, matches_local_name, nice_number_scale,
+        authored_chart_parts, capture_event, chart_workbook_relationship_id, local_name,
+        matches_local_name, nice_number_scale, read_chart_data,
         render_chart as render_chart_with_theme, render_geometry as render_geometry_with_theme,
+        replace_chart_data,
     };
 
     const MANIFEST: &str = include_str!("../../../scripts/pptx-corpus-manifest.tsv");
@@ -15134,6 +15848,17 @@ mod tests {
         assert_eq!(parsed.values.values, vec![1.5, 2.5]);
         assert!(matches!(parsed.categories, Some(AxisData::String(_))));
         assert_eq!(parsed, Series::from_xml(&parsed.to_xml().unwrap()).unwrap());
+
+        let foreign = br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:x="urn:producer"><c:idx val="0"/><c:order val="0"/><c:spPr><x:solidFill><x:srgbClr val="112233"/></x:solidFill></c:spPr><c:val><c:numRef><c:f>S!$A$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:val></c:ser>"#;
+        let parsed = Series::from_xml(foreign).unwrap();
+        assert!(parsed.sp_pr.as_ref().unwrap().fill.is_none());
+        let written = parsed.to_xml().unwrap();
+        assert!(
+            std::str::from_utf8(&written)
+                .unwrap()
+                .contains(r#"<x:solidFill><x:srgbClr val="112233"/></x:solidFill>"#)
+        );
+        assert_eq!(parsed, Series::from_xml(&written).unwrap());
     }
 
     #[test]
@@ -15167,7 +15892,6 @@ mod tests {
             br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$A$1:$A$2</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="2"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>"#,
             br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$A$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>NaN</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>"#,
             br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="urn:producer"><c:idx val="0"/><c:order val="0"/><a:marker/><c:val><c:numRef><c:f>S!$A$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:val></c:ser>"#,
-            br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:x="urn:producer"><c:idx val="0"/><c:order val="0"/><c:spPr><x:solidFill><x:srgbClr val="112233"/></x:solidFill></c:spPr><c:val><c:numRef><c:f>S!$A$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:val></c:ser>"#,
             br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:idx val="0"/><c:order val="0"/><c:tx><c:v>opaque</c:v></c:tx><c:tx><c:strRef><c:f>S!$A$1</c:f><c:strCache><c:ptCount val="0"/></c:strCache></c:strRef></c:tx><c:val><c:numRef><c:f>S!$B$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:val></c:ser>"#,
             br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:idx val="0"/><c:order val="0"/><c:cat><c:multiLvlStrRef/></c:cat><c:cat><c:numRef><c:f>S!$A$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:cat><c:val><c:numRef><c:f>S!$B$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:val></c:ser>"#,
             br#"<c:ser xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$B$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:val><c:bubbleSize><c:numLit/></c:bubbleSize><c:bubbleSize><c:numRef><c:f>S!$C$1</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="0"/></c:numCache></c:numRef></c:bubbleSize></c:ser>"#,
@@ -15373,7 +16097,7 @@ mod tests {
         assert_eq!(parsed.chart.disp_blanks_as, DispBlanksAs::Span);
         assert!(parsed.chart.title.is_some());
         assert!(parsed.chart.legend.is_some());
-        assert!(parsed.sp_pr.is_some());
+        assert!(parsed.sp_pr.as_ref().unwrap().fill.is_some());
         assert!(parsed.tx_pr.is_some());
 
         let written = String::from_utf8(parsed.to_xml().unwrap()).unwrap();
@@ -15388,7 +16112,7 @@ mod tests {
             "<c:plotVisOnly",
             "<c:dispBlanksAs",
             "<c:spPr>",
-            "<c:txPr>",
+            "<c:txPr",
         ] {
             assert!(written.contains(tag), "missing fixed-prefix tag {tag}");
         }
@@ -15399,14 +16123,15 @@ mod tests {
             "<c:plotVisOnly",
             "<c:dispBlanksAs",
             "<c:spPr>",
-            "<c:txPr>",
+            "<c:txPr",
         ]
         .iter()
         .map(|tag| written.find(tag).unwrap())
         .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(written.contains("<a:solidFill><a:srgbClr"));
-        assert!(written.contains("<a:bodyPr/><a:p/>"));
+        assert!(written.contains("<d:bodyPr/><d:p"));
+        assert!(written.contains(&format!("xmlns:d=\"{A_NS}\"")));
         assert_eq!(parsed, CT_ChartSpace::from_xml(written.as_bytes()).unwrap());
     }
 
@@ -15447,7 +16172,7 @@ mod tests {
             br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea/></c:chart><c:chart><c:plotArea/></c:chart></c:chartSpace>"#,
             br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:title/><c:title/><c:plotArea/></c:chart></c:chartSpace>"#,
             br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea/><c:plotVisOnly><c:child/></c:plotVisOnly></c:chart></c:chartSpace>"#,
-            br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:foreign"><c:chart><c:plotArea/></c:chart><c:txPr><a:bodyPr/><a:p><x:r><x:t>foreign</x:t></x:r></a:p></c:txPr></c:chartSpace>"#,
+            br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:foreign"><c:chart><c:plotArea/></c:chart><c:txPr><x:bodyPr/><a:p/></c:txPr></c:chartSpace>"#,
             br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:foreign"><c:chart><c:plotArea/></c:chart><c:spPr><a:solidFill><x:srgbClr val="112233"/></a:solidFill></c:spPr></c:chartSpace>"#,
         ];
         for xml in cases {
@@ -15459,6 +16184,56 @@ mod tests {
                 String::from_utf8_lossy(xml)
             );
         }
+    }
+
+    #[test]
+    fn fx215_chart_text_adapter_preserves_qualified_and_foreign_owners() {
+        for (prefix, declarations) in [
+            ("d:", format!("xmlns:d=\"{A_NS}\"")),
+            ("", format!("xmlns=\"{A_NS}\"")),
+        ] {
+            let opaque = "<x:r><x:t>foreign</x:t></x:r>";
+            let xml = format!(
+                "<c:chartSpace xmlns:c=\"{C_NS}\" {declarations} xmlns:x=\"urn:foreign\"><c:chart><c:plotArea/></c:chart><c:txPr><{prefix}bodyPr/><{prefix}p>{opaque}<{prefix}r><{prefix}t>owned</{prefix}t></{prefix}r></{prefix}p></c:txPr></c:chartSpace>"
+            );
+            let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+            let text = chart.tx_pr.as_ref().unwrap();
+            assert_eq!(text.paragraphs().len(), 1);
+            assert_eq!(text.paragraphs()[0].runs.len(), 1);
+            let written = chart.to_xml().unwrap();
+            assert!(std::str::from_utf8(&written).unwrap().contains(opaque));
+            let reopened = CT_ChartSpace::from_xml(&written).unwrap();
+            assert_eq!(
+                reopened.tx_pr.as_ref().unwrap().paragraphs()[0].runs.len(),
+                1
+            );
+            assert_eq!(
+                text.body_properties,
+                reopened.tx_pr.as_ref().unwrap().body_properties
+            );
+            for body in [text, reopened.tx_pr.as_ref().unwrap()] {
+                let oxml_drawing::text::TextRun::Run(run) = &body.paragraphs()[0].runs[0] else {
+                    panic!("qualified text must remain a regular run");
+                };
+                assert_eq!(run.text.value, "owned");
+            }
+        }
+        let xml = format!(
+            "<c:chartSpace xmlns:c=\"{C_NS}\" xmlns:a=\"{A_NS}\" xmlns:x=\"urn:foreign\"><c:chart><c:plotArea/></c:chart><c:txPr><a:bodyPr/><a:p><x:r><x:t>foreign</x:t></x:r></a:p></c:txPr></c:chartSpace>"
+        );
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        assert!(
+            chart.tx_pr.as_ref().unwrap().paragraphs()[0]
+                .runs
+                .is_empty()
+        );
+        let saved = chart.to_xml().unwrap();
+        assert!(
+            std::str::from_utf8(&saved)
+                .unwrap()
+                .contains("<x:r><x:t>foreign</x:t></x:r>")
+        );
+        assert_eq!(chart, CT_ChartSpace::from_xml(&saved).unwrap());
     }
 
     #[test]
@@ -16040,7 +16815,7 @@ mod tests {
     fn oxml_chart_is_an_explicit_publication_candidate() {
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains("name = \"oxml-chart\""));
-        assert!(manifest.contains("version = \"0.14.0\""));
+        assert!(manifest.contains("version = \"0.14.1\""));
         assert!(manifest.contains("publish = true"));
         for dependency in [
             "oxml-core.workspace",
@@ -16882,5 +17657,329 @@ mod tests {
         let pixels = &bytes[cursor..];
         assert_eq!(pixels.len(), width * height * 3, "PPM pixel length");
         (width, height, pixels)
+    }
+    #[test]
+    fn fx215_existing_chart_data_projection() {
+        let data = ChartData {
+            categories: vec!["1".into(), "2".into()],
+            series: vec![("Revenue & margin".into(), vec![1.25, 2.5])],
+            number_format: Some("0.00".into()),
+            ..ChartData::default()
+        };
+        for kind in [
+            ChartKind::Bar,
+            ChartKind::Line,
+            ChartKind::Pie,
+            ChartKind::Doughnut,
+            ChartKind::Area,
+            ChartKind::Scatter,
+            ChartKind::Radar,
+        ] {
+            let (xml, _) = authored_chart_parts(kind, &data, "rIdWorkbook").unwrap();
+            let original = xml.clone();
+            let (actual_kind, actual) = read_chart_data(&xml).unwrap();
+            assert_eq!(actual_kind, kind);
+            assert_eq!(actual.categories, data.categories);
+            assert_eq!(actual.series, data.series);
+            assert_eq!(actual.number_format, data.number_format);
+            assert_eq!(xml, original);
+            assert_eq!(
+                chart_workbook_relationship_id(&xml).unwrap().as_deref(),
+                Some("rIdWorkbook")
+            );
+        }
+    }
+
+    #[test]
+    fn fx215_workbook_relationship_ignores_foreign_id_and_accepts_alias() {
+        let data = ChartData {
+            categories: vec!["One".into()],
+            series: vec![("Values".into(), vec![2.0])],
+            ..ChartData::default()
+        };
+        let (xml, _) = authored_chart_parts(ChartKind::Bar, &data, "rIdWorkbook").unwrap();
+        let xml = String::from_utf8(xml)
+            .unwrap()
+            .replace("r:id=", "rr:id=")
+            .replace(
+                "<c:externalData",
+                &format!(
+                    "<c:externalData xmlns:rr=\"{R_NS}\" xmlns:f=\"urn:foreign\" f:id=\"wrong\""
+                ),
+            );
+        assert_eq!(
+            chart_workbook_relationship_id(xml.as_bytes())
+                .unwrap()
+                .as_deref(),
+            Some("rIdWorkbook")
+        );
+        let foreign = xml.replace(&format!("xmlns:rr=\"{R_NS}\""), "xmlns:rr=\"urn:foreign\"");
+        assert!(chart_workbook_relationship_id(foreign.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn fx215_replace_data_updates_cache_formula_and_workbook() {
+        let original = ChartData {
+            categories: vec!["North".into(), "South".into()],
+            series: vec![
+                ("Revenue".into(), vec![1.0, 2.0]),
+                ("Cost".into(), vec![0.5, 1.0]),
+            ],
+            ..ChartData::default()
+        };
+        for kind in [ChartKind::Bar, ChartKind::Line] {
+            let (xml, workbook) = authored_chart_parts(kind, &original, "rIdWorkbook").unwrap();
+            for series in [
+                vec![("New revenue".into(), vec![8.0, 9.0, 10.0])],
+                vec![
+                    ("New revenue".into(), vec![8.0, 9.0, 10.0]),
+                    ("New cost".into(), vec![1.0, 2.0, 3.0]),
+                    ("Profit".into(), vec![7.0, 7.0, 7.0]),
+                ],
+            ] {
+                let data = ChartData {
+                    categories: vec!["East".into(), "West".into(), "Central".into()],
+                    series,
+                    ..ChartData::default()
+                };
+                let (chart, book) = replace_chart_data(&xml, &workbook, &data).unwrap();
+                assert_eq!(read_chart_data(&chart).unwrap().1.series, data.series);
+                assert_eq!(
+                    read_chart_data(&chart).unwrap().1.categories,
+                    data.categories
+                );
+                let package = OpcPackage::from_reader(std::io::Cursor::new(book)).unwrap();
+                let sheet = String::from_utf8(
+                    package
+                        .get_part("/xl/worksheets/sheet1.xml")
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                assert!(sheet.contains("<v>8</v>"));
+                assert!(sheet.contains("<v>10</v>"));
+                assert!(sheet.contains("East"));
+            }
+        }
+    }
+
+    #[test]
+    fn fx215_surviving_series_and_workbook_opaque_payload() {
+        let original = ChartData {
+            categories: vec!["North".into(), "South".into()],
+            series: vec![("Revenue".into(), vec![1.0, 2.0])],
+            ..ChartData::default()
+        };
+        let (xml, workbook) =
+            authored_chart_parts(ChartKind::Bar, &original, "rIdWorkbook").unwrap();
+        let source=String::from_utf8(xml).unwrap().replace("<c:chartSpace ","<c:chartSpace xmlns:f=\"urn:foreign\" f:keep='root' ").replace("<c:ser ","<c:ser f:keep='series' ").replace("<c:idx", "<f:opaque data='exact'/><c:idx").replace("</c:ser>","<c:extLst><c:ext uri='producer'><f:payload value='retain'/></c:ext></c:extLst></c:ser>");
+        assert!(source.contains("f:keep='series'"));
+        assert!(source.contains("<f:opaque data='exact'/>"));
+        let data = ChartData {
+            categories: vec!["West".into()],
+            series: vec![("Changed".into(), vec![9.0])],
+            ..ChartData::default()
+        };
+        let (changed, _) = replace_chart_data(source.as_bytes(), &workbook, &data).unwrap();
+        let changed = String::from_utf8(changed).unwrap();
+        for exact in [
+            "f:keep='root'",
+            "f:keep='series'",
+            "<f:opaque data='exact'/>",
+            "<c:extLst><c:ext uri='producer'><f:payload value='retain'/></c:ext></c:extLst>",
+        ] {
+            assert!(changed.contains(exact), "{exact}");
+        }
+        let space = CT_ChartSpace::from_xml(changed.as_bytes()).unwrap();
+        assert_eq!(space.chart.plot_area.series().unwrap()[0].index, 0);
+        let no_op = replace_chart_data(source.as_bytes(), &workbook, &original).unwrap();
+        assert_eq!(no_op.0, source.as_bytes());
+        assert_eq!(no_op.1, workbook);
+    }
+
+    #[test]
+    fn fx215_all_seven_families_replace_data_without_changing_kind() {
+        let original = ChartData {
+            categories: vec!["1".into(), "2".into()],
+            series: vec![("Old".into(), vec![1.0, 2.0])],
+            ..ChartData::default()
+        };
+        let data = ChartData {
+            categories: vec!["3".into(), "4".into(), "5".into()],
+            series: vec![("New".into(), vec![0.25, 0.5, 0.75])],
+            number_format: Some("0.0%".into()),
+            ..ChartData::default()
+        };
+        for kind in [
+            ChartKind::Bar,
+            ChartKind::Line,
+            ChartKind::Pie,
+            ChartKind::Doughnut,
+            ChartKind::Area,
+            ChartKind::Scatter,
+            ChartKind::Radar,
+        ] {
+            let (chart, book) = authored_chart_parts(kind, &original, "rIdWorkbook").unwrap();
+            let (updated, workbook) = replace_chart_data(&chart, &book, &data).unwrap();
+            let (actual, projected) = read_chart_data(&updated).unwrap();
+            assert_eq!(actual, kind);
+            assert_eq!(projected.categories, data.categories);
+            assert_eq!(projected.series, data.series);
+            assert_eq!(projected.number_format, data.number_format);
+            let package = OpcPackage::from_reader(std::io::Cursor::new(workbook)).unwrap();
+            let styles =
+                String::from_utf8(package.get_part("/xl/styles.xml").unwrap().to_vec()).unwrap();
+            assert!(styles.contains("formatCode=\"0.0%\""));
+        }
+    }
+    #[test]
+    fn fx215_qualified_corpus_replacement_cardinalities() {
+        let corpus = corpus_dir();
+        assert!(corpus.is_dir(), "F-X215 required corpus is missing");
+        for deck in ["bar-chart.pptx", "line-chart.pptx", "chart-picture-bg.pptx"] {
+            let path = corpus.join(deck);
+            let expected = MANIFEST
+                .lines()
+                .find(|line| line.starts_with(&format!("{deck}\t")))
+                .unwrap()
+                .split('\t')
+                .nth(2)
+                .unwrap();
+            assert_eq!(sha256(&path), expected);
+            let package = OpcPackage::open(&path).unwrap();
+            let chart_part = "/ppt/charts/chart1.xml";
+            let chart = package.get_part(chart_part).unwrap();
+            let (kind, original) = read_chart_data(chart).unwrap();
+            let workbook_id = chart_workbook_relationship_id(chart).unwrap().unwrap();
+            let rel = package
+                .get_part_rels(chart_part)
+                .unwrap()
+                .items
+                .iter()
+                .find(|rel| rel.id == workbook_id)
+                .unwrap();
+            assert_eq!(rel.rel_type, oxml_opc::relationship::rel_types::PACKAGE);
+            assert_ne!(rel.target_mode.as_deref(), Some("External"));
+            let workbook_part = OpcPackage::resolve_rel_target(chart_part, &rel.target);
+            let workbook = package.get_part(&workbook_part).unwrap();
+            let mut variants = Vec::new();
+            if original.series.len() > 1 {
+                let mut fewer = original.clone();
+                fewer.series.pop();
+                variants.push(("fewer", fewer));
+            }
+            let mut more = original.clone();
+            more.series.push((
+                "Added exact values".into(),
+                (0..more.categories.len())
+                    .map(|index| 100.0 + index as f64)
+                    .collect(),
+            ));
+            variants.push(("more", more));
+            let mut categories = original.clone();
+            categories.categories.push("Added category".into());
+            for (_, values) in &mut categories.series {
+                values.push(777.0);
+            }
+            variants.push(("categories", categories));
+            for (label, data) in variants {
+                let (changed, book) = replace_chart_data(chart, workbook, &data)
+                    .unwrap_or_else(|error| panic!("{deck}/{label}: {error}"));
+                let (actual, projection) = read_chart_data(&changed).unwrap();
+                assert_eq!(actual, kind);
+                assert_eq!(projection.categories, data.categories);
+                assert_eq!(projection.series, data.series);
+                let mut candidate = package.clone();
+                candidate.set_part(chart_part, changed);
+                candidate.set_part(&workbook_part, book);
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                candidate.write_to(&mut bytes).unwrap();
+                if let Some(directory) = std::env::var_os("RDOCX_FX215_CANDIDATES_DIR") {
+                    let directory = PathBuf::from(directory);
+                    fs::create_dir_all(&directory).unwrap();
+                    fs::write(
+                        directory.join(format!("{deck}-{label}.pptx")),
+                        bytes.get_ref(),
+                    )
+                    .unwrap();
+                }
+                let reopened =
+                    OpcPackage::from_reader(std::io::Cursor::new(bytes.into_inner())).unwrap();
+                for (part, source) in &package.parts {
+                    if part != chart_part && part != &workbook_part {
+                        assert_eq!(
+                            reopened.get_part(part).unwrap(),
+                            source,
+                            "{deck}/{label}: {part}"
+                        );
+                    }
+                }
+                for (owner, relationships) in &package.part_rels {
+                    assert_eq!(
+                        reopened.get_part_rels(owner).unwrap().to_xml().unwrap(),
+                        relationships.to_xml().unwrap()
+                    );
+                }
+                let old_book = OpcPackage::from_reader(std::io::Cursor::new(workbook)).unwrap();
+                let new_book = OpcPackage::from_reader(std::io::Cursor::new(
+                    reopened.get_part(&workbook_part).unwrap(),
+                ))
+                .unwrap();
+                for (part, source) in &old_book.parts {
+                    if part != "/xl/worksheets/sheet1.xml" && part != "/xl/styles.xml" {
+                        assert_eq!(
+                            new_book.get_part(part).unwrap(),
+                            source,
+                            "{deck}/{label}: workbook {part}"
+                        );
+                    }
+                }
+                eprintln!("F-X215 corpus {deck}/{label} qualified cache and workbook candidate");
+            }
+        }
+    }
+    #[test]
+    fn fx215_sparse_cache_projection_retains_missing_values() {
+        let plot = format!(
+            r#"<q:barChart><q:barDir val="col"/><q:grouping val="clustered"/>{}<q:axId val="-1884094432"/><q:axId val="-1884097184"/></q:barChart>"#,
+            sparse_category_series()
+        );
+        let xml = chart_with_plot(&plot);
+        let (_, data) = read_chart_data(xml.as_bytes()).unwrap();
+        assert_eq!(data.categories, vec!["North", "", "West"]);
+        assert_eq!(data.series[0].1[0], 1.0);
+        assert!(data.series[0].1[1].is_nan());
+        assert_eq!(data.series[0].1[2], 2.0);
+    }
+
+    #[test]
+    fn fx215_invalid_data_and_external_formula_preserve_inputs() {
+        let original = ChartData {
+            categories: vec!["North".into(), "South".into()],
+            series: vec![("Revenue".into(), vec![1.0, 2.0])],
+            ..ChartData::default()
+        };
+        let (xml, book) = authored_chart_parts(ChartKind::Bar, &original, "rIdWorkbook").unwrap();
+        let chart_source = xml.clone();
+        let book_source = book.clone();
+        let invalid = ChartData {
+            categories: original.categories.clone(),
+            series: vec![("Bad".into(), vec![f64::NAN, 1.0])],
+            ..ChartData::default()
+        };
+        assert!(replace_chart_data(&xml, &book, &invalid).is_err());
+        assert_eq!(xml, chart_source);
+        assert_eq!(book, book_source);
+        let external = String::from_utf8(xml.clone())
+            .unwrap()
+            .replace("Sheet1!", "'[1]Sheet1'!");
+        let changed = ChartData {
+            categories: original.categories.clone(),
+            series: vec![("New".into(), vec![8.0, 9.0])],
+            ..ChartData::default()
+        };
+        let error = replace_chart_data(external.as_bytes(), &book, &changed).unwrap_err();
+        assert!(error.to_string().contains("external workbook formula"));
+        assert_eq!(book, book_source);
     }
 }

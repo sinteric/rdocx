@@ -6,15 +6,20 @@ use oxml_core::xml::{local_name, matches_local_name};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
-use crate::namespace::reject_conflicting_a_prefix;
+use super::paragraph::{
+    TextNamespaceScope, text_close_generated_child, text_root_spellings_scoped, text_validate_root,
+};
 use crate::order::OrderedRawChildren;
 
 use super::body::{Result, TextError, missing_end};
-use super::paragraph::CT_TextParagraphProperties;
+use super::paragraph::{
+    CT_TextParagraphProperties, text_capture_opaque_event, text_fragment_scope, text_owned_name,
+    text_root_spellings, text_source_start,
+};
 
 /// DrawingML list defaults for each of the nine paragraph levels.
 #[allow(non_camel_case_types)]
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct CT_TextListStyle {
     pub default_paragraph_properties: Option<CT_TextParagraphProperties>,
     pub level1: Option<CT_TextParagraphProperties>,
@@ -27,13 +32,70 @@ pub struct CT_TextListStyle {
     pub level8: Option<CT_TextParagraphProperties>,
     pub level9: Option<CT_TextParagraphProperties>,
     raw_attributes: Vec<(String, String)>,
+    source_root: Vec<String>,
+    source_tag: String,
+    source_namespaces: Vec<(String, String)>,
     raw_children: OrderedRawChildren,
 }
+impl PartialEq for CT_TextListStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.default_paragraph_properties == other.default_paragraph_properties
+            && self.level1 == other.level1
+            && self.level2 == other.level2
+            && self.level3 == other.level3
+            && self.level4 == other.level4
+            && self.level5 == other.level5
+            && self.level6 == other.level6
+            && self.level7 == other.level7
+            && self.level8 == other.level8
+            && self.level9 == other.level9
+            && self
+                .raw_attributes
+                .iter()
+                .filter(|(key, _)| key != "xmlns" && !key.starts_with("xmlns:"))
+                .eq(other
+                    .raw_attributes
+                    .iter()
+                    .filter(|(key, _)| key != "xmlns" && !key.starts_with("xmlns:")))
+            && matches!(
+                (
+                    super::paragraph::text_namespace_scope(
+                        &text_source_start(&self.source_tag, &self.source_root),
+                        &[],
+                    ),
+                    super::paragraph::text_namespace_scope(
+                        &text_source_start(&other.source_tag, &other.source_root),
+                        &[],
+                    ),
+                ),
+                (Ok(left), Ok(right)) if left.iter().filter(|(key, value)| key != "r" || value != "http://schemas.openxmlformats.org/officeDocument/2006/relationships").map(|(key, value)| (key, value)).collect::<std::collections::BTreeMap<_, _>>()
+                    == right.iter().filter(|(key, value)| key != "r" || value != "http://schemas.openxmlformats.org/officeDocument/2006/relationships").map(|(key, value)| (key, value)).collect::<std::collections::BTreeMap<_, _>>()
+            )
+            && self.raw_children == other.raw_children
+    }
+}
+impl Eq for CT_TextListStyle {}
 
 impl CT_TextListStyle {
     /// Parses a complete list-style element with any prefix, including the
     /// PresentationML wrappers that share this DrawingML content model.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        Self::from_xml_with_namespaces(xml, &TextNamespaceScope::default())
+    }
+
+    /// Parses a list-style fragment using its actual enclosing namespace bindings.
+    /// The original root attributes and opaque children remain retained source facts.
+    pub fn from_xml_with_inherited_namespaces(
+        xml: &[u8],
+        inherited: &[(String, String)],
+    ) -> Result<Self> {
+        Self::from_xml_with_namespaces(xml, &TextNamespaceScope::inherited(inherited))
+    }
+
+    pub(crate) fn from_xml_with_namespaces(
+        xml: &[u8],
+        inherited: &TextNamespaceScope,
+    ) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();
         loop {
@@ -42,12 +104,19 @@ impl CT_TextListStyle {
                 .map_err(OxmlError::from)?
             {
                 Event::Start(element) if is_list_style_root(element.name().as_ref()) => {
-                    reject_conflicting_a_prefix(&element)?;
-                    return Self::from_element(&mut reader, &element);
+                    validate_list_style_root(&element)?;
+                    return Self::from_element(&mut reader, &element, inherited);
                 }
                 Event::Empty(element) if is_list_style_root(element.name().as_ref()) => {
-                    reject_conflicting_a_prefix(&element)?;
-                    return Self::from_start(&element);
+                    validate_list_style_root(&element)?;
+                    let mut style = Self::from_start(&element)?;
+                    style.source_namespaces = text_fragment_scope(&element, inherited)?.physical;
+                    style.source_root = text_root_spellings_scoped(
+                        &element,
+                        inherited,
+                        &capture_empty_element(&element)?,
+                    )?;
+                    return Ok(style);
                 }
                 Event::Start(element) | Event::Empty(element) => {
                     return Err(unexpected(&element));
@@ -66,12 +135,28 @@ impl CT_TextListStyle {
     fn from_start(start: &BytesStart<'_>) -> Result<Self> {
         Ok(Self {
             raw_attributes: capture_raw_attributes(start)?,
+            source_root: text_root_spellings(start)?,
+            source_tag: std::str::from_utf8(start.name().as_ref())
+                .map_err(OxmlError::from)?
+                .to_owned(),
             ..Self::default()
         })
     }
 
-    fn from_element(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+    fn from_element(
+        reader: &mut Reader<&[u8]>,
+        start: &BytesStart<'_>,
+        inherited: &TextNamespaceScope,
+    ) -> Result<Self> {
+        let mut namespaces = text_fragment_scope(start, inherited)?;
+        namespaces.fixed_list_style_children = true;
         let mut style = Self::from_start(start)?;
+        style.source_namespaces = namespaces.physical.clone();
+        style.source_root = text_root_spellings_scoped(
+            start,
+            inherited,
+            &capture_element(&mut reader.clone(), start)?,
+        )?;
         let root_name = local_name(start.name().as_ref()).to_vec();
         let mut boundary = 0;
         let mut buffer = Vec::new();
@@ -81,20 +166,20 @@ impl CT_TextListStyle {
                 .map_err(OxmlError::from)?
             {
                 Event::Start(element) => {
-                    let name = local_name(element.name().as_ref()).to_vec();
+                    let name = text_owned_name(&element, &namespaces)?;
                     if name == b"defPPr" || list_level(&name)?.is_some() {
-                        reject_conflicting_a_prefix(&element)?;
+                        validate_list_style_root(&element)?;
                     }
                     let raw = capture_element(reader, &element)?;
-                    style.capture_child(&name, raw, &mut boundary)?;
+                    style.capture_child(&name, raw, &mut boundary, &namespaces)?;
                 }
                 Event::Empty(element) => {
-                    let name = local_name(element.name().as_ref()).to_vec();
+                    let name = text_owned_name(&element, &namespaces)?;
                     if name == b"defPPr" || list_level(&name)?.is_some() {
-                        reject_conflicting_a_prefix(&element)?;
+                        validate_list_style_root(&element)?;
                     }
                     let raw = capture_empty_element(&element)?;
-                    style.capture_child(&name, raw, &mut boundary)?;
+                    style.capture_child(&name, raw, &mut boundary, &namespaces)?;
                 }
                 Event::End(element)
                     if local_name(element.name().as_ref()) == root_name.as_slice() =>
@@ -106,18 +191,31 @@ impl CT_TextListStyle {
                         std::str::from_utf8(&root_name).unwrap_or("list style"),
                     ));
                 }
+                event @ (Event::Comment(_) | Event::PI(_) | Event::Text(_) | Event::CData(_)) => {
+                    style
+                        .raw_children
+                        .push(boundary, text_capture_opaque_event(event)?);
+                }
                 _ => {}
             }
             buffer.clear();
         }
     }
 
-    fn capture_child(&mut self, name: &[u8], raw: Vec<u8>, boundary: &mut usize) -> Result<()> {
+    fn capture_child(
+        &mut self,
+        name: &[u8],
+        raw: Vec<u8>,
+        boundary: &mut usize,
+        namespaces: &TextNamespaceScope,
+    ) -> Result<()> {
         if name == b"defPPr" {
             if self.default_paragraph_properties.is_some() {
                 return Err(TextError::DuplicateElement("defPPr".to_owned()));
             }
-            self.default_paragraph_properties = Some(CT_TextParagraphProperties::from_xml(&raw)?);
+            self.default_paragraph_properties = Some(
+                CT_TextParagraphProperties::from_xml_with_namespaces(&raw, namespaces)?,
+            );
             *boundary = (*boundary).max(1);
             return Ok(());
         }
@@ -127,7 +225,10 @@ impl CT_TextListStyle {
                     String::from_utf8_lossy(name).into_owned(),
                 ));
             }
-            self.set_level(level, CT_TextParagraphProperties::from_xml(&raw)?);
+            self.set_level(
+                level,
+                CT_TextParagraphProperties::from_xml_with_namespaces(&raw, namespaces)?,
+            );
             *boundary = (*boundary).max(level + 1);
             return Ok(());
         }
@@ -142,6 +243,46 @@ impl CT_TextListStyle {
         Ok(())
     }
 
+    /// Returns local list defaults over the inherited default and each level.
+    pub fn with_inherited_defaults(&self, defaults: &Self) -> Result<Self> {
+        let mut local = Writer::new(Vec::new());
+        self.write_xml(&mut local)?;
+        let mut inherited = Writer::new(Vec::new());
+        defaults.write_xml(&mut inherited)?;
+        let xml = super::paragraph::text_inherit_property_xml(
+            &local.into_inner(),
+            &self.source_namespaces,
+            &inherited.into_inner(),
+            &defaults.source_namespaces,
+        )?;
+        let mut result = Self::from_xml_with_inherited_namespaces(&xml, &self.source_namespaces)?;
+        for level in 1..=9 {
+            if defaults.default_paragraph_properties.is_none()
+                && defaults.level(level).is_none()
+                && self.default_paragraph_properties.is_none()
+                && self.level(level).is_none()
+            {
+                continue;
+            }
+            let mut properties = defaults
+                .default_paragraph_properties
+                .clone()
+                .unwrap_or_default();
+            for overlay in [
+                defaults.level(level),
+                self.default_paragraph_properties.as_ref(),
+                self.level(level),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                properties = overlay.with_inherited_defaults(&properties)?;
+            }
+            result.set_level(level, properties);
+        }
+        Ok(result)
+    }
+
     /// Writes the list style with fixed prefixes and ascending level order.
     pub fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.write_xml_as(writer, "a:lstStyle")
@@ -149,8 +290,15 @@ impl CT_TextListStyle {
 
     /// Writes the list style using a caller-selected OOXML wrapper tag.
     pub fn write_xml_as<W: Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
-        let mut start = BytesStart::new(tag);
-        push_raw_attributes(&mut start, &self.raw_attributes);
+        let mut start =
+            super::paragraph::text_wrapper_start(tag, &self.source_tag, &self.source_root)?;
+        let owned_tag = std::str::from_utf8(start.name().as_ref())
+            .map_err(OxmlError::from)?
+            .to_owned();
+        let tag = owned_tag.as_str();
+        if self.source_root.is_empty() {
+            push_raw_attributes(&mut start, &self.raw_attributes);
+        }
         let has_modelled = self.default_paragraph_properties.is_some()
             || (1..=9).any(|level| self.level(level).is_some());
         if !has_modelled && self.raw_children.is_empty() {
@@ -160,14 +308,40 @@ impl CT_TextListStyle {
         write_start(writer, start)?;
         emit_raw(writer, self.raw_children.at(0))?;
         if let Some(properties) = &self.default_paragraph_properties {
-            properties.write_xml(writer, "a:defPPr")?;
+            {
+                let mut child = Writer::new(Vec::new());
+                properties.write_xml(&mut child, "a:defPPr")?;
+                writer
+                    .get_mut()
+                    .write_all(&text_close_generated_child(
+                        &child.into_inner(),
+                        &super::paragraph::text_namespace_scope(
+                            &text_source_start(tag, &self.source_root),
+                            &[],
+                        )?,
+                    )?)
+                    .map_err(OxmlError::from)?;
+            }
         }
         for level in 1..=9 {
             emit_raw(writer, self.raw_children.at(level))?;
             if let Some(properties) = self.level(level) {
                 let tag = level_tag(level)
                     .ok_or_else(|| TextError::UnexpectedElement(format!("list level {level}")))?;
-                properties.write_xml(writer, tag)?;
+                {
+                    let mut child = Writer::new(Vec::new());
+                    properties.write_xml(&mut child, tag)?;
+                    writer
+                        .get_mut()
+                        .write_all(&text_close_generated_child(
+                            &child.into_inner(),
+                            &super::paragraph::text_namespace_scope(
+                                &text_source_start(tag, &self.source_root),
+                                &[],
+                            )?,
+                        )?)
+                        .map_err(OxmlError::from)?;
+                }
             }
         }
         emit_raw(writer, self.raw_children.at(10))?;
@@ -216,6 +390,21 @@ impl CT_TextListStyle {
         };
         *slot = Some(properties);
     }
+}
+
+fn validate_list_style_root(start: &BytesStart<'_>) -> Result<()> {
+    let namespaces = super::paragraph::text_namespace_scope(start, &[])?;
+    let name = start.name();
+    let raw = std::str::from_utf8(name.as_ref()).map_err(OxmlError::from)?;
+    let (prefix, local) = raw.split_once(':').unwrap_or(("", raw));
+    if local != "lstStyle"
+        && namespaces.iter().any(|(key, uri)| {
+            key == prefix && uri == "http://schemas.openxmlformats.org/presentationml/2006/main"
+        })
+    {
+        return Ok(());
+    }
+    text_validate_root(start)
 }
 
 fn is_list_style_root(name: &[u8]) -> bool {

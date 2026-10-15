@@ -39,12 +39,12 @@ pub(crate) fn tab_stops(values: &[CT_TabStop]) -> Vec<TabStop> {
         .iter()
         .filter_map(|value| {
             let align = match value.val {
-                ST_TabJc::Left => TabAlign::Left,
+                ST_TabJc::Left | ST_TabJc::Start => TabAlign::Left,
                 ST_TabJc::Center => TabAlign::Center,
-                ST_TabJc::Right => TabAlign::Right,
+                ST_TabJc::Right | ST_TabJc::End => TabAlign::Right,
                 ST_TabJc::Decimal => TabAlign::Decimal,
                 // A list tab, which Word treats as a left stop.
-                ST_TabJc::Num => TabAlign::Left,
+                ST_TabJc::Num | ST_TabJc::List => TabAlign::Left,
                 ST_TabJc::Bar => TabAlign::Bar,
                 ST_TabJc::Clear => return None,
             };

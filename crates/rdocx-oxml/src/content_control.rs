@@ -1,6 +1,9 @@
 //! WordprocessingML structured document tags (`w:sdt`).
 
 use std::io::Write;
+use std::ops::Range;
+
+use quick_xml::reader::NsReader;
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
@@ -158,11 +161,200 @@ pub struct CT_SdtPr {
 #[derive(Debug, Clone, PartialEq)]
 struct TypeElement {
     control_type: SdtType,
+    name: String,
     attributes: Vec<(String, String)>,
     children: Vec<u8>,
+    namespace_bindings: Vec<(String, String)>,
+}
+
+struct CheckboxChild {
+    value: Option<Range<usize>>,
+    font: Option<Range<usize>>,
+    insert_attribute: usize,
 }
 
 impl CT_SdtPr {
+    /// The selected checkbox glyph and its physical state font travel together.
+    pub fn checkbox_state(&self, checked: bool) -> Result<(char, String)> {
+        let name = if checked {
+            b"checkedState".as_slice()
+        } else {
+            b"uncheckedState".as_slice()
+        };
+        let child = self.checkbox_child(name)?;
+        let element = self.type_element.as_ref().ok_or_else(|| {
+            OxmlError::InvalidValue("checkbox type payload is missing".to_owned())
+        })?;
+        let read = |range: &Range<usize>| -> Result<String> {
+            Ok(
+                quick_xml::escape::unescape(std::str::from_utf8(&element.children[range.clone()])?)
+                    .map_err(|error| {
+                        OxmlError::InvalidValue(format!("checkbox state decode failed: {error}"))
+                    })?
+                    .into_owned(),
+            )
+        };
+        let code = child
+            .as_ref()
+            .and_then(|child| child.value.as_ref())
+            .map(read)
+            .transpose()?
+            .unwrap_or_else(|| if checked { "2612" } else { "2610" }.to_owned());
+        let glyph = u32::from_str_radix(&code, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .ok_or_else(|| {
+                OxmlError::InvalidValue(format!(
+                    "checkbox state glyph {code:?} is not a Unicode scalar"
+                ))
+            })?;
+        oxml_core::xml::reject_non_xml_characters("checkbox state glyph", &glyph.to_string())?;
+        let font = child
+            .as_ref()
+            .and_then(|child| child.font.as_ref())
+            .map(read)
+            .transpose()?
+            .unwrap_or_else(|| "MS Gothic".to_owned());
+        oxml_core::xml::reject_non_xml_characters("checkbox state font", &font)?;
+        if font.trim().is_empty() {
+            return Err(OxmlError::InvalidValue(
+                "checkbox state font is empty".to_owned(),
+            ));
+        }
+        Ok((glyph, font))
+    }
+
+    /// Change only the qualified checked value, preserving all other raw bytes.
+    pub fn set_checkbox_checked(&mut self, checked: bool) -> Result<()> {
+        let child = self.checkbox_child(b"checked")?;
+        let element = self.type_element.as_mut().ok_or_else(|| {
+            OxmlError::InvalidValue("checkbox type payload is missing".to_owned())
+        })?;
+        let value = if checked {
+            b"1".as_slice()
+        } else {
+            b"0".as_slice()
+        };
+        if let Some(child) = child {
+            if let Some(range) = child.value {
+                element.children.splice(range, value.iter().copied());
+            } else {
+                let mut prefix = "rdocxW14".to_owned();
+                let mut suffix = 0usize;
+                while element
+                    .namespace_bindings
+                    .iter()
+                    .any(|(bound, _)| bound == &prefix)
+                    || element
+                        .children
+                        .windows(prefix.len())
+                        .any(|bytes| bytes == prefix.as_bytes())
+                {
+                    suffix += 1;
+                    prefix = format!("rdocxW14{suffix}");
+                }
+                let attribute = format!(
+                    " xmlns:{prefix}=\"http://schemas.microsoft.com/office/word/2010/wordml\" {prefix}:val=\"{}\"",
+                    u8::from(checked)
+                );
+                element.children.splice(
+                    child.insert_attribute..child.insert_attribute,
+                    attribute.bytes(),
+                );
+            }
+        } else {
+            let checked_xml = format!(
+                "<rdocxW14:checked xmlns:rdocxW14=\"http://schemas.microsoft.com/office/word/2010/wordml\" rdocxW14:val=\"{}\"/>",
+                u8::from(checked)
+            );
+            element.children.splice(0..0, checked_xml.bytes());
+        }
+        Ok(())
+    }
+
+    fn checkbox_child(&self, wanted: &[u8]) -> Result<Option<CheckboxChild>> {
+        const W14: &[u8] = b"http://schemas.microsoft.com/office/word/2010/wordml";
+        if self.control_type != Some(SdtType::CheckBox) {
+            return Err(OxmlError::InvalidValue(
+                "only a checkbox has a checked state".to_owned(),
+            ));
+        }
+        let element = self.type_element.as_ref().ok_or_else(|| {
+            OxmlError::InvalidValue("checkbox type payload is missing".to_owned())
+        })?;
+        let mut start = BytesStart::new("scope");
+        for (prefix, namespace) in &element.namespace_bindings {
+            let name = if prefix.is_empty() {
+                "xmlns".to_owned()
+            } else {
+                format!("xmlns:{prefix}")
+            };
+            start.push_attribute((name.as_str(), namespace.as_str()));
+        }
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(start))?;
+        let offset = writer.get_ref().len();
+        writer.get_mut().extend_from_slice(&element.children);
+        writer.write_event(Event::End(BytesEnd::new("scope")))?;
+        let xml = writer.into_inner();
+        let mut reader = NsReader::from_reader(xml.as_slice());
+        let mut depth = 0usize;
+        let mut found = None;
+        loop {
+            let before = reader.buffer_position() as usize;
+            let (namespace, event) = reader.read_resolved_event()?;
+            let qualified = matches!(namespace, quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == W14);
+            match event {
+                Event::Start(child) | Event::Empty(child) => {
+                    let empty = xml.get(reader.buffer_position() as usize - 2) == Some(&b'/');
+                    if depth == 1 && qualified && child.local_name().as_ref() == wanted {
+                        if found.is_some() {
+                            return Err(OxmlError::InvalidValue(
+                                "duplicate qualified checkbox state child".to_owned(),
+                            ));
+                        }
+                        let mut record = CheckboxChild {
+                            value: None,
+                            font: None,
+                            insert_attribute: reader.buffer_position() as usize
+                                - offset
+                                - if empty { 2 } else { 1 },
+                        };
+                        for attribute in child.attributes() {
+                            let attribute = attribute?;
+                            let (namespace, local) =
+                                reader.resolver().resolve_attribute(attribute.key);
+                            if !matches!(namespace, quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref() == W14)
+                            {
+                                continue;
+                            }
+                            let destination = match local.as_ref() {
+                                b"val" => &mut record.value,
+                                b"font" => &mut record.font,
+                                _ => continue,
+                            };
+                            if destination.is_some() {
+                                return Err(OxmlError::InvalidValue(
+                                    "duplicate qualified checkbox state attribute".to_owned(),
+                                ));
+                            }
+                            let relative = attribute.value.as_ptr() as usize
+                                - child.as_ref().as_ptr() as usize;
+                            let begin = before + 1 + relative - offset;
+                            *destination = Some(begin..begin + attribute.value.len());
+                        }
+                        found = Some(record);
+                    }
+                    if !empty {
+                        depth += 1;
+                    }
+                }
+                Event::End(_) => depth = depth.saturating_sub(1),
+                Event::Eof => return Ok(found),
+                _ => {}
+            }
+        }
+    }
     fn from_xml_with_prefixes(
         reader: &mut Reader<&[u8]>,
         start: &BytesStart<'_>,
@@ -196,8 +388,18 @@ impl CT_SdtPr {
                                 })?;
                             properties.type_element = Some(TypeElement {
                                 control_type,
+                                name: if control_type == SdtType::CheckBox {
+                                    std::str::from_utf8(child.name().as_ref())?.to_owned()
+                                } else {
+                                    control_type.element_name().to_owned()
+                                },
                                 attributes: capture_attributes(&child, &child_prefixes, &[])?,
                                 children: children.to_vec(),
+                                namespace_bindings: if control_type == SdtType::CheckBox {
+                                    namespace_bindings(&child_prefixes)
+                                } else {
+                                    Vec::new()
+                                },
                             });
                         } else {
                             reader.read_to_end_into(child.name(), &mut Vec::new())?;
@@ -216,8 +418,18 @@ impl CT_SdtPr {
                         {
                             properties.type_element = Some(TypeElement {
                                 control_type,
+                                name: if control_type == SdtType::CheckBox {
+                                    std::str::from_utf8(child.name().as_ref())?.to_owned()
+                                } else {
+                                    control_type.element_name().to_owned()
+                                },
                                 attributes: capture_attributes(&child, &child_prefixes, &[])?,
                                 children: Vec::new(),
+                                namespace_bindings: if control_type == SdtType::CheckBox {
+                                    namespace_bindings(&child_prefixes)
+                                } else {
+                                    Vec::new()
+                                },
                             });
                         }
                     } else {
@@ -338,7 +550,14 @@ impl CT_SdtPr {
         let Some(control_type) = self.control_type else {
             return Ok(());
         };
-        let name = control_type.element_name();
+        let name = self
+            .type_element
+            .as_ref()
+            .filter(|element| element.control_type == control_type)
+            .map_or_else(
+                || control_type.element_name(),
+                |element| element.name.as_str(),
+            );
         let mut start = BytesStart::new(name);
         let children = match &self.type_element {
             Some(element) if element.control_type == control_type => {
@@ -363,7 +582,7 @@ impl CT_SdtPr {
 }
 
 /// A typed or preserved child of `w:sdtContent`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum SdtContent {
     Paragraph(CT_P),
     Table(CT_Tbl),
@@ -372,6 +591,30 @@ pub enum SdtContent {
     Run(CT_R),
     ContentControl(CT_Sdt),
     RawXml(Vec<u8>),
+}
+
+impl Clone for SdtContent {
+    fn clone(&self) -> Self {
+        if let Self::ContentControl(control) = self {
+            return Self::ContentControl(control.clone());
+        }
+        clone_non_control_sdt_content(self)
+    }
+}
+
+// Keep the large modeled leaf variants out of the recursive control frame.
+// This helper remains exhaustive even though its current caller selects leaves.
+#[inline(never)]
+fn clone_non_control_sdt_content(content: &SdtContent) -> SdtContent {
+    match content {
+        SdtContent::Paragraph(paragraph) => SdtContent::Paragraph(paragraph.clone()),
+        SdtContent::Table(table) => SdtContent::Table(table.clone()),
+        SdtContent::Row(row) => SdtContent::Row(row.clone()),
+        SdtContent::Cell(cell) => SdtContent::Cell(cell.clone()),
+        SdtContent::Run(run) => SdtContent::Run(run.clone()),
+        SdtContent::ContentControl(control) => SdtContent::ContentControl(control.clone()),
+        SdtContent::RawXml(raw) => SdtContent::RawXml(raw.clone()),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,7 +628,7 @@ pub(crate) enum SdtOwner {
 }
 
 impl SdtOwner {
-    fn owns(self, local: &[u8]) -> bool {
+    pub(crate) fn owns(self, local: &[u8]) -> bool {
         match self {
             Self::Standalone => matches!(local, b"p" | b"tbl" | b"tr" | b"tc" | b"r"),
             Self::Body | Self::Cell => matches!(local, b"p" | b"tbl"),
@@ -971,6 +1214,13 @@ impl CT_Sdt {
 
     /// Parse a content control at the reader's current `w:sdt` start.
     pub fn from_xml(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+        let prefixes = word_prefixes_at(start, &["w".to_owned()])?;
+        crate::document::admit_word_reader(
+            reader,
+            &prefixes,
+            b"sdt",
+            Some(crate::namespace::W_NS),
+        )?;
         Self::from_xml_with_prefixes(reader, start, &["w".to_owned()], SdtOwner::Standalone)
     }
 
@@ -997,6 +1247,9 @@ impl CT_Sdt {
     /// Whether a preserved control is admitted by the complete typed parser.
     #[doc(hidden)]
     pub fn story_raw_is_typed(raw: &[u8], inherited: &[String], owner: StorySdtOwner) -> bool {
+        if crate::document::admit_word_xml(raw, inherited, None).is_err() {
+            return false;
+        }
         Self::from_raw_with_context(raw, inherited, owner.into()).is_some()
     }
 
@@ -1097,7 +1350,15 @@ impl CT_Sdt {
             })
     }
 
+    /// Stored run originals are cloned even after the current run is edited.
+    pub(crate) fn original_resource_runs(&self) -> impl Iterator<Item = &CT_R> {
+        self.inline_run_sources
+            .iter()
+            .map(|source| &source.original)
+    }
+
     pub(crate) fn to_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        crate::document::admit_word_model(crate::document::WordOwner::Control(self))?;
         let mut start = BytesStart::new("w:sdt");
         for (name, value) in &self.extra_attributes {
             start.push_attribute((name.as_str(), value.as_str()));
@@ -1357,6 +1618,111 @@ fn set_nth_inline_legacy_form(
     field.set_nth_legacy_form_value_in_source_order(remaining, value)
 }
 
+// Keep by-value leaf model construction out of each recursive control frame.
+// This boundary addresses the measured ordinary-stack table/control overflow.
+#[inline(never)]
+fn append_modeled_content_child(
+    reader: &mut Reader<&[u8]>,
+    child: &BytesStart<'_>,
+    inherited: &[String],
+    empty: bool,
+    content: &mut Vec<SdtContent>,
+    inline_run_sources: &mut Vec<InlineRunSource>,
+) -> Result<()> {
+    let prefixes = word_prefixes_at(child, inherited)?;
+    match (child.local_name().as_ref(), empty) {
+        (b"p", false) => content.push(SdtContent::Paragraph(
+            CT_P::from_xml_with_prefixes_and_root(reader, &prefixes, Some(child))?,
+        )),
+        (b"p", true) => content.push(SdtContent::Paragraph(CT_P::from_empty_root(
+            child, &prefixes,
+        )?)),
+        (b"tbl", false) => {
+            let bindings = local_namespace_overrides(child, inherited)?;
+            let mut table =
+                CT_Tbl::from_xml_with_prefixes_and_owner_bindings(reader, &prefixes, &bindings)?;
+            table.retain_root_attributes(child, &prefixes)?;
+            content.push(SdtContent::Table(table));
+        }
+        (b"tbl", true) => {
+            let mut table = CT_Tbl::new();
+            table.retain_root_attributes(child, &prefixes)?;
+            content.push(SdtContent::Table(table));
+        }
+        (b"tr", false) => {
+            let bindings = local_namespace_overrides(child, inherited)?;
+            content.push(SdtContent::Row(
+                CT_Row::from_xml_with_prefixes_and_owner_bindings(
+                    reader,
+                    &prefixes,
+                    &bindings,
+                    Some(child),
+                )?,
+            ));
+        }
+        (b"tr", true) => content.push(SdtContent::Row(CT_Row::from_empty_root(child, &prefixes)?)),
+        (b"tc", false) => {
+            let bindings = local_namespace_overrides(child, inherited)?;
+            let mut cell =
+                CT_Tc::from_xml_with_prefixes_and_owner_bindings(reader, &prefixes, &bindings)?;
+            cell.retain_root_attributes(child, &prefixes)?;
+            content.push(SdtContent::Cell(cell));
+        }
+        (b"tc", true) => {
+            let mut cell = CT_Tc {
+                properties: None,
+                content: Vec::new(),
+                extra_xml: Vec::new(),
+            };
+            cell.retain_root_attributes(child, &prefixes)?;
+            content.push(SdtContent::Cell(cell));
+        }
+        (b"r", _) => {
+            let (run, raw_xml) = if empty {
+                (
+                    CT_R {
+                        properties: None,
+                        content: Vec::new(),
+                        extra_xml: Vec::new(),
+                        extra_xml_positions: Vec::new(),
+                        alt_drawings: Vec::new(),
+                    },
+                    capture_empty_element(child)?,
+                )
+            } else {
+                let raw = capture_element(reader, child)?;
+                (parse_inline_run(&raw, inherited)?, raw)
+            };
+            inline_run_sources.push(InlineRunSource {
+                content_index: content.len(),
+                original: run.clone(),
+                raw_xml,
+            });
+            content.push(SdtContent::Run(run));
+        }
+        _ => {
+            return Err(OxmlError::InvalidValue(
+                "unsupported modeled content-control child".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Variant construction reserves space for the largest modeled leaf. Keep it
+// outside the recursive control parser even for retained and nested children.
+#[inline(never)]
+fn append_retained_sdt_content(
+    content: &mut Vec<SdtContent>,
+    control: Option<CT_Sdt>,
+    raw: Vec<u8>,
+) {
+    content.push(match control {
+        Some(control) => SdtContent::ContentControl(control),
+        None => SdtContent::RawXml(raw),
+    });
+}
+
 fn parse_content(
     reader: &mut Reader<&[u8]>,
     inherited: &[String],
@@ -1380,62 +1746,30 @@ fn parse_content(
                 .into_iter()
                 .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
                 if owned_word_child.is_some_and(|local| !owner.owns(local)) {
-                    content.push(SdtContent::RawXml(capture_element(reader, &child)?));
-                } else if is_word_element(child.name().as_ref(), b"p", &prefixes) {
-                    content.push(SdtContent::Paragraph(
-                        CT_P::from_xml_with_prefixes_and_root(reader, &prefixes, Some(&child))?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"tbl", &prefixes) {
-                    let owner_bindings = local_namespace_overrides(&child, inherited)?;
-                    content.push(SdtContent::Table(
-                        CT_Tbl::from_xml_with_prefixes_and_owner_bindings(
-                            reader,
-                            &prefixes,
-                            &owner_bindings,
-                        )?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"tr", &prefixes) {
-                    let owner_bindings = local_namespace_overrides(&child, inherited)?;
-                    content.push(SdtContent::Row(
-                        CT_Row::from_xml_with_prefixes_and_owner_bindings(
-                            reader,
-                            &prefixes,
-                            &owner_bindings,
-                            Some(&child),
-                        )?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"tc", &prefixes) {
-                    let owner_bindings = local_namespace_overrides(&child, inherited)?;
-                    content.push(SdtContent::Cell(
-                        CT_Tc::from_xml_with_prefixes_and_owner_bindings(
-                            reader,
-                            &prefixes,
-                            &owner_bindings,
-                        )?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"r", &prefixes) {
-                    let raw_xml = capture_element(reader, &child)?;
-                    let run = parse_inline_run(&raw_xml, inherited)?;
-                    inline_run_sources.push(InlineRunSource {
-                        content_index: content.len(),
-                        original: run.clone(),
-                        raw_xml,
-                    });
-                    content.push(SdtContent::Run(run));
+                    append_retained_sdt_content(
+                        &mut content,
+                        None,
+                        capture_element(reader, &child)?,
+                    );
+                } else if owned_word_child.is_some() {
+                    append_modeled_content_child(
+                        reader,
+                        &child,
+                        inherited,
+                        false,
+                        &mut content,
+                        inline_run_sources,
+                    )?;
                 } else if is_word_element(child.name().as_ref(), b"sdt", &prefixes) {
                     let raw = capture_element(reader, &child)?;
                     let parsed = CT_Sdt::from_raw_with_context(&raw, &prefixes, owner);
-                    if let Some(sdt) = parsed {
-                        content.push(SdtContent::ContentControl(sdt));
-                    } else {
-                        content.push(SdtContent::RawXml(raw));
-                    }
+                    append_retained_sdt_content(&mut content, parsed, raw);
                 } else {
                     let raw = capture_element(reader, &child)?;
                     if let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes) {
                         revisions.push((content.len(), revision));
                     }
-                    content.push(SdtContent::RawXml(raw));
+                    append_retained_sdt_content(&mut content, None, raw);
                 }
             }
             Ok(Event::Empty(child)) => {
@@ -1450,48 +1784,29 @@ fn parse_content(
                 .into_iter()
                 .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
                 if owned_word_child.is_some_and(|local| !owner.owns(local)) {
-                    content.push(SdtContent::RawXml(capture_empty_element(&child)?));
-                } else if is_word_element(child.name().as_ref(), b"p", &prefixes) {
-                    content.push(SdtContent::Paragraph(CT_P::from_empty_root(
-                        &child, &prefixes,
-                    )?));
-                } else if is_word_element(child.name().as_ref(), b"tbl", &prefixes) {
-                    content.push(SdtContent::Table(CT_Tbl::new()));
-                } else if is_word_element(child.name().as_ref(), b"tr", &prefixes) {
-                    content.push(SdtContent::Row(CT_Row::from_empty_root(&child, &prefixes)?));
-                } else if is_word_element(child.name().as_ref(), b"tc", &prefixes) {
-                    content.push(SdtContent::Cell(CT_Tc {
-                        properties: None,
-                        content: Vec::new(),
-                        extra_xml: Vec::new(),
-                    }));
-                } else if is_word_element(child.name().as_ref(), b"r", &prefixes) {
-                    let run = CT_R {
-                        properties: None,
-                        content: Vec::new(),
-                        extra_xml: Vec::new(),
-                        extra_xml_positions: Vec::new(),
-                        alt_drawings: Vec::new(),
-                    };
-                    inline_run_sources.push(InlineRunSource {
-                        content_index: content.len(),
-                        original: run.clone(),
-                        raw_xml: capture_empty_element(&child)?,
-                    });
-                    content.push(SdtContent::Run(run));
+                    append_retained_sdt_content(&mut content, None, capture_empty_element(&child)?);
+                } else if owned_word_child.is_some() {
+                    append_modeled_content_child(
+                        reader,
+                        &child,
+                        inherited,
+                        true,
+                        &mut content,
+                        inline_run_sources,
+                    )?;
                 } else {
                     let raw = capture_empty_element(&child)?;
                     if let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes) {
                         revisions.push((content.len(), revision));
                     }
-                    content.push(SdtContent::RawXml(raw));
+                    append_retained_sdt_content(&mut content, None, raw);
                 }
             }
             Ok(Event::End(end)) if matches_local_name(end.name().as_ref(), b"sdtContent") => break,
             Ok(Event::Eof) => {
                 return Err(OxmlError::MissingElement("w:sdtContent end".to_owned()));
             }
-            Ok(event) => content.push(SdtContent::RawXml(event_to_raw(event)?)),
+            Ok(event) => append_retained_sdt_content(&mut content, None, event_to_raw(event)?),
             Err(error) => return Err(error.into()),
         }
         buffer.clear();
@@ -1542,13 +1857,14 @@ fn is_word_attribute(key: &[u8], local: &[u8], prefixes: &[String]) -> bool {
 }
 
 fn is_supported_type_element(name: &[u8], local: &[u8], prefixes: &[String]) -> bool {
-    if is_word_element(name, local, prefixes) {
+    if local != b"checkbox" && is_word_element(name, local, prefixes) {
         return true;
     }
-    let Some(separator) = name.iter().position(|byte| *byte == b':') else {
-        return false;
+    let prefix = match name.iter().position(|byte| *byte == b':') {
+        Some(separator) => &name[..separator],
+        None if local == b"checkbox" => b"".as_slice(),
+        None => return false,
     };
-    let prefix = &name[..separator];
     prefixes.iter().any(|binding| {
         let Some(rest) = binding.strip_prefix('\0') else {
             return false;
@@ -1557,11 +1873,15 @@ fn is_supported_type_element(name: &[u8], local: &[u8], prefixes: &[String]) -> 
             return false;
         };
         bound_prefix.as_bytes() == prefix
-            && matches!(
-                namespace,
-                "http://schemas.microsoft.com/office/word/2010/wordml"
-                    | "http://schemas.microsoft.com/office/word/2012/wordml"
-            )
+            && if local == b"checkbox" {
+                namespace == "http://schemas.microsoft.com/office/word/2010/wordml"
+            } else {
+                matches!(
+                    namespace,
+                    "http://schemas.microsoft.com/office/word/2010/wordml"
+                        | "http://schemas.microsoft.com/office/word/2012/wordml"
+                )
+            }
     })
 }
 
@@ -1870,6 +2190,43 @@ mod tests {
             r#"<w:sdt><w:sdtPr><w:id w:val="not-an-integer"/></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#,
         );
         assert!(matches!(malformed.body.content[0], BodyContent::RawXml(_)));
+    }
+
+    #[test]
+    fn fx211_clone_preserves_all_standalone_content_carriers() {
+        let raw = r#"<x:opaque x:key="one &amp; two"><x:child/><!--kept--></x:opaque>"#;
+        let xml = format!(
+            r#"<w:sdt xmlns:w="{W_NS}" xmlns:x="urn:producer" x:root="retained"><w:sdtPr><w:alias w:val="source"/><w:id w:val="42"/><w:tag w:val="kept"/></w:sdtPr><w:sdtContent x:content="retained"><w:p><w:r><w:t>paragraph</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:tr><w:trPr><w:cantSplit/></w:trPr><w:tc><w:p/></w:tc></w:tr><w:tc><w:tcPr><w:shd w:fill="AABBCC"/></w:tcPr><w:p/></w:tc><w:r><w:rPr><w:b/></w:rPr><w:t>run</w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="nested"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:sdtContent></w:sdt>{raw}</w:sdtContent></w:sdt>"#
+        );
+        let original =
+            CT_Sdt::from_raw_with_context(xml.as_bytes(), &["w".to_owned()], SdtOwner::Standalone)
+                .unwrap();
+        assert_eq!(original.content.len(), 7);
+        assert!(matches!(original.content[0], SdtContent::Paragraph(_)));
+        assert!(matches!(original.content[1], SdtContent::Table(_)));
+        assert!(matches!(original.content[2], SdtContent::Row(_)));
+        assert!(matches!(original.content[3], SdtContent::Cell(_)));
+        assert!(matches!(original.content[4], SdtContent::Run(_)));
+        assert!(matches!(original.content[5], SdtContent::ContentControl(_)));
+        assert!(matches!(original.content[6], SdtContent::RawXml(_)));
+        let mut cloned = original.clone();
+        assert_eq!(cloned, original);
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        original.to_xml(&mut Writer::new(&mut before)).unwrap();
+        cloned.to_xml(&mut Writer::new(&mut after)).unwrap();
+        assert_eq!(after, before);
+        assert!(String::from_utf8(after).unwrap().contains(raw));
+        let SdtContent::RawXml(bytes) = &mut cloned.content[6] else {
+            panic!("raw carrier")
+        };
+        bytes.extend_from_slice(b"<!--clone-only-->");
+        assert_ne!(cloned, original);
+        let SdtContent::RawXml(bytes) = &original.content[6] else {
+            panic!("original raw carrier")
+        };
+        assert_eq!(bytes.as_slice(), raw.as_bytes());
+        assert_eq!(original.properties.as_ref().unwrap().id, Some(42));
     }
 
     #[test]

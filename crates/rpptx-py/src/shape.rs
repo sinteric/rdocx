@@ -31,7 +31,10 @@ type Crop = (
 );
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyPlaceholderFormat>()?;
     module.add_class::<PyShape>()?;
+    module.add_class::<PyChart>()?;
+    module.add_class::<PyChartSeries>()?;
     module.add_class::<PyShapeClickAction>()?;
     module.add_class::<PyShapeHyperlink>()?;
     module.add_class::<PyShapeCollection>()?;
@@ -55,7 +58,7 @@ pub(crate) fn length(py: Python<'_>, value: Option<rpptx::Emu>) -> PyResult<Opti
 /// Reads the bytes of a path, a bytes-like object, or a binary file-like object.
 ///
 /// A file-like object is rewound first when it can seek, as python-pptx does.
-fn image_bytes(image_file: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, String)> {
+pub(crate) fn image_bytes(image_file: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, String)> {
     fn blob(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
         match data.cast::<PyBytes>() {
             Ok(bytes) => Ok(bytes.as_bytes().to_vec()),
@@ -115,6 +118,18 @@ pub(crate) fn slide_index(path: &ContentPath) -> PyResult<usize> {
         .ok_or_else(|| PyIndexError::new_err("slide index is missing"))
 }
 
+pub(crate) fn shape_owner(path: &ContentPath) -> PyResult<rpptx::ShapeOwner> {
+    path.segs
+        .iter()
+        .find_map(|segment| match segment {
+            PathSeg::Slide(index) => Some(rpptx::ShapeOwner::Slide(*index)),
+            PathSeg::Layout(index) => Some(rpptx::ShapeOwner::Layout(*index)),
+            PathSeg::Master(index) => Some(rpptx::ShapeOwner::Master(*index)),
+            _ => None,
+        })
+        .ok_or_else(|| PyIndexError::new_err("shape part owner is missing"))
+}
+
 fn shape_indices(path: &ContentPath) -> impl Iterator<Item = usize> + '_ {
     path.segs.iter().filter_map(|segment| match segment {
         PathSeg::Shape(index) => Some(*index),
@@ -123,29 +138,75 @@ fn shape_indices(path: &ContentPath) -> impl Iterator<Item = usize> + '_ {
 }
 
 pub(crate) fn shape_ref_at<'a>(
+    presentation: &'a PyPresentation,
+    path: &ContentPath,
+) -> Option<rpptx::ShapeRef<'a>> {
+    let current = presentation.current_path(path)?;
+    native_shape_ref_at(&presentation.inner, &current)
+}
+
+pub(crate) fn native_shape_ref_at<'a>(
     presentation: &'a rpptx::Presentation,
     path: &ContentPath,
 ) -> Option<rpptx::ShapeRef<'a>> {
-    let slide = presentation.slide(slide_index(path).ok()?)?;
-    let mut indices = shape_indices(path);
-    let mut shape = slide.shape(indices.next()?)?;
-    for index in indices {
-        shape = shape.child(index)?;
-    }
-    Some(shape)
+    let owner = shape_owner(path).ok()?;
+    let indices = shape_indices(path).collect::<Vec<_>>();
+    presentation.part_shape_at(owner, &indices).ok()
 }
 
 pub(crate) fn shape_mut_at<'a>(
+    presentation: &'a mut PyPresentation,
+    path: &ContentPath,
+) -> Option<rpptx::ShapeMut<'a>> {
+    let current = presentation.current_path(path)?;
+    native_shape_mut_at(&mut presentation.inner, &current)
+}
+
+pub(crate) fn native_shape_mut_at<'a>(
     presentation: &'a mut rpptx::Presentation,
     path: &ContentPath,
 ) -> Option<rpptx::ShapeMut<'a>> {
-    let slide = presentation.slide_mut(slide_index(path).ok()?)?;
-    let mut indices = shape_indices(path);
-    let mut shape = slide.into_shape_mut(indices.next()?)?;
-    for index in indices {
-        shape = shape.into_child_mut(index)?;
+    let owner = shape_owner(path).ok()?;
+    let indices = shape_indices(path).collect::<Vec<_>>();
+    presentation.shape_mut_at(owner, &indices).ok()
+}
+
+const CHART_TYPES: [(i64, rpptx::ChartKind); 7] = [
+    (1, rpptx::ChartKind::Area),
+    (51, rpptx::ChartKind::Bar),
+    (-4120, rpptx::ChartKind::Doughnut),
+    (65, rpptx::ChartKind::Line),
+    (5, rpptx::ChartKind::Pie),
+    (81, rpptx::ChartKind::Radar),
+    (74, rpptx::ChartKind::Scatter),
+];
+
+fn checked_chart_inputs(
+    chart_type: &Bound<'_, PyAny>,
+    data: &Bound<'_, PyAny>,
+) -> PyResult<(rpptx::ChartKind, rpptx::ChartData)> {
+    if chart_type.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(PyTypeError::new_err(
+            "chart type must be an XL_CHART_TYPE integer",
+        ));
     }
-    Some(shape)
+    let value = chart_type.extract::<i64>()?;
+    let kind = CHART_TYPES
+        .iter()
+        .find_map(|(v, k)| (*v == value).then_some(*k))
+        .ok_or_else(|| PyValueError::new_err(format!("unsupported XL_CHART_TYPE value {value}")))?;
+    let (categories, series, number_format) =
+        data.call_method0("_data")?
+            .extract::<(Vec<String>, Vec<(String, Vec<f64>)>, Option<String>)>()?;
+    Ok((
+        kind,
+        rpptx::ChartData {
+            categories,
+            series,
+            number_format,
+            ..Default::default()
+        },
+    ))
 }
 
 #[pyclass(name = "Shape")]
@@ -155,6 +216,103 @@ pub struct PyShape {
 }
 
 impl PyShape {
+    fn set_flip_axis(&self, py: Python<'_>, value: bool, horizontal: bool) -> PyResult<()> {
+        self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner absent"))?;
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .materialize_owner_geometry(
+                shape_owner(&current)?,
+                &shape_indices(&current).collect::<Vec<_>>(),
+            )
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let flags = native_shape_ref_at(&candidate, &current)
+            .and_then(|shape| shape.flips())
+            .ok_or_else(|| PyValueError::new_err("opaque shape has no flip flags"))?;
+        let flags = if horizontal {
+            (value, flags.1)
+        } else {
+            (flags.0, value)
+        };
+        native_shape_mut_at(&mut candidate, &current)
+            .ok_or_else(|| PyIndexError::new_err("shape index out of range"))?
+            .set_flips(flags.0, flags.1)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        if candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let operation = if horizontal {
+            "Shape.flip_h"
+        } else {
+            "Shape.flip_v"
+        };
+        let prepared =
+            presentation.prepare_owners(&candidate, operation, &survivors, false, false, false)?;
+        presentation.publish_owners(candidate, prepared)
+    }
+    fn connect_end(
+        &self,
+        py: Python<'_>,
+        target: &Bound<'_, PyAny>,
+        site: u32,
+        end: rpptx::ConnectorEnd,
+        operation: &'static str,
+    ) -> PyResult<()> {
+        let target = target.extract::<PyRef<'_, PyShape>>()?;
+        if !target.presentation.is(&self.presentation) {
+            return Err(PyValueError::new_err(
+                "shape belongs to another presentation",
+            ));
+        }
+        self.validate(py)?;
+        target.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let connector_path = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("connector owner absent"))?;
+        let target_path = presentation
+            .current_path(&target.path)
+            .ok_or_else(|| PyIndexError::new_err("target owner absent"))?;
+        let slide = shape_owner(&connector_path)?;
+        if shape_owner(&target_path)? != slide {
+            return Err(PyValueError::new_err(
+                "connection target belongs to another slide",
+            ));
+        }
+        let id = presentation.checked_shape_id(&target.path)?;
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .connect_connector_at(
+                slide,
+                &shape_indices(&connector_path).collect::<Vec<_>>(),
+                end,
+                id,
+                site,
+            )
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        if candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared =
+            presentation.prepare_owners(&candidate, operation, &survivors, false, false, false)?;
+        presentation.publish_owners(candidate, prepared)
+    }
+
     pub(crate) fn new(presentation: Py<PyPresentation>, path: ContentPath) -> Self {
         Self { presentation, path }
     }
@@ -167,19 +325,37 @@ impl PyShape {
     fn edit(
         &self,
         py: Python<'_>,
+        operation: &'static str,
         change: impl FnOnce(&mut rpptx::ShapeMut<'_>) -> rpptx::Result<()>,
     ) -> PyResult<()> {
         self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        let mut shape = shape_mut_at(&mut presentation.inner, &self.path)
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner absent"))?;
+        let mut candidate = presentation.inner.clone();
+        let mut shape = native_shape_mut_at(&mut candidate, &current)
             .ok_or_else(|| PyIndexError::new_err("shape index out of range"))?;
-        change(&mut shape).map_err(|error| rpptx_to_pyerr(py, error))
+        change(&mut shape).map_err(|e| rpptx_to_pyerr(py, e))?;
+        drop(shape);
+        if candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared =
+            presentation.prepare_owners(&candidate, operation, &survivors, false, false, false)?;
+        presentation.publish_owners(candidate, prepared)
     }
 
     fn read<T>(&self, py: Python<'_>, read: impl FnOnce(rpptx::ShapeRef<'_>) -> T) -> PyResult<T> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        shape_ref_at(&presentation.inner, &self.path)
+        shape_ref_at(&presentation, &self.path)
             .map(read)
             .ok_or_else(|| PyIndexError::new_err("shape index out of range"))
     }
@@ -217,6 +393,7 @@ impl PyShape {
         py: Python<'_>,
         edge: fn(&mut Crop) -> &mut rpptx::Percent1000,
         value: f64,
+        operation: &'static str,
     ) -> PyResult<()> {
         let units = (value * CROP_UNITS_PER_FRACTION).round_ties_even();
         if !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&units) {
@@ -231,24 +408,42 @@ impl PyShape {
             return Ok(());
         }
         let (left, top, right, bottom) = crop;
-        self.edit(py, |shape| shape.set_crop(left, top, right, bottom))
+        self.edit(py, operation, |shape| {
+            shape.set_crop(left, top, right, bottom)
+        })
     }
 
-    /// Copies a placeholder's inherited transform onto it before a geometry or rotation edit.
-    fn materialize_geometry(&self, py: Python<'_>) -> PyResult<()> {
+    fn prepared_geometry(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<(rpptx::Emu, rpptx::Emu, rpptx::Emu, rpptx::Emu)>> {
         self.validate(py)?;
-        let shape_path = shape_indices(&self.path).collect::<Vec<_>>();
-        self.presentation
-            .borrow_mut(py)
-            .inner
-            .materialize_geometry(slide_index(&self.path)?, &shape_path)
-            .map_err(|error| rpptx_to_pyerr(py, error))
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner absent"))?;
+        let path = shape_indices(&current).collect::<Vec<_>>();
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .materialize_owner_geometry(shape_owner(&current)?, &path)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        candidate
+            .effective_geometry_at(shape_owner(&current)?, &path)
+            .map_err(|e| rpptx_to_pyerr(py, e))
     }
 
-    fn picture_id(&self, py: Python<'_>) -> PyResult<(usize, u32)> {
+    fn picture_id(&self, py: Python<'_>) -> PyResult<(rpptx::ShapeOwner, u32)> {
         let (kind, id) = self.read(py, |shape| (shape.kind(), shape.non_visual_id()))?;
+        let resolved = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
         match (kind, id) {
-            (rpptx::ShapeKind::Picture, Some(id)) => Ok((slide_index(&self.path)?, id)),
+            (rpptx::ShapeKind::Picture, Some(_)) => Ok((
+                shape_owner(&resolved)?,
+                self.presentation.borrow(py).checked_shape_id(&self.path)?,
+            )),
             _ => Err(PyValueError::new_err("shape is not a picture")),
         }
     }
@@ -257,13 +452,244 @@ impl PyShape {
 #[pymethods]
 impl PyShape {
     #[getter]
+    fn element(&self, py: Python<'_>) -> PyResult<Py<crate::presentation::PyPptElement>> {
+        self.read(py, |_| ())?;
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let path = presentation.capture_path(current.segs, None)?;
+        drop(presentation);
+        crate::presentation::PyPptElement::new_checked(
+            py,
+            self.presentation.clone_ref(py),
+            path,
+            crate::presentation::PptElementKind::Shape,
+        )
+    }
+
+    #[getter]
+    fn is_placeholder(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.placeholder_idx().is_some())
+    }
+
+    #[getter]
+    fn placeholder_format(&self, py: Python<'_>) -> PyResult<PyPlaceholderFormat> {
+        if !self.is_placeholder(py)? {
+            return Err(PyValueError::new_err("shape is not a placeholder"));
+        }
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
+        Ok(PyPlaceholderFormat {
+            presentation: self.presentation.clone_ref(py),
+            path,
+        })
+    }
+
+    fn ungroup<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+        self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("group owner absent"))?;
+        let Some((PathSeg::Shape(index), parent)) = current.segs.split_last() else {
+            return Err(PyValueError::new_err("missing group path"));
+        };
+        let slide = shape_owner(&current)?;
+        let group = parent
+            .iter()
+            .filter_map(|s| {
+                if let PathSeg::Shape(i) = s {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut candidate = presentation.inner.clone();
+        let range = candidate
+            .shapes_mut_at(slide, &group)
+            .map_err(|error| rpptx_to_pyerr(py, error))?
+            .ungroup(*index)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let survivors = presentation.ungrouped_shape_owners(parent, *index, range.len())?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Shape.ungroup",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let mut handles = Vec::new();
+        handles.try_reserve(range.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("ungroup result allocation failed")
+        })?;
+        for index in range {
+            let mut destination = smallvec::SmallVec::from_slice(parent);
+            destination.push(PathSeg::Shape(index));
+            let path = presentation.capture_prepared_path(&prepared, destination, None)?;
+            handles.push(Py::new(
+                py,
+                PyShape::new(self.presentation.clone_ref(py), path),
+            )?);
+        }
+        let result = pyo3::types::PyList::new(py, handles)?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
+    }
+
+    #[getter]
+    fn flip_h(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.flips())?
+            .map(|flags| flags.0)
+            .ok_or_else(|| PyValueError::new_err("opaque shape has no flip flags"))
+    }
+    #[setter]
+    fn set_flip_h(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.set_flip_axis(py, value, true)
+    }
+    #[getter]
+    fn flip_v(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.flips())?
+            .map(|flags| flags.1)
+            .ok_or_else(|| PyValueError::new_err("opaque shape has no flip flags"))
+    }
+    #[setter]
+    fn set_flip_v(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.set_flip_axis(py, value, false)
+    }
+    fn begin_connect(&self, py: Python<'_>, shape: &Bound<'_, PyAny>, site: u32) -> PyResult<()> {
+        self.connect_end(
+            py,
+            shape,
+            site,
+            rpptx::ConnectorEnd::Begin,
+            "Shape.begin_connect",
+        )
+    }
+    fn end_connect(&self, py: Python<'_>, shape: &Bound<'_, PyAny>, site: u32) -> PyResult<()> {
+        self.connect_end(
+            py,
+            shape,
+            site,
+            rpptx::ConnectorEnd::End,
+            "Shape.end_connect",
+        )
+    }
+    #[getter]
+    fn begin_x(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::Begin)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        length(py, Some(point.0))
+    }
+    #[setter]
+    fn set_begin_x(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        check_coordinate("begin_x", value, MIN_COORDINATE)?;
+        let mut point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::Begin)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        point.0 = rpptx::Emu(value);
+        self.edit(py, "Shape.begin_x", |shape| {
+            shape.set_connector_endpoint(rpptx::ConnectorEnd::Begin, point.0, point.1)
+        })
+    }
+    #[getter]
+    fn begin_y(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::Begin)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        length(py, Some(point.1))
+    }
+    #[setter]
+    fn set_begin_y(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        check_coordinate("begin_y", value, MIN_COORDINATE)?;
+        let mut point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::Begin)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        point.1 = rpptx::Emu(value);
+        self.edit(py, "Shape.begin_y", |shape| {
+            shape.set_connector_endpoint(rpptx::ConnectorEnd::Begin, point.0, point.1)
+        })
+    }
+    #[getter]
+    fn end_x(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::End)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        length(py, Some(point.0))
+    }
+    #[setter]
+    fn set_end_x(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        check_coordinate("end_x", value, MIN_COORDINATE)?;
+        let mut point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::End)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        point.0 = rpptx::Emu(value);
+        self.edit(py, "Shape.end_x", |shape| {
+            shape.set_connector_endpoint(rpptx::ConnectorEnd::End, point.0, point.1)
+        })
+    }
+    #[getter]
+    fn end_y(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::End)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        length(py, Some(point.1))
+    }
+    #[setter]
+    fn set_end_y(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        check_coordinate("end_y", value, MIN_COORDINATE)?;
+        let mut point = self
+            .read(py, |shape| {
+                shape.connector_endpoint(rpptx::ConnectorEnd::End)
+            })?
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        point.1 = rpptx::Emu(value);
+        self.edit(py, "Shape.end_y", |shape| {
+            shape.set_connector_endpoint(rpptx::ConnectorEnd::End, point.0, point.1)
+        })
+    }
+
+    #[getter]
     fn click_action(&self, py: Python<'_>) -> PyResult<Py<PyShapeClickAction>> {
         self.validate(py)?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
             PyShapeClickAction {
                 presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
+                path,
             },
         )
     }
@@ -272,7 +698,7 @@ impl PyShape {
     fn left(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        let value = shape_ref_at(&presentation.inner, &self.path)
+        let value = shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.position())
             .map(|(left, _)| left);
         drop(presentation);
@@ -280,10 +706,40 @@ impl PyShape {
     }
 
     #[getter]
+    fn alt_text(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |shape| shape.alt_text())
+    }
+
+    #[setter]
+    fn set_alt_text(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        self.edit(py, "Shape.alt_text", |shape| shape.set_alt_text(value))
+    }
+
+    #[getter]
+    fn alt_title(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |shape| shape.title())
+    }
+
+    #[setter]
+    fn set_alt_title(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        self.edit(py, "Shape.alt_title", |shape| shape.set_title(value))
+    }
+
+    #[getter]
+    fn decorative(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.decorative())
+    }
+
+    #[setter]
+    fn set_decorative(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.edit(py, "Shape.decorative", |shape| shape.set_decorative(value))
+    }
+
+    #[getter]
     fn top(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        let value = shape_ref_at(&presentation.inner, &self.path)
+        let value = shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.position())
             .map(|(_, top)| top);
         drop(presentation);
@@ -294,7 +750,7 @@ impl PyShape {
     fn width(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        let value = shape_ref_at(&presentation.inner, &self.path)
+        let value = shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.size())
             .map(|(width, _)| width);
         drop(presentation);
@@ -305,7 +761,7 @@ impl PyShape {
     fn height(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        let value = shape_ref_at(&presentation.inner, &self.path)
+        let value = shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.size())
             .map(|(_, height)| height);
         drop(presentation);
@@ -319,12 +775,17 @@ impl PyShape {
     /// report `None`.
     fn effective_geometry<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
         self.validate(py)?;
-        let shape_path = shape_indices(&self.path).collect::<Vec<_>>();
+        let resolved = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let shape_path = shape_indices(&resolved).collect::<Vec<_>>();
         let geometry = self
             .presentation
             .borrow(py)
             .inner
-            .effective_geometry(slide_index(&self.path)?, &shape_path)
+            .effective_geometry_at(shape_owner(&resolved)?, &shape_path)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         let Some((left, top, width, height)) = geometry else {
             return Ok(None);
@@ -340,64 +801,64 @@ impl PyShape {
     #[getter]
     fn shape_id(&self, py: Python<'_>) -> PyResult<Option<u32>> {
         self.validate(py)?;
-        Ok(
-            shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-                .and_then(|shape| shape.non_visual_id()),
-        )
+        Ok(shape_ref_at(&self.presentation.borrow(py), &self.path)
+            .and_then(|shape| shape.non_visual_id()))
     }
 
     #[setter]
     fn set_left(&self, py: Python<'_>, value: i64) -> PyResult<()> {
         check_coordinate("left", value, MIN_COORDINATE)?;
-        self.materialize_geometry(py)?;
-        let top = self.read(py, |shape| {
-            shape.position().map_or(rpptx::Emu(0), |(_, top)| top)
-        })?;
-        self.edit(py, |shape| shape.set_position(rpptx::Emu(value), top))
+        let top = self
+            .prepared_geometry(py)?
+            .map_or(rpptx::Emu(0), |geometry| geometry.1);
+        self.edit(py, "Shape.left", |shape| {
+            shape.set_position(rpptx::Emu(value), top)
+        })
     }
 
     #[setter]
     fn set_top(&self, py: Python<'_>, value: i64) -> PyResult<()> {
         check_coordinate("top", value, MIN_COORDINATE)?;
-        self.materialize_geometry(py)?;
-        let left = self.read(py, |shape| {
-            shape.position().map_or(rpptx::Emu(0), |(left, _)| left)
-        })?;
-        self.edit(py, |shape| shape.set_position(left, rpptx::Emu(value)))
+        let left = self
+            .prepared_geometry(py)?
+            .map_or(rpptx::Emu(0), |geometry| geometry.0);
+        self.edit(py, "Shape.top", |shape| {
+            shape.set_position(left, rpptx::Emu(value))
+        })
     }
 
     #[setter]
     fn set_width(&self, py: Python<'_>, value: i64) -> PyResult<()> {
         check_coordinate("width", value, 0)?;
-        self.materialize_geometry(py)?;
-        let height = self.read(py, |shape| {
-            shape.size().map_or(rpptx::Emu(0), |(_, height)| height)
-        })?;
-        self.edit(py, |shape| shape.set_size(rpptx::Emu(value), height))
+        let height = self
+            .prepared_geometry(py)?
+            .map_or(rpptx::Emu(0), |geometry| geometry.3);
+        self.edit(py, "Shape.width", |shape| {
+            shape.set_size(rpptx::Emu(value), height)
+        })
     }
 
     #[setter]
     fn set_height(&self, py: Python<'_>, value: i64) -> PyResult<()> {
         check_coordinate("height", value, 0)?;
-        self.materialize_geometry(py)?;
-        let width = self.read(py, |shape| {
-            shape.size().map_or(rpptx::Emu(0), |(width, _)| width)
-        })?;
-        self.edit(py, |shape| shape.set_size(width, rpptx::Emu(value)))
+        let width = self
+            .prepared_geometry(py)?
+            .map_or(rpptx::Emu(0), |geometry| geometry.2);
+        self.edit(py, "Shape.height", |shape| {
+            shape.set_size(width, rpptx::Emu(value))
+        })
     }
 
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.validate(py)?;
-        Ok(
-            shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
-                .and_then(|shape| shape.non_visual_name()),
-        )
+        Ok(shape_ref_at(&self.presentation.borrow(py), &self.path)
+            .and_then(|shape| shape.non_visual_name()))
     }
 
     #[setter]
     fn set_name(&self, py: Python<'_>, value: &str) -> PyResult<()> {
-        self.edit(py, |shape| shape.set_name(value))
+        self.edit(py, "Shape.name", |shape| shape.set_name(value))
     }
 
     /// Clockwise rotation in degrees, normalized to `0.0 <= rotation < 360.0`.
@@ -419,8 +880,7 @@ impl PyShape {
         let units = ((value * ANGLE_UNITS_PER_DEGREE).round_ties_even() as i64)
             .rem_euclid(ANGLE_UNITS_PER_TURN);
         let angle = rpptx::Angle(i32::try_from(units).expect("a normalized angle fits in i32"));
-        self.materialize_geometry(py)?;
-        self.edit(py, |shape| shape.set_rotation(angle))
+        self.edit(py, "Shape.rotation", |shape| shape.set_rotation(angle))
     }
 
     #[getter]
@@ -480,7 +940,9 @@ impl PyShape {
             return Err(PyValueError::new_err("shape is not an auto shape"));
         }
         let preset = preset_name(py, value)?;
-        self.edit(py, |shape| shape.set_auto_shape_type(&preset))
+        self.edit(py, "Shape.auto_shape_type", |shape| {
+            shape.set_auto_shape_type(&preset)
+        })
     }
 
     #[getter]
@@ -488,11 +950,20 @@ impl PyShape {
         if self.read(py, |shape| shape.kind())? != rpptx::ShapeKind::Shape {
             return Err(PyValueError::new_err("shape has no adjustments"));
         }
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
             PyAdjustmentCollection {
                 presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
+                path,
             },
         )
     }
@@ -500,26 +971,36 @@ impl PyShape {
     #[getter]
     fn fill(&self, py: Python<'_>) -> PyResult<Py<PyFillFormat>> {
         self.require_shape_properties(py, "fill")?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
-            PyFillFormat::new(
-                self.presentation.clone_ref(py),
-                self.path.clone(),
-                FillTarget::Shape,
-            ),
+            PyFillFormat::new(self.presentation.clone_ref(py), path, FillTarget::Shape),
         )
     }
 
     #[getter]
     fn line(&self, py: Python<'_>) -> PyResult<Py<PyLineFormat>> {
         self.require_shape_properties(py, "line")?;
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
-            PyLineFormat::new(
-                self.presentation.clone_ref(py),
-                self.path.clone(),
-                FillTarget::Line,
-            ),
+            PyLineFormat::new(self.presentation.clone_ref(py), path, FillTarget::Line),
         )
     }
 
@@ -542,9 +1023,18 @@ impl PyShape {
                 return Err(PyValueError::new_err("shape has no shadow"));
             }
         }
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
         Py::new(
             py,
-            PyShadowFormat::new(self.presentation.clone_ref(py), self.path.clone()),
+            PyShadowFormat::new(self.presentation.clone_ref(py), path),
         )
     }
 
@@ -560,7 +1050,9 @@ impl PyShape {
 
     #[setter]
     fn set_theme_effect_index(&self, py: Python<'_>, value: u32) -> PyResult<()> {
-        self.edit(py, |shape| shape.set_theme_effect_index(value))
+        self.edit(py, "Shape.theme_effect_index", |shape| {
+            shape.set_theme_effect_index(value)
+        })
     }
 
     /// The shape element serialized on its own, as bytes.
@@ -578,7 +1070,7 @@ impl PyShape {
         let presentation = self.presentation.borrow(py);
         let image = presentation
             .inner
-            .picture_image(slide, shape_id)
+            .picture_image_at(slide, shape_id)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         Ok(PyImage {
             ext: image_extension(&image.content_type, &image.part_name),
@@ -595,7 +1087,7 @@ impl PyShape {
 
     #[setter]
     fn set_crop_left(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        self.set_crop_edge(py, |crop| &mut crop.0, value)
+        self.set_crop_edge(py, |crop| &mut crop.0, value, "Shape.crop_left")
     }
 
     /// The share of the image cropped from the picture's top edge.
@@ -606,7 +1098,7 @@ impl PyShape {
 
     #[setter]
     fn set_crop_top(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        self.set_crop_edge(py, |crop| &mut crop.1, value)
+        self.set_crop_edge(py, |crop| &mut crop.1, value, "Shape.crop_top")
     }
 
     /// The share of the image cropped from the picture's right edge.
@@ -617,7 +1109,7 @@ impl PyShape {
 
     #[setter]
     fn set_crop_right(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        self.set_crop_edge(py, |crop| &mut crop.2, value)
+        self.set_crop_edge(py, |crop| &mut crop.2, value, "Shape.crop_right")
     }
 
     /// The share of the image cropped from the picture's bottom edge.
@@ -628,7 +1120,55 @@ impl PyShape {
 
     #[setter]
     fn set_crop_bottom(&self, py: Python<'_>, value: f64) -> PyResult<()> {
-        self.set_crop_edge(py, |crop| &mut crop.3, value)
+        self.set_crop_edge(py, |crop| &mut crop.3, value, "Shape.crop_bottom")
+    }
+
+    /// Replaces this picture placeholder and returns the new picture owner.
+    fn insert_picture(
+        &self,
+        py: Python<'_>,
+        image_file: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyShape>> {
+        self.validate(py)?;
+        let (bytes, filename) = image_bytes(image_file)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("placeholder owner is absent"))?;
+        if current
+            .segs
+            .iter()
+            .any(|seg| !matches!(seg, PathSeg::Slide(_) | PathSeg::Shape(_)))
+        {
+            return Err(PyValueError::new_err(
+                "picture insertion requires a physical slide placeholder",
+            ));
+        }
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .fill_picture_placeholder(
+                slide_index(&current)?,
+                &shape_indices(&current).collect::<Vec<_>>(),
+                &bytes,
+                &filename,
+            )
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let mut survivors = presentation.unchanged_owners()?;
+        survivors.retain(|proof| {
+            proof.layout_index.is_some() || !proof.destination.starts_with(&current.segs)
+        });
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Shape.insert_picture",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let path = presentation.capture_prepared_path(&prepared, current.segs.clone(), None)?;
+        let result = Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
     }
 
     /// Replaces the picture's image, keeping its position, size, and crop.
@@ -638,16 +1178,22 @@ impl PyShape {
         self.presentation
             .borrow_mut(py)
             .inner
-            .replace_picture_image(slide, shape_id, &bytes)
+            .replace_picture_image_at(slide, shape_id, &bytes)
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
     #[getter]
     fn shapes(&self, py: Python<'_>) -> PyResult<Py<PyShapeCollection>> {
         self.validate(py)?;
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("group owner is absent"))?;
+        let path = presentation.capture_xml_children_path(current.segs)?;
+        drop(presentation);
         Py::new(
             py,
-            PyShapeCollection::new(self.presentation.clone_ref(py), self.path.clone()),
+            PyShapeCollection::new(self.presentation.clone_ref(py), path),
         )
     }
 
@@ -655,7 +1201,7 @@ impl PyShape {
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        shape_ref_at(&presentation.inner, &self.path)
+        shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.text())
             .ok_or_else(|| PyValueError::new_err("shape has no text"))
     }
@@ -664,19 +1210,31 @@ impl PyShape {
     fn set_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
         self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        shape_mut_at(&mut presentation.inner, &self.path)
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
+        native_shape_mut_at(&mut candidate, &current)
             .ok_or_else(|| PyIndexError::new_err("shape index out of range"))?
             .set_text(text)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
-        Ok(())
+        let survivors = presentation.text_changed_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Shape.text",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)
     }
 
     #[getter]
     fn has_text_frame(&self, py: Python<'_>) -> PyResult<bool> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        Ok(shape_ref_at(&presentation.inner, &self.path)
+        Ok(shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.text_frame())
             .is_some())
     }
@@ -685,16 +1243,48 @@ impl PyShape {
     fn text_frame(&self, py: Python<'_>) -> PyResult<Py<PyTextFrame>> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        if shape_ref_at(&presentation.inner, &self.path)
+        if shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.text_frame())
             .is_none()
         {
             return Err(PyValueError::new_err("shape has no text frame"));
         }
         drop(presentation);
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_text_body_path(current.segs, None)?;
+        Py::new(py, PyTextFrame::new(self.presentation.clone_ref(py), path))
+    }
+
+    #[getter]
+    fn has_chart(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.read(py, |shape| shape.shape_type())? == Some(rpptx::ShapeType::Chart))
+    }
+
+    #[getter]
+    fn chart(&self, py: Python<'_>) -> PyResult<Py<PyChart>> {
+        self.validate(py)?;
+        if !self.has_chart(py)? {
+            return Err(PyValueError::new_err("shape has no chart"));
+        }
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("chart owner is absent"))?;
+        let path = presentation.capture_xml_children_path(current.segs)?;
+        drop(presentation);
         Py::new(
             py,
-            PyTextFrame::new(self.presentation.clone_ref(py), self.path.clone()),
+            PyChart {
+                presentation: self.presentation.clone_ref(py),
+                path,
+            },
         )
     }
 
@@ -702,7 +1292,7 @@ impl PyShape {
     fn has_table(&self, py: Python<'_>) -> PyResult<bool> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        Ok(shape_ref_at(&presentation.inner, &self.path)
+        Ok(shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.table())
             .is_some())
     }
@@ -711,17 +1301,63 @@ impl PyShape {
     fn table(&self, py: Python<'_>) -> PyResult<Py<PyTable>> {
         self.validate(py)?;
         let presentation = self.presentation.borrow(py);
-        if shape_ref_at(&presentation.inner, &self.path)
+        if shape_ref_at(&presentation, &self.path)
             .and_then(|shape| shape.table())
             .is_none()
         {
             return Err(PyValueError::new_err("shape has no table"));
         }
         drop(presentation);
-        Py::new(
-            py,
-            PyTable::new(self.presentation.clone_ref(py), self.path.clone()),
-        )
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .capture_xml_children_path(current.segs)?;
+        Py::new(py, PyTable::new(self.presentation.clone_ref(py), path))
+    }
+}
+
+/// Read-only placeholder metadata bound to its current causal shape owner.
+#[pyclass(name = "PlaceholderFormat")]
+pub struct PyPlaceholderFormat {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+#[pymethods]
+impl PyPlaceholderFormat {
+    #[getter]
+    fn idx(&self, py: Python<'_>) -> PyResult<u32> {
+        PyShape {
+            presentation: self.presentation.clone_ref(py),
+            path: self.path.clone(),
+        }
+        .read(py, |shape| shape.placeholder_idx())?
+        .ok_or_else(|| PyValueError::new_err("shape is not a placeholder"))
+    }
+
+    #[getter]
+    fn r#type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let shape = PyShape {
+            presentation: self.presentation.clone_ref(py),
+            path: self.path.clone(),
+        };
+        let (idx, token) = shape.read(py, |shape| {
+            (
+                shape.placeholder_idx(),
+                shape.placeholder_type().map(str::to_owned),
+            )
+        })?;
+        idx.ok_or_else(|| PyValueError::new_err("shape is not a placeholder"))?;
+        Ok(py
+            .import("rpptx.enum.shapes")?
+            .getattr("PP_PLACEHOLDER")?
+            .call_method1("from_xml", (token.unwrap_or_else(|| "obj".into()),))?
+            .unbind())
     }
 }
 
@@ -763,19 +1399,18 @@ impl PyShapeClickAction {
             "shape click action",
             ".click_action",
         )?;
-        let shape_id = shape_ref_at(&presentation.inner, &self.path)
-            .and_then(|shape| shape.non_visual_id())
-            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        let resolved = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let shape_id = presentation.checked_shape_id(&self.path)?;
         let Some(target) = presentation
             .inner
-            .shape_target_slide(slide_index(&self.path)?, shape_id)
+            .shape_target_slide(slide_index(&resolved)?, shape_id)
             .map_err(|error| rpptx_to_pyerr(py, error))?
         else {
             return Ok(None);
         };
-        let path = presentation
-            .revisions
-            .capture(smallvec![PathSeg::Slide(target)]);
+        let path = presentation.capture_path(smallvec![PathSeg::Slide(target)], None)?;
         Py::new(py, PySlide::new(self.presentation.clone_ref(py), path)).map(Some)
     }
 
@@ -799,12 +1434,13 @@ impl PyShapeClickAction {
             "shape click action",
             ".click_action",
         )?;
-        let shape_id = shape_ref_at(&presentation.inner, &self.path)
-            .and_then(|shape| shape.non_visual_id())
-            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        let resolved = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let shape_id = presentation.checked_shape_id(&self.path)?;
         presentation
             .inner
-            .set_shape_target_slide(slide_index(&self.path)?, shape_id, target)
+            .set_shape_target_slide(slide_index(&resolved)?, shape_id, target)
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 }
@@ -827,12 +1463,13 @@ impl PyShapeHyperlink {
             "shape hyperlink",
             ".click_action.hyperlink",
         )?;
-        let shape_id = shape_ref_at(&presentation.inner, &self.path)
-            .and_then(|shape| shape.non_visual_id())
-            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        let resolved = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let shape_id = presentation.checked_shape_id(&self.path)?;
         presentation
             .inner
-            .shape_hyperlink_address(slide_index(&self.path)?, shape_id)
+            .shape_hyperlink_address_at(shape_owner(&resolved)?, shape_id)
             .map(|address| address.map(str::to_owned))
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
@@ -847,13 +1484,14 @@ impl PyShapeHyperlink {
             "shape hyperlink",
             ".click_action.hyperlink",
         )?;
-        let shape_id = shape_ref_at(&presentation.inner, &self.path)
-            .and_then(|shape| shape.non_visual_id())
-            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        let resolved = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let shape_id = presentation.checked_shape_id(&self.path)?;
         presentation
             .inner
-            .set_shape_hyperlink(
-                slide_index(&self.path)?,
+            .set_shape_hyperlink_at(
+                shape_owner(&resolved)?,
                 shape_id,
                 value.filter(|value| !value.is_empty()),
             )
@@ -867,19 +1505,86 @@ pub struct PyShapeCollection {
     path: ContentPath,
 }
 
+struct CurrentShapeSelection {
+    slide: rpptx::ShapeOwner,
+    group: Vec<usize>,
+    parent: smallvec::SmallVec<[PathSeg; 5]>,
+    indices: Vec<usize>,
+}
+
 impl PyShapeCollection {
+    fn selected_current_indices(
+        &self,
+        py: Python<'_>,
+        shapes: &Bound<'_, PyAny>,
+    ) -> PyResult<CurrentShapeSelection> {
+        let mut handles = Vec::new();
+        for value in shapes.try_iter()? {
+            let shape = value?.extract::<Py<PyShape>>()?;
+            if !shape.borrow(py).presentation.is(&self.presentation) {
+                return Err(PyValueError::new_err(
+                    "shape owner is not in this presentation collection",
+                ));
+            }
+            handles.try_reserve(1).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("shape selection allocation failed")
+            })?;
+            handles.push(shape);
+        }
+        let (slide, group) = self.target(py)?;
+        let presentation = self.presentation.borrow(py);
+        let parent = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("collection owner absent"))?
+            .segs;
+        let mut indices = Vec::new();
+        indices.try_reserve(handles.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("shape selection allocation failed")
+        })?;
+        for shape in handles {
+            let shape = shape.borrow(py);
+            shape.validate(py)?;
+            let current = presentation
+                .current_path(&shape.path)
+                .ok_or_else(|| PyIndexError::new_err("shape owner absent"))?;
+            let Some((PathSeg::Shape(index), prefix)) = current.segs.split_last() else {
+                return Err(PyValueError::new_err("shape has no physical member path"));
+            };
+            if prefix != parent.as_slice() {
+                return Err(PyValueError::new_err(
+                    "shape owner is not in this presentation collection",
+                ));
+            }
+            indices.push(*index);
+        }
+        indices.sort_unstable();
+        if indices.windows(2).any(|p| p[0] == p[1]) {
+            return Err(PyValueError::new_err("shape selection contains duplicates"));
+        }
+        Ok(CurrentShapeSelection {
+            slide,
+            group,
+            parent,
+            indices,
+        })
+    }
+
     pub(crate) fn new(presentation: Py<PyPresentation>, path: ContentPath) -> Self {
         Self { presentation, path }
     }
 
-    fn validate(&self, py: Python<'_>) -> PyResult<usize> {
+    fn validate(&self, py: Python<'_>) -> PyResult<rpptx::ShapeOwner> {
         let presentation = self.presentation.borrow(py);
         validate_path(py, &presentation, &self.path, "shape collection", ".shapes")?;
-        slide_index(&self.path)
+        shape_owner(
+            &presentation
+                .current_path(&self.path)
+                .ok_or_else(|| PyIndexError::new_err("owner is absent"))?,
+        )
     }
 
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
-        let slide = self.validate(py)?;
+        let owner = self.validate(py)?;
         let presentation = self.presentation.borrow(py);
         if self
             .path
@@ -887,13 +1592,26 @@ impl PyShapeCollection {
             .iter()
             .any(|segment| matches!(segment, PathSeg::Shape(_)))
         {
-            return Ok(shape_ref_at(&presentation.inner, &self.path)
-                .map_or(0, |shape| shape.child_count()));
+            return Ok(
+                shape_ref_at(&presentation, &self.path).map_or(0, |shape| shape.child_count())
+            );
         }
-        Ok(presentation
-            .inner
-            .slide(slide)
-            .map_or(0, |slide| slide.shapes().len()))
+        Ok(match owner {
+            rpptx::ShapeOwner::Slide(index) => presentation
+                .inner
+                .slide(index)
+                .map_or(0, |slide| slide.shapes().len()),
+            rpptx::ShapeOwner::Layout(index) => {
+                presentation.inner.layout(index).map_or(0, |layout| {
+                    layout.common_slide_data.shape_tree.children.len()
+                })
+            }
+            rpptx::ShapeOwner::Master(index) => {
+                presentation.inner.master(index).map_or(0, |master| {
+                    master.common_slide_data.shape_tree.children.len()
+                })
+            }
+        })
     }
 
     fn require_slide_root(&self) -> PyResult<()> {
@@ -912,14 +1630,23 @@ impl PyShapeCollection {
 
     /// Returns the slide index and group path that additions to this
     /// collection target, or the error an addition raises.
-    fn target(&self, py: Python<'_>) -> PyResult<(usize, Vec<usize>)> {
+    fn target(&self, py: Python<'_>) -> PyResult<(rpptx::ShapeOwner, Vec<usize>)> {
         let slide_index = self.validate(py)?;
-        let group = shape_indices(&self.path).collect::<Vec<_>>();
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let group = shape_indices(&current).collect::<Vec<_>>();
         let mut presentation = self.presentation.borrow_mut(py);
-        if presentation.inner.shapes_mut(slide_index, &group).is_some() {
+        if presentation
+            .inner
+            .shapes_mut_at(slide_index, &group)
+            .is_ok()
+        {
             return Ok((slide_index, group));
         }
-        let fallback_group = shape_ref_at(&presentation.inner, &self.path)
+        let fallback_group = shape_ref_at(&presentation, &self.path)
             .is_some_and(|shape| shape.kind() == rpptx::ShapeKind::Group);
         Err(PyValueError::new_err(if fallback_group {
             "a group inside an mc:AlternateContent fallback cannot take new shapes"
@@ -933,40 +1660,265 @@ impl PyShapeCollection {
     fn add(
         &self,
         py: Python<'_>,
+        operation: &'static str,
         add: impl FnOnce(&mut rpptx::ShapesMut<'_>) -> rpptx::Result<()>,
     ) -> PyResult<Py<PyShape>> {
         let (slide_index, group) = self.target(py)?;
         let index = self.len(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
-        let mut shapes = presentation
-            .inner
-            .shapes_mut(slide_index, &group)
-            .expect("the target is a slide or a group");
-        add(&mut shapes).map_err(|error| rpptx_to_pyerr(py, error))?;
-        drop(presentation);
-        self.capture_added(py, index)
+        let mut candidate = presentation.inner.clone();
+        {
+            let mut shapes = candidate
+                .shapes_mut_at(slide_index, &group)
+                .map_err(|error| rpptx_to_pyerr(py, error))?;
+            add(&mut shapes).map_err(|error| rpptx_to_pyerr(py, error))?;
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared =
+            presentation.prepare_owners(&candidate, operation, &survivors, false, false, false)?;
+        let mut segments = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?
+            .segs;
+        segments.push(PathSeg::Shape(index));
+        let path = presentation.capture_prepared_path(&prepared, segments, None)?;
+        let result = Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
     }
 
     fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyShape>> {
-        let mut segments = self.path.segs.clone();
+        let mut segments = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?
+            .segs;
         segments.push(PathSeg::Shape(index));
-        let path = self.presentation.borrow(py).revisions.capture(segments);
-        Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))
-    }
-
-    fn capture_added(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyShape>> {
-        let mut presentation = self.presentation.borrow_mut(py);
-        presentation.revisions.bump();
-        let mut segments = self.path.segs.clone();
-        segments.push(PathSeg::Shape(index));
-        let path = presentation.revisions.capture(segments);
-        drop(presentation);
+        let path = self.presentation.borrow(py).capture_path(segments, None)?;
         Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))
     }
 }
 
 #[pymethods]
 impl PyShapeCollection {
+    /// Adds a video, or an audio clip for an `audio/` type, played on click,
+    /// with `poster_frame_image` shown until it plays, as python-pptx
+    /// `add_movie` does. Without a poster a black frame shows. `mime_type`
+    /// defaults to the one the file extension names.
+    #[pyo3(signature = (movie_file, left, top, width, height, poster_frame_image = None, mime_type = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_movie(
+        &mut self,
+        py: Python<'_>,
+        movie_file: &Bound<'_, PyAny>,
+        left: i64,
+        top: i64,
+        width: i64,
+        height: i64,
+        poster_frame_image: Option<&Bound<'_, PyAny>>,
+        mime_type: Option<&str>,
+    ) -> PyResult<Py<PyShape>> {
+        let (owner, group) = self.target(py)?;
+        let rpptx::ShapeOwner::Slide(slide_index) = owner else {
+            return Err(PyValueError::new_err("movies require a slide owner"));
+        };
+        if !group.is_empty() {
+            return Err(PyValueError::new_err(
+                "a movie goes on the slide's own shapes, not in a group",
+            ));
+        }
+        let media = MediaFile::read(movie_file, mime_type)?;
+        let (poster, poster_name) = match poster_frame_image {
+            Some(image) => image_bytes(image)?,
+            None => (BLACK_POSTER.to_vec(), "poster.png".to_owned()),
+        };
+        let index = self.len(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .add_media(
+                slide_index,
+                media.kind(),
+                media.input(),
+                rpptx::MediaPoster {
+                    bytes: &poster,
+                    filename: &poster_name,
+                },
+                rpptx::Emu(left),
+                rpptx::Emu(top),
+                rpptx::Emu(width),
+                rpptx::Emu(height),
+                rpptx::MediaPlaybackSettings::default(),
+            )
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let survivors = presentation.unchanged_owners()?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.add_movie",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let mut segments = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?
+            .segs;
+        segments.push(PathSeg::Shape(index));
+        let path = presentation.capture_prepared_path(&prepared, segments, None)?;
+        let result = Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
+    }
+
+    fn group(&self, py: Python<'_>, shapes: &Bound<'_, PyAny>) -> PyResult<Py<PyShape>> {
+        let CurrentShapeSelection {
+            slide,
+            group,
+            parent,
+            indices,
+        } = self.selected_current_indices(py, shapes)?;
+        let start = *indices
+            .first()
+            .ok_or_else(|| PyValueError::new_err("empty group selection"))?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .shapes_mut_at(slide, &group)
+            .map_err(|_| PyValueError::new_err("missing group"))?
+            .group(&indices)
+            .map(drop)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let survivors = presentation.grouped_shape_owners(&parent, start, indices.len())?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.group",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let mut destination = parent;
+        destination.push(PathSeg::Shape(start));
+        let path = presentation.capture_prepared_path(&prepared, destination, None)?;
+        let result = Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
+    }
+    #[pyo3(signature=(shapes,alignment,reference=None,*,relative_to=None))]
+    fn align(
+        &self,
+        py: Python<'_>,
+        shapes: &Bound<'_, PyAny>,
+        alignment: &str,
+        reference: Option<&str>,
+        relative_to: Option<&str>,
+    ) -> PyResult<()> {
+        let alignment = match alignment {
+            "left" => rpptx::ShapeAlignment::Left,
+            "center" => rpptx::ShapeAlignment::Center,
+            "right" => rpptx::ShapeAlignment::Right,
+            "top" => rpptx::ShapeAlignment::Top,
+            "middle" => rpptx::ShapeAlignment::Middle,
+            "bottom" => rpptx::ShapeAlignment::Bottom,
+            _ => return Err(PyValueError::new_err("unknown alignment")),
+        };
+        if reference.is_some() && relative_to.is_some() && reference != relative_to {
+            return Err(PyValueError::new_err("reference and relative_to disagree"));
+        }
+        let reference = match relative_to.or(reference).unwrap_or("selection") {
+            "selection" => rpptx::ArrangeReference::Selection,
+            "slide" => rpptx::ArrangeReference::Slide,
+            _ => return Err(PyValueError::new_err("unknown reference")),
+        };
+        let CurrentShapeSelection {
+            slide,
+            group,
+            indices,
+            ..
+        } = self.selected_current_indices(py, shapes)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .shapes_mut_at(slide, &group)
+            .map_err(|_| PyValueError::new_err("missing group"))?
+            .align(&indices, alignment, reference)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        if candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.align",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)
+    }
+    #[pyo3(signature=(shapes,direction,reference=None,*,relative_to=None))]
+    fn distribute(
+        &self,
+        py: Python<'_>,
+        shapes: &Bound<'_, PyAny>,
+        direction: &str,
+        reference: Option<&str>,
+        relative_to: Option<&str>,
+    ) -> PyResult<()> {
+        let direction = match direction {
+            "horizontal" => rpptx::DistributeDirection::Horizontal,
+            "vertical" => rpptx::DistributeDirection::Vertical,
+            _ => return Err(PyValueError::new_err("unknown direction")),
+        };
+        if reference.is_some() && relative_to.is_some() && reference != relative_to {
+            return Err(PyValueError::new_err("reference and relative_to disagree"));
+        }
+        let reference = match relative_to.or(reference).unwrap_or("selection") {
+            "selection" => rpptx::ArrangeReference::Selection,
+            "slide" => rpptx::ArrangeReference::Slide,
+            _ => return Err(PyValueError::new_err("unknown reference")),
+        };
+        let CurrentShapeSelection {
+            slide,
+            group,
+            indices,
+            ..
+        } = self.selected_current_indices(py, shapes)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .shapes_mut_at(slide, &group)
+            .map_err(|_| PyValueError::new_err("missing group"))?
+            .distribute(&indices, direction, reference)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        if candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.distribute",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)
+    }
+
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         self.len(py)
     }
@@ -1008,20 +1960,16 @@ impl PyShapeCollection {
 
     #[getter]
     fn title(&self, py: Python<'_>) -> PyResult<Option<Py<PyShape>>> {
-        let slide_index = self.validate(py)?;
-        let presentation = self.presentation.borrow(py);
-        let Some(slide) = presentation.inner.slide(slide_index) else {
-            return Ok(None);
-        };
-        let Some(title) = slide.title() else {
-            return Ok(None);
-        };
-        let index = slide
-            .shapes()
-            .position(|shape| shape.placeholder_idx() == title.placeholder_idx())
-            .expect("title is an immediate slide shape");
-        drop(presentation);
-        self.item(py, index).map(Some)
+        self.validate(py)?;
+        for index in 0..self.len(py)? {
+            let shape = self.item(py, index)?;
+            if shape.borrow(py).read(py, |shape| {
+                matches!(shape.placeholder_type(), Some("title" | "ctrTitle"))
+            })? {
+                return Ok(Some(shape));
+            }
+        }
+        Ok(None)
     }
 
     #[getter]
@@ -1033,6 +1981,55 @@ impl PyShapeCollection {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn add_chart(
+        &self,
+        py: Python<'_>,
+        chart_type: &Bound<'_, PyAny>,
+        left: i64,
+        top: i64,
+        width: i64,
+        height: i64,
+        chart_data: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyShape>> {
+        self.require_slide_root()?;
+        let (kind, data) = checked_chart_inputs(chart_type, chart_data)?;
+        self.validate(py)?;
+        let index = self.len(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("chart owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .add_chart(
+                slide_index(&current)?,
+                kind,
+                rpptx::Emu(left),
+                rpptx::Emu(top),
+                rpptx::Emu(width),
+                rpptx::Emu(height),
+                &data,
+            )
+            .map(drop)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let survivors = presentation.unchanged_owners()?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.add_chart",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let mut segments = current.segs;
+        segments.push(PathSeg::Shape(index));
+        let path = presentation.capture_prepared_path(&prepared, segments, None)?;
+        let result = Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
+    }
+
     fn add_textbox(
         &mut self,
         py: Python<'_>,
@@ -1041,7 +2038,7 @@ impl PyShapeCollection {
         width: i64,
         height: i64,
     ) -> PyResult<Py<PyShape>> {
-        self.add(py, |shapes| {
+        self.add(py, "ShapeCollection.add_textbox", |shapes| {
             shapes
                 .add_textbox(
                     rpptx::Emu(left),
@@ -1063,7 +2060,7 @@ impl PyShapeCollection {
         height: i64,
     ) -> PyResult<Py<PyShape>> {
         let preset = preset_name(py, shape_type)?;
-        self.add(py, |shapes| {
+        self.add(py, "ShapeCollection.add_shape", |shapes| {
             shapes
                 .add_shape(
                     &preset,
@@ -1091,7 +2088,7 @@ impl PyShapeCollection {
             3 => rpptx::ConnectorType::Curve,
             _ => return Err(PyValueError::new_err("unsupported MSO_CONNECTOR value")),
         };
-        self.add(py, |shapes| {
+        self.add(py, "ShapeCollection.add_connector", |shapes| {
             shapes
                 .add_connector(
                     connector,
@@ -1106,28 +2103,55 @@ impl PyShapeCollection {
 
     /// Appends an empty group, which its own `shapes` collection populates.
     fn add_group_shape(&mut self, py: Python<'_>) -> PyResult<Py<PyShape>> {
-        self.add(py, |shapes| shapes.add_group_shape().map(drop))
+        self.add(py, "ShapeCollection.add_group_shape", |shapes| {
+            shapes.add_group_shape().map(drop)
+        })
     }
 
     /// Removes one shape of this slide and the package parts only it used.
     fn remove(&mut self, py: Python<'_>, shape: &Bound<'_, PyAny>) -> PyResult<()> {
         self.require_slide_root()?;
-        let slide_index = self.validate(py)?;
+        let owner = self.validate(py)?;
+        let parent = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape collection owner is absent"))?;
         let shape = shape.extract::<PyRef<'_, PyShape>>()?;
         if !shape.presentation.is(&self.presentation) {
-            return Err(PyValueError::new_err("shape is not in this collection"));
+            return Err(PyValueError::new_err(
+                "shape owner is not in this presentation collection",
+            ));
         }
         shape.validate(py)?;
-        let shape_index = match shape.path.segs.as_slice() {
-            [PathSeg::Slide(slide), PathSeg::Shape(index)] if *slide == slide_index => *index,
-            _ => return Err(PyValueError::new_err("shape is not in this collection")),
+        let current = self
+            .presentation
+            .borrow(py)
+            .current_path(&shape.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let shape_index = match current.segs.as_slice() {
+            [_, PathSeg::Shape(index)] if shape_owner(&current)? == owner => *index,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "shape owner is not in this presentation collection",
+                ));
+            }
         };
         let mut presentation = self.presentation.borrow_mut(py);
-        presentation
-            .inner
-            .remove_shape(slide_index, shape_index)
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .remove_shape_at(owner, shape_index)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        let survivors = presentation.removed_shape_owners(&parent.segs, shape_index)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.remove",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
         Ok(())
     }
 
@@ -1136,16 +2160,33 @@ impl PyShapeCollection {
     #[pyo3(name = "move")]
     fn move_shape(&mut self, py: Python<'_>, from_: isize, to: isize) -> PyResult<()> {
         self.require_slide_root()?;
-        let slide_index = self.validate(py)?;
+        let owner = self.validate(py)?;
+        let parent = self
+            .presentation
+            .borrow(py)
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape collection owner is absent"))?;
         let len = self.len(py)?;
         let from_ = normalize_index(from_, len, "shape")?;
         let to = normalize_index(to, len, "shape")?;
+        if from_ == to {
+            return Ok(());
+        }
         let mut presentation = self.presentation.borrow_mut(py);
-        presentation
-            .inner
-            .move_shape(slide_index, from_, to)
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .move_shape_at(owner, from_, to)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        let survivors = presentation.moved_shape_owners(&parent.segs, from_, to)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "ShapeCollection.move",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
         Ok(())
     }
 
@@ -1160,7 +2201,7 @@ impl PyShapeCollection {
         width: i64,
         height: i64,
     ) -> PyResult<Py<PyShape>> {
-        self.add(py, |shapes| {
+        self.add(py, "ShapeCollection.add_table", |shapes| {
             shapes
                 .add_table(
                     rows,
@@ -1186,7 +2227,7 @@ impl PyShapeCollection {
     ) -> PyResult<Py<PyShape>> {
         self.target(py)?;
         let (bytes, filename) = image_bytes(image_file)?;
-        self.add(py, |shapes| {
+        self.add(py, "ShapeCollection.add_picture", |shapes| {
             shapes
                 .add_picture(
                     &bytes,
@@ -1197,6 +2238,92 @@ impl PyShapeCollection {
                     height.map(rpptx::Emu),
                 )
                 .map(drop)
+        })
+    }
+}
+
+/// A one-pixel black PNG, the poster of a movie added without one.
+const BLACK_POSTER: [u8; 67] = [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x3A, 0x7E, 0x9B,
+    0x55, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x60, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+/// Media file extensions and the content types they name.
+const MEDIA_TYPES: [(&str, &str); 14] = [
+    ("mp4", "video/mp4"),
+    ("m4v", "video/mp4"),
+    ("mov", "video/quicktime"),
+    ("avi", "video/x-msvideo"),
+    ("wmv", "video/x-ms-wmv"),
+    ("webm", "video/webm"),
+    ("mpg", "video/mpeg"),
+    ("mpeg", "video/mpeg"),
+    ("mp3", "audio/mpeg"),
+    ("m4a", "audio/mp4"),
+    ("wav", "audio/wav"),
+    ("wma", "audio/x-ms-wma"),
+    ("aac", "audio/aac"),
+    ("ogg", "audio/ogg"),
+];
+
+/// Media bytes from a path, bytes, or a binary file object, with a file
+/// name whose extension matches the content type.
+pub(crate) struct MediaFile {
+    bytes: Vec<u8>,
+    filename: String,
+    content_type: String,
+}
+
+impl MediaFile {
+    pub(crate) fn read(file: &Bound<'_, PyAny>, mime_type: Option<&str>) -> PyResult<Self> {
+        let (bytes, filename) = image_bytes(file)?;
+        let extension = filename
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase());
+        let content_type = match mime_type {
+            Some(mime_type) => mime_type.to_owned(),
+            None => extension
+                .as_deref()
+                .and_then(|extension| MEDIA_TYPES.iter().find(|(known, _)| *known == extension))
+                .map(|(_, content_type)| (*content_type).to_owned())
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "pass mime_type, such as \"video/mp4\", for media without a known extension",
+                    )
+                })?,
+        };
+        let filename = if extension.is_some() {
+            filename
+        } else {
+            let extension = MEDIA_TYPES
+                .iter()
+                .find(|(_, known)| *known == content_type)
+                .map_or("bin", |(extension, _)| *extension);
+            format!("media.{extension}")
+        };
+        Ok(Self {
+            bytes,
+            filename,
+            content_type,
+        })
+    }
+
+    pub(crate) fn kind(&self) -> rpptx::MediaKind {
+        if self.content_type.starts_with("audio/") {
+            rpptx::MediaKind::Audio
+        } else {
+            rpptx::MediaKind::Video
+        }
+    }
+
+    pub(crate) fn input(&self) -> rpptx::MediaSourceInput<'_> {
+        rpptx::MediaSourceInput::Embedded(rpptx::EmbeddedMediaInput {
+            bytes: &self.bytes,
+            filename: &self.filename,
+            content_type: &self.content_type,
         })
     }
 }
@@ -1248,20 +2375,20 @@ impl PyPlaceholderCollection {
             "placeholder collection",
             ".placeholders",
         )?;
-        let slide_index = slide_index(&self.path)?;
-        let slide = presentation
-            .inner
-            .slide(slide_index)
-            .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?;
-        let placeholder = slide
-            .placeholder(placeholder_idx)
-            .ok_or_else(|| PyIndexError::new_err("placeholder index out of range"))?;
-        let shape_index = slide
-            .shapes()
-            .position(|shape| shape.placeholder_idx() == placeholder.placeholder_idx())
-            .expect("placeholder is an immediate slide shape");
-        drop(presentation);
+        let resolved = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("shape owner is absent"))?;
+        let owner = shape_owner(&resolved)?;
         let collection = PyShapeCollection::new(self.presentation.clone_ref(py), self.path.clone());
+        let shape_index = (0..collection.len(py)?)
+            .find(|index| {
+                presentation
+                    .inner
+                    .part_shape_at(owner, &[*index])
+                    .is_ok_and(|shape| shape.placeholder_idx() == Some(placeholder_idx))
+            })
+            .ok_or_else(|| PyIndexError::new_err("placeholder index out of range"))?;
+        drop(presentation);
         collection.item(py, shape_index)
     }
 }
@@ -1279,7 +2406,7 @@ impl PyAdjustmentCollection {
     fn values(&self, py: Python<'_>) -> PyResult<Vec<(String, f64)>> {
         let presentation = self.presentation.borrow(py);
         validate_path(py, &presentation, &self.path, "adjustments", ".adjustments")?;
-        shape_ref_at(&presentation.inner, &self.path)
+        shape_ref_at(&presentation, &self.path)
             .ok_or_else(|| PyIndexError::new_err("shape index out of range"))?
             .adjustments()
             .map_err(|error| rpptx_to_pyerr(py, error))
@@ -1311,7 +2438,7 @@ impl PyAdjustmentCollection {
         })?;
         let raw = (value * 100_000.0).trunc();
         let mut presentation = self.presentation.borrow_mut(py);
-        shape_mut_at(&mut presentation.inner, &self.path)
+        shape_mut_at(&mut presentation, &self.path)
             .ok_or_else(|| PyIndexError::new_err("shape index out of range"))?
             .set_adjust_value(&values[index].0, raw)
             .map_err(|error| rpptx_to_pyerr(py, error))
@@ -1371,4 +2498,106 @@ fn image_extension(content_type: &str, part_name: &str) -> String {
         },
         str::to_owned,
     )
+}
+
+#[pyclass(name = "Chart")]
+pub struct PyChart {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+impl PyChart {
+    fn owner(&self, py: Python<'_>) -> PyResult<(usize, u32)> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "chart",
+            "Re-fetch it with shape.chart.",
+        )?;
+        let presentation = self.presentation.borrow(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("chart owner is absent"))?;
+        Ok((
+            slide_index(&current)?,
+            presentation.checked_shape_id(&self.path)?,
+        ))
+    }
+    fn data(&self, py: Python<'_>) -> PyResult<(rpptx::ChartKind, rpptx::ChartData)> {
+        let (slide, id) = self.owner(py)?;
+        self.presentation
+            .borrow(py)
+            .inner
+            .chart_data(slide, id)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+}
+
+#[pymethods]
+impl PyChart {
+    #[getter]
+    fn chart_type(&self, py: Python<'_>) -> PyResult<i64> {
+        let kind = self.data(py)?.0;
+        Ok(CHART_TYPES
+            .iter()
+            .find_map(|(v, k)| (*k == kind).then_some(*v))
+            .expect("supported chart kind"))
+    }
+    #[getter]
+    fn categories<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.data(py)?.1.categories)
+    }
+    #[getter]
+    fn series<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .data(py)?
+            .1
+            .series
+            .into_iter()
+            .map(|(name, values)| Py::new(py, PyChartSeries { name, values }))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+    fn replace_data(&self, py: Python<'_>, chart_data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (slide, id) = self.owner(py)?;
+        let kind = self.data(py)?.0;
+        let chart_type = CHART_TYPES
+            .iter()
+            .find_map(|(v, k)| (*k == kind).then_some(*v))
+            .expect("supported kind");
+        let chart_type = chart_type.into_pyobject(py)?;
+        let (_, data) = checked_chart_inputs(chart_type.as_any(), chart_data)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .replace_chart_data(slide, id, &data)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        if candidate
+            .to_bytes()
+            .map_err(|error| rpptx_to_pyerr(py, error))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|error| rpptx_to_pyerr(py, error))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Chart.replace_data",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)
+    }
+}
+
+#[pyclass(name = "ChartSeries", frozen, get_all)]
+pub struct PyChartSeries {
+    name: String,
+    values: Vec<f64>,
 }

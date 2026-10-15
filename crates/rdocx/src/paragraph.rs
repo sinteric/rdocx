@@ -259,6 +259,12 @@ pub enum TabAlignment {
     Center,
     Right,
     Decimal,
+    Bar,
+    Clear,
+    Num,
+    List,
+    Start,
+    End,
 }
 
 impl TabAlignment {
@@ -268,6 +274,12 @@ impl TabAlignment {
             Self::Center => ST_TabJc::Center,
             Self::Right => ST_TabJc::Right,
             Self::Decimal => ST_TabJc::Decimal,
+            Self::Bar => ST_TabJc::Bar,
+            Self::Clear => ST_TabJc::Clear,
+            Self::Num => ST_TabJc::Num,
+            Self::List => ST_TabJc::List,
+            Self::Start => ST_TabJc::Start,
+            Self::End => ST_TabJc::End,
         }
     }
 
@@ -277,7 +289,12 @@ impl TabAlignment {
             ST_TabJc::Center => Some(Self::Center),
             ST_TabJc::Right => Some(Self::Right),
             ST_TabJc::Decimal => Some(Self::Decimal),
-            ST_TabJc::Bar | ST_TabJc::Clear | ST_TabJc::Num => None,
+            ST_TabJc::Bar => Some(Self::Bar),
+            ST_TabJc::Clear => Some(Self::Clear),
+            ST_TabJc::Num => Some(Self::Num),
+            ST_TabJc::List => Some(Self::List),
+            ST_TabJc::Start => Some(Self::Start),
+            ST_TabJc::End => Some(Self::End),
         }
     }
 }
@@ -289,6 +306,8 @@ pub enum TabLeader {
     Dot,
     Hyphen,
     Underscore,
+    Heavy,
+    MiddleDot,
 }
 
 impl TabLeader {
@@ -298,6 +317,8 @@ impl TabLeader {
             Self::Dot => ST_TabLeader::Dot,
             Self::Hyphen => ST_TabLeader::Hyphen,
             Self::Underscore => ST_TabLeader::Underscore,
+            Self::Heavy => ST_TabLeader::Heavy,
+            Self::MiddleDot => ST_TabLeader::MiddleDot,
         }
     }
 
@@ -307,7 +328,8 @@ impl TabLeader {
             ST_TabLeader::Dot => Some(Self::Dot),
             ST_TabLeader::Hyphen => Some(Self::Hyphen),
             ST_TabLeader::Underscore => Some(Self::Underscore),
-            ST_TabLeader::Heavy | ST_TabLeader::MiddleDot => None,
+            ST_TabLeader::Heavy => Some(Self::Heavy),
+            ST_TabLeader::MiddleDot => Some(Self::MiddleDot),
         }
     }
 }
@@ -624,11 +646,23 @@ impl ParagraphFrame {
 #[derive(Debug, Clone, Copy)]
 pub struct TabStopRef<'a> {
     inner: &'a CT_TabStop,
+    source: Option<&'a [u8]>,
 }
 
 impl TabStopRef<'_> {
-    /// The tab stop alignment, or `None` for a token this facade does not
-    /// model, such as `bar`, `clear` or `num`.
+    /// Checked direct token projection, distinguishing unsupported source from absence.
+    pub fn checked_values(self) -> crate::Result<(TabAlignment, Option<TabLeader>)> {
+        let (alignment, leader) = match (self.source, self.inner.source_occurrence) {
+            (Some(source), Some(occurrence)) => CT_Tabs::source_tokens(source, occurrence)?,
+            _ => (self.inner.val, self.inner.leader),
+        };
+        let alignment = TabAlignment::from_st(alignment)
+            .ok_or_else(|| crate::Error::Other("unsupported tab alignment".to_owned()))?;
+        Ok((alignment, leader.and_then(TabLeader::from_st)))
+    }
+
+    /// Legacy modeled alignment projection. Use `checked_values` to reject
+    /// unsupported imported source tokens instead of exposing their parser fallback.
     pub fn alignment(self) -> Option<TabAlignment> {
         TabAlignment::from_st(self.inner.val)
     }
@@ -638,7 +672,8 @@ impl TabStopRef<'_> {
         Length::twips(self.inner.pos.0)
     }
 
-    /// The leader character, or `None` when unset or outside the modeled set.
+    /// Legacy modeled leader projection. Use `checked_values` to distinguish
+    /// an absent leader from an unsupported imported token.
     pub fn leader(self) -> Option<TabLeader> {
         self.inner.leader.and_then(TabLeader::from_st)
     }
@@ -1098,6 +1133,7 @@ impl<'a> Paragraph<'a> {
     /// other run.
     pub fn add_hyperlink(&mut self, text: &str, relationship_id: &str) -> Run<'_> {
         self.add_hyperlink_with_tooltip(text, relationship_id, None)
+            .expect("an absent tooltip contains no invalid XML characters")
     }
 
     /// Add a hyperlink run and optionally set its user-facing hover tooltip.
@@ -1106,12 +1142,44 @@ impl<'a> Paragraph<'a> {
         text: &str,
         relationship_id: &str,
         tooltip: Option<&str>,
-    ) -> Run<'_> {
+    ) -> crate::Result<Run<'_>> {
+        if let Some(tooltip) = tooltip {
+            oxml_core::xml::reject_non_xml_characters("hyperlink tooltip", tooltip)?;
+        }
         let run_start = self.inner.runs.len();
         self.inner.runs.push(CT_R::new(text));
         self.inner.hyperlinks.push(HyperlinkSpan {
             rel_id: Some(relationship_id.to_string()),
             anchor: None,
+            tooltip: tooltip.map(str::to_owned),
+            doc_location: None,
+            run_start,
+            run_end: run_start + 1,
+            extra_attributes: Vec::new(),
+            extra_xml: Vec::new(),
+            preserved_raw_before: None,
+        });
+        Ok(Run {
+            inner: self.inner.runs.last_mut().unwrap(),
+        })
+    }
+
+    /// Add a run wrapped in a hyperlink to bookmark `anchor` of the same
+    /// document (`w:hyperlink w:anchor`), with an optional hover tooltip.
+    ///
+    /// No relationship is written, so the link stays inside the document.
+    /// Checked document authoring validates the destination bookmark.
+    pub fn add_internal_hyperlink(
+        &mut self,
+        text: &str,
+        anchor: &str,
+        tooltip: Option<&str>,
+    ) -> Run<'_> {
+        let run_start = self.inner.runs.len();
+        self.inner.runs.push(CT_R::new(text));
+        self.inner.hyperlinks.push(HyperlinkSpan {
+            rel_id: None,
+            anchor: Some(anchor.to_owned()),
             tooltip: tooltip.map(str::to_owned),
             doc_location: None,
             run_start,
@@ -1579,6 +1647,7 @@ impl<'a> Paragraph<'a> {
             space: Some(1),
             color: Some(color.to_string()),
             extra_attributes: Vec::new(),
+            source_xml: None,
         };
         self.ensure_ppr().borders = Some(Box::new(CT_PBdr {
             top: Some(edge.clone()),
@@ -1627,6 +1696,7 @@ impl<'a> Paragraph<'a> {
             space: Some(space_points),
             color: Some(color.to_string()),
             extra_attributes: Vec::new(),
+            source_xml: None,
         };
         let borders = self
             .ensure_ppr()
@@ -2011,17 +2081,17 @@ impl<'a> Paragraph<'a> {
         };
         match border {
             Some((style, size_eighths_pt, color)) => {
-                let retained = slot
-                    .take()
-                    .map(|existing| existing.extra_attributes)
-                    .unwrap_or_default();
-                *slot = Some(CT_BorderEdge {
+                let existing = slot.get_or_insert_with(|| CT_BorderEdge {
                     val: style.to_st(),
-                    sz: Some(size_eighths_pt),
+                    sz: None,
                     space: Some(1),
-                    color: Some(color.to_owned()),
-                    extra_attributes: retained,
+                    color: None,
+                    extra_attributes: Vec::new(),
+                    source_xml: None,
                 });
+                existing.val = style.to_st();
+                existing.sz = Some(size_eighths_pt);
+                existing.color = Some(color.to_owned());
             }
             None => *slot = None,
         }
@@ -2053,26 +2123,93 @@ impl<'a> Paragraph<'a> {
         if shading.is_none() && self.inner.properties.is_none() {
             return;
         }
-        self.ensure_ppr().shading = shading.map(|(pattern, fill_color, color)| {
-            Box::new(CT_Shd {
-                val: pattern.to_owned(),
-                color: Some(color.to_owned()),
-                fill: Some(fill_color.to_owned()),
-                ..Default::default()
-            })
-        });
+        match shading {
+            Some((pattern, fill_color, color)) => {
+                let existing = self
+                    .ensure_ppr()
+                    .shading
+                    .get_or_insert_with(Default::default);
+                existing.val = pattern.to_owned();
+                existing.fill = Some(fill_color.to_owned());
+                existing.color = Some(color.to_owned());
+                existing.theme_color = None;
+                existing.theme_tint = None;
+                existing.theme_shade = None;
+                existing.theme_fill = None;
+                existing.theme_fill_tint = None;
+                existing.theme_fill_shade = None;
+            }
+            None => self.ensure_ppr().shading = None,
+        }
+    }
+
+    /// Set or clear only the direct shading fill, retaining imported pattern and foreground.
+    pub fn set_shading_fill_value(&mut self, fill: Option<&str>) {
+        if fill.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        match fill {
+            Some(fill) => {
+                let shading = self
+                    .ensure_ppr()
+                    .shading
+                    .get_or_insert_with(Default::default);
+                shading.fill = Some(fill.to_owned());
+                shading.theme_fill = None;
+                shading.theme_fill_tint = None;
+                shading.theme_fill_shade = None;
+            }
+            None => self.ensure_ppr().shading = None,
+        }
+    }
+
+    /// Insert a checked tab before the first greater position, preserving equal positions.
+    pub fn try_add_tab_stop(
+        &mut self,
+        alignment: TabAlignment,
+        position: Length,
+        leader: Option<TabLeader>,
+    ) -> crate::Result<usize> {
+        let position = i32::try_from(position.to_emu() / 635)
+            .map(Twips)
+            .map_err(|_| {
+                crate::Error::Other("tab position exceeds signed twip range".to_owned())
+            })?;
+        let mut candidate = self.inner.properties.clone().unwrap_or_default();
+        let tabs = candidate
+            .tabs
+            .get_or_insert_with(|| CT_Tabs { tabs: Vec::new() });
+        let index = tabs
+            .tabs
+            .iter()
+            .position(|tab| tab.pos.0 > position.0)
+            .unwrap_or(tabs.tabs.len());
+        tabs.tabs.insert(
+            index,
+            CT_TabStop {
+                val: alignment.to_st(),
+                pos: position,
+                leader: leader.map(TabLeader::to_st),
+                source_occurrence: None,
+            },
+        );
+        candidate.refresh_tabs_source(None)?;
+        self.inner.properties = Some(candidate);
+        Ok(index)
     }
 
     /// Get one tab stop by index, or `None` when the index is out of range.
     pub fn tab_stop(&self, index: usize) -> Option<TabStopRef<'_>> {
-        self.inner
-            .properties
-            .as_ref()?
+        let properties = self.inner.properties.as_ref()?;
+        properties
             .tabs
             .as_ref()?
             .tabs
             .get(index)
-            .map(|inner| TabStopRef { inner })
+            .map(|inner| TabStopRef {
+                inner,
+                source: properties.tab_source(),
+            })
     }
 
     /// Replace one tab stop by index.
@@ -2085,50 +2222,89 @@ impl<'a> Paragraph<'a> {
         position: Length,
         leader: Option<TabLeader>,
     ) -> bool {
-        let Some(tabs) = self
-            .inner
-            .properties
+        self.try_set_tab_stop(index, alignment, position, leader)
+            .unwrap_or(false)
+    }
+
+    /// Replace one source occurrence after validating its signed schema position.
+    pub fn try_set_tab_stop(
+        &mut self,
+        index: usize,
+        alignment: TabAlignment,
+        position: Length,
+        leader: Option<TabLeader>,
+    ) -> crate::Result<bool> {
+        let position = i32::try_from(position.to_emu() / 635)
+            .map(Twips)
+            .map_err(|_| {
+                crate::Error::Other("tab position exceeds signed twip range".to_owned())
+            })?;
+        let Some(properties) = self.inner.properties.as_ref() else {
+            return Ok(false);
+        };
+        let mut candidate = properties.clone();
+        let Some(tab) = candidate
+            .tabs
             .as_mut()
-            .and_then(|ppr| ppr.tabs.as_mut())
+            .and_then(|tabs| tabs.tabs.get_mut(index))
         else {
-            return false;
+            return Ok(false);
         };
-        let Some(tab) = tabs.tabs.get_mut(index) else {
-            return false;
-        };
+        let occurrence = tab.source_occurrence;
         tab.val = alignment.to_st();
-        tab.pos = position.as_twips();
+        tab.pos = position;
         tab.leader = leader.map(TabLeader::to_st);
-        true
+        candidate.refresh_tabs_source(occurrence)?;
+        self.inner.properties = Some(candidate);
+        Ok(true)
     }
 
     /// Remove one tab stop by index, keeping the order of the rest.
     ///
     /// Returns `false` without mutation when the index is out of range.
     pub fn remove_tab_stop(&mut self, index: usize) -> bool {
-        let Some(tabs) = self
-            .inner
-            .properties
-            .as_mut()
-            .and_then(|ppr| ppr.tabs.as_mut())
-        else {
-            return false;
+        self.try_remove_tab_stop(index).unwrap_or(false)
+    }
+
+    /// Remove one source occurrence without reordering remaining or foreign nodes.
+    pub fn try_remove_tab_stop(&mut self, index: usize) -> crate::Result<bool> {
+        let Some(properties) = self.inner.properties.as_ref() else {
+            return Ok(false);
+        };
+        let mut candidate = properties.clone();
+        let Some(tabs) = candidate.tabs.as_mut() else {
+            return Ok(false);
         };
         if index >= tabs.tabs.len() {
-            return false;
+            return Ok(false);
         }
         tabs.tabs.remove(index);
         if tabs.tabs.is_empty() {
-            self.ensure_ppr().tabs = None;
+            candidate.tabs = None;
         }
-        true
+        candidate.refresh_tabs_source(None)?;
+        self.inner.properties = Some(candidate);
+        Ok(true)
     }
 
-    /// Remove every direct tab stop.
+    /// Remove every direct tab stop, preserving opaque tabs-container content.
     pub fn clear_tab_stops(&mut self) {
-        if let Some(ppr) = self.inner.properties.as_mut() {
-            ppr.tabs = None;
+        let _ = self.try_clear_tab_stops();
+    }
+
+    /// Clear direct tabs after source merge succeeds, with absent clear a no-op.
+    pub fn try_clear_tab_stops(&mut self) -> crate::Result<()> {
+        let Some(properties) = self.inner.properties.as_ref() else {
+            return Ok(());
+        };
+        if properties.tabs.is_none() {
+            return Ok(());
         }
+        let mut candidate = properties.clone();
+        candidate.tabs = None;
+        candidate.refresh_tabs_source(None)?;
+        self.inner.properties = Some(candidate);
+        Ok(())
     }
 
     /// Suppress line numbering for this paragraph.
@@ -3124,14 +3300,16 @@ impl<'a> ParagraphRef<'a> {
 
     /// Get one tab stop by index, or `None` when the index is out of range.
     pub fn tab_stop(&self, index: usize) -> Option<TabStopRef<'_>> {
-        self.inner
-            .properties
-            .as_ref()?
+        let properties = self.inner.properties.as_ref()?;
+        properties
             .tabs
             .as_ref()?
             .tabs
             .get(index)
-            .map(|inner| TabStopRef { inner })
+            .map(|inner| TabStopRef {
+                inner,
+                source: properties.tab_source(),
+            })
     }
 
     /// Get direct line-number suppression without collapsing inheritance.
@@ -3241,6 +3419,650 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fx200_tabs_preserve_unknown_tokens_foreign_children_duplicates_and_order() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let opaque = "<f:payload xmlns:f='urn:foreign' q='&#65;'> preserve </f:payload>";
+        let input = format!(
+            "<w:pPr><q:tabs xmlns:q='{word}' xmlns:f='urn:foreign' f:root='retained'><q:tab q:val='start' q:pos='720' f:tag='first'>{opaque}</q:tab><!--between--><q:tab q:val='end' q:pos='720'/><q:tab q:val='futureAlignment' q:pos='1440' q:leader='futureLeader'/><q:tab xmlns:q='urn:foreign' q:val='right' q:pos='99'/></q:tabs></w:pPr><w:r><w:t>tabs</w:t></w:r>"
+        );
+        let mut inner = fragment(&input);
+        let original = serialized(&inner);
+        let properties = inner.properties.as_ref().unwrap();
+        assert_eq!(
+            properties
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [720, 720, 1440]
+        );
+        assert_eq!(
+            ParagraphRef { inner: &inner }
+                .tab_stop(0)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Start, None)
+        );
+        assert_eq!(
+            ParagraphRef { inner: &inner }
+                .tab_stop(1)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::End, None)
+        );
+        assert!(
+            ParagraphRef { inner: &inner }
+                .tab_stop(2)
+                .unwrap()
+                .checked_values()
+                .is_err()
+        );
+        assert_eq!(
+            serialized(&inner),
+            original,
+            "reads must not promote unsupported source"
+        );
+        let index = Paragraph { inner: &mut inner }
+            .try_add_tab_stop(
+                TabAlignment::List,
+                Length::twips(360),
+                Some(TabLeader::MiddleDot),
+            )
+            .unwrap();
+        assert_eq!(index, 0);
+        let saved = serialized(&inner);
+        assert!(saved.contains("futureAlignment") && saved.contains("futureLeader"));
+        assert!(saved.contains(opaque) && saved.contains("<!--between-->"));
+        assert!(saved.contains("f:root=\"retained\"") || saved.contains("f:root='retained'"));
+        let mut reopened = reopened_fragment(&saved);
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [360, 720, 720, 1440]
+        );
+        assert!(
+            ParagraphRef { inner: &reopened }
+                .tab_stop(3)
+                .unwrap()
+                .checked_values()
+                .is_err()
+        );
+        // Explicitly assigning Left must replace an unknown token whose legacy model fallback is Left.
+        assert!(
+            Paragraph {
+                inner: &mut reopened
+            }
+            .try_set_tab_stop(3, TabAlignment::Left, Length::twips(1440), None)
+            .unwrap()
+        );
+        assert_eq!(
+            ParagraphRef { inner: &reopened }
+                .tab_stop(3)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Left, None)
+        );
+        let known = serialized(&reopened);
+        assert!(!known.contains("futureAlignment") && !known.contains("futureLeader"));
+        assert!(known.contains(opaque));
+        assert!(
+            Paragraph {
+                inner: &mut reopened
+            }
+            .try_remove_tab_stop(1)
+            .unwrap()
+        );
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [360, 720, 1440]
+        );
+        Paragraph {
+            inner: &mut reopened,
+        }
+        .try_clear_tab_stops()
+        .unwrap();
+        let cleared = serialized(&reopened);
+        assert!(cleared.contains("urn:foreign") && cleared.contains("<!--between-->"));
+        assert!(!cleared.contains("futureAlignment"));
+        let twice = reopened_fragment(&cleared);
+        assert!(
+            twice
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .is_none_or(|tabs| tabs.tabs.is_empty())
+        );
+        assert_eq!(serialized(&twice), cleared);
+    }
+
+    #[test]
+    fn fx200_tab_edits_preserve_child_namespace_and_opaque_attribute_bytes() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let container_attribute = " f:root = '&#x41;&#65;'";
+        let child_attributes = " q:keep='&#65;' f:keep = '&#x42;'";
+        let opaque = "<f:payload q='&#65;'/>";
+        let foreign = "<q:tab xmlns:q='urn:foreign' q:val='right' q:pos='99'/>";
+        let input = format!(
+            "<w:pPr><q:tabs xmlns:q='{word}' xmlns:f='urn:foreign'{container_attribute}><p:tab xmlns:p='{word}' xmlns:q='urn:foreign'{child_attributes} p:val='left' p:pos='720' p:leader='dot'>{opaque}</p:tab><q:tab q:val='end' q:pos='720'/><q:tab q:val='futureAlignment' q:pos='1440' q:leader='futureLeader'/>{foreign}</q:tabs></w:pPr><w:r><w:t>owned child control</w:t></w:r>"
+        );
+        let mut inner = fragment(&input);
+        let source = serialized(&inner);
+        assert!(source.contains(container_attribute));
+        assert!(source.contains(child_attributes));
+        assert_eq!(
+            ParagraphRef { inner: &inner }
+                .tab_stop(0)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Left, Some(TabLeader::Dot))
+        );
+        assert_eq!(
+            inner
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .len(),
+            3
+        );
+        assert_eq!(
+            Paragraph { inner: &mut inner }
+                .try_add_tab_stop(TabAlignment::Center, Length::twips(360), None)
+                .unwrap(),
+            0
+        );
+        let saved = serialized(&inner);
+        for raw in [container_attribute, child_attributes, opaque, foreign] {
+            assert!(
+                saved.contains(raw),
+                "lost exact source slice {raw}: {saved}"
+            );
+        }
+        assert!(saved.contains("<p:tab ") && saved.contains("xmlns:q='urn:foreign'"));
+        let mut reader = quick_xml::NsReader::from_reader(saved.as_bytes());
+        let mut buffer = Vec::new();
+        let mut seen_owned_child = false;
+        loop {
+            match reader.read_event_into(&mut buffer).unwrap() {
+                quick_xml::events::Event::Start(ref element)
+                | quick_xml::events::Event::Empty(ref element)
+                    if element.name().as_ref() == b"p:tab" =>
+                {
+                    assert_eq!(
+                        reader.resolver().resolve_element(element.name()).0,
+                        quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                            word.as_bytes()
+                        ))
+                    );
+                    for attribute in element.attributes() {
+                        let attribute = attribute.unwrap();
+                        if attribute.key.as_ref() == b"q:keep" {
+                            assert_eq!(
+                                reader.resolver().resolve_attribute(attribute.key).0,
+                                quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                                    b"urn:foreign"
+                                ))
+                            );
+                            assert_eq!(attribute.value.as_ref(), b"&#65;");
+                        }
+                    }
+                    seen_owned_child = true;
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        assert!(seen_owned_child);
+        let mut reopened = reopened_fragment(&saved);
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [360, 720, 720, 1440]
+        );
+        assert_eq!(
+            ParagraphRef { inner: &reopened }
+                .tab_stop(1)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Left, Some(TabLeader::Dot))
+        );
+        assert!(
+            ParagraphRef { inner: &reopened }
+                .tab_stop(3)
+                .unwrap()
+                .checked_values()
+                .is_err()
+        );
+        assert!(
+            Paragraph {
+                inner: &mut reopened
+            }
+            .try_set_tab_stop(
+                1,
+                TabAlignment::Right,
+                Length::twips(900),
+                Some(TabLeader::Hyphen)
+            )
+            .unwrap()
+        );
+        let edited = serialized(&reopened);
+        for raw in [container_attribute, child_attributes, opaque, foreign] {
+            assert!(
+                edited.contains(raw),
+                "lost exact source slice {raw}: {edited}"
+            );
+        }
+        let mut restored = reopened_fragment(&edited);
+        assert_eq!(
+            restored
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [360, 900, 720, 1440]
+        );
+        assert_eq!(
+            ParagraphRef { inner: &restored }
+                .tab_stop(1)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Right, Some(TabLeader::Hyphen))
+        );
+        assert_eq!(
+            ParagraphRef { inner: &restored }
+                .tab_stop(2)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::End, None)
+        );
+        assert!(
+            Paragraph {
+                inner: &mut restored
+            }
+            .try_remove_tab_stop(0)
+            .unwrap()
+        );
+        let removed = serialized(&restored);
+        assert!(removed.contains(child_attributes) && removed.contains(container_attribute));
+        assert_eq!(
+            reopened_fragment(&removed)
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn fx200_default_namespace_tab_keeps_owned_attributes_and_foreign_payload() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let foreign_attribute = " f:keep = '&#65;'";
+        let opaque = "<f:payload q='&#x42;'/>";
+        let foreign_child = "<tab xmlns='urn:foreign' q:val='right' q:pos='99'/>";
+        let input = format!(
+            "<w:pPr><q:tabs xmlns:q='{word}' xmlns:f='urn:foreign'><tab xmlns='{word}'{foreign_attribute} q:val='left' q:pos='720'>{opaque}</tab>{foreign_child}</q:tabs></w:pPr><w:r><w:t>default namespace control</w:t></w:r>"
+        );
+        let mut inner = fragment(&input);
+        assert_eq!(
+            inner
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .len(),
+            1
+        );
+        assert_eq!(
+            ParagraphRef { inner: &inner }
+                .tab_stop(0)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Left, None)
+        );
+        assert_eq!(
+            Paragraph { inner: &mut inner }
+                .try_add_tab_stop(TabAlignment::Center, Length::twips(360), None)
+                .unwrap(),
+            0
+        );
+        let saved = serialized(&inner);
+        assert!(!saved.contains('\0'));
+        for raw in [foreign_attribute, opaque, foreign_child] {
+            assert!(
+                saved.contains(raw),
+                "lost exact source slice {raw}: {saved}"
+            );
+        }
+        assert!(saved.contains(&format!("<tab xmlns='{word}'")));
+        let mut reopened = reopened_fragment(&saved);
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [360, 720]
+        );
+        assert_eq!(
+            ParagraphRef { inner: &reopened }
+                .tab_stop(1)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Left, None)
+        );
+        assert!(
+            Paragraph {
+                inner: &mut reopened
+            }
+            .try_set_tab_stop(
+                1,
+                TabAlignment::Right,
+                Length::twips(900),
+                Some(TabLeader::Dot)
+            )
+            .unwrap()
+        );
+        let replaced = serialized(&reopened);
+        assert!(!replaced.contains('\0'));
+        for raw in [foreign_attribute, opaque, foreign_child] {
+            assert!(
+                replaced.contains(raw),
+                "lost exact source slice {raw}: {replaced}"
+            );
+        }
+        let mut reader = quick_xml::NsReader::from_reader(replaced.as_bytes());
+        let mut buffer = Vec::new();
+        let mut found = false;
+        loop {
+            match reader.read_event_into(&mut buffer).unwrap() {
+                quick_xml::events::Event::Start(ref element)
+                    if element.name().as_ref() == b"tab" =>
+                {
+                    assert_eq!(
+                        reader.resolver().resolve_element(element.name()).0,
+                        quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                            word.as_bytes()
+                        ))
+                    );
+                    for attribute in element.attributes() {
+                        let attribute = attribute.unwrap();
+                        if attribute.key.as_ref() == b"q:val" || attribute.key.as_ref() == b"q:pos"
+                        {
+                            assert_eq!(
+                                reader.resolver().resolve_attribute(attribute.key).0,
+                                quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                                    word.as_bytes()
+                                ))
+                            );
+                        }
+                        if attribute.key.as_ref() == b"f:keep" {
+                            assert_eq!(
+                                reader.resolver().resolve_attribute(attribute.key).0,
+                                quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                                    b"urn:foreign"
+                                ))
+                            );
+                        }
+                    }
+                    found = true;
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        assert!(found);
+        let restored = reopened_fragment(&replaced);
+        assert_eq!(
+            restored
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs
+                .iter()
+                .map(|tab| tab.pos.0)
+                .collect::<Vec<_>>(),
+            [360, 900]
+        );
+        assert_eq!(
+            ParagraphRef { inner: &restored }
+                .tab_stop(1)
+                .unwrap()
+                .checked_values()
+                .unwrap(),
+            (TabAlignment::Right, Some(TabLeader::Dot))
+        );
+        assert_eq!(serialized(&restored), replaced);
+    }
+
+    #[test]
+    fn fx200_tab_position_validation_and_absent_clear_are_atomic() {
+        let mut inner = fragment("<w:r><w:t>no properties</w:t></w:r>");
+        let before = serialized(&inner);
+        Paragraph { inner: &mut inner }
+            .try_clear_tab_stops()
+            .unwrap();
+        assert!(inner.properties.is_none());
+        assert!(
+            Paragraph { inner: &mut inner }
+                .try_add_tab_stop(TabAlignment::Left, Length::emu(i64::MAX), None)
+                .is_err()
+        );
+        assert_eq!(serialized(&inner), before);
+        Paragraph { inner: &mut inner }
+            .try_add_tab_stop(TabAlignment::Bar, Length::emu(-636), Some(TabLeader::Heavy))
+            .unwrap();
+        assert_eq!(
+            inner
+                .properties
+                .as_ref()
+                .unwrap()
+                .tabs
+                .as_ref()
+                .unwrap()
+                .tabs[0]
+                .pos,
+            Twips(-1)
+        );
+        let before = serialized(&inner);
+        assert!(
+            Paragraph { inner: &mut inner }
+                .try_set_tab_stop(0, TabAlignment::Right, Length::emu(i64::MIN), None)
+                .is_err()
+        );
+        assert!(
+            !Paragraph { inner: &mut inner }
+                .try_remove_tab_stop(5)
+                .unwrap()
+        );
+        assert_eq!(serialized(&inner), before);
+    }
+
+    #[test]
+    fn fx200_shading_fill_edit_preserves_pattern_foreground_and_foreign_attributes() {
+        let mut inner = fragment(
+            r#"<w:pPr><w:shd w:val="diagStripe" w:fill="112233" w:themeFill="accent1" w:themeFillTint="33" w:color="445566" w:themeColor="accent2" xmlns:f="urn:foreign" f:keep="retained"/></w:pPr>"#,
+        );
+        let original = inner
+            .properties
+            .as_ref()
+            .unwrap()
+            .shading
+            .as_ref()
+            .unwrap()
+            .clone();
+        Paragraph { inner: &mut inner }.set_shading_fill_value(Some("A1B2C3"));
+        let shading = inner.properties.as_ref().unwrap().shading.as_ref().unwrap();
+        assert_eq!(shading.val, original.val);
+        assert_eq!(shading.color, original.color);
+        assert_eq!(shading.theme_color, original.theme_color);
+        assert_eq!(shading.extra_attributes, original.extra_attributes);
+        assert_eq!(shading.fill.as_deref(), Some("A1B2C3"));
+        assert_eq!(shading.theme_fill, None);
+        assert_eq!(shading.theme_fill_tint, None);
+        let saved = serialized(&inner);
+        let reopened = reopened_fragment(&saved);
+        assert_eq!(
+            reopened.properties.as_ref().unwrap().shading,
+            inner.properties.as_ref().unwrap().shading
+        );
+        Paragraph { inner: &mut inner }.set_shading_fill_value(None);
+        assert!(inner.properties.as_ref().unwrap().shading.is_none());
+    }
+
+    #[test]
+    fn fx200_paragraph_border_edit_preserves_existing_gap_and_foreign_attributes() {
+        let mut inner = fragment(
+            r#"<w:pPr><w:pBdr><w:top w:val="single" w:sz="8" w:space="7" w:color="112233" xmlns:foreign="urn:fx200:border" foreign:keep="retained"/></w:pBdr></w:pPr><w:r><w:t>border control</w:t></w:r>"#,
+        );
+        let prior = inner.properties.as_ref().unwrap().borders.as_ref().unwrap();
+        let original_attributes = prior.top.as_ref().unwrap().extra_attributes.clone();
+        assert!(
+            !original_attributes.is_empty(),
+            "fixture must retain foreign attributes"
+        );
+        assert_eq!(prior.top.as_ref().unwrap().space, Some(7));
+
+        Paragraph { inner: &mut inner }.set_border_value(
+            ParagraphBorderEdge::Top,
+            Some((BorderStyle::Double, 16, "A1B2C3")),
+        );
+
+        let border = inner.properties.as_ref().unwrap().borders.as_ref().unwrap();
+        let top = border.top.as_ref().unwrap();
+        assert_eq!(top.val, ST_Border::Double);
+        assert_eq!(top.sz, Some(16));
+        assert_eq!(top.color.as_deref(), Some("A1B2C3"));
+        assert_eq!(top.extra_attributes, original_attributes);
+        assert_eq!(
+            top.space,
+            Some(7),
+            "named fields must not overwrite the existing gap"
+        );
+        let reopened = reopened_fragment(&serialized(&inner));
+        assert_eq!(reopened.text(), "border control");
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .borders
+                .as_ref()
+                .unwrap()
+                .top
+                .as_ref()
+                .unwrap()
+                .space,
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn fx200_paragraph_shading_edit_preserves_foreign_attributes() {
+        let mut inner = fragment(
+            r#"<w:pPr><w:shd w:val="diagStripe" w:fill="112233" w:color="445566" xmlns:foreign="urn:fx200:shading" foreign:keep="retained"/></w:pPr><w:r><w:t>shading control</w:t></w:r>"#,
+        );
+        let prior = inner.properties.as_ref().unwrap().shading.as_ref().unwrap();
+        let original_attributes = prior.extra_attributes.clone();
+        assert!(
+            !original_attributes.is_empty(),
+            "fixture must retain foreign attributes"
+        );
+        assert_eq!(prior.val, "diagStripe");
+        assert_eq!(prior.color.as_deref(), Some("445566"));
+
+        Paragraph { inner: &mut inner }.set_shading_value(Some(("diagStripe", "A1B2C3", "445566")));
+
+        let shading = inner.properties.as_ref().unwrap().shading.as_ref().unwrap();
+        assert_eq!(shading.fill.as_deref(), Some("A1B2C3"));
+        assert_eq!(shading.val, "diagStripe");
+        assert_eq!(shading.color.as_deref(), Some("445566"));
+        assert_eq!(shading.extra_attributes, original_attributes);
+        let reopened = reopened_fragment(&serialized(&inner));
+        assert_eq!(reopened.text(), "shading control");
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .shading
+                .as_ref()
+                .unwrap()
+                .extra_attributes,
+            original_attributes
+        );
+    }
+
+    #[test]
     fn hyperlink_reader_exposes_modeled_and_unmodeled_attributes() {
         let mut paragraph = CT_P::new();
         paragraph.add_run("linked");
@@ -3292,6 +4114,24 @@ mod tests {
             .to_xml(&mut quick_xml::Writer::new(&mut xml))
             .unwrap();
         String::from_utf8(xml).unwrap()
+    }
+
+    // CT_P::to_xml writes a nested paragraph whose Word prefix is normally
+    // supplied by document.xml. Supply that owning context for standalone reopen.
+    fn reopened_fragment(xml: &str) -> CT_P {
+        assert!(xml.starts_with("<w:p>") || xml.starts_with("<w:p ") || xml.starts_with("<w:p/"));
+        let mut reader = quick_xml::Reader::from_str(xml);
+        let root = match reader.read_event().unwrap() {
+            quick_xml::events::Event::Start(root) | quick_xml::events::Event::Empty(root) => root,
+            event => panic!("expected serialized paragraph root, got {event:?}"),
+        };
+        assert!(
+            root.attributes()
+                .all(|attribute| { attribute.unwrap().key.as_ref() != b"xmlns:w" })
+        );
+        let mut standalone = xml.to_owned();
+        standalone.insert_str(4, &format!(r#" xmlns:w="{W}""#));
+        CT_P::from_xml_fragment(standalone.as_bytes()).unwrap()
     }
 
     #[test]

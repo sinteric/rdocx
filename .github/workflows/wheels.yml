@@ -25,6 +25,92 @@ jobs:
           - { label: macos-arm64, runner: macos-14, target: aarch64-apple-darwin, manylinux: off, install: native }
           - { label: windows-x86_64, runner: windows-2025, target: x86_64-pc-windows-msvc, manylinux: off, install: native }
     runs-on: ${{ matrix.platform.runner }}
+    env:
+      WHEEL_TEST_NODES: >-
+        {
+          "rdocx": [
+            "crates/rdocx-py/tests/test_core.py::test_core_text_mutations_survive_bytes_round_trip",
+            "crates/rdocx-py/tests/test_core.py::test_constructor_accepts_an_optional_input_path",
+            "crates/rdocx-py/tests/test_core.py::test_priority_word_operations_return_typed_snapshots_and_remain_atomic",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_five_checked_xml_owners_preserve_noop_and_atomic_refusal[paragraph]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_five_checked_xml_owners_preserve_noop_and_atomic_refusal[run]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_five_checked_xml_owners_preserve_noop_and_atomic_refusal[table]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_five_checked_xml_owners_preserve_noop_and_atomic_refusal[cell]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_five_checked_xml_owners_preserve_noop_and_atomic_refusal[section]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_hyperlink_capture_survives_unrelated_append_and_reopens",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_identical_hyperlink_removal_cannot_resurrect_capture",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_table_append_preserves_owner_and_retires_old_grid",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_run_keeps_first_global_cause_and_manual_item_equality",
+            "crates/rdocx-py/tests/test_core.py::test_hyperlinks_are_retargeted_or_removed_in_every_story",
+            "crates/rdocx-py/tests/test_core.py::test_a_stale_hyperlink_snapshot_never_edits_another_link",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_xml_child_views_retire_without_retiring_true_ancestors",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_section_furniture_retirement_preserves_shared_physical_part",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_run_text_retires_picture_with_first_cause_and_keeps_rpr",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_imported_local_picture_run_xml_preserves_owned_media_and_opaque",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_constructor_inventory_preserves_direct_control_and_cell_joins[False]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211a_constructor_inventory_preserves_direct_control_and_cell_joins[True]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_captured_link_survives_append_with_fresh_paragraph_setup",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_hyperlink_foreign_manual_and_noop_authority",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_removed_link_first_cause_survives_identical_replacements",
+            "crates/rdocx-py/tests/test_core.py::test_fx211c_word_grid_retirement_is_local_and_invalid_access_atomic",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_opaque_word_owners_preserve_corpus_fragments[table]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_opaque_word_owners_preserve_corpus_fragments[cell]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_opaque_word_owners_preserve_corpus_fragments[section]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_word_current_compatibility_repairs[margin]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_word_current_compatibility_repairs[header]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_word_current_compatibility_repairs[notes]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_word_current_compatibility_repairs[equation]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_word_current_compatibility_repairs[merge]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_word_current_compatibility_repairs[style]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_merge_opaque_refusal_preserves_package_and_owners[properties]",
+            "crates/rdocx-py/tests/test_core.py::test_fx211d_merge_opaque_refusal_preserves_package_and_owners[borders]",
+            "crates/rdocx-py/tests/test_rendering_threads.py::test_fx211c_word_unknown_symbol_source_and_same_pass_diagnostics[symbol]",
+            "crates/rdocx-py/tests/test_rendering_threads.py::test_fx211c_word_unknown_symbol_source_and_same_pass_diagnostics[numbering]"
+          ],
+          "rpptx": [
+            "crates/rpptx-py/tests/test_documented_examples.py::test_python_round_three_authoring_and_inspection_is_typed_and_lossless",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_unit_constructors_truncate_fractional_values_toward_zero",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_structural_append_retires_slide_inventory_and_preserves_existing_owners",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_run_text_replaces_in_place_and_keeps_every_handle_live",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[shape]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[table]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[cell]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[body]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[paragraph]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[run]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[slide]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[layout]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened[master]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211b_element_precisely_retires_replaced_children_and_preserves_unrelated_owners",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_paragraph_text_preserves_its_owner_and_retires_replaced_runs",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_row_cells_are_checked_live_grid_views",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_theme_name_is_live_and_preserves_source_parts",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_alt_text_and_highlight_alias_reach_saved_native_properties",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_arrangement_aliases_and_foreign_refusals_are_atomic",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_absent_core_author_retains_none_and_roundtrips",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_autofit_approximation_facts_are_owned_and_deduplicated",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_bullet_char_alias_qualifies_numbering_four_families_and_render",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_bullet_char_invalid_alias_is_atomic_with_live_owners[]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_bullet_char_invalid_alias_is_atomic_with_live_owners[True]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_bullet_char_invalid_alias_is_atomic_with_live_owners[17]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_arrangement_minimum_refusal_keeps_bytes_and_held_owners[align-1-selection-selection reference requires at least 2, got 1]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_arrangement_minimum_refusal_keeps_bytes_and_held_owners[distribute-1-selection-selection reference requires at least 3, got 1]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_arrangement_minimum_refusal_keeps_bytes_and_held_owners[distribute-2-selection-selection reference requires at least 3, got 2]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_arrangement_minimum_refusal_keeps_bytes_and_held_owners[align-0-slide-no shapes were given]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_arrangement_minimum_refusal_keeps_bytes_and_held_owners[distribute-0-slide-no shapes were given]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_table_collections_keep_owner_authority_and_retire_indexed_grid_views[rows]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx211c_table_collections_keep_owner_authority_and_retire_indexed_grid_views[columns]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx206_grid_change_retires_cells_but_preserves_table_and_other_shapes",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_table_rows_and_columns_are_added_and_removed_like_python_pptx_add_tr",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_stale_shape_text_and_table_paths_report_exact_recovery",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_nested_group_paths_report_exact_recovery",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[add]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[add_at]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[single]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[diagnostics]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[batch]"
+          ]
+        }
     permissions:
       contents: read
       id-token: write
@@ -76,18 +162,15 @@ jobs:
           "$venv_python" -m pip install --upgrade pip
           "$venv_python" -m pip install dist/${{ matrix.package.distribution }}-*.whl pytest python-docx==1.2.0 python-pptx==1.0.2
           "$venv_python" -c "import ${{ matrix.package.module }}"
-          if [[ "${{ matrix.package.distribution }}" == "rdocx" ]]; then
-            # The Issue 253 PDF text oracle requires pinned Poppler 26.01.0 in CI.
-            "$venv_python" -m pytest \
-              crates/rdocx-py/tests/test_core.py \
-              crates/rdocx-py/tests/test_formatting_tables.py \
-              crates/rdocx-py/tests/test_shared.py \
-              crates/rdocx-py/tests/test_python_docx_parity.py \
-              -k "not test_issue_253_pdf_text_view"
-          else
-            # The SHA-bound Issue 158 viewer oracle runs in pinned CI, not bare wheel runners.
-            "$venv_python" -m pytest crates/rpptx-py/tests/test_documented_examples.py -k "not test_issue_158_deck_fixture_acceptance"
-          fi
+          PACKAGE_DISTRIBUTION="${{ matrix.package.distribution }}" "$venv_python" - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          nodes = json.loads(os.environ["WHEEL_TEST_NODES"])[os.environ["PACKAGE_DISTRIBUTION"]]
+          subprocess.run([sys.executable, "-m", "pytest", *nodes], check=True)
+          PY
       - id: cp312
         if: (github.event_name == 'workflow_dispatch' || (matrix.package.distribution == 'rdocx' && startsWith(github.ref, 'refs/tags/v')) || (matrix.package.distribution == 'rpptx' && startsWith(github.ref, 'refs/tags/rpptx-v'))) && matrix.platform.install == 'native'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -123,6 +206,7 @@ jobs:
             -w /workspace \
             -e PACKAGE_DISTRIBUTION="${{ matrix.package.distribution }}" \
             -e PACKAGE_MODULE="${{ matrix.package.module }}" \
+            -e WHEEL_TEST_NODES \
             python:3.9-alpine \
             sh -euxc '
               python -m venv /tmp/wheel-venv
@@ -130,18 +214,15 @@ jobs:
               "$venv_python" -m pip install --upgrade pip
               "$venv_python" -m pip install /dist/${PACKAGE_DISTRIBUTION}-*.whl pytest python-docx==1.2.0 python-pptx==1.0.2
               "$venv_python" -c "import ${PACKAGE_MODULE}"
-              if [ "$PACKAGE_DISTRIBUTION" = rdocx ]; then
-                # Poppler is pinned in CI. The Issue 158 CLI chain needs Cargo, absent here.
-                "$venv_python" -m pytest \
-                  crates/rdocx-py/tests/test_core.py \
-                  crates/rdocx-py/tests/test_formatting_tables.py \
-                  crates/rdocx-py/tests/test_shared.py \
-                  crates/rdocx-py/tests/test_python_docx_parity.py \
-                  -k "not test_issue_253_pdf_text_view and not test_issue_158_complete_word_workflow"
-              else
-                # The Issue 158 viewer is pinned in CI. The Issue 217 CLI chain needs Cargo.
-                "$venv_python" -m pytest crates/rpptx-py/tests/test_documented_examples.py -k "not test_issue_158_deck_fixture_acceptance and not test_issue_217_complete_deck_chain"
-              fi
+              "$venv_python" - << "PY"
+          import json
+          import os
+          import subprocess
+          import sys
+
+          nodes = json.loads(os.environ["WHEEL_TEST_NODES"])[os.environ["PACKAGE_DISTRIBUTION"]]
+          subprocess.run([sys.executable, "-m", "pytest", *nodes], check=True)
+          PY
             '
       - name: Attest built artifact
         if: github.event_name == 'push' && ((matrix.package.distribution == 'rdocx' && startsWith(github.ref, 'refs/tags/v')) || (matrix.package.distribution == 'rpptx' && startsWith(github.ref, 'refs/tags/rpptx-v')))
@@ -234,10 +315,11 @@ jobs:
           packages-dir: dist
 
   build-cli-assets:
-    name: CLI ${{ matrix.platform.label }}
+    name: CLI ${{ matrix.family }} ${{ matrix.platform.label }}
     strategy:
       fail-fast: false
       matrix:
+        family: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["rdocx","rpptx"]' || startsWith(github.ref, 'refs/tags/rpptx-v') && '["rpptx"]' || '["rdocx"]') }}
         platform:
           - { label: linux-x86_64, runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, archive: tar.gz }
           - { label: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, archive: tar.gz }
@@ -245,7 +327,7 @@ jobs:
           - { label: macos-x86_64, runner: macos-15-intel, target: x86_64-apple-darwin, archive: tar.gz }
           - { label: macos-arm64, runner: macos-14, target: aarch64-apple-darwin, archive: tar.gz }
           - { label: windows-x86_64, runner: windows-2025, target: x86_64-pc-windows-msvc, archive: zip }
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
@@ -253,18 +335,53 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          python-version: "3.12"
       - name: Select Rust release family
         id: selected
         shell: bash
         run: |
-          case "${GITHUB_REF_NAME}" in
-            v*) package=rdocx-cli; binary=rdocx; version=${GITHUB_REF_NAME#v} ;;
-            rpptx-v*) package=rpptx-cli; binary=rpptx; version=${GITHUB_REF_NAME#rpptx-v} ;;
-            *) exit 1 ;;
-          esac
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            binary="${{ matrix.family }}"
+            package="${binary}-cli"
+            version=$(python - "$package" <<'PY_VERSION'
+          from pathlib import Path
+          import re
+          import sys
+          import tomllib
+
+          manifest = tomllib.loads(Path(f"crates/{sys.argv[1]}/Cargo.toml").read_text())
+          version = manifest["package"]["version"]
+          if isinstance(version, dict):
+              assert version == {"workspace": True}, version
+              workspace = tomllib.loads(Path("Cargo.toml").read_text())
+              version = workspace["workspace"]["package"]["version"]
+          assert isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+          print(version)
+          PY_VERSION
+            )
+            if [[ "$binary" == "rdocx" ]]; then
+              selected_tag="v${version}"
+            else
+              selected_tag="rpptx-v${version}"
+            fi
+            python scripts/sprint_workflow.py unified-release-family "$selected_tag"
+            artifact="cli-asset-${binary}-${{ matrix.platform.label }}"
+          else
+            case "${GITHUB_REF_NAME}" in
+              v*) package=rdocx-cli; binary=rdocx; version=${GITHUB_REF_NAME#v} ;;
+              rpptx-v*) package=rpptx-cli; binary=rpptx; version=${GITHUB_REF_NAME#rpptx-v} ;;
+              *) exit 1 ;;
+            esac
+            [[ "$binary" == "${{ matrix.family }}" ]]
+            artifact="cli-asset-${{ matrix.platform.label }}"
+          fi
           echo "package=${package}" >> "${GITHUB_OUTPUT}"
           echo "binary=${binary}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "artifact=${artifact}" >> "${GITHUB_OUTPUT}"
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.97.1
@@ -330,13 +447,13 @@ jobs:
       - name: Upload selected CLI archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cli-asset-${{ matrix.platform.label }}
+          name: ${{ steps.selected.outputs.artifact }}
           path: dist/${{ steps.selected.outputs.binary }}-${{ matrix.platform.target }}.${{ matrix.platform.archive }}
           if-no-files-found: error
 
   cli-assets:
     name: Verify CLI release assets
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     needs: build-cli-assets
     runs-on: ubuntu-24.04
     steps:
@@ -357,10 +474,12 @@ jobs:
           import zipfile
 
           tag = os.environ["GITHUB_REF_NAME"]
-          if tag.startswith("rpptx-v"):
-              binary = "rpptx"
+          if os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch":
+              binaries = ["rdocx", "rpptx"]
+          elif tag.startswith("rpptx-v"):
+              binaries = ["rpptx"]
           elif tag.startswith("v"):
-              binary = "rdocx"
+              binaries = ["rdocx"]
           else:
               raise AssertionError(f"unsupported Rust release tag {tag}")
 
@@ -375,28 +494,38 @@ jobs:
           dist = Path("dist")
           expected_names = {
               f"{binary}-{target}{suffix}"
+              for binary in binaries
               for target, suffix in expected_targets.items()
           }
           archives = sorted(path for path in dist.iterdir() if path.is_file())
           assert {path.name for path in archives} == expected_names, archives
 
-          expected_readme = Path(f"crates/{binary}-cli/README.md").read_bytes()
           expected_license = Path("LICENSE").read_bytes()
 
           def normalize_text(payload: bytes) -> bytes:
               return payload.replace(b"\r\n", b"\n")
 
           for archive in archives:
+              binary = next(name for name in binaries if archive.name.startswith(name + "-"))
+              expected_readme = Path(f"crates/{binary}-cli/README.md").read_bytes()
               executable = f"{binary}.exe" if archive.suffix == ".zip" else binary
               expected_members = {executable, "README.md", "LICENSE"}
               if archive.suffix == ".zip":
                   with zipfile.ZipFile(archive) as package:
-                      members = {info.filename: info for info in package.infolist()}
+                      ordered_members = package.infolist()
+                      ordered_names = [info.filename for info in ordered_members]
+                      assert len(ordered_members) == len(expected_members), ordered_names
+                      assert len(ordered_names) == len(set(ordered_names)), ordered_names
+                      members = {info.filename: info for info in ordered_members}
                       assert set(members) == expected_members, members
                       payloads = {name: package.read(name) for name in members}
               else:
                   with tarfile.open(archive, "r:gz") as package:
-                      members = {member.name: member for member in package.getmembers()}
+                      ordered_members = package.getmembers()
+                      ordered_names = [member.name for member in ordered_members]
+                      assert len(ordered_members) == len(expected_members), ordered_names
+                      assert len(ordered_names) == len(set(ordered_names)), ordered_names
+                      members = {member.name: member for member in ordered_members}
                       assert set(members) == expected_members, members
                       assert all(member.isfile() for member in members.values())
                       assert members[executable].mode & 0o111
@@ -412,7 +541,7 @@ jobs:
       - name: Upload reviewed CLI assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cli-release-assets-${{ github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && format('cli-rehearsal-assets-{0}', github.sha) || format('cli-release-assets-{0}', github.ref_name) }}
           path: |
             dist/*.tar.gz
             dist/*.zip

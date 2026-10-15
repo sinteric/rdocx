@@ -76,6 +76,8 @@ jobs:
               - 'rust-toolchain.toml'
               - 'crates/**'
               - 'scripts/install_pinned_poppler.py'
+              - 'scripts/sprint_workflow.py'
+              - 'scripts/test_sprint_workflow.py'
             presentation_fidelity:
               - '.github/workflows/ci.yml'
               - '.cargo/**'
@@ -232,7 +234,7 @@ jobs:
         run: |
           brew install \
             cmake ninja pkg-config fontconfig freetype jpeg-turbo \
-            libpng libtiff little-cms2 openjpeg
+            libpng libtiff little-cms2 openjpeg cairo glib
           python3 scripts/install_pinned_poppler.py
       - name: Install pinned LibreOffice 26.2.5.2
         if: matrix.package.distribution == 'rpptx'
@@ -263,6 +265,8 @@ jobs:
           "$binding_python" -m pip install \
             maturin==1.13.3 \
             pytest==9.1.1 \
+            Pillow==12.3.0 \
+            meson==1.9.1 \
             "${{ matrix.package.oracle }}"
       - name: Build Python extension
         shell: bash
@@ -272,12 +276,26 @@ jobs:
           VIRTUAL_ENV="$binding_venv" \
             "$binding_python" -m maturin develop --locked \
               --manifest-path "crates/${{ matrix.package.crate }}/Cargo.toml"
+      - name: Prepare independent font acceptance inputs
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "4"
+        run: |
+          binding_venv="${RUNNER_TEMP}/${{ matrix.package.distribution }}-venv"
+          binding_python="$binding_venv/bin/python"
+          export PATH="$binding_venv/bin:$PATH"
+          "$binding_python" -I -B crates/rdocx-py/tests/test_rendering_threads.py \
+            --prepare-fx195-inputs "${RUNNER_TEMP}/${{ matrix.package.distribution }}-font-inputs" \
+            --family "${{ matrix.package.distribution }}"
       - name: Run full Python binding suite
         shell: bash
         run: |
           binding_venv="${RUNNER_TEMP}/${{ matrix.package.distribution }}-venv"
           binding_python="$binding_venv/bin/python"
           "$binding_python" -m pytest "crates/${{ matrix.package.crate }}/tests"
+      - name: Validate retained compatibility report contracts
+        if: matrix.package.distribution == 'rdocx'
+        run: python3 -m unittest -v scripts.test_sprint_workflow.CompatibilityReportTests
 
   no-default-features:
     name: No default features
@@ -383,7 +401,7 @@ jobs:
             )
           }
 
-          verify_package "$package_root/rdocx-wasm" "@tensorbee/rdocx-wasm" "0.16.0" "rdocx_wasm"
+          verify_package "$package_root/rdocx-wasm" "@tensorbee/rdocx-wasm" "0.16.1" "rdocx_wasm"
           verify_package "$package_root/rpptx-wasm" "@tensorbee/rpptx-wasm" "0.12.1" "rpptx_wasm"
 
   release-regressions:
@@ -572,6 +590,8 @@ jobs:
             fonts/Carlito-BoldItalic.ttf \
             fonts/Carlito-Italic.ttf \
             fonts/Carlito-Regular.ttf \
+            fonts/Gelasio-Italic.ttf \
+            fonts/Gelasio-Regular.ttf \
             fonts/LiberationMono-Bold.ttf \
             fonts/LiberationMono-BoldItalic.ttf \
             fonts/LiberationMono-Italic.ttf \
@@ -590,7 +610,10 @@ jobs:
             fonts/NotoSansJP-F266a-subset.ttf \
             fonts/NotoSansKR-F266a-subset.ttf \
             fonts/NotoSansSC-FX058-subset.ttf \
-            fonts/NotoSansThai.ttf)"
+            fonts/NotoSansSymbols2-bullets-subset.ttf \
+            fonts/NotoSansThai.ttf \
+            fonts/Selawik-Bold.ttf \
+            fonts/Selawik-Regular.ttf)"
           diff -u \
             <(printf '%s\n' "$expected_fonts") \
             <(printf '%s\n' "$packaged_fonts")
@@ -603,10 +626,14 @@ jobs:
           expected_legal="$(printf '%s\n' \
             fonts/LICENSE-Caladea \
             fonts/LICENSE-Carlito \
+            fonts/LICENSE-Gelasio \
             fonts/LICENSE-Liberation \
             fonts/LICENSE-Noto \
+            fonts/LICENSE-Selawik \
             fonts/NOTICE-Caladea \
-            fonts/NOTICE-Noto)"
+            fonts/NOTICE-Gelasio \
+            fonts/NOTICE-Noto \
+            fonts/NOTICE-Selawik)"
           diff -u \
             <(printf '%s\n' "$expected_legal") \
             <(printf '%s\n' "$packaged_legal")

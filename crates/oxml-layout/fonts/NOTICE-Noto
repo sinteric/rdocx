@@ -19,3 +19,14 @@ The Noto Sans SC, Noto Sans Hebrew, Noto Sans KR and Noto Sans JP files in this
 package are deterministic subsets. Their exact reproduction commands and
 repertoires are recorded in SUBSET-NotoSansSC.md, SUBSET-NotoSansHebrew.md,
 SUBSET-NotoSansKR.md and SUBSET-NotoSansJP.md.
+
+Noto Sans Symbols 2 bullet and checkbox subset:
+Upstream: https://github.com/notofonts/symbols
+Commit: 51303ca9e8ac9dcea7b12d307ba568fd0e6fcfca
+Source SHA-256: 7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21
+Subset SHA-256: a95e7d7421e30e8ad304a0eb48aa18aefabcfec568a0f652c1039d72da999373
+The subset retains original naming and only the 17 codepoints below. It is a
+monochrome semantic fallback, not original Symbol or Wingdings outline parity.
+Reproduction uses FontTools 4.66.1 with this command:
+
+pyftsubset NotoSansSymbols2-Regular.ttf --output-file=NotoSansSymbols2-bullets-subset.ttf --unicodes=U+21E8,U+25C6,U+25FB,U+2610,U+2611,U+2612,U+2713,U+2717,U+274D,U+2751,U+2752,U+2756,U+2794,U+27A2,U+29EB,U+2B25,U+2B27 --glyph-names --symbol-cmap --legacy-cmap --notdef-glyph --notdef-outline --recommended-glyphs --name-IDs=* --name-legacy --name-languages=* --layout-features=* --no-hinting

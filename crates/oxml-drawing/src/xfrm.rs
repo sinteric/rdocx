@@ -270,16 +270,16 @@ impl CT_Transform2D {
         );
         matrix = affine_then(
             matrix,
-            affine_rotation_about(self.rotation.to_degrees(), centre_x, centre_y),
-        );
-        matrix = affine_then(
-            matrix,
             affine_scale_about(
                 if self.flip_horizontal { -1.0 } else { 1.0 },
                 if self.flip_vertical { -1.0 } else { 1.0 },
                 centre_x,
                 centre_y,
             ),
+        );
+        matrix = affine_then(
+            matrix,
+            affine_rotation_about(self.rotation.to_degrees(), centre_x, centre_y),
         );
 
         if matrix.into_iter().all(f64::is_finite) {
@@ -533,6 +533,163 @@ const fn affine_then(first: [f64; 6], next: [f64; 6]) -> [f64; 6] {
 #[cfg(test)]
 mod tests {
     use super::{CT_Transform2D, TransformError};
+
+    #[test]
+    fn fx206_horizontal_flip_rotation_matches_native_marker_centers() {
+        // PowerPoint 16.113.3 PDF vertices, normal reopen, 72 points per inch.
+        // 0.0002 pt accommodates the exported path coordinate precision.
+        let matrix_0 = CT_Transform2D::from_xml(br#"<a:xfrm rot="1800000" flipH="1" flipV="0"><a:off x="900000" y="600000"/><a:ext cx="3500000" cy="2000000"/><a:chOff x="0" y="0"/><a:chExt cx="3500000" cy="2000000"/></a:xfrm>"#)
+            .unwrap().matrix().unwrap();
+        let (mut x, mut y) = (350000.0, 250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!((x / 12_700.0 - 333.65635).abs() < 0.0002, "H/FF0000 x: {x}");
+        assert!(
+            (y / 12_700.0 - 129.95915000000002).abs() < 0.0002,
+            "H/FF0000 y: {y}"
+        );
+        let (mut x, mut y) = (1750000.0, 450000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!((x / 12_700.0 - 230.31495).abs() < 0.0002, "H/00FF00 x: {x}");
+        assert!(
+            (y / 12_700.0 - 88.47919999999999).abs() < 0.0002,
+            "H/00FF00 y: {y}"
+        );
+        let (mut x, mut y) = (800000.0, 1250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!((x / 12_700.0 - 263.6003).abs() < 0.0002, "H/0000FF x: {x}");
+        assert!(
+            (y / 12_700.0 - 180.43354999999997).abs() < 0.0002,
+            "H/0000FF y: {y}"
+        );
+    }
+
+    #[test]
+    fn fx206_vertical_flip_rotation_matches_native_marker_centers() {
+        // PowerPoint 16.113.3 PDF vertices, normal reopen, 72 points per inch.
+        // 0.0002 pt accommodates the exported path coordinate precision.
+        let matrix_0 = CT_Transform2D::from_xml(br#"<a:xfrm rot="2100000" flipH="0" flipV="1"><a:off x="6500000" y="600000"/><a:ext cx="3500000" cy="2000000"/><a:chOff x="0" y="0"/><a:chExt cx="3500000" cy="2000000"/></a:xfrm>"#)
+            .unwrap().matrix().unwrap();
+        let (mut x, mut y) = (350000.0, 250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 525.433475).abs() < 0.0002,
+            "V/FF0000 x: {x}"
+        );
+        assert!((y / 12_700.0 - 111.13045).abs() < 0.0002, "V/FF0000 y: {y}");
+        let (mut x, mut y) = (1750000.0, 450000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!((x / 12_700.0 - 624.76635).abs() < 0.0002, "V/00FF00 x: {x}");
+        assert!(
+            (y / 12_700.0 - 161.45934999999997).abs() < 0.0002,
+            "V/00FF00 y: {y}"
+        );
+        let (mut x, mut y) = (800000.0, 1250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 599.622025).abs() < 0.0002,
+            "V/0000FF x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 66.95384999999999).abs() < 0.0002,
+            "V/0000FF y: {y}"
+        );
+    }
+
+    #[test]
+    fn fx206_nested_flip_rotation_matches_native_marker_centers() {
+        // PowerPoint 16.113.3 PDF vertices, normal reopen, 72 points per inch.
+        // 0.0002 pt accommodates the exported path coordinate precision.
+        let matrix_0 = CT_Transform2D::from_xml(br#"<a:xfrm rot="-2400000" flipH="0" flipV="1"><a:off x="500000" y="200000"/><a:ext cx="2200000" cy="1500000"/><a:chOff x="0" y="0"/><a:chExt cx="2200000" cy="1500000"/></a:xfrm>"#)
+            .unwrap().matrix().unwrap();
+        let matrix_1 = CT_Transform2D::from_xml(br#"<a:xfrm rot="1500000" flipH="1" flipV="0"><a:off x="900000" y="3800000"/><a:ext cx="3500000" cy="2000000"/><a:chOff x="0" y="0"/><a:chExt cx="3500000" cy="2000000"/></a:xfrm>"#)
+            .unwrap().matrix().unwrap();
+        let (mut x, mut y) = (350000.0, 250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        let [a, b, c, d, e, f] = matrix_1;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 210.30605).abs() < 0.0002,
+            "Nested/FF0000 x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 449.5367675).abs() < 0.0002,
+            "Nested/FF0000 y: {y}"
+        );
+        let (mut x, mut y) = (1750000.0, 450000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        let [a, b, c, d, e, f] = matrix_1;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 177.99075).abs() < 0.0002,
+            "Nested/00FF00 x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 342.97335).abs() < 0.0002,
+            "Nested/00FF00 y: {y}"
+        );
+        let (mut x, mut y) = (800000.0, 1250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        let [a, b, c, d, e, f] = matrix_1;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 266.69415).abs() < 0.0002,
+            "Nested/0000FF x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 384.14645).abs() < 0.0002,
+            "Nested/0000FF y: {y}"
+        );
+    }
+
+    #[test]
+    fn fx206_rotation_without_flip_control_matches_native_marker_centers() {
+        // PowerPoint 16.113.3 PDF vertices, normal reopen, 72 points per inch.
+        // 0.0002 pt accommodates the exported path coordinate precision.
+        let matrix_0 = CT_Transform2D::from_xml(br#"<a:xfrm rot="2400000" flipH="0" flipV="0"><a:off x="6500000" y="3800000"/><a:ext cx="3500000" cy="2000000"/><a:chOff x="0" y="0"/><a:chExt cx="3500000" cy="2000000"/></a:xfrm>"#)
+            .unwrap().matrix().unwrap();
+        let (mut x, mut y) = (350000.0, 250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 603.120275).abs() < 0.0002,
+            "RotOnly/FF0000 x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 261.855425).abs() < 0.0002,
+            "RotOnly/FF0000 y: {y}"
+        );
+        let (mut x, mut y) = (1750000.0, 450000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 677.443525).abs() < 0.0002,
+            "RotOnly/00FF00 x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 344.777625).abs() < 0.0002,
+            "RotOnly/00FF00 y: {y}"
+        );
+        let (mut x, mut y) = (800000.0, 1250000.0);
+        let [a, b, c, d, e, f] = matrix_0;
+        (x, y) = (a * x + c * y + e, b * x + d * y + f);
+        assert!(
+            (x / 12_700.0 - 579.650425).abs() < 0.0002,
+            "RotOnly/0000FF x: {x}"
+        );
+        assert!(
+            (y / 12_700.0 - 344.94982500000003).abs() < 0.0002,
+            "RotOnly/0000FF y: {y}"
+        );
+    }
 
     const EPSILON: f64 = 1.0e-10;
 

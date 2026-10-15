@@ -2626,13 +2626,14 @@ impl BibliographyUpdateState {
             };
             let effective =
                 crate::style::resolve_run_properties(Some(style_id), None, &document.styles);
-            let input = document.build_layout_input();
+            let input = document.build_layout_input()?;
             let family = rdocx_layout::engine::resolve_font_family(
                 &effective,
                 input.theme.as_ref(),
                 rdocx_layout::engine::WordFontSlot::Ascii,
             );
             let mut fonts = oxml_layout::FontManager::new_deterministic()?;
+            fonts.load_embedded_fonts(&input.embedded_fonts)?;
             fonts.load_additional_fonts(&input.fonts);
             let font = fonts.resolve_font_for_metrics(
                 family.as_deref(),

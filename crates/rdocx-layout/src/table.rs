@@ -1910,6 +1910,127 @@ fn layout_control_cell_content(
     Ok(())
 }
 
+/// Effective accepted cell paragraph properties in physical source order.
+///
+/// This source projection uses the same table-style chain, conditional regions,
+/// logical grid positions and cell content selection as native table layout.
+/// Nested tables resolve their own style instead of inheriting the outer cell.
+/// It does not perform layout or mutate the imported model.
+pub fn effective_table_paragraph_properties<'a>(
+    table: &'a CT_Tbl,
+    styles: &CT_Styles,
+) -> Vec<(&'a rdocx_oxml::text::CT_P, rdocx_oxml::properties::CT_PPr)> {
+    let mut output = Vec::new();
+    if table.accepted_view_removes() {
+        return output;
+    }
+    let mut resolved_table = CT_Tbl::new();
+    resolved_table.properties = Some(resolve_base_table_properties(table, styles));
+    let mut rows = layout_table_rows(table, &[]);
+    rows.retain(|(row, _)| !row.accepted_view_removes());
+    // Only the count is used. Native fallback column inference is reused,
+    // so no declared-grid, grid-span or omitted-column policy is duplicated.
+    let columns = compute_column_widths(table.grid.as_ref(), 0.0, &resolved_table, &rows).len();
+    for (row_index, (row, path)) in rows.iter().enumerate() {
+        let row_properties = resolve_row_properties(
+            &resolved_table,
+            styles,
+            row,
+            row_index,
+            rows.len(),
+            columns.max(1),
+        );
+        let mut column = (row_properties.grid_before.unwrap_or(0) as usize).min(columns);
+        for (cell, _) in layout_row_cells(row, path) {
+            let cell_style = resolve_table_style_cell(
+                &resolved_table,
+                styles,
+                row_index,
+                column,
+                rows.len(),
+                columns,
+                &cell_conditional_selectors(row, cell),
+            );
+            if cell
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.v_merge)
+                != Some(VMerge::Continue)
+            {
+                for item in &cell.content {
+                    match item {
+                        rdocx_oxml::table::CellContent::Paragraph(paragraph) => {
+                            let direct = paragraph.properties.as_ref();
+                            let mut properties =
+                                crate::style_resolver::resolve_paragraph_properties_in_table(
+                                    direct.and_then(|properties| properties.style_id.as_deref()),
+                                    styles,
+                                    cell_style.paragraph_properties.as_ref(),
+                                );
+                            if let Some(direct) = direct {
+                                properties.merge_from(direct);
+                            }
+                            output.push((paragraph, properties));
+                        }
+                        rdocx_oxml::table::CellContent::Table(nested) => {
+                            output.extend(effective_table_paragraph_properties(nested, styles));
+                        }
+                        rdocx_oxml::table::CellContent::ContentControl(control) => {
+                            collect_control_paragraph_properties(
+                                control,
+                                styles,
+                                cell_style.paragraph_properties.as_ref(),
+                                &mut output,
+                            );
+                        }
+                    }
+                }
+            }
+            column += cell
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.grid_span)
+                .unwrap_or(1) as usize;
+        }
+    }
+    output
+}
+
+fn collect_control_paragraph_properties<'a>(
+    control: &'a CT_Sdt,
+    styles: &CT_Styles,
+    table_properties: Option<&rdocx_oxml::properties::CT_PPr>,
+    output: &mut Vec<(&'a rdocx_oxml::text::CT_P, rdocx_oxml::properties::CT_PPr)>,
+) {
+    for item in &control.content {
+        match item {
+            SdtContent::Paragraph(paragraph) => {
+                let direct = paragraph.properties.as_ref();
+                let mut properties = crate::style_resolver::resolve_paragraph_properties_in_table(
+                    direct.and_then(|properties| properties.style_id.as_deref()),
+                    styles,
+                    table_properties,
+                );
+                if let Some(direct) = direct {
+                    properties.merge_from(direct);
+                }
+                output.push((paragraph, properties));
+            }
+            SdtContent::Table(table) => {
+                output.extend(effective_table_paragraph_properties(table, styles))
+            }
+            SdtContent::ContentControl(nested) => {
+                collect_control_paragraph_properties(nested, styles, table_properties, output);
+            }
+            // Native cell layout does not admit row/cell/run/raw block owners here.
+            SdtContent::Row(_)
+            | SdtContent::Cell(_)
+            | SdtContent::Run(_)
+            | SdtContent::RawXml(_) => {}
+        }
+    }
+}
+
 #[derive(Default)]
 struct ResolvedTableCellStyle {
     paragraph_properties: Option<rdocx_oxml::properties::CT_PPr>,
@@ -2286,6 +2407,7 @@ mod tests {
             core_properties: None,
             theme: None,
             fonts: Vec::new(),
+            embedded_fonts: Vec::new(),
         };
         let media = MediaRegistry::new(&input.images);
         let mut font_manager = FontManager::new();
@@ -2662,6 +2784,7 @@ mod tests {
             core_properties: None,
             theme: None,
             fonts: Vec::new(),
+            embedded_fonts: Vec::new(),
         };
 
         let mut fm = FontManager::new();

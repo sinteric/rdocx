@@ -130,6 +130,9 @@ pub struct ResolvedSlide {
     /// Slide width and height in typographic points.
     pub size: (f64, f64),
     pub background: Option<ResolvedBackground>,
+    /// Failed semantic member resolutions, including members omitted without bounds.
+    /// This count is independent of drawable fallback shapes.
+    pub unresolved_member_count: usize,
     /// Shapes in final draw order.
     pub shapes: Vec<ResolvedShape>,
     pub diagnostics: Vec<Diagnostic>,
@@ -416,6 +419,10 @@ pub struct ResolvedRunStyle {
     pub bold: bool,
     pub italic: bool,
     pub all_caps: bool,
+    pub small_caps: bool,
+    /// The producing run language used for selected-face shaping.
+    pub language: Option<String>,
+    pub highlight: Option<oxml_layout::Color>,
     pub underline: bool,
     pub strike: bool,
     pub spacing: Option<f64>,

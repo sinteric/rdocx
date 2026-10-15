@@ -188,6 +188,59 @@ pub struct CT_TblStylePr {
 
 #[allow(non_snake_case)]
 impl CT_Style {
+    fn style_property_bytes(
+        &self,
+        rank: u8,
+        local: &[u8],
+        generated: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        let sources = self
+            .modeled_xml
+            .iter()
+            .filter(|(owner_rank, _)| *owner_rank == rank)
+            .map(|(_, raw)| raw)
+            .collect::<Vec<_>>();
+        let mut selected = None;
+        for (index, source) in sources.iter().enumerate() {
+            if defaults_owned_child_name(source, &[])?.as_deref() == Some(local) {
+                selected = Some(index);
+            }
+        }
+        let Some(selected) = selected else {
+            let mut bytes = sources.into_iter().flatten().copied().collect::<Vec<_>>();
+            if let Some(generated) = generated {
+                bytes.extend_from_slice(generated);
+            }
+            return Ok(bytes);
+        };
+        let unchanged = if generated.is_none() {
+            false
+        } else if local == b"rPr" {
+            Some(parse_style_rpr(sources[selected], &[])?) == self.rpr
+        } else {
+            Some(parse_scoped_ppr(sources[selected], &[])?) == self.ppr
+        };
+        let mut bytes = Vec::new();
+        for (index, source) in sources.iter().enumerate() {
+            let owned = defaults_owned_child_name(source, &[])?.as_deref() == Some(local);
+            if !owned {
+                bytes.extend_from_slice(source);
+            } else if let Some(generated) = generated {
+                if unchanged || index != selected {
+                    bytes.extend_from_slice(source);
+                } else {
+                    bytes.extend_from_slice(&merge_defaults_property_root(
+                        source,
+                        generated,
+                        &[],
+                        local,
+                    )?);
+                }
+            }
+        }
+        Ok(bytes)
+    }
+
     pub fn from_xml(reader: &mut Reader<&[u8]>, attrs: &BytesStart) -> Result<Self> {
         let prefixes = word_prefixes_at(attrs, &["w".to_string()])?;
         let namespace_bindings = namespace_bindings_at(attrs, &[])?;
@@ -253,7 +306,34 @@ impl CT_Style {
                     let ename = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     let bindings = namespace_bindings_at(e, namespace_bindings)?;
-                    if let Some(rank) = style_scalar_rank(ename.as_ref(), &prefixes) {
+                    if is_word_element(ename.as_ref(), b"pPr", &prefixes)
+                        || is_word_element(ename.as_ref(), b"rPr", &prefixes)
+                    {
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_empty_element(e)?,
+                            &bindings,
+                        )?;
+                        if is_word_element(ename.as_ref(), b"pPr", &prefixes) {
+                            ppr = Some(parse_scoped_ppr(&raw, &prefixes)?);
+                            modeled_xml.push((20, raw));
+                        } else {
+                            rpr = Some(parse_style_rpr(&raw, &prefixes)?);
+                            modeled_xml.push((21, raw));
+                        }
+                    } else if matches!(ename.local_name().as_ref(), b"pPr" | b"rPr") {
+                        let rank = if ename.local_name().as_ref() == b"pPr" {
+                            20
+                        } else {
+                            21
+                        };
+                        modeled_xml.push((
+                            rank,
+                            crate::text::raw_with_external_bindings(
+                                &capture_empty_element(e)?,
+                                &bindings,
+                            )?,
+                        ));
+                    } else if let Some(rank) = style_scalar_rank(ename.as_ref(), &prefixes) {
                         let string_value = matches!(rank, 0 | 2 | 3 | 4)
                             .then(|| get_val_attr(e, &prefixes))
                             .transpose()?
@@ -348,11 +428,39 @@ impl CT_Style {
                         } else {
                             extra_xml.push((rank, make_style_raw_self_contained(&raw, &bindings)?));
                         }
-                    } else if is_word_element(ename.as_ref(), b"pPr", &prefixes) {
-                        let raw = capture_element(reader, e)?;
-                        ppr = Some(parse_scoped_ppr(&raw, word_prefixes)?);
-                    } else if is_word_element(ename.as_ref(), b"rPr", &prefixes) {
-                        rpr = Some(CT_RPr::from_xml(reader)?);
+                    } else if is_word_element(ename.as_ref(), b"pPr", &prefixes)
+                        || is_word_element(ename.as_ref(), b"rPr", &prefixes)
+                    {
+                        let trim_start = reader.config().trim_text_start;
+                        let trim_end = reader.config().trim_text_end;
+                        reader.config_mut().trim_text(false);
+                        let captured = capture_element(reader, e);
+                        reader.config_mut().trim_text_start = trim_start;
+                        reader.config_mut().trim_text_end = trim_end;
+                        let raw = crate::text::raw_with_external_bindings(&captured?, &bindings)?;
+                        if is_word_element(ename.as_ref(), b"pPr", &prefixes) {
+                            ppr = Some(parse_scoped_ppr(&raw, &prefixes)?);
+                            modeled_xml.push((20, raw));
+                        } else {
+                            rpr = Some(parse_style_rpr(&raw, &prefixes)?);
+                            modeled_xml.push((21, raw));
+                        }
+                    } else if matches!(ename.local_name().as_ref(), b"pPr" | b"rPr") {
+                        let trim_start = reader.config().trim_text_start;
+                        let trim_end = reader.config().trim_text_end;
+                        reader.config_mut().trim_text(false);
+                        let captured = capture_element(reader, e);
+                        reader.config_mut().trim_text_start = trim_start;
+                        reader.config_mut().trim_text_end = trim_end;
+                        let rank = if ename.local_name().as_ref() == b"pPr" {
+                            20
+                        } else {
+                            21
+                        };
+                        modeled_xml.push((
+                            rank,
+                            crate::text::raw_with_external_bindings(&captured?, &bindings)?,
+                        ));
                     } else if is_word_element(ename.as_ref(), b"tblPr", &prefixes) {
                         let raw = capture_element(reader, e)?;
                         let preserved = make_style_raw_self_contained(&raw, &bindings)?;
@@ -519,13 +627,35 @@ impl CT_Style {
         write_style_extras(writer, &extras, &mut extra_index, 11)?;
         write_style_toggle(writer, "w:locked", 11, self.locked, &self.modeled_xml)?;
         write_style_extras(writer, &extras, &mut extra_index, 20)?;
+        let mut generated_ppr = Writer::new(Vec::new());
         if let Some(ref ppr) = self.ppr {
-            ppr.to_xml(writer)?;
+            ppr.to_xml(&mut generated_ppr)?;
         }
+        let ppr = self.ppr.as_ref().map(|_| {
+            if generated_ppr.get_ref().is_empty() {
+                b"<w:pPr/>".as_slice()
+            } else {
+                generated_ppr.get_ref().as_slice()
+            }
+        });
+        writer
+            .get_mut()
+            .write_all(&self.style_property_bytes(20, b"pPr", ppr)?)?;
         write_style_extras(writer, &extras, &mut extra_index, 21)?;
+        let mut generated_rpr = Writer::new(Vec::new());
         if let Some(ref rpr) = self.rpr {
-            rpr.to_xml(writer)?;
+            rpr.to_xml(&mut generated_rpr)?;
         }
+        let rpr = self.rpr.as_ref().map(|_| {
+            if generated_rpr.get_ref().is_empty() {
+                b"<w:rPr/>".as_slice()
+            } else {
+                generated_rpr.get_ref().as_slice()
+            }
+        });
+        writer
+            .get_mut()
+            .write_all(&self.style_property_bytes(21, b"rPr", rpr)?)?;
         write_style_extras(writer, &extras, &mut extra_index, 22)?;
         if let Some(ref properties) = self.table_properties {
             let preserved_matches = self.table_properties_original.as_ref() == Some(properties);
@@ -564,10 +694,53 @@ impl CT_Style {
 pub struct CT_DocDefaults {
     pub rpr: Option<CT_RPr>,
     pub ppr: Option<CT_PPr>,
+    /// Namespace-closed original wrapper, preserving attributes and child slots.
+    pub source_xml: Option<Vec<u8>>,
 }
 
 #[allow(non_snake_case)]
 impl CT_DocDefaults {
+    fn from_source_xml(raw: &[u8], inherited: &[String]) -> Result<Self> {
+        let (root, children) = defaults_source_children(raw)?;
+        let prefixes = word_prefixes_at(&root, inherited)?;
+        let mut defaults = Self {
+            source_xml: Some(raw.to_vec()),
+            ..Self::default()
+        };
+        for child in children {
+            let Some((start, nested)) = defaults_optional_children(&child)? else {
+                continue;
+            };
+            let scope = word_prefixes_at(&start, &prefixes)?;
+            let run = is_word_element(start.name().as_ref(), b"rPrDefault", &scope);
+            let paragraph = is_word_element(start.name().as_ref(), b"pPrDefault", &scope);
+            if !run && !paragraph {
+                continue;
+            }
+            // Last physical owned wrapper determines the direct property facts.
+            if run {
+                defaults.rpr = None;
+            }
+            if paragraph {
+                defaults.ppr = None;
+            }
+            for property in nested {
+                let Some((start, _)) = defaults_optional_children(&property)? else {
+                    continue;
+                };
+                let property_scope = word_prefixes_at(&start, &scope)?;
+                if run && is_word_element(start.name().as_ref(), b"rPr", &property_scope) {
+                    defaults.rpr = Some(parse_style_rpr(&property, &scope)?);
+                } else if paragraph
+                    && is_word_element(start.name().as_ref(), b"pPr", &property_scope)
+                {
+                    defaults.ppr = Some(parse_scoped_ppr(&property, &scope)?);
+                }
+            }
+        }
+        Ok(defaults)
+    }
+
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
         Self::from_xml_with_prefixes(reader, &["w".to_string()])
     }
@@ -666,6 +839,45 @@ impl CT_DocDefaults {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        if let Some(raw) = &self.source_xml {
+            let original = Self::from_source_xml(raw, &[])?;
+            if original.rpr == self.rpr && original.ppr == self.ppr {
+                writer.get_mut().write_all(raw)?;
+                return Ok(());
+            }
+            let mut run = Writer::new(Vec::new());
+            if let Some(properties) = &self.rpr {
+                properties.to_xml(&mut run)?;
+            }
+            let mut paragraph = Writer::new(Vec::new());
+            if let Some(properties) = &self.ppr {
+                properties.to_xml(&mut paragraph)?;
+            }
+            // An explicitly empty final owner suppresses any earlier duplicate.
+            let run = self.rpr.as_ref().map(|_| {
+                if run.get_ref().is_empty() {
+                    b"<w:rPr/>".to_vec()
+                } else {
+                    run.into_inner()
+                }
+            });
+            let paragraph = self.ppr.as_ref().map(|_| {
+                if paragraph.get_ref().is_empty() {
+                    b"<w:pPr/>".to_vec()
+                } else {
+                    paragraph.into_inner()
+                }
+            });
+            let merged = merge_defaults_source(
+                raw,
+                run.as_deref(),
+                paragraph.as_deref(),
+                original.rpr != self.rpr,
+                original.ppr != self.ppr,
+            )?;
+            writer.get_mut().write_all(&merged)?;
+            return Ok(());
+        }
         writer.write_event(Event::Start(BytesStart::new("w:docDefaults")))?;
 
         if let Some(ref rpr) = self.rpr {
@@ -683,6 +895,662 @@ impl CT_DocDefaults {
         writer.write_event(Event::End(BytesEnd::new("w:docDefaults")))?;
         Ok(())
     }
+}
+
+fn parse_style_rpr(raw: &[u8], inherited: &[String]) -> Result<CT_RPr> {
+    let (root, children) = defaults_source_children(raw)?;
+    let scope = word_prefixes_at(&root, inherited)?;
+    let end = std::str::from_utf8(root.name().as_ref())?.to_owned();
+    let mut projection = Writer::new(Vec::new());
+    projection.write_event(Event::Start(root))?;
+    for child in children {
+        let name = defaults_owned_child_name(&child, &scope)?;
+        if name.as_deref().is_some_and(|name| {
+            matches!(
+                name,
+                b"rFonts"
+                    | b"sz"
+                    | b"szCs"
+                    | b"u"
+                    | b"b"
+                    | b"bCs"
+                    | b"i"
+                    | b"iCs"
+                    | b"caps"
+                    | b"smallCaps"
+                    | b"strike"
+                    | b"dstrike"
+                    | b"vanish"
+                    | b"rtl"
+                    | b"lang"
+                    | b"color"
+                    | b"spacing"
+                    | b"position"
+                    | b"vertAlign"
+            )
+        }) {
+            let (leaf, _) = defaults_source_children(&child)?;
+            projection.write_event(Event::Empty(leaf))?;
+        } else {
+            projection.get_mut().extend_from_slice(&child);
+        }
+    }
+    projection.write_event(Event::End(BytesEnd::new(end)))?;
+    parse_scoped_rpr(projection.get_ref(), inherited)
+}
+
+// These concrete two-level wrappers retain all unowned bytes in their source slot.
+fn defaults_optional_children(raw: &[u8]) -> Result<Option<(BytesStart<'static>, Vec<Vec<u8>>)>> {
+    let mut reader = Reader::from_reader(raw);
+    match reader.read_event()? {
+        Event::Start(_) | Event::Empty(_) => defaults_source_children(raw).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn defaults_source_children(raw: &[u8]) -> Result<(BytesStart<'static>, Vec<Vec<u8>>)> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(false);
+    let (start, empty) = match reader.read_event()? {
+        Event::Start(start) => (start.into_owned(), false),
+        Event::Empty(start) => (start.into_owned(), true),
+        _ => {
+            return Err(OxmlError::InvalidValue(
+                "default wrapper root missing".to_owned(),
+            ));
+        }
+    };
+    let mut children = Vec::new();
+    if !empty {
+        loop {
+            let begin = reader.buffer_position() as usize;
+            match reader.read_event()? {
+                Event::Start(ref child) => {
+                    capture_element(&mut reader, child)?;
+                    children.push(raw[begin..reader.buffer_position() as usize].to_vec());
+                }
+                Event::End(_) => break,
+                Event::Eof => {
+                    return Err(OxmlError::InvalidValue(
+                        "default wrapper end missing".to_owned(),
+                    ));
+                }
+                _ => children.push(raw[begin..reader.buffer_position() as usize].to_vec()),
+            }
+        }
+    }
+    Ok((start, children))
+}
+
+fn defaults_owned_child_name(raw: &[u8], inherited: &[String]) -> Result<Option<Vec<u8>>> {
+    let Some((root, _)) = defaults_optional_children(raw)? else {
+        return Ok(None);
+    };
+    let scope = word_prefixes_at(&root, inherited)?;
+    let local = root.name().local_name().as_ref().to_vec();
+    Ok(is_word_element(root.name().as_ref(), &local, &scope).then_some(local))
+}
+
+// Style and defaults setters use this attribute-level merge. All physical
+// duplicates lose changed owned attributes, while their opaque bytes survive.
+fn defaults_owned_attributes(
+    raw: &[u8],
+    inherited: &[String],
+) -> Result<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
+    let mut values = std::collections::HashMap::new();
+    if let Some((root, _)) = defaults_optional_children(raw)? {
+        let scope = word_prefixes_at(&root, inherited)?;
+        for attr in root.attributes() {
+            let attr = attr?;
+            let local = attr.key.local_name().as_ref().to_vec();
+            if is_word_attribute(attr.key.as_ref(), &local, &scope) {
+                values.insert(local, attr.value.to_vec());
+            }
+        }
+    }
+    Ok(values)
+}
+
+pub(crate) fn merge_defaults_scalar_attributes(
+    raw: &[u8],
+    before: Option<&Vec<u8>>,
+    after: Option<&Vec<u8>>,
+    inherited: &[String],
+    selected: bool,
+) -> Result<Vec<u8>> {
+    let canonical = vec!["w".to_owned()];
+    let old = defaults_owned_attributes(before.map_or(&[], Vec::as_slice), &canonical)?;
+    let new = defaults_owned_attributes(after.map_or(&[], Vec::as_slice), &canonical)?;
+    let changed = old
+        .keys()
+        .chain(new.keys())
+        .filter(|key| old.get(*key) != new.get(*key))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    if changed.is_empty() {
+        return Ok(raw.to_vec());
+    }
+    let (root, _) = defaults_source_children(raw)?;
+    let scope = word_prefixes_at(&root, inherited)?;
+    let bindings = namespace_bindings_at(&root, &[])?;
+    // Reuse an existing qualified Word binding. A new binding is needed only
+    // when the physical owner has no usable attribute prefix.
+    let existing_prefix = scope
+        .iter()
+        .find(|prefix| !prefix.is_empty() && !prefix.starts_with('\0'))
+        .cloned();
+    let mut prefix = existing_prefix
+        .clone()
+        .unwrap_or_else(|| "defaultsWord".to_owned());
+    while existing_prefix.is_none()
+        && (bindings.iter().any(|(name, _)| name == &prefix)
+            || inherited.contains(&prefix)
+            || raw
+                .windows(prefix.len() + 1)
+                .any(|bytes| bytes == format!("{prefix}:").as_bytes()))
+    {
+        prefix.push('_');
+    }
+    let mut result = Vec::new();
+    let mut cursor = 1;
+    while cursor < raw.len()
+        && !raw[cursor].is_ascii_whitespace()
+        && raw[cursor] != b'/'
+        && raw[cursor] != b'>'
+    {
+        cursor += 1;
+    }
+    result.extend_from_slice(&raw[..cursor]);
+    loop {
+        let begin = cursor;
+        while cursor < raw.len() && raw[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if matches!(raw.get(cursor), Some(b'/') | Some(b'>')) {
+            result.extend_from_slice(&raw[begin..cursor]);
+            break;
+        }
+        let key_start = cursor;
+        while cursor < raw.len() && !raw[cursor].is_ascii_whitespace() && raw[cursor] != b'=' {
+            cursor += 1;
+        }
+        let key = &raw[key_start..cursor];
+        while cursor < raw.len() && raw[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if raw.get(cursor) != Some(&b'=') {
+            return Err(OxmlError::InvalidValue(
+                "default attribute assignment missing".to_owned(),
+            ));
+        }
+        cursor += 1;
+        while cursor < raw.len() && raw[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let quote = *raw
+            .get(cursor)
+            .ok_or_else(|| OxmlError::InvalidValue("default attribute quote missing".to_owned()))?;
+        if quote != b'\'' && quote != b'"' {
+            return Err(OxmlError::InvalidValue(
+                "default attribute quote invalid".to_owned(),
+            ));
+        }
+        cursor += 1;
+        while cursor < raw.len() && raw[cursor] != quote {
+            cursor += 1;
+        }
+        if cursor == raw.len() {
+            return Err(OxmlError::InvalidValue(
+                "default attribute end missing".to_owned(),
+            ));
+        }
+        cursor += 1;
+        let local = key.rsplit(|byte| *byte == b':').next().unwrap_or(key);
+        if !changed.contains(local) || !is_word_attribute(key, local, &scope) {
+            result.extend_from_slice(&raw[begin..cursor]);
+        }
+    }
+    if selected && changed.iter().any(|key| new.contains_key(key)) {
+        if existing_prefix.is_none() {
+            result.extend_from_slice(format!(" xmlns:{prefix}=\"{W_NS}\"").as_bytes());
+        }
+        let mut keys = changed.iter().collect::<Vec<_>>();
+        keys.sort();
+        for key in keys {
+            if let Some(value) = new.get(key) {
+                result.extend_from_slice(
+                    format!(" {prefix}:{}=\"", std::str::from_utf8(key)?).as_bytes(),
+                );
+                result.extend_from_slice(value);
+                result.push(b'"');
+            }
+        }
+    }
+    result.extend_from_slice(&raw[cursor..]);
+    Ok(result)
+}
+
+// The typed paragraph border owner has no raw container slot. Merge only the
+// changed owned edge attributes while retaining its physical source payload.
+fn style_border_semantic_key(name: Vec<u8>) -> Vec<u8> {
+    match name.as_slice() {
+        b"start" => b"left".to_vec(),
+        b"end" => b"right".to_vec(),
+        _ => name,
+    }
+}
+
+pub(crate) fn merge_style_border_source(
+    raw: &[u8],
+    before: Option<&Vec<u8>>,
+    after: &[u8],
+    inherited: &[String],
+    selected_owner: bool,
+) -> Result<Vec<u8>> {
+    let (root, source) = defaults_source_children(raw)?;
+    let scope = word_prefixes_at(&root, inherited)?;
+    let canonical = vec!["w".to_owned()];
+    let mut previous = std::collections::HashMap::new();
+    if let Some(before) = before {
+        let before =
+            crate::text::raw_with_external_bindings(before, &[("w".to_owned(), W_NS.to_owned())])?;
+        let (before_root, children) = defaults_source_children(&before)?;
+        let before_scope = word_prefixes_at(&before_root, &canonical)?;
+        let bindings = namespace_bindings_at(&before_root, &[])?;
+        for child in children {
+            if let Some(name) = defaults_owned_child_name(&child, &before_scope)? {
+                previous.insert(
+                    style_border_semantic_key(name),
+                    crate::text::raw_with_external_bindings(&child, &bindings)?,
+                );
+            }
+        }
+    }
+    let bindings = [("w".to_owned(), W_NS.to_owned())];
+    let after = crate::text::raw_with_external_bindings(after, &bindings)?;
+    let (generated_root, generated) = defaults_source_children(&after)?;
+    let generated_scope = word_prefixes_at(&generated_root, &[])?;
+    let mut supplied = std::collections::HashMap::new();
+    let mut order = Vec::new();
+    for child in generated {
+        if let Some(name) = defaults_owned_child_name(&child, &generated_scope)? {
+            let name = style_border_semantic_key(name);
+            order.push(name.clone());
+            supplied.insert(
+                name,
+                crate::text::raw_with_external_bindings(
+                    &child,
+                    &namespace_bindings_at(&generated_root, &[])?,
+                )?,
+            );
+        }
+    }
+    let mut selected = std::collections::HashMap::new();
+    for (index, child) in source.iter().enumerate() {
+        if let Some(name) = defaults_owned_child_name(child, &scope)? {
+            let name = style_border_semantic_key(name);
+            selected.insert(name, index);
+        }
+    }
+    let generated_bindings = namespace_bindings_at(&generated_root, &[])?;
+    let end = std::str::from_utf8(root.name().as_ref())?.to_owned();
+    let mut writer = Writer::new(Vec::new());
+    writer.write_event(Event::Start(root))?;
+    let mut inserted = std::collections::HashSet::new();
+    for child in &source {
+        if let Some(name) = defaults_owned_child_name(child, &scope)? {
+            let name = style_border_semantic_key(name);
+            if let Some(rank) = order.iter().position(|value| value == &name) {
+                for new_name in order
+                    .iter()
+                    .take(rank)
+                    .filter(|value| !selected.contains_key(*value))
+                {
+                    if selected_owner && inserted.insert(new_name.clone()) {
+                        writer.get_mut().extend_from_slice(
+                            &crate::text::raw_with_external_bindings(
+                                &supplied[new_name],
+                                &generated_bindings,
+                            )?,
+                        );
+                    }
+                }
+            }
+            // Explicit deletion removes the owned edge, including every physical
+            // alias or duplicate. Opaque siblings and the enclosing owner remain.
+            if previous.contains_key(&name) && !supplied.contains_key(&name) {
+                continue;
+            }
+            if previous.get(&name) != supplied.get(&name) && supplied.contains_key(&name) {
+                writer
+                    .get_mut()
+                    .extend_from_slice(&merge_defaults_scalar_attributes(
+                        child,
+                        previous.get(&name),
+                        supplied.get(&name),
+                        &scope,
+                        true,
+                    )?);
+                inserted.insert(name);
+                continue;
+            }
+        }
+        writer.get_mut().extend_from_slice(child);
+    }
+    for name in order
+        .iter()
+        .filter(|name| selected_owner && !selected.contains_key(*name) && !inserted.contains(*name))
+    {
+        writer
+            .get_mut()
+            .extend_from_slice(&crate::text::raw_with_external_bindings(
+                &supplied[name],
+                &generated_bindings,
+            )?);
+    }
+    writer.write_event(Event::End(BytesEnd::new(end)))?;
+    Ok(writer.into_inner())
+}
+
+fn merge_defaults_property_root(
+    raw: &[u8],
+    generated: &[u8],
+    inherited: &[String],
+    local: &[u8],
+) -> Result<Vec<u8>> {
+    let (root, source_children) = defaults_source_children(raw)?;
+    let scope = word_prefixes_at(&root, inherited)?;
+    let mut before = Writer::new(Vec::new());
+    if local == b"rPr" {
+        parse_style_rpr(raw, inherited)?.to_xml(&mut before)?;
+    } else {
+        parse_scoped_ppr(raw, inherited)?.to_xml(&mut before)?;
+    }
+    let bindings = [("w".to_owned(), W_NS.to_owned())];
+    let generated = crate::text::raw_with_external_bindings(generated, &bindings)?;
+    let (generated_root, children) = defaults_source_children(&generated)?;
+    let generated_scope = word_prefixes_at(&generated_root, &[])?;
+    let mut previous = std::collections::HashMap::new();
+    if !before.get_ref().is_empty() {
+        let raw_before = crate::text::raw_with_external_bindings(before.get_ref(), &bindings)?;
+        let (before_root, before_children) = defaults_source_children(&raw_before)?;
+        let before_scope = word_prefixes_at(&before_root, &[])?;
+        for child in before_children {
+            if let Some(name) = defaults_owned_child_name(&child, &before_scope)? {
+                previous.insert(name, child);
+            }
+        }
+    }
+    let mut supplied = std::collections::HashMap::new();
+    let mut order = Vec::new();
+    for child in &children {
+        if let Some(name) = defaults_owned_child_name(child, &generated_scope)? {
+            order.push(name.clone());
+            supplied.insert(name, child.clone());
+        }
+    }
+    let mut changed = previous
+        .keys()
+        .chain(supplied.keys())
+        .filter(|name| previous.get(*name) != supplied.get(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    changed.sort();
+    changed.dedup();
+    let mut selected = std::collections::HashMap::new();
+    for (index, child) in source_children.iter().enumerate() {
+        if let Some(name) = defaults_owned_child_name(child, &scope)? {
+            selected.insert(name, index);
+        }
+    }
+    let generated_bindings = namespace_bindings_at(&generated_root, &[])?;
+    let end = std::str::from_utf8(root.name().as_ref())?.to_owned();
+    let source_bindings =
+        namespace_bindings_at(&root, &crate::numbering::namespace_bindings(&scope))?;
+    let mut writer = Writer::new(Vec::new());
+    writer.write_event(Event::Start(root))?;
+    let mut inserted = std::collections::HashSet::new();
+    for (index, child) in source_children.iter().enumerate() {
+        let name = defaults_owned_child_name(child, &scope)?;
+        if let Some(ref name) = name {
+            let rank = order.iter().position(|value| value == name);
+            for new_name in order
+                .iter()
+                .filter(|value| changed.contains(value) && !selected.contains_key(*value))
+            {
+                if !inserted.contains(new_name)
+                    && rank.is_some_and(|rank| {
+                        order.iter().position(|value| value == new_name).unwrap() < rank
+                    })
+                {
+                    writer
+                        .get_mut()
+                        .extend_from_slice(&crate::text::raw_with_external_bindings(
+                            &supplied[new_name],
+                            &generated_bindings,
+                        )?);
+                    inserted.insert(new_name.clone());
+                }
+            }
+            if local == b"pPr" && name == b"pBdr" && changed.contains(name) {
+                if let Some(generated) = supplied.get(name) {
+                    let generated_border =
+                        crate::text::raw_with_external_bindings(generated, &generated_bindings)?;
+                    if crate::borders::CT_PBdr::from_source_xml(&generated_border)?
+                        == crate::borders::CT_PBdr::default()
+                    {
+                        let child =
+                            crate::text::raw_with_external_bindings(child, &source_bindings)?;
+                        writer
+                            .get_mut()
+                            .extend_from_slice(&crate::borders::CT_PBdr::merge_source(
+                                &child, &child, None, false,
+                            )?);
+                    } else {
+                        writer
+                            .get_mut()
+                            .extend_from_slice(&merge_style_border_source(
+                                child,
+                                previous.get(name),
+                                generated,
+                                &scope,
+                                selected.get(name) == Some(&index),
+                            )?);
+                    }
+                } else {
+                    // Explicit clear removes each owned edge, not its surrounding
+                    // source container or opaque siblings.
+                    let child = crate::text::raw_with_external_bindings(child, &source_bindings)?;
+                    writer
+                        .get_mut()
+                        .extend_from_slice(&crate::borders::CT_PBdr::merge_source(
+                            &child, &child, None, false,
+                        )?);
+                }
+                inserted.insert(name.clone());
+                continue;
+            }
+            if changed.contains(name)
+                && matches!(
+                    name.as_slice(),
+                    b"rFonts"
+                        | b"sz"
+                        | b"szCs"
+                        | b"u"
+                        | b"b"
+                        | b"bCs"
+                        | b"i"
+                        | b"iCs"
+                        | b"color"
+                        | b"lang"
+                        | b"spacing"
+                        | b"ind"
+                        | b"jc"
+                        | b"keepNext"
+                        | b"keepLines"
+                        | b"pageBreakBefore"
+                        | b"shd"
+                        | b"caps"
+                        | b"smallCaps"
+                        | b"strike"
+                        | b"dstrike"
+                        | b"vanish"
+                        | b"rtl"
+                        | b"position"
+                        | b"vertAlign"
+                )
+            {
+                if !supplied.contains_key(name)
+                    && !matches!(name.as_slice(), b"rFonts" | b"sz" | b"szCs")
+                {
+                    inserted.insert(name.clone());
+                    continue;
+                }
+                writer
+                    .get_mut()
+                    .extend_from_slice(&merge_defaults_scalar_attributes(
+                        child,
+                        previous.get(name),
+                        supplied.get(name),
+                        &scope,
+                        selected.get(name) == Some(&index),
+                    )?);
+
+                inserted.insert(name.clone());
+                continue;
+            }
+            if changed.contains(name) && selected.get(name) == Some(&index) {
+                if let Some(generated) = supplied.get(name) {
+                    writer
+                        .get_mut()
+                        .extend_from_slice(&crate::text::raw_with_external_bindings(
+                            generated,
+                            &generated_bindings,
+                        )?);
+                }
+                inserted.insert(name.clone());
+                continue;
+            }
+        }
+        writer.get_mut().extend_from_slice(child);
+    }
+    for name in order
+        .iter()
+        .filter(|name| changed.contains(name) && !inserted.contains(*name))
+    {
+        writer
+            .get_mut()
+            .extend_from_slice(&crate::text::raw_with_external_bindings(
+                &supplied[name],
+                &generated_bindings,
+            )?);
+    }
+    writer.write_event(Event::End(BytesEnd::new(end)))?;
+    Ok(writer.into_inner())
+}
+
+fn merge_defaults_property_wrapper(
+    raw: &[u8],
+    inherited: &[String],
+    local: &[u8],
+    generated: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let (root, children) = defaults_source_children(raw)?;
+    let scope = word_prefixes_at(&root, inherited)?;
+    let mut selected = None;
+    for (index, child) in children.iter().enumerate() {
+        if let Some((start, _)) = defaults_optional_children(child)? {
+            let scope = word_prefixes_at(&start, &scope)?;
+            if is_word_element(start.name().as_ref(), local, &scope) {
+                selected = Some(index);
+            }
+        }
+    }
+    let mut writer = Writer::new(Vec::new());
+    let end = std::str::from_utf8(root.name().as_ref())?.to_owned();
+    writer.write_event(Event::Start(root))?;
+    for (index, child) in children.iter().enumerate() {
+        if Some(index) == selected {
+            if let Some(generated) = generated {
+                writer
+                    .get_mut()
+                    .extend_from_slice(&merge_defaults_property_root(
+                        child, generated, &scope, local,
+                    )?);
+            }
+        } else {
+            writer.get_mut().extend_from_slice(child);
+        }
+    }
+    if selected.is_none()
+        && let Some(generated) = generated
+    {
+        writer
+            .get_mut()
+            .extend_from_slice(&crate::text::raw_with_external_bindings(
+                generated,
+                &[("w".to_owned(), W_NS.to_owned())],
+            )?);
+    }
+    writer.write_event(Event::End(BytesEnd::new(end)))?;
+    Ok(writer.into_inner())
+}
+
+fn merge_defaults_source(
+    raw: &[u8],
+    run: Option<&[u8]>,
+    paragraph: Option<&[u8]>,
+    run_changed: bool,
+    paragraph_changed: bool,
+) -> Result<Vec<u8>> {
+    let (root, children) = defaults_source_children(raw)?;
+    let scope = word_prefixes_at(&root, &[])?;
+    let mut run_slot = None;
+    let mut paragraph_slot = None;
+    for (index, child) in children.iter().enumerate() {
+        if let Some((start, _)) = defaults_optional_children(child)? {
+            let child_scope = word_prefixes_at(&start, &scope)?;
+            if is_word_element(start.name().as_ref(), b"rPrDefault", &child_scope) {
+                run_slot = Some(index);
+            }
+            if is_word_element(start.name().as_ref(), b"pPrDefault", &child_scope) {
+                paragraph_slot = Some(index);
+            }
+        }
+    }
+    let mut writer = Writer::new(Vec::new());
+    let end = std::str::from_utf8(root.name().as_ref())?.to_owned();
+    writer.write_event(Event::Start(root))?;
+    // Insert a newly supplied rPrDefault before any existing pPrDefault.
+    if run_slot.is_none()
+        && let Some(run) = run
+    {
+        writer.get_mut().extend_from_slice(&merge_defaults_property_wrapper(b"<w:rPrDefault xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>", &scope, b"rPr", Some(run))?);
+    }
+    for (index, child) in children.iter().enumerate() {
+        if Some(index) == run_slot && run_changed {
+            writer
+                .get_mut()
+                .extend_from_slice(&merge_defaults_property_wrapper(
+                    child, &scope, b"rPr", run,
+                )?);
+        } else if Some(index) == paragraph_slot && paragraph_changed {
+            writer
+                .get_mut()
+                .extend_from_slice(&merge_defaults_property_wrapper(
+                    child, &scope, b"pPr", paragraph,
+                )?);
+        } else {
+            writer.get_mut().extend_from_slice(child);
+        }
+    }
+    if paragraph_slot.is_none()
+        && let Some(paragraph) = paragraph
+    {
+        writer.get_mut().extend_from_slice(&merge_defaults_property_wrapper(b"<w:pPrDefault xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>", &scope, b"pPr", Some(paragraph))?);
+    }
+    writer.write_event(Event::End(BytesEnd::new(end)))?;
+    Ok(writer.into_inner())
 }
 
 /// `CT_Styles` — The styles part (word/styles.xml).
@@ -719,10 +1587,12 @@ impl CT_Styles {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, &word_prefixes)?;
                     if is_word_element(name.as_ref(), b"docDefaults", &prefixes) {
-                        doc_defaults = Some(CT_DocDefaults::from_xml_with_prefixes(
-                            &mut reader,
-                            &prefixes,
-                        )?);
+                        let bindings = namespace_bindings_at(e, &namespace_bindings)?;
+                        reader.config_mut().trim_text(false);
+                        let captured = capture_element(&mut reader, e)?;
+                        reader.config_mut().trim_text(true);
+                        let raw = crate::text::raw_with_external_bindings(&captured, &bindings)?;
+                        doc_defaults = Some(CT_DocDefaults::from_source_xml(&raw, &prefixes)?);
                     } else if is_word_element(name.as_ref(), b"style", &prefixes) {
                         let bindings = namespace_bindings_at(e, &namespace_bindings)?;
                         styles.push(CT_Style::from_xml_with_prefixes(
@@ -737,6 +1607,17 @@ impl CT_Styles {
                         namespace_bindings = namespace_bindings_at(e, &namespace_bindings)?;
                     } else {
                         reader.read_to_end_into(name, &mut Vec::new())?;
+                    }
+                }
+                Ok(Event::Empty(ref e)) => {
+                    let prefixes = word_prefixes_at(e, &word_prefixes)?;
+                    if is_word_element(e.name().as_ref(), b"docDefaults", &prefixes) {
+                        let bindings = namespace_bindings_at(e, &namespace_bindings)?;
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_empty_element(e)?,
+                            &bindings,
+                        )?;
+                        doc_defaults = Some(CT_DocDefaults::from_source_xml(&raw, &prefixes)?);
                     }
                 }
                 Ok(Event::Eof) => break,
@@ -869,6 +1750,7 @@ impl CT_Styles {
         };
 
         let doc_defaults = CT_DocDefaults {
+            source_xml: None,
             rpr: Some(CT_RPr {
                 font_ascii: Some("Calibri".to_string()),
                 font_hansi: Some("Calibri".to_string()),
@@ -1217,7 +2099,7 @@ fn parse_conditional_style_properties(
                     depth -= 1;
                 } else if is_word_element(start.name().as_ref(), b"rPr", &prefixes) {
                     let captured = capture_element(&mut reader, start)?;
-                    layers.run_properties = Some(Box::new(parse_scoped_rpr(&captured, &prefixes)?));
+                    layers.run_properties = Some(Box::new(parse_style_rpr(&captured, &prefixes)?));
                     depth -= 1;
                 } else if is_word_element(start.name().as_ref(), b"tblPr", &prefixes) {
                     layers.table_properties =
@@ -1596,7 +2478,29 @@ mod tests {
         let xml = styles.to_xml().unwrap();
         let parsed = CT_Styles::from_xml(&xml).unwrap();
 
-        assert_eq!(parsed.to_xml().unwrap(), xml);
+        // Namespace-close only the retained owners. Every other byte remains exact.
+        let original = String::from_utf8(xml.clone()).unwrap();
+        let (prefix, heading) = original
+            .split_once(r#"<w:style w:type="paragraph" w:styleId="Heading1">"#)
+            .unwrap();
+        assert_eq!(prefix.matches("<w:docDefaults>").count(), 1);
+        let prefix = prefix.replace(
+            "<w:docDefaults>",
+            &format!("<w:docDefaults xmlns:w=\"{W_NS}\">"),
+        );
+        let mut heading = heading.to_owned();
+        for owner in ["pPr", "rPr"] {
+            let opening = format!("<w:{owner}>");
+            assert_eq!(heading.matches(&opening).count(), 1);
+            heading = heading.replace(&opening, &format!("<w:{owner} xmlns:w=\"{W_NS}\">"));
+        }
+        let expected =
+            format!(r#"{prefix}<w:style w:type="paragraph" w:styleId="Heading1">{heading}"#);
+        let imported = parsed.to_xml().unwrap();
+        assert_eq!(imported, expected.as_bytes());
+        let reopened = CT_Styles::from_xml(&imported).unwrap();
+        assert_eq!(reopened.to_xml().unwrap(), imported);
+        assert_eq!(reopened, parsed);
 
         assert_eq!(parsed.styles.len(), 2);
         assert!(parsed.doc_defaults.is_some());
@@ -1644,10 +2548,13 @@ mod tests {
             "<q:unhideWhenUsed",
             "<q:qFormat",
             "<q:locked",
-            "<w:pPr",
+            "<q:pPr",
         ]
         .map(|token| serialized.find(token).unwrap());
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(serialized.contains(&format!(
+            r#"<q:pPr xmlns:q="{W_NS}"><q:spacing q:after="0"/></q:pPr>"#
+        )));
         assert_eq!(serialized.matches("name-trivia").count(), 1);
         assert_eq!(serialized.matches("next kept").count(), 1);
         assert_eq!(serialized.matches("link-trivia").count(), 1);
@@ -1822,11 +2729,15 @@ mod tests {
             serialized
                 .contains(r#"<ext:keep xmlns:ext="urn:producer" ext:value="byte-identical"/>"#)
         );
-        let ppr = serialized.find("<w:pPr").unwrap();
-        let rpr = serialized.find("<w:rPr").unwrap();
+        let ppr = serialized.find("<q:pPr").unwrap();
+        let rpr = serialized.find("<q:rPr").unwrap();
         let table_properties = serialized.find("<q:tblPr").unwrap();
         let conditional = serialized.find("<q:tblStylePr").unwrap();
         assert!(ppr < rpr && rpr < table_properties && table_properties < conditional);
+        assert!(serialized.contains(&format!(
+            r#"<q:pPr xmlns:q="{W_NS}"><q:spacing q:after="40"/></q:pPr>"#
+        )));
+        assert!(serialized.contains(&format!(r#"<q:rPr xmlns:q="{W_NS}"><q:b/></q:rPr>"#)));
         assert!(serialized.contains(r#"<bad:tblPr xmlns:bad="urn:not-word">"#));
         CT_Styles::from_xml(serialized.as_bytes()).expect("preserved prefixes remain bound");
 
@@ -1880,5 +2791,666 @@ mod tests {
                 .and_then(|shading| shading.fill.as_deref()),
             Some("DDEEFF")
         );
+    }
+    #[test]
+    fn fx200_defaults_source_preserves_unknown_wrappers_and_qualified_owner_after_font_edit() {
+        let foreign =
+            r#"<f:rPrDefault xmlns:f="urn:foreign" f:flag='&#x41;'><f:rPr/></f:rPrDefault>"#;
+        let opaque = r#"<z:keep xmlns:z="urn:opaque" z:value='&#65;'><z:child/></z:keep>"#;
+        let source = format!(
+            r#"<q:styles xmlns:q="{W_NS}" xmlns:x="urn:attr"><q:docDefaults x:root='&#65;'><!--before-->{foreign}<q:rPrDefault x:wrapper='keep'>  {opaque}<q:rPr x:property='&#65;'><q:rFonts q:ascii="Prior" q:hAnsi="Other"/><q:b q:val='true'/><!--inside-->{opaque}</q:rPr><!--after--></q:rPrDefault><q:pPrDefault x:unchanged='&#x42;'><q:pPr x:property='&#66;'><q:keepNext/></q:pPr>{opaque}</q:pPrDefault></q:docDefaults></q:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        let defaults = styles.doc_defaults.as_ref().unwrap();
+        assert_eq!(
+            defaults.rpr.as_ref().unwrap().font_ascii.as_deref(),
+            Some("Prior")
+        );
+        assert_eq!(defaults.rpr.as_ref().unwrap().bold, Some(true));
+        let original_ppr = defaults.ppr.clone();
+        let original_source = defaults.source_xml.clone().unwrap();
+        let mut untouched = Writer::new(Vec::new());
+        defaults.to_xml(&mut untouched).unwrap();
+        assert_eq!(untouched.into_inner(), original_source);
+        let properties = styles.doc_defaults.as_mut().unwrap().rpr.as_mut().unwrap();
+        properties.font_ascii = Some("Selected".to_owned());
+        properties.font_hansi = Some("Selected".to_owned());
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(text.contains(foreign) && text.contains(opaque));
+        assert!(text.contains("x:root='&#65;'") && text.contains("x:wrapper='keep'"));
+        assert!(text.contains("<!--before-->") && text.contains("<!--after-->"));
+        assert!(text.contains("x:property='&#65;'"));
+        assert!(text.contains("<q:b q:val='true'/><!--inside-->"));
+        let original_text = std::str::from_utf8(&original_source).unwrap();
+        let begin = original_text.find("<q:pPrDefault").unwrap();
+        let end = original_text.find("</q:pPrDefault>").unwrap() + "</q:pPrDefault>".len();
+        assert!(text.contains(&original_text[begin..end]));
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let defaults = reopened.doc_defaults.as_ref().unwrap();
+        assert_eq!(
+            defaults.rpr.as_ref().unwrap().font_ascii.as_deref(),
+            Some("Selected")
+        );
+        assert_eq!(defaults.rpr.as_ref().unwrap().bold, Some(true));
+        assert_eq!(defaults.ppr, original_ppr);
+    }
+
+    #[test]
+    fn fx200_empty_default_wrapper_and_duplicate_wrapper_last_owner_are_preserved() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:f="urn:foreign"><w:docDefaults f:keep='yes'/></w:styles>"#
+        );
+        let styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        let defaults = styles.doc_defaults.as_ref().unwrap();
+        assert!(defaults.rpr.is_none() && defaults.ppr.is_none());
+        assert!(
+            std::str::from_utf8(&styles.to_xml().unwrap())
+                .unwrap()
+                .contains("f:keep='yes'")
+        );
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}"><w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr></w:rPrDefault><w:rPrDefault><!--last--></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        assert!(styles.doc_defaults.as_ref().unwrap().rpr.is_none());
+        styles.doc_defaults.as_mut().unwrap().rpr = Some(CT_RPr {
+            font_ascii: Some("Selected".to_owned()),
+            ..Default::default()
+        });
+        let saved = styles.to_xml().unwrap();
+        assert!(std::str::from_utf8(&saved).unwrap().contains("<w:b/>"));
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let properties = reopened.doc_defaults.unwrap().rpr.unwrap();
+        assert_eq!(properties.font_ascii.as_deref(), Some("Selected"));
+        assert!(properties.bold.is_none());
+    }
+    #[test]
+    fn fx200_same_wrapper_duplicate_default_properties_do_not_resurface_on_font_clear() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:f="urn:foreign"><w:docDefaults><w:rPrDefault><w:rPr><w:b/></w:rPr><w:rPr f:last='&#65;'><w:rFonts w:ascii="Selected"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        let properties = styles.doc_defaults.as_mut().unwrap().rpr.as_mut().unwrap();
+        assert!(properties.bold.is_none());
+        assert_eq!(properties.font_ascii.as_deref(), Some("Selected"));
+        properties.font_ascii = None;
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(text.contains("<w:b/>") && text.contains("f:last='&#65;'"));
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let properties = reopened.doc_defaults.unwrap().rpr.unwrap();
+        assert!(properties.bold.is_none() && properties.font_ascii.is_none());
+    }
+    #[test]
+    fn fx200_duplicate_default_font_children_clear_owned_slots_without_reviving_or_erasing_raw() {
+        for replacement in [None, Some("B")] {
+            let source = format!(
+                r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:docDefaults><w:rPrDefault><w:rPr><q:rFonts q:ascii='A' f:earlier='&#65;'><f:opaque/><!--font-child--></q:rFonts><!--between--><w:rFonts w:hint='cs' f:last='&#66;'/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+            );
+            let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+            let properties = styles.doc_defaults.as_mut().unwrap().rpr.as_mut().unwrap();
+            assert_eq!(properties.font_ascii.as_deref(), Some("A"));
+            assert_eq!(properties.font_hint.as_deref(), Some("cs"));
+            properties.font_ascii = replacement.map(str::to_owned);
+            let saved = styles.to_xml().unwrap();
+            let text = std::str::from_utf8(&saved).unwrap();
+            for raw in [
+                "f:earlier='&#65;'",
+                "<f:opaque/><!--font-child-->",
+                "<!--between-->",
+                "w:hint='cs'",
+                "f:last='&#66;'",
+            ] {
+                assert!(text.contains(raw), "missing {raw}: {text}");
+            }
+            assert!(!text.contains("q:ascii='A'"));
+            let reopened = CT_Styles::from_xml(&saved).unwrap();
+            let properties = reopened.doc_defaults.unwrap().rpr.unwrap();
+            assert_eq!(properties.font_ascii.as_deref(), replacement);
+            assert_eq!(properties.font_hint.as_deref(), Some("cs"));
+        }
+    }
+
+    #[test]
+    fn fx200_duplicate_default_size_children_clear_all_owned_values_preserving_foreign_payload() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:docDefaults><w:rPrDefault><w:rPr><q:sz q:val='24' f:first='&#65;'/><!--size--><w:sz w:val='28' f:last='&#66;'><f:opaque/></w:sz><q:szCs q:val='20' f:first='CS'/><w:szCs w:val='32' f:last='CS2'/><f:sz f:val='999'/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        let properties = styles.doc_defaults.as_mut().unwrap().rpr.as_mut().unwrap();
+        assert_eq!(properties.sz, Some(crate::units::HalfPoint(28)));
+        assert_eq!(properties.sz_cs, Some(crate::units::HalfPoint(32)));
+        properties.sz = None;
+        properties.sz_cs = None;
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        for raw in [
+            "f:first='&#65;'",
+            "<!--size-->",
+            "f:last='&#66;'",
+            "<f:opaque/>",
+            "f:first='CS'",
+            "f:last='CS2'",
+            "<f:sz f:val='999'/>",
+        ] {
+            assert!(text.contains(raw), "missing {raw}: {text}");
+        }
+        for value in ["q:val='24'", "w:val='28'", "q:val='20'", "w:val='32'"] {
+            assert!(!text.contains(value));
+        }
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let properties = reopened.doc_defaults.unwrap().rpr.unwrap();
+        assert!(properties.sz.is_none() && properties.sz_cs.is_none());
+    }
+    #[test]
+    fn fx200_style_property_root_attributes_and_untouched_owner_bytes_survive_updates() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Imported"><w:name w:val="Imported"/><q:pPr f:keep='&#65;'><q:keepNext q:val='true'/><!--ppr--><f:opaque/></q:pPr><q:rPr f:keep='&#66;'><q:rFonts q:ascii='A' q:hint='cs'/><!--rpr--><f:opaque/></q:rPr></w:style></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        let original = styles.styles[0]
+            .modeled_xml
+            .iter()
+            .find(|(rank, _)| *rank == 20)
+            .unwrap()
+            .1
+            .clone();
+        styles.styles[0].rpr.as_mut().unwrap().font_ascii = Some("B".to_owned());
+        let saved = styles.to_xml().unwrap();
+        assert!(
+            saved
+                .windows(original.len())
+                .any(|window| window == original)
+        );
+        let text = std::str::from_utf8(&saved).unwrap();
+        for raw in [
+            "f:keep='&#65;'",
+            "f:keep='&#66;'",
+            "q:hint='cs'",
+            "<!--rpr-->",
+            "<f:opaque/>",
+        ] {
+            assert!(text.contains(raw), "{text}");
+        }
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        assert_eq!(
+            reopened.styles[0]
+                .rpr
+                .as_ref()
+                .unwrap()
+                .font_ascii
+                .as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            reopened.styles[0].ppr.as_ref().unwrap().keep_next,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn fx200_duplicate_style_property_owners_keep_empty_final_owner_and_foreign_peers() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Imported"><w:name w:val="Imported"/><w:pPr><w:keepNext/></w:pPr><w:pPr f:last='&#65;'/><w:rPr><w:b/></w:rPr><f:rPr f:keep='peer'/><w:rPr f:last='&#66;'><w:rFonts w:ascii='A'/></w:rPr></w:style></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        assert!(styles.styles[0].ppr.as_ref().unwrap().keep_next.is_none());
+        assert!(styles.styles[0].rpr.as_ref().unwrap().bold.is_none());
+        styles.styles[0].rpr.as_mut().unwrap().font_ascii = None;
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        for raw in [
+            "<w:b/>",
+            "<w:keepNext/>",
+            "f:last='&#65;'",
+            "f:last='&#66;'",
+            "f:keep='peer'",
+        ] {
+            assert!(text.contains(raw), "{text}");
+        }
+        let first = text.find("<w:b/>").unwrap();
+        let peer = text.find("f:keep='peer'").unwrap();
+        let last = text.find("f:last='&#66;'").unwrap();
+        assert!(first < peer && peer < last, "{text}");
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let style = &reopened.styles[0];
+        assert!(
+            style.rpr.as_ref().unwrap().bold.is_none()
+                && style.rpr.as_ref().unwrap().font_ascii.is_none()
+        );
+        assert!(style.ppr.as_ref().unwrap().keep_next.is_none());
+        styles.styles[0].rpr = None;
+        let cleared = styles.to_xml().unwrap();
+        let reopened = CT_Styles::from_xml(&cleared).unwrap();
+        assert!(reopened.styles[0].rpr.is_none());
+        assert!(
+            std::str::from_utf8(&cleared)
+                .unwrap()
+                .contains("f:keep='peer'")
+        );
+    }
+    #[test]
+    fn fx200_style_border_container_edit_retains_aliased_root_and_opaque_payload() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Imported"><q:pPr f:outer='&#65;'><q:pBdr f:keep='&#66;'><q:bottom q:val='single' f:edge='&#67;'/><!--border--><f:opaque>  keep  </f:opaque><f:bottom f:val='foreign'/></q:pBdr><q:keepNext/></q:pPr></w:style></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        let edge = styles.styles[0]
+            .ppr
+            .as_mut()
+            .unwrap()
+            .borders
+            .as_mut()
+            .unwrap()
+            .bottom
+            .as_mut()
+            .unwrap();
+        edge.val = crate::shared::ST_Border::Double;
+        edge.sz = Some(8);
+        edge.color = Some("123456".to_owned());
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        for raw in [
+            "f:outer='&#65;'",
+            "f:keep='&#66;'",
+            "f:edge='&#67;'",
+            "<!--border-->",
+            "<f:opaque>  keep  </f:opaque>",
+            "<f:bottom f:val='foreign'/>",
+        ] {
+            assert!(text.contains(raw), "{text}");
+        }
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let properties = reopened.styles[0].ppr.as_ref().unwrap();
+        let border = properties
+            .borders
+            .as_ref()
+            .unwrap()
+            .bottom
+            .as_ref()
+            .unwrap();
+        assert_eq!(border.val, crate::shared::ST_Border::Double);
+        assert_eq!(border.sz, Some(8));
+        assert_eq!(border.color.as_deref(), Some("123456"));
+        assert_eq!(properties.keep_next, Some(true));
+        assert_eq!(reopened.to_xml().unwrap(), saved);
+    }
+
+    #[test]
+    fn fx200_duplicate_style_border_clear_keeps_payload_but_suppresses_earlier_edges() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Imported"><w:pPr><q:pBdr f:first='&#65;'><q:top q:val='single'/><f:opaque first='same'/></q:pBdr><f:pBdr f:keep='foreign'/><q:pBdr f:last='&#66;'><q:bottom q:val='double'/><!--last--><f:opaque last='same'/></q:pBdr><w:keepNext/></w:pPr></w:style></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        assert!(
+            styles.styles[0]
+                .ppr
+                .as_ref()
+                .unwrap()
+                .borders
+                .as_ref()
+                .unwrap()
+                .bottom
+                .is_some()
+        );
+        styles.styles[0].ppr.as_mut().unwrap().borders = None;
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        for raw in [
+            "f:first='&#65;'",
+            "f:last='&#66;'",
+            "<f:opaque first='same'/>",
+            "<f:opaque last='same'/>",
+            "<!--last-->",
+            "<f:pBdr f:keep='foreign'/>",
+        ] {
+            assert!(text.contains(raw), "{text}");
+        }
+        assert!(text.find("f:first='&#65;'").unwrap() < text.find("f:keep='foreign'").unwrap());
+        assert!(text.find("f:keep='foreign'").unwrap() < text.find("f:last='&#66;'").unwrap());
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let properties = reopened.styles[0].ppr.as_ref().unwrap();
+        let border = properties.borders.as_ref().unwrap();
+        assert!(
+            border.top.is_none()
+                && border.bottom.is_none()
+                && border.left.is_none()
+                && border.right.is_none()
+                && border.between.is_none()
+                && border.bar.is_none()
+        );
+        assert_eq!(properties.keep_next, Some(true));
+        assert_eq!(reopened.to_xml().unwrap(), saved);
+    }
+
+    #[test]
+    fn fx200_direct_style_reader_restores_both_trim_flags_and_opaque_sibling_whitespace() {
+        for property in [
+            "<w:pPr><w:keepNext/></w:pPr>",
+            "<f:pPr><f:payload>  inner  </f:payload></f:pPr>",
+            "<w:rPr><w:b/></w:rPr>",
+            "<f:rPr><f:payload>  inner  </f:payload></f:rPr>",
+        ] {
+            for (trim_start, trim_end) in [(false, false), (false, true), (true, false)] {
+                let source = format!(
+                    r#"<w:style xmlns:w="{W_NS}" xmlns:f="urn:foreign" w:type="paragraph" w:styleId="Direct">{property}<f:opaque>  keep  </f:opaque></w:style>"#
+                );
+                let mut reader = Reader::from_reader(source.as_bytes());
+                reader.config_mut().trim_text_start = trim_start;
+                reader.config_mut().trim_text_end = trim_end;
+                let Event::Start(start) = reader.read_event().unwrap() else {
+                    panic!("style root missing")
+                };
+                let style = CT_Style::from_xml(&mut reader, &start).unwrap();
+                assert_eq!(reader.config().trim_text_start, trim_start);
+                assert_eq!(reader.config().trim_text_end, trim_end);
+                let expected = match (trim_start, trim_end) {
+                    (false, false) => ">  keep  </f:opaque>",
+                    (false, true) => ">  keep</f:opaque>",
+                    _ => ">keep  </f:opaque>",
+                };
+                assert!(
+                    style
+                        .extra_xml
+                        .iter()
+                        .any(|(_, raw)| std::str::from_utf8(raw).unwrap().contains(expected)),
+                    "{style:?}"
+                );
+            }
+            let opening = &property[..property.find('>').unwrap() + 1];
+            let malformed = format!(
+                r#"<w:style xmlns:w="{W_NS}" xmlns:f="urn:foreign" w:type="paragraph" w:styleId="Direct">{opening}</f:wrong></w:style>"#
+            );
+            let mut reader = Reader::from_reader(malformed.as_bytes());
+            reader.config_mut().trim_text(false);
+            let Event::Start(start) = reader.read_event().unwrap() else {
+                panic!("style root missing")
+            };
+            assert!(CT_Style::from_xml(&mut reader, &start).is_err());
+            assert!(!reader.config().trim_text_start && !reader.config().trim_text_end);
+        }
+    }
+    #[test]
+    fn fx200_started_style_border_edges_match_empty_projection_and_keep_source_on_updates() {
+        for prefix in ["w", "q"] {
+            let source = format!(
+                r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Started"><{prefix}:pPr><{prefix}:pBdr><{prefix}:bottom {prefix}:val='single' f:edge='&#65;'><f:opaque>  keep  </f:opaque><!--edge--></{prefix}:bottom></{prefix}:pBdr></{prefix}:pPr></w:style></w:styles>"#
+            );
+            let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+            let original = styles.to_xml().unwrap();
+            let before = styles.styles[0]
+                .ppr
+                .as_ref()
+                .unwrap()
+                .borders
+                .as_ref()
+                .unwrap()
+                .bottom
+                .as_ref()
+                .unwrap();
+            assert_eq!(before.val, crate::shared::ST_Border::Single);
+            assert!(before.source_xml.is_some());
+            assert_eq!(
+                CT_Styles::from_xml(&original).unwrap().to_xml().unwrap(),
+                original
+            );
+            let edge = styles.styles[0]
+                .ppr
+                .as_mut()
+                .unwrap()
+                .borders
+                .as_mut()
+                .unwrap()
+                .bottom
+                .as_mut()
+                .unwrap();
+            edge.val = crate::shared::ST_Border::Double;
+            edge.sz = Some(8);
+            edge.color = Some("123456".to_owned());
+            let saved = styles.to_xml().unwrap();
+            let text = std::str::from_utf8(&saved).unwrap();
+            for raw in [
+                "f:edge='&#65;'",
+                "<f:opaque>  keep  </f:opaque>",
+                "<!--edge-->",
+            ] {
+                assert!(text.contains(raw), "{text}");
+            }
+            assert!(text.contains(&format!("</{prefix}:bottom>")), "{text}");
+            let reopened = CT_Styles::from_xml(&saved).unwrap();
+            let actual = reopened.styles[0]
+                .ppr
+                .as_ref()
+                .unwrap()
+                .borders
+                .as_ref()
+                .unwrap()
+                .bottom
+                .as_ref()
+                .unwrap();
+            assert_eq!(actual.val, crate::shared::ST_Border::Double);
+            assert_eq!(actual.sz, Some(8));
+            assert_eq!(actual.color.as_deref(), Some("123456"));
+            assert_eq!(reopened.to_xml().unwrap(), saved);
+            let empty = format!(
+                r#"<w:pPr xmlns:w="{W_NS}"><w:pBdr><w:bottom w:val="double" w:sz="8" w:color="123456"/></w:pBdr></w:pPr>"#
+            );
+            let canonical =
+                crate::numbering::parse_scoped_ppr(empty.as_bytes(), &["w".to_owned()]).unwrap();
+            let expected = canonical.borders.as_ref().unwrap().bottom.as_ref().unwrap();
+            assert_eq!(
+                (actual.val, actual.sz, actual.color.as_deref()),
+                (expected.val, expected.sz, expected.color.as_deref())
+            );
+        }
+    }
+    #[test]
+    fn fx200_style_border_opaque_descendants_keep_bytes_and_never_become_direct_edges() {
+        for opaque in [
+            r#"<f:opaque><q:bottom q:val='double'></q:bottom></f:opaque>"#,
+            r#"<f:opaque xmlns:q='urn:shadow'><q:bottom q:val='double'></q:bottom><w:left w:val='double'/></f:opaque>"#,
+        ] {
+            let source = format!(
+                r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Opaque"><q:pPr><q:pBdr>{opaque}<q:right q:val='single' f:edge='&#65;'><f:inside>  real  </f:inside></q:right></q:pBdr></q:pPr></w:style></w:styles>"#
+            );
+            let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+            let borders = styles.styles[0]
+                .ppr
+                .as_ref()
+                .unwrap()
+                .borders
+                .as_ref()
+                .unwrap();
+            assert!(borders.bottom.is_none() && borders.left.is_none());
+            assert_eq!(
+                borders.right.as_ref().unwrap().val,
+                crate::shared::ST_Border::Single
+            );
+            let noop = styles.to_xml().unwrap();
+            assert!(std::str::from_utf8(&noop).unwrap().contains(opaque));
+            styles.styles[0]
+                .ppr
+                .as_mut()
+                .unwrap()
+                .borders
+                .as_mut()
+                .unwrap()
+                .right
+                .as_mut()
+                .unwrap()
+                .val = crate::shared::ST_Border::Double;
+            let saved = styles.to_xml().unwrap();
+            let text = std::str::from_utf8(&saved).unwrap();
+            assert!(
+                text.contains(opaque)
+                    && text.contains("<f:inside>  real  </f:inside>")
+                    && text.contains("f:edge='&#65;'")
+            );
+            let reopened = CT_Styles::from_xml(&saved).unwrap();
+            let actual = reopened.styles[0]
+                .ppr
+                .as_ref()
+                .unwrap()
+                .borders
+                .as_ref()
+                .unwrap();
+            assert!(actual.bottom.is_none() && actual.left.is_none());
+            assert_eq!(
+                actual.right.as_ref().unwrap().val,
+                crate::shared::ST_Border::Double
+            );
+            assert_eq!(reopened.to_xml().unwrap(), saved);
+        }
+    }
+
+    #[test]
+    fn fx200_started_logical_style_border_edges_update_once_without_payload_duplication() {
+        for (physical, logical) in [("start", "left"), ("end", "right")] {
+            let source = format!(
+                r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Logical"><q:pPr><q:pBdr f:container='&#65;'><q:{physical} q:val='single' f:edge='&#66;'><f:payload>  unique  </f:payload><!--unique--></q:{physical}></q:pBdr></q:pPr></w:style></w:styles>"#
+            );
+            let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+            let initial = styles.to_xml().unwrap();
+            assert_eq!(
+                CT_Styles::from_xml(&initial).unwrap().to_xml().unwrap(),
+                initial
+            );
+            for (value, size, color) in [
+                (crate::shared::ST_Border::Double, 8, "123456"),
+                (crate::shared::ST_Border::Single, 12, "654321"),
+            ] {
+                let borders = styles.styles[0]
+                    .ppr
+                    .as_mut()
+                    .unwrap()
+                    .borders
+                    .as_mut()
+                    .unwrap();
+                let edge = if logical == "left" {
+                    borders.left.as_mut().unwrap()
+                } else {
+                    borders.right.as_mut().unwrap()
+                };
+                edge.val = value;
+                edge.sz = Some(size);
+                edge.color = Some(color.to_owned());
+                let saved = styles.to_xml().unwrap();
+                let text = std::str::from_utf8(&saved).unwrap();
+                assert_eq!(
+                    text.matches(&format!("<q:{physical} ")).count(),
+                    1,
+                    "{text}"
+                );
+                assert_eq!(
+                    text.matches(&format!("</q:{physical}>")).count(),
+                    1,
+                    "{text}"
+                );
+                assert_eq!(
+                    text.matches("<f:payload>  unique  </f:payload>").count(),
+                    1,
+                    "{text}"
+                );
+                assert_eq!(text.matches("<!--unique-->").count(), 1, "{text}");
+                assert!(text.contains("f:edge='&#66;'") && text.contains("f:container='&#65;'"));
+                styles = CT_Styles::from_xml(&saved).unwrap();
+                let borders = styles.styles[0]
+                    .ppr
+                    .as_ref()
+                    .unwrap()
+                    .borders
+                    .as_ref()
+                    .unwrap();
+                let actual = if logical == "left" {
+                    borders.left.as_ref().unwrap()
+                } else {
+                    borders.right.as_ref().unwrap()
+                };
+                assert_eq!(
+                    (actual.val, actual.sz, actual.color.as_deref()),
+                    (value, Some(size), Some(color))
+                );
+                assert_eq!(styles.to_xml().unwrap(), saved);
+            }
+        }
+    }
+
+    #[test]
+    fn fx200_style_partial_border_clear_removes_all_aliases_without_touching_siblings() {
+        let source = format!(
+            r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:f"><w:style w:type="paragraph" w:styleId="Partial"><q:pPr><q:pBdr f:root='&#65;'><q:start q:val='single' f:gone='yes'><f:gone>owned</f:gone></q:start><q:left q:val='double'/><!--keep--><q:end q:val='single' f:stay='&#66;'><f:stay>  body  </f:stay></q:end><f:left f:val='foreign'/></q:pBdr></q:pPr></w:style></w:styles>"#
+        );
+        let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+        styles.styles[0]
+            .ppr
+            .as_mut()
+            .unwrap()
+            .borders
+            .as_mut()
+            .unwrap()
+            .left = None;
+        let saved = styles.to_xml().unwrap();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(!text.contains("<q:start") && !text.contains("<q:left"));
+        for exact in [
+            "f:root='&#65;'",
+            "<!--keep-->",
+            "f:stay='&#66;'",
+            "<f:stay>  body  </f:stay>",
+            "<f:left f:val='foreign'/>",
+        ] {
+            assert!(text.contains(exact), "{text}");
+        }
+        let reopened = CT_Styles::from_xml(&saved).unwrap();
+        let borders = reopened.styles[0]
+            .ppr
+            .as_ref()
+            .unwrap()
+            .borders
+            .as_ref()
+            .unwrap();
+        assert!(borders.left.is_none());
+        assert_eq!(
+            borders.right.as_ref().unwrap().val,
+            crate::shared::ST_Border::Single
+        );
+        assert_eq!(reopened.to_xml().unwrap(), saved);
+    }
+    #[test]
+    fn fx200_changed_style_scalar_keeps_physical_foreign_attributes_and_started_payload() {
+        for started in [false, true] {
+            let leaf = if started {
+                "<q:u q:val='single' f:keep='&#65;'><f:opaque>  keep  </f:opaque><!--inside--></q:u>"
+            } else {
+                "<q:u q:val='single' f:keep='&#65;'/>"
+            };
+            let source = format!(
+                r#"<w:styles xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><w:style w:type="paragraph" w:styleId="Scalar"><q:rPr f:root='&#66;'>{leaf}<q:b/></q:rPr></w:style></w:styles>"#
+            );
+            let mut styles = CT_Styles::from_xml(source.as_bytes()).unwrap();
+            styles.styles[0].rpr.as_mut().unwrap().underline =
+                Some(crate::shared::ST_Underline::Double);
+            let saved = styles.to_xml().unwrap();
+            let text = std::str::from_utf8(&saved).unwrap();
+            assert!(
+                text.contains("f:keep='&#65;'")
+                    && text.contains("f:root='&#66;'")
+                    && text.contains("<q:b/>"),
+                "{text}"
+            );
+            if started {
+                assert!(
+                    text.contains("<f:opaque>  keep  </f:opaque><!--inside-->"),
+                    "{text}"
+                );
+            }
+            let reopened = CT_Styles::from_xml(&saved).unwrap();
+            assert_eq!(
+                reopened.styles[0].rpr.as_ref().unwrap().underline,
+                Some(crate::shared::ST_Underline::Double)
+            );
+            assert_eq!(reopened.to_xml().unwrap(), saved);
+        }
     }
 }

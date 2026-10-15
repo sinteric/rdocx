@@ -532,6 +532,47 @@ fn section_lookup_is_total_for_every_index() {
 }
 
 #[test]
+fn empty_cell_margins_do_not_make_ordinary_tables_unmodeled_after_reopening() {
+    for margins in ["<w:tcMar/>", "<w:tcMar />", "<w:tcMar></w:tcMar>"] {
+        let seed = Document::new().to_bytes().unwrap();
+        let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed)).unwrap();
+        let rows = (0..7)
+            .map(|row| {
+                let cells = (0..3)
+                    .map(|column| {
+                        format!("<w:tc><w:tcPr>{margins}</w:tcPr><w:p><w:r><w:t>cell {row}:{column}</w:t></w:r></w:p></w:tc>")
+                    })
+                    .collect::<String>();
+                format!("<w:tr>{cells}</w:tr>")
+            })
+            .collect::<String>();
+        package.set_part(
+            "/word/document.xml",
+            format!("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl>{rows}</w:tbl><w:sectPr/></w:body></w:document>").into_bytes(),
+        );
+        let mut archive = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut archive).unwrap();
+        let mut document = Document::from_bytes(archive.get_ref()).unwrap();
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+
+        for document in [&mut document, &mut reopened] {
+            let table = document.tables().into_iter().next().unwrap();
+            assert_eq!(table.row_count(), 7, "{margins}");
+            for row in 0..7 {
+                let row_ref = table.row(row).unwrap();
+                assert_eq!(row_ref.cell_count(), 3, "{margins}");
+                for column in 0..3 {
+                    let cell = row_ref.cell(column).unwrap();
+                    assert!(cell.has_cell_margins(), "{margins}");
+                    assert!(!cell.has_unmodeled_properties(), "{margins}");
+                    assert_eq!(cell.text(), format!("cell {row}:{column}"), "{margins}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn section_geometry_round_trips_with_unsupported_children_in_order() {
     let seed = Document::new().to_bytes().unwrap();
     let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed)).unwrap();
@@ -2128,7 +2169,9 @@ mod theme_and_embedded_font_tests {
         assert!(output.find("altName").unwrap() < output.find("embedRegular").unwrap());
 
         let mut reopened = Document::from_bytes(&package_bytes(&saved)).unwrap();
-        assert!(reopened.remove_font("Corpus Sans").unwrap().is_some());
+        let before_removal = reopened.to_bytes().unwrap();
+        assert!(reopened.remove_font("Corpus Sans").is_err());
+        assert_eq!(reopened.to_bytes().unwrap(), before_removal);
         let removed =
             OpcPackage::from_reader(std::io::Cursor::new(reopened.to_bytes().unwrap())).unwrap();
         let output = std::str::from_utf8(removed.get_part("/word/fontTable.xml").unwrap()).unwrap();
@@ -2253,7 +2296,7 @@ mod theme_and_embedded_font_tests {
         let source = root.join("source.docx");
         std::fs::write(&source, authored.to_bytes().unwrap()).unwrap();
         let status = std::process::Command::new("soffice")
-            .arg("--headless")
+            .args(["--headless", "--norestore", "--nodefault", "--nologo"])
             .arg(format!(
                 "-env:UserInstallation=file://{}",
                 profile.display()
@@ -2402,9 +2445,13 @@ mod theme_and_embedded_font_tests {
         let wrong_type_id = wrong_type_relationship.id.clone();
         wrong_type_relationship.rel_type = rel_types::IMAGE.to_owned();
         let mut wrong_type = Document::from_bytes(&package_bytes(&wrong_type_package)).unwrap();
-        wrong_type
-            .remove_embedded_font("Corpus Sans", EmbeddedFontKind::Regular)
-            .unwrap();
+        let before_removal = wrong_type.to_bytes().unwrap();
+        assert!(
+            wrong_type
+                .remove_embedded_font("Corpus Sans", EmbeddedFontKind::Regular)
+                .is_err()
+        );
+        assert_eq!(wrong_type.to_bytes().unwrap(), before_removal);
         let wrong_type_saved =
             OpcPackage::from_reader(std::io::Cursor::new(wrong_type.to_bytes().unwrap())).unwrap();
         assert_eq!(
@@ -5063,7 +5110,7 @@ fn odt_reader_matches_pinned_libreoffice_structure() {
     std::fs::write(&source, &odt).unwrap();
 
     let status = std::process::Command::new("soffice")
-        .arg("--headless")
+        .args(["--headless", "--norestore", "--nodefault", "--nologo"])
         .arg(format!(
             "-env:UserInstallation=file://{}",
             profile.display()
@@ -5528,6 +5575,8 @@ fn m23_drawings_text_boxes_and_watermarks_match_word() {
                 anchor: None,
                 name: Some("Cropped inline".to_owned()),
                 description: Some("inline corpus picture".to_owned()),
+                title: None,
+                decorative: false,
             },
         )
         .unwrap();
@@ -5563,6 +5612,8 @@ fn m23_drawings_text_boxes_and_watermarks_match_word() {
                 }),
                 name: Some("Floating picture".to_owned()),
                 description: None,
+                title: None,
+                decorative: false,
             },
         )
         .unwrap();
@@ -5693,6 +5744,8 @@ fn drawing_option_matrix_round_trips_with_story_relationships() {
                 anchor: None,
                 name: None,
                 description: None,
+                title: None,
+                decorative: false,
             },
         )
         .unwrap();
@@ -5737,7 +5790,7 @@ fn section_aware_watermark_pages_select_the_requested_variant() {
             rdocx::TextWatermarkOptions::default(),
         )
         .unwrap();
-    assert!(!document.even_and_odd_headers());
+    assert!(document.even_and_odd_headers());
     document
         .section_mut(0)
         .unwrap()
@@ -5794,6 +5847,8 @@ fn staged_drawing_invariants_reject_invalid_inputs_atomically() {
         anchor: None,
         name: None,
         description: None,
+        title: None,
+        decorative: false,
     };
     assert!(
         document
@@ -5838,6 +5893,8 @@ fn staged_drawing_invariants_reject_invalid_inputs_atomically() {
         anchor: None,
         name: None,
         description: None,
+        title: None,
+        decorative: false,
     };
     assert!(
         document
@@ -8059,7 +8116,7 @@ fn checked_table_setters_are_atomic() {
                 .set_width_mode(TableWidth::Fixed(Length::emu(i64::MAX)))
                 .is_err()
         );
-        assert!(table.set_indent_checked(Length::twips(-1)).is_err());
+        assert!(table.set_indent_checked(Length::emu(i64::MAX)).is_err());
         assert!(table.set_shading_checked("not-a-color").is_err());
         assert!(
             table
@@ -10287,7 +10344,7 @@ fn source_built_style_graph_matches_pinned_word_effective_formatting() {
         let source = root.join("source.docx");
         std::fs::write(&source, authored.to_bytes().unwrap()).unwrap();
         let status = std::process::Command::new("soffice")
-            .arg("--headless")
+            .args(["--headless", "--norestore", "--nodefault", "--nologo"])
             .arg(format!(
                 "-env:UserInstallation=file://{}",
                 profile.display()
@@ -10607,6 +10664,7 @@ fn table_style_updates_merge_nested_borders_and_margins() {
                         space: None,
                         color: Some("AABBCC".to_owned()),
                         extra_attributes: Vec::new(),
+                        source_xml: None,
                     }),
                     ..CT_TblBorders::default()
                 }),
@@ -18250,7 +18308,7 @@ mod f269_section_page_semantics {
         std::fs::write(&ours, document.to_pdf_deterministic().unwrap()).unwrap();
 
         let status = std::process::Command::new("soffice")
-            .arg("--headless")
+            .args(["--headless", "--norestore", "--nodefault", "--nologo"])
             .arg(format!(
                 "-env:UserInstallation=file://{}",
                 profile.display()
@@ -18868,7 +18926,7 @@ mod f267_table_style_conditional_tests {
         std::fs::write(&ours, document.to_pdf_deterministic().unwrap()).unwrap();
 
         let status = std::process::Command::new("soffice")
-            .arg("--headless")
+            .args(["--headless", "--norestore", "--nodefault", "--nologo"])
             .arg(format!(
                 "-env:UserInstallation=file://{}",
                 profile.display()
@@ -19570,6 +19628,7 @@ mod advanced_table_authoring_and_geometry {
             endnotes: None,
             theme: None,
             fonts: Vec::new(),
+            embedded_fonts: Vec::new(),
             revision_view: rdocx_layout::RevisionView::Accepted,
         }
     }
@@ -21151,7 +21210,7 @@ mod floating_table_placement_and_wrap {
     /// to contribute. An inline table with the same indent still takes it.
     #[test]
     fn a_floating_table_takes_its_origin_from_the_anchor_not_the_indent() {
-        let indented = |position: Option<TableFloatPosition>| {
+        let indented = |position: Option<TableFloatPosition>, indent: i32| {
             let mut document = Document::new();
             document.add_paragraph("One line above the table.");
             {
@@ -21159,7 +21218,7 @@ mod floating_table_placement_and_wrap {
                 table.set_column_width(0, Length::twips(1000));
                 table.set_column_width(1, Length::twips(1000));
                 table.set_width(Length::twips(2000));
-                table.set_indent(Length::twips(1440));
+                table.set_indent_checked(Length::twips(indent)).unwrap();
                 table
                     .set_float_position(position)
                     .expect("float position is valid");
@@ -21169,8 +21228,13 @@ mod floating_table_placement_and_wrap {
         };
 
         let float = float_at(TableAnchor::Margin, TableAnchor::Margin, 0, 0);
-        assert_eq!(indented(Some(float)), MARGIN_LEFT);
-        assert_eq!(indented(None), MARGIN_LEFT + 72.0);
+        for indent in [-1440, 0, 1440] {
+            assert_eq!(indented(Some(float), indent), MARGIN_LEFT);
+            assert_eq!(
+                indented(None, indent),
+                MARGIN_LEFT + f64::from(indent) / 20.0
+            );
+        }
     }
 }
 
@@ -22346,6 +22410,15 @@ fn decimal_integer_measurements_round_to_the_nearest_integer() {
     let paragraph = &document.paragraphs()[0];
     assert_eq!(paragraph.indent_left(), Some(Length::twips(721)));
     assert_eq!(paragraph.space_before(), Some(Length::twips(120)));
+    let border = paragraph
+        .border(rdocx::paragraph::ParagraphBorderEdge::Top)
+        .unwrap();
+    assert_eq!(border.size_eighths_pt(), Some(4));
+    assert_eq!(border.space_points(), Some(2));
+    assert_eq!(
+        paragraph.tab_stop(0).unwrap().position(),
+        Length::twips(1440)
+    );
     let table = &document.tables()[0];
     assert_eq!(
         table.grid_widths(),
@@ -22376,15 +22449,14 @@ fn decimal_integer_measurements_round_to_the_nearest_integer() {
         assert_eq!(untouched.get_part(part), original.get_part(part), "{part}");
     }
 
-    // A re-serialized part writes the rounded integers.
+    // Re-serializing the part preserves unchanged source-owned border and tab leaves.
     document.add_paragraph("Edited");
     let edited =
         OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
     let body = std::str::from_utf8(edited.get_part("/word/document.xml").unwrap()).unwrap();
     for expected in [
-        r#"w:sz="4""#,
-        r#"w:space="2""#,
-        r#"w:pos="1440""#,
+        r#"<w:top w:val="single" w:sz="4.0" w:space="1.5"/>"#,
+        r#"<w:tab w:val="left" w:pos="1440.0"/>"#,
         r#"w:before="120""#,
         r#"w:line="276""#,
         r#"w:left="721""#,
@@ -22400,6 +22472,48 @@ fn decimal_integer_measurements_round_to_the_nearest_integer() {
     assert_eq!(
         body.matches(r#"<w:tcW w:w="4320" w:type="dxa"/>"#).count(),
         2
+    );
+    // Explicitly authored leaves have no imported lexical owner and write integers.
+    document
+        .add_paragraph("Authored measurements")
+        .border_bottom_with_space(BorderStyle::Single, 4, 2, "000000")
+        .add_tab_stop(TabAlignment::Left, Length::twips(1440));
+    let authored =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let authored_body =
+        std::str::from_utf8(authored.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(
+        authored_body
+            .contains(r#"<w:bottom w:val="single" w:sz="4" w:space="2" w:color="000000"/>"#),
+        "{authored_body}"
+    );
+    assert_eq!(
+        authored_body
+            .matches(r#"<w:tab w:val="left" w:pos="1440"/>"#)
+            .count(),
+        1
+    );
+    assert_eq!(
+        authored_body
+            .matches(r#"<w:top w:val="single" w:sz="4.0" w:space="1.5"/>"#)
+            .count(),
+        1
+    );
+    assert_eq!(
+        authored_body
+            .matches(r#"<w:tab w:val="left" w:pos="1440.0"/>"#)
+            .count(),
+        1
+    );
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let reopened_paragraphs = reopened.paragraphs();
+    let authored_paragraph = reopened_paragraphs.last().unwrap();
+    let border = authored_paragraph.bottom_border().unwrap();
+    assert_eq!(border.size_eighths_pt(), Some(4));
+    assert_eq!(border.space_points(), Some(2));
+    assert_eq!(
+        authored_paragraph.tab_stop(0).unwrap().position(),
+        Length::twips(1440)
     );
     let styles = rdocx_oxml::CT_Styles::from_xml(original.get_part("/word/styles.xml").unwrap())
         .unwrap()
@@ -24322,4 +24436,1034 @@ fn issue_282_rtf_cell_import_keeps_empty_and_formatted_paragraphs() {
             assert!(rtf.contains("\\i "), "{rtf}");
         }
     }
+}
+
+#[test]
+fn checked_table_indentation_accepts_signed_twips_and_removes_direct_indent() {
+    let mut document = Document::new();
+    document.add_table(1, 1);
+    let before = document.to_bytes().unwrap();
+    document
+        .table_mut(0)
+        .unwrap()
+        .set_indent_value(None)
+        .unwrap();
+    assert_eq!(document.to_bytes().unwrap(), before);
+    for emu in [-914_400, -636, -634, 0, 634, 636, 914_400] {
+        document
+            .table_mut(0)
+            .unwrap()
+            .set_indent_value(Some(Length::emu(emu)))
+            .unwrap();
+        let bytes = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            reopened.table(0).unwrap().indent().unwrap().to_emu(),
+            (emu / 635) * 635
+        );
+    }
+    document
+        .table_mut(0)
+        .unwrap()
+        .set_indent_value(None)
+        .unwrap();
+    assert!(document.table(0).unwrap().indent().is_none());
+    let bytes = document.to_bytes().unwrap();
+    assert!(
+        Document::from_bytes(&bytes)
+            .unwrap()
+            .table(0)
+            .unwrap()
+            .indent()
+            .is_none()
+    );
+    for emu in [
+        i64::MIN,
+        i64::MAX,
+        (i64::from(i32::MAX) + 1) * 635,
+        (i64::from(i32::MIN) - 1) * 635,
+    ] {
+        assert!(
+            document
+                .table_mut(0)
+                .unwrap()
+                .set_indent_value(Some(Length::emu(emu)))
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), bytes);
+    }
+    for twips in [i32::MIN, i32::MAX] {
+        document
+            .table_mut(0)
+            .unwrap()
+            .set_indent_checked(Length::twips(twips))
+            .unwrap();
+        assert_eq!(
+            document.table(0).unwrap().indent().unwrap().to_emu(),
+            i64::from(twips) * 635
+        );
+    }
+}
+
+#[test]
+fn fx200_checked_one_call_lists_validate_before_allocating_and_round_trip_all_levels() {
+    for numbered in [false, true] {
+        let mut document = Document::new();
+        let before = document.to_bytes().unwrap();
+        let invalid = if numbered {
+            document.try_add_numbered_list_item("bad", 9).map(|_| ())
+        } else {
+            document.try_add_bullet_list_item("bad", 9).map(|_| ())
+        };
+        assert!(invalid.is_err());
+        assert_eq!(document.to_bytes().unwrap(), before);
+        let invalid = if numbered {
+            document
+                .try_add_numbered_list_item("bad\u{0}", 0)
+                .map(|_| ())
+        } else {
+            document.try_add_bullet_list_item("bad\u{0}", 0).map(|_| ())
+        };
+        assert!(invalid.is_err());
+        assert_eq!(document.to_bytes().unwrap(), before);
+        for level in 0..9 {
+            if numbered {
+                document.try_add_numbered_list_item("item", level).unwrap();
+            } else {
+                document.try_add_bullet_list_item("item", level).unwrap();
+            }
+        }
+        assert_eq!(document.paragraph_count(), 9);
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(reopened.paragraph_count(), 9);
+        assert_eq!(reopened.numbering_definitions().len(), 1);
+        assert_eq!(reopened.numbering_instances().len(), 1);
+        reopened.validate_numbering_graph().unwrap();
+    }
+}
+
+#[test]
+fn fx202_picture_options_title_decorative_and_invalid_metadata_are_atomic() {
+    use rdocx::{Length, PictureOptions, StoryKind};
+    let mut document = Document::new();
+    document.add_paragraph("unrelated body");
+    let story = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind() == StoryKind::Body)
+        .unwrap();
+    for invalid in ["bad\u{0}name", "bad\u{1}name"] {
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .add_picture_with_options(
+                    &story,
+                    &mhtml_pixel_png(),
+                    "picture.png",
+                    PictureOptions {
+                        width: Length::pt(20.0),
+                        height: Length::pt(10.0),
+                        crop: None,
+                        anchor: None,
+                        name: Some("visible name".into()),
+                        description: Some("description".into()),
+                        title: Some(invalid.into()),
+                        decorative: true,
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+    document
+        .add_picture_with_options(
+            &story,
+            &mhtml_pixel_png(),
+            "picture.png",
+            PictureOptions {
+                width: Length::pt(20.0),
+                height: Length::pt(10.0),
+                crop: None,
+                anchor: None,
+                name: Some("visible name".into()),
+                description: Some("description & more".into()),
+                title: Some("title <literal>".into()),
+                decorative: true,
+            },
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+    let parsed = rdocx_oxml::document::CT_Document::from_xml(
+        package.get_part("/word/document.xml").unwrap(),
+    )
+    .unwrap();
+    let inline = parsed
+        .body
+        .paragraphs()
+        .flat_map(|p| &p.runs)
+        .flat_map(|r| &r.content)
+        .find_map(|content| match content {
+            rdocx_oxml::text::RunContent::Drawing(drawing) => drawing.inline.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(inline.name.as_deref(), Some("visible name"));
+    assert_eq!(inline.description.as_deref(), Some("description & more"));
+    assert_eq!(inline.title.as_deref(), Some("title <literal>"));
+    assert!(inline.decorative);
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    assert_eq!(reopened.to_bytes().unwrap(), bytes);
+    assert_eq!(reopened.paragraphs()[0].text(), "unrelated body");
+}
+
+#[test]
+fn fx202_physical_pictures_resize_one_shared_media_and_reject_changed_source() {
+    use rdocx::{Length, PictureOptions, StoryKind};
+    let mut document = Document::new();
+    document.add_paragraph("outside");
+    let story = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind() == StoryKind::Body)
+        .unwrap();
+    document
+        .add_picture_with_options(
+            &story,
+            &mhtml_pixel_png(),
+            "one.png",
+            PictureOptions {
+                width: Length::pt(20.0),
+                height: Length::pt(10.0),
+                crop: None,
+                anchor: None,
+                name: Some("first".into()),
+                description: Some("description".into()),
+                title: Some("title".into()),
+                decorative: true,
+            },
+        )
+        .unwrap();
+    // Add a second physical drawing of the same media through the legacy
+    // relationship-wide native authoring route.
+    document.add_picture(
+        &mhtml_pixel_png(),
+        "two.png",
+        Length::pt(20.0),
+        Length::pt(10.0),
+    );
+    let initial = document.pictures().unwrap();
+    assert_eq!(initial.len(), 2);
+    // Pin one shared relationship independently of media import allocation.
+    if initial[0].relationship_id != initial[1].relationship_id {
+        let mut package =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
+                .unwrap();
+        let source = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        let old = format!("r:embed=\"{}\"", initial[1].relationship_id);
+        assert_eq!(source.matches(&old).count(), 1);
+        let updated = source.replace(&old, &format!("r:embed=\"{}\"", initial[0].relationship_id));
+        package.set_part("/word/document.xml", updated.into_bytes());
+        let mut archive = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut archive).unwrap();
+        document = Document::from_bytes(&archive.into_inner()).unwrap();
+    }
+    let pictures = document.pictures().unwrap();
+    assert_eq!(pictures.len(), 2);
+    assert_eq!(pictures[0].relationship_id, pictures[1].relationship_id);
+    assert_eq!(pictures[0].name.as_deref(), Some("first"));
+    assert_eq!(pictures[0].title.as_deref(), Some("title"));
+    assert!(pictures[0].decorative);
+    assert_eq!(pictures[0].bytes, mhtml_pixel_png());
+    assert_eq!(pictures[0].content_type, "image/png");
+    assert_ne!(pictures[0].location, pictures[1].location);
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .set_picture_size_at(&pictures[0], Length::emu(0), Length::pt(30.0))
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    document
+        .set_picture_size_at(&pictures[0], Length::pt(40.0), Length::pt(30.0))
+        .unwrap();
+    let resized = document.pictures().unwrap();
+    assert_eq!(
+        (resized[0].width, resized[0].height),
+        (Length::pt(40.0).to_emu(), Length::pt(30.0).to_emu())
+    );
+    assert_eq!(
+        (resized[1].width, resized[1].height),
+        (pictures[1].width, pictures[1].height)
+    );
+    assert_eq!(resized[1].bytes, pictures[1].bytes);
+    assert_eq!(resized[0].title, pictures[0].title);
+    let changed = document.to_bytes().unwrap();
+    assert!(
+        document
+            .set_picture_size_at(&pictures[0], Length::pt(50.0), Length::pt(30.0))
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), changed);
+    let reopened = Document::from_bytes(&changed).unwrap();
+    assert_eq!(reopened.pictures().unwrap(), resized);
+    assert_eq!(reopened.paragraphs()[0].text(), "outside");
+}
+
+#[test]
+fn fx202_internal_heading_links_stage_bookmarks_and_refuse_invalid_targets() {
+    let mut document = Document::new();
+    document.add_paragraph("Target").set_style("Heading1");
+    document.add_paragraph("See ");
+    let heading = document.paragraph_story_location(0).unwrap().unwrap();
+    let source = document.paragraph_story_location(1).unwrap().unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .add_internal_hyperlink_at(&source, "missing", "Unknown", None)
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let inserted = document
+        .add_heading_hyperlink_at(&source, &heading, "target", Some("owned tip"))
+        .unwrap();
+    assert_eq!(inserted.run_index, 1);
+    let bookmarks = document.bookmarks();
+    assert_eq!(bookmarks.len(), 1);
+    assert_eq!(bookmarks[0].name(), Some("Heading_1"));
+    let name = bookmarks[0].name().unwrap().to_owned();
+    let source = document.paragraph_story_location(1).unwrap().unwrap();
+    let heading = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .add_heading_hyperlink_at(&source, &heading, "again", None)
+        .unwrap();
+    assert_eq!(document.bookmarks().len(), 1);
+    let source = document.paragraph_story_location(1).unwrap().unwrap();
+    document
+        .add_internal_hyperlink_at(&source, "anchor", &name, Some("second tip"))
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert_eq!(xml.matches("w:anchor=\"Heading_1\"").count(), 3);
+    assert!(xml.contains("owned tip") && xml.contains("second tip"));
+    assert!(
+        !package
+            .get_part_rels("/word/document.xml")
+            .unwrap()
+            .items
+            .iter()
+            .any(|rel| rel.rel_type
+                == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink")
+    );
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    assert_eq!(reopened.paragraphs()[0].text(), "Target");
+    assert_eq!(reopened.paragraphs()[1].text(), "See targetagainanchor");
+    let before = document.to_bytes().unwrap();
+    let source = document.paragraph_story_location(1).unwrap().unwrap();
+    let heading = document.paragraph_story_location(0).unwrap().unwrap();
+    assert!(
+        document
+            .add_heading_hyperlink_at(&source, &heading, "bad\u{0}", None)
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn fx202_configured_run_pictures_keep_related_owner_options_and_atomicity() {
+    use rdocx::{Length, PictureCrop, PictureOptions, StoryKind, StoryRunPosition};
+    let mut document = container_neutral_story_fixture();
+    for kind in [
+        StoryKind::Body,
+        StoryKind::Header,
+        StoryKind::TableCell,
+        StoryKind::TextBox,
+    ] {
+        let story = document
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.kind() == kind)
+            .unwrap();
+        let location = document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| {
+                item.location().story() == &story
+                    && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+            })
+            .unwrap()
+            .location()
+            .clone();
+        let position = StoryRunPosition {
+            location,
+            run_index: 1,
+        };
+        let original_text = document
+            .read_story_paragraph(&position.location, |p| p.text())
+            .unwrap();
+        let options = PictureOptions {
+            width: Length::pt(20.0),
+            height: Length::pt(10.0),
+            crop: Some(PictureCrop {
+                left: 10000,
+                top: 0,
+                right: 5000,
+                bottom: 0,
+            }),
+            anchor: None,
+            name: Some("actual owner".into()),
+            description: Some("rich image".into()),
+            title: Some("owned title".into()),
+            decorative: true,
+        };
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .insert_picture_with_options_at(
+                    &position,
+                    b"not an image",
+                    "bad.png",
+                    Some(Length::pt(20.0)),
+                    Some(Length::pt(10.0)),
+                    Some(options.clone())
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+        let picture = document
+            .insert_picture_with_options_at(
+                &position,
+                &mhtml_pixel_png(),
+                "actual.png",
+                Some(Length::pt(20.0)),
+                Some(Length::pt(10.0)),
+                Some(options),
+            )
+            .unwrap();
+        assert_eq!(picture.location.story().kind(), kind);
+        assert_eq!(picture.title.as_deref(), Some("owned title"));
+        assert!(picture.decorative);
+        assert_eq!(picture.bytes, mhtml_pixel_png());
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+        let rel = package
+            .get_part_rels(picture.location.story().part_name())
+            .unwrap()
+            .items
+            .iter()
+            .find(|r| r.id == picture.relationship_id)
+            .unwrap();
+        assert_eq!(rel.rel_type, rel_types::IMAGE);
+        let fresh = document
+            .pictures()
+            .unwrap()
+            .into_iter()
+            .find(|p| p == &picture)
+            .unwrap();
+        assert_eq!(
+            document
+                .read_story_paragraph(&fresh.location, |p| p.text())
+                .unwrap(),
+            original_text
+        );
+        document
+            .set_picture_size_at(&fresh, Length::pt(30.0), Length::pt(15.0))
+            .unwrap();
+        let resized = document
+            .pictures()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.location.story().kind() == kind)
+            .unwrap();
+        assert_eq!(resized.width, Length::pt(30.0).to_emu());
+        assert_eq!(resized.bytes, picture.bytes);
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(reopened.pictures().unwrap(), document.pictures().unwrap());
+    }
+}
+
+#[test]
+fn fx202_anchored_picture_aliases_resize_only_owned_extents_and_keep_crop() {
+    use rdocx::{
+        DrawingHorizontalRelativeFrom, DrawingVerticalRelativeFrom, DrawingWrap, Length,
+        PictureAnchor, PictureCrop, PictureOptions, StoryKind,
+    };
+    let mut document = Document::new();
+    document.add_paragraph("anchor outside");
+    let body = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind() == StoryKind::Body)
+        .unwrap();
+    document
+        .add_picture_with_options(
+            &body,
+            &mhtml_pixel_png(),
+            "anchored.png",
+            PictureOptions {
+                width: Length::pt(40.0),
+                height: Length::pt(20.0),
+                crop: Some(PictureCrop {
+                    left: 10000,
+                    top: 0,
+                    right: 20000,
+                    bottom: 0,
+                }),
+                anchor: Some(PictureAnchor {
+                    horizontal_relative_from: DrawingHorizontalRelativeFrom::Margin,
+                    horizontal_offset: Length::pt(18.0),
+                    horizontal_alignment: None,
+                    vertical_relative_from: DrawingVerticalRelativeFrom::Paragraph,
+                    vertical_offset: Length::pt(6.0),
+                    vertical_alignment: None,
+                    wrap: DrawingWrap::Square,
+                    distance_top: Length::pt(2.0),
+                    distance_bottom: Length::pt(3.0),
+                    distance_left: Length::pt(4.0),
+                    distance_right: Length::pt(5.0),
+                    relative_height: 7,
+                    behind_text: false,
+                }),
+                name: Some("anchor".into()),
+                description: Some("alt".into()),
+                title: Some("title".into()),
+                decorative: true,
+            },
+        )
+        .unwrap();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+        .unwrap()
+        .replace("xmlns:wp=", "xmlns:q=")
+        .replace("wp:", "q:")
+        .replace(
+            "<q:docPr ",
+            "<q:docPr xmlns:z=\"urn:producer\" z:flag=\"exact\" ",
+        );
+    assert!(xml.contains("z:flag=\"exact\""));
+    package.set_part("/word/document.xml", xml.as_bytes().to_vec());
+    let mut archive = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut archive).unwrap();
+    let mut document = Document::from_bytes(&archive.into_inner()).unwrap();
+    let picture = document.pictures().unwrap().remove(0);
+    assert!(picture.anchored && picture.decorative);
+    assert_eq!(picture.title.as_deref(), Some("title"));
+    document
+        .set_picture_size_at(&picture, Length::pt(60.0), Length::pt(30.0))
+        .unwrap();
+    let saved = document.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(saved.clone())).unwrap();
+    let after = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    for source in [
+        "z:flag=\"exact\"",
+        "l=\"10000\"",
+        "r=\"20000\"",
+        "relativeHeight=\"7\"",
+        "distT=\"25400\"",
+    ] {
+        assert!(xml.contains(source) && after.contains(source), "{source}");
+    }
+    assert!(after.contains("<q:extent"));
+    let resized = document.pictures().unwrap().remove(0);
+    assert_eq!(
+        (resized.width, resized.height),
+        (Length::pt(60.0).to_emu(), Length::pt(30.0).to_emu())
+    );
+    assert_eq!(resized.bytes, picture.bytes);
+    assert_eq!(
+        Document::from_bytes(&saved).unwrap().pictures().unwrap()[0],
+        resized
+    );
+}
+
+#[test]
+fn fx202_related_source_links_and_imported_invalid_names_are_checked_atomically() {
+    use rdocx::StoryKind;
+    let mut document = container_neutral_story_fixture();
+    document.paragraph_mut(0).unwrap().set_style("Heading1");
+    for kind in [
+        StoryKind::Header,
+        StoryKind::Footer,
+        StoryKind::TableCell,
+        StoryKind::TextBox,
+    ] {
+        let source = document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| {
+                item.location().story().kind() == kind
+                    && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+            })
+            .unwrap()
+            .location()
+            .clone();
+        let heading = document.paragraph_story_location(0).unwrap().unwrap();
+        let result = document
+            .add_heading_hyperlink_at(&source, &heading, "linked", Some("related tip"))
+            .unwrap();
+        assert_eq!(result.location.story().kind(), kind);
+        assert_eq!(document.bookmarks().len(), 1);
+        let source = document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| {
+                item.location().story().kind() == kind
+                    && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+            })
+            .unwrap()
+            .location()
+            .clone();
+        document
+            .add_internal_hyperlink_at(&source, "again", "Heading_1", None)
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved.clone())).unwrap();
+        let owner =
+            std::str::from_utf8(package.get_part(source.story().part_name()).unwrap()).unwrap();
+        assert!(owner.contains("related tip"));
+        assert!(owner.contains("Heading_1"));
+        assert!(
+            !package
+                .get_part_rels(source.story().part_name())
+                .is_some_and(|rels| rels
+                    .items
+                    .iter()
+                    .any(|r| r.rel_type == rel_types::HYPERLINK))
+        );
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(reopened.bookmarks().len(), 1);
+    }
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let source = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert_eq!(source.matches("w:name=\"Heading_1\"").count(), 1);
+    package.set_part(
+        "/word/document.xml",
+        source
+            .replace("w:name=\"Heading_1\"", "w:name=\"Bad Name\"")
+            .into_bytes(),
+    );
+    let mut archive = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut archive).unwrap();
+    let mut document = Document::from_bytes(&archive.into_inner()).unwrap();
+    let bookmark = &document.bookmarks()[0];
+    assert_eq!(bookmark.name(), Some("Bad Name"));
+    assert!(bookmark.issue().is_none() && bookmark.range().is_some());
+    let source = document
+        .story_item_snapshots()
+        .unwrap()
+        .into_iter()
+        .find(|item| {
+            item.location().story().kind() == StoryKind::Header
+                && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+        })
+        .unwrap()
+        .location()
+        .clone();
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .add_internal_hyperlink_at(&source, "invalid", "Bad Name", None)
+        .unwrap_err();
+    assert!(error.to_string().contains("valid Word bookmark name"));
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn fx202_supported_heading_destinations_and_external_tooltips_are_atomic() {
+    use rdocx::StoryKind;
+    for kind in [StoryKind::Header, StoryKind::Footer, StoryKind::TableCell] {
+        let mut document = container_neutral_story_fixture();
+        let target = document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| {
+                item.location().story().kind() == kind
+                    && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+            })
+            .unwrap()
+            .location()
+            .clone();
+        document
+            .edit_story_paragraph(&target, |p| {
+                p.set_style("Heading1");
+                Ok(())
+            })
+            .unwrap();
+        let target = document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| {
+                item.location().story().kind() == kind
+                    && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+            })
+            .unwrap()
+            .location()
+            .clone();
+        let source = document.paragraph_story_location(0).unwrap().unwrap();
+        document
+            .add_heading_hyperlink_at(&source, &target, "target", Some("related destination"))
+            .unwrap();
+        let ranges = document.story_ranges().unwrap();
+        let bookmark = ranges.iter().find(|entry| matches!(entry.kind(), rdocx::StoryRangeKind::Bookmark { name, .. } if name == "Heading_1")).unwrap();
+        assert_eq!(bookmark.range().start.location.story().kind(), kind);
+        let target = bookmark.range().start.location.clone();
+        let source = document.paragraph_story_location(0).unwrap().unwrap();
+        document
+            .add_heading_hyperlink_at(&source, &target, "again", None)
+            .unwrap();
+        assert_eq!(
+            document
+                .story_ranges()
+                .unwrap()
+                .iter()
+                .filter(|entry| matches!(entry.kind(), rdocx::StoryRangeKind::Bookmark { .. }))
+                .count(),
+            1
+        );
+        let bytes = document.to_bytes().unwrap();
+        assert_eq!(
+            Document::from_bytes(&bytes)
+                .unwrap()
+                .story_ranges()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let mut document = container_neutral_story_fixture();
+    let location = document
+        .story_item_snapshots()
+        .unwrap()
+        .into_iter()
+        .find(|item| {
+            item.location().story().kind() == StoryKind::Header
+                && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+        })
+        .unwrap()
+        .location()
+        .clone();
+    let rel = document
+        .add_hyperlink_relationship_to_story(location.story(), "https://example.com/#fragment")
+        .unwrap();
+    let location = document
+        .story_item_snapshots()
+        .unwrap()
+        .into_iter()
+        .find(|item| {
+            item.location().story().kind() == StoryKind::Header
+                && item.location().item_kind() == rdocx::StoryItemKind::Paragraph
+        })
+        .unwrap()
+        .location()
+        .clone();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .edit_story_paragraph(&location, |p| {
+                p.add_hyperlink_with_tooltip("invalid", &rel, Some("invalid\u{0}"))?;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    document
+        .edit_story_paragraph(&location, |p| {
+            p.add_hyperlink_with_tooltip("valid", &rel, Some("valid & tooltip"))?;
+            Ok(())
+        })
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let xml = std::str::from_utf8(package.get_part(location.story().part_name()).unwrap()).unwrap();
+    assert!(xml.contains("valid &amp; tooltip"));
+    assert!(
+        package
+            .get_part_rels(location.story().part_name())
+            .unwrap()
+            .items
+            .iter()
+            .any(|r| r.target == "https://example.com/#fragment")
+    );
+    assert!(
+        reopened
+            .story_item_snapshots()
+            .unwrap()
+            .iter()
+            .any(|item| item.location().story().kind() == StoryKind::Header
+                && item.text().is_some_and(|text| text.contains("valid")))
+    );
+}
+
+#[test]
+fn fx202_malformed_story_picture_bytes_refuse_before_allocation() {
+    use rdocx::{Length, StoryKind};
+    let mut document = container_neutral_story_fixture();
+    for kind in [StoryKind::Body, StoryKind::Header, StoryKind::TableCell] {
+        let story = document
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.kind() == kind)
+            .unwrap();
+        let before = document.to_bytes().unwrap();
+        for bytes in [b"not an image".as_slice(), b"\x89PNG\r\n\x1a\n".as_slice()] {
+            assert!(
+                document
+                    .insert_picture_to_story(
+                        &story,
+                        None,
+                        bytes,
+                        "bad.png",
+                        Some(Length::pt(10.0)),
+                        Some(Length::pt(10.0))
+                    )
+                    .is_err()
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn fx211d_opaque_word_owners_preserve_corpus_fragments() {
+    let opaque = "<corpus:keep key=\"one\"/><corpus:keep key=\"two\"/>";
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for kind in ["table", "cell", "section"] {
+        let mut document = Document::new();
+        document.add_table(1, 1);
+        document.add_paragraph("XML sibling preserved");
+        let table_location = |document: &Document| {
+            document
+                .story_item_snapshots()
+                .unwrap()
+                .into_iter()
+                .find(|s| s.location().item_kind() == StoryItemKind::Table)
+                .unwrap()
+                .location()
+                .clone()
+        };
+        let root = format!(
+            r#"xmlns:x="{w}" xmlns:corpus="urn:s91:corpus" corpus:stamp="opaque-attribute""#
+        );
+        let xml = match kind {
+            "table" => format!(
+                r#"<x:tbl {root}><x:tblGrid><x:gridCol x:w="1440"/></x:tblGrid><x:tr><x:tc><x:p><x:r><x:t>XML seed</x:t></x:r></x:p></x:tc></x:tr>{opaque}</x:tbl>"#
+            ),
+            "cell" => {
+                format!(r#"<x:tc {root}><x:p><x:r><x:t>XML seed</x:t></x:r></x:p>{opaque}</x:tc>"#)
+            }
+            _ => format!(
+                r#"<x:sectPr {root}><x:pgSz x:w="12240" x:h="15840"/><x:pgMar x:top="1440" x:right="1440" x:bottom="1440" x:left="1440" x:header="720" x:footer="720" x:gutter="0"/>{opaque}</x:sectPr>"#
+            ),
+        };
+        let replace = |document: &mut Document, xml: &str| {
+            match kind {
+                "table" => document.replace_table_xml(&table_location(document), xml),
+                "cell" => document.replace_cell_xml(&table_location(document), 0, 0, xml),
+                _ => document.replace_section_properties_xml(0, xml),
+            }
+            .unwrap();
+        };
+        replace(&mut document, &xml);
+        let selected = |document: &Document| {
+            match kind {
+                "table" => document.table_element_xml(&table_location(document)),
+                "cell" => document.cell_element_xml(&table_location(document), 0, 0),
+                _ => document.section_properties_xml(0),
+            }
+            .unwrap()
+        };
+        let exact = String::from_utf8(selected(&document)).unwrap();
+        assert!(exact.contains(opaque), "{kind}: {exact}");
+        let changed = if kind == "section" {
+            exact.replace("left=\"1440\"", "left=\"1600\"")
+        } else {
+            exact.replace("XML seed", "XML changed")
+        };
+        assert_ne!(changed, exact);
+        replace(&mut document, &changed);
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        let exact = String::from_utf8(selected(&reopened)).unwrap();
+        assert!(
+            exact.contains(opaque) && exact.contains("opaque-attribute"),
+            "{kind}: {exact}"
+        );
+        assert!(
+            reopened
+                .paragraphs()
+                .iter()
+                .any(|p| p.text() == "XML sibling preserved")
+        );
+    }
+}
+
+#[test]
+fn fx211d_checked_merge_retains_text_and_refuses_boundary_loss() {
+    let mut document = Document::new();
+    document.add_table(2, 2);
+    document
+        .table_mut(0)
+        .unwrap()
+        .cell(0, 0)
+        .unwrap()
+        .set_text("origin");
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .table_mut(0)
+            .unwrap()
+            .merge_cells((0, 0), (8, 1))
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let merged = document
+        .table_mut(0)
+        .unwrap()
+        .merge_cells((0, 0), (1, 1))
+        .unwrap();
+    assert_eq!(merged, (0, 0));
+    document
+        .table_mut(0)
+        .unwrap()
+        .split_cell(merged.0, merged.1)
+        .unwrap();
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.table(0).unwrap().row_count(), 2);
+    for row in 0..2 {
+        assert_eq!(reopened.table(0).unwrap().row(row).unwrap().cell_count(), 2);
+    }
+    assert!(
+        reopened
+            .table(0)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            .text()
+            .contains("origin")
+    );
+}
+
+#[test]
+fn fx211d_requested_builtin_table_style_is_lazy_and_does_not_change_defaults() {
+    let mut document = Document::new();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        !document
+            .ensure_builtin_table_style("unknown guessed style")
+            .unwrap()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let defaults = document
+        .styles()
+        .iter()
+        .filter(|s| s.is_default())
+        .map(|s| s.style_id().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        document
+            .ensure_builtin_table_style("Light Shading Accent 1")
+            .unwrap()
+    );
+    assert_eq!(
+        document.style("LightShading-Accent1").unwrap().name(),
+        Some("Light Shading Accent 1")
+    );
+    let styles = document.styles();
+    assert_eq!(
+        styles
+            .iter()
+            .filter(|s| s.is_default())
+            .map(|s| s.style_id().to_owned())
+            .collect::<Vec<_>>(),
+        defaults
+    );
+    let before = document.to_bytes().unwrap();
+    assert!(
+        !document
+            .ensure_builtin_table_style("LightShading-Accent1")
+            .unwrap()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn fx211d_merge_refuses_removed_opaque_properties_atomically() {
+    let w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let opaque = r#"<x:keep xmlns:x="urn:opaque" marker="preserve"/>"#;
+    let mut unsafe_successes = Vec::new();
+    for kind in ["properties", "borders"] {
+        let mut document = Document::new();
+        document.add_table(1, 2);
+        let location = document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.location().item_kind() == StoryItemKind::Table)
+            .unwrap()
+            .location()
+            .clone();
+        let properties = if kind == "borders" {
+            format!("<w:tcBorders>{opaque}</w:tcBorders>")
+        } else {
+            opaque.to_owned()
+        };
+        let xml = format!(
+            r#"<w:tc xmlns:w="{w}"><w:tcPr>{properties}</w:tcPr><w:p><w:r><w:t>second</w:t></w:r></w:p></w:tc>"#
+        );
+        document.replace_cell_xml(&location, 0, 1, &xml).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert_eq!(
+            document
+                .table_mut(0)
+                .unwrap()
+                .merge_cells((0, 1), (0, 1))
+                .unwrap(),
+            (0, 1)
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+        let result = document.table_mut(0).unwrap().merge_cells((0, 0), (0, 1));
+        if result.is_ok() {
+            unsafe_successes.push(kind);
+        } else {
+            assert_eq!(
+                document.to_bytes().unwrap(),
+                before,
+                "{kind}: refusal mutated package"
+            );
+            let reopened = Document::from_bytes(&before).unwrap();
+            let reopened_location = reopened
+                .story_item_snapshots()
+                .unwrap()
+                .into_iter()
+                .find(|s| s.location().item_kind() == StoryItemKind::Table)
+                .unwrap()
+                .location()
+                .clone();
+            assert_eq!(reopened.table(0).unwrap().row(0).unwrap().cell_count(), 2);
+            assert!(
+                String::from_utf8(reopened.cell_element_xml(&reopened_location, 0, 1).unwrap())
+                    .unwrap()
+                    .contains(opaque)
+            );
+        }
+    }
+    assert!(
+        unsafe_successes.is_empty(),
+        "merge discarded opaque properties: {unsafe_successes:?}"
+    );
 }

@@ -3,6 +3,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
+from rdocx import RGBColor
+
 
 def _document_xml(document_bytes):
     with ZipFile(BytesIO(document_bytes)) as package:
@@ -121,7 +123,7 @@ def test_font_and_paragraph_format_values_round_trip():
     paragraph_format = paragraph.paragraph_format
     assert font.name == "Aptos"
     assert font.size == Pt(12)
-    assert font.color == RGBColor(0x12, 0x34, 0x56)
+    assert font.color.rgb == RGBColor(0x12, 0x34, 0x56)
     assert font.underline == WD_UNDERLINE.DOT_DASH
     assert paragraph.alignment == WD_ALIGN_PARAGRAPH.RIGHT
     assert paragraph_format.alignment == WD_ALIGN_PARAGRAPH.RIGHT
@@ -156,12 +158,13 @@ def test_format_subhandles_become_stale_after_structure_change():
     font = paragraph.add_run("held").font
     paragraph_format = document.paragraphs[0].paragraph_format
 
-    document.add_paragraph("invalidates both")
+    spacing = paragraph_format.space_after
+    document.add_paragraph("retires the earlier run")
 
     with pytest.raises(StaleElementError):
         _ = font.bold
-    with pytest.raises(StaleElementError):
-        _ = paragraph_format.space_after
+    assert paragraph_format.space_after == spacing
+    assert paragraph.text == "held"
 
 
 def test_nested_paragraph_stale_error_names_complete_recovery_path():
@@ -170,8 +173,10 @@ def test_nested_paragraph_stale_error_names_complete_recovery_path():
     document = Document()
     cell = document.add_table(rows=1, cols=1).rows[0].cells[0]
     nested = cell.add_paragraph("held")
+    retired_run = nested.runs[0]
 
-    document.add_paragraph("invalidates nested paragraph")
+    document.add_paragraph("retires the earlier nested run")
+    assert nested.text == "held"
 
     with pytest.raises(
         StaleElementError,
@@ -180,7 +185,7 @@ def test_nested_paragraph_stale_error_names_complete_recovery_path():
             r"\.paragraphs\[1\]"
         ),
     ):
-        _ = nested.text
+        _ = retired_run.text
 
 
 def test_cell_text_replacement_invalidates_nested_run_and_font():
@@ -283,7 +288,7 @@ def test_automatic_font_color_reads_as_none_after_reopen():
     )
     reopened = Document.from_bytes(automatic)
 
-    assert reopened.paragraphs[0].runs[0].font.color is None
+    assert reopened.paragraphs[0].runs[0].font.color.rgb is None
 
 
 def test_table_rows_are_cloned_with_their_formatting_and_removed():
@@ -359,9 +364,9 @@ def test_table_borders_margins_and_grid_widths_round_trip():
     assert '<w:gridCol w:w="2160"/>' in xml
 
     table = Document.from_bytes(document.to_bytes()).tables[0]
-    assert table.border("top") == ("single", 4, "000000")
-    assert table.border("insideH") == ("single", 4, "000000")
-    assert table.border("insideV") == ("dashed", 8, "FF0000")
+    assert table.border("top") == ("single", 4, RGBColor.from_string("000000"))
+    assert table.border("insideH") == ("single", 4, RGBColor.from_string("000000"))
+    assert table.border("insideV") == ("dashed", 8, RGBColor.from_string("FF0000"))
     assert table.cell_margins == (Pt(1), Pt(2), Pt(3), Pt(4))
     assert table.grid_widths == (Inches(1), Inches(2), Inches(1.5))
     assert table.width == Inches(4.5)
@@ -426,7 +431,7 @@ def test_cell_shading_borders_and_margins_round_trip():
     assert '<w:bottom w:val="double" w:sz="6" w:space="0" w:color="auto"/>' in xml
 
     cell = Document.from_bytes(document.to_bytes()).tables[0].cell(0, 1)
-    assert cell.shading == "D9D9D9"
+    assert cell.shading == RGBColor.from_string("D9D9D9")
     assert cell.border("bottom") == ("double", 6, "auto")
     assert cell.border("top") is None
     assert cell.margins == (0, Pt(5), 0, Pt(5))
@@ -447,13 +452,13 @@ def test_invalid_table_formatting_changes_nothing_and_keeps_handles_live():
         cell.set_border("middle", "single", size=4, color="000000")
     with pytest.raises(RdocxError, match="border width"):
         table.set_border("top", "single", size=97, color="000000")
-    with pytest.raises(RdocxError, match="border color"):
+    with pytest.raises(ValueError, match=r"Cell\.set_border\(color\).*six ASCII hexadecimal digits"):
         cell.set_border("top", "single", size=4, color="red")
     with pytest.raises(RdocxError, match="cannot be negative"):
         table.set_cell_margins(top=-635, right=0, bottom=0, left=0)
     with pytest.raises(RdocxError, match="cannot be negative"):
         cell.set_margins(top=0, right=0, bottom=0, left=-635)
-    with pytest.raises(RdocxError, match="shading color"):
+    with pytest.raises(ValueError, match=r"Cell\.shading.*six ASCII hexadecimal digits"):
         cell.shading = "yellow"
     with pytest.raises(RdocxError, match="exactly 2 positive column widths"):
         table.grid_widths = [914400]
@@ -474,7 +479,7 @@ def test_invalid_table_formatting_changes_nothing_and_keeps_handles_live():
     table.set_borders("single", size=4, color="auto")
     row.cant_split = True
     cell.shading = "FFFFFF"
-    assert (row.cant_split, cell.shading) == (True, "FFFFFF")
+    assert (row.cant_split, cell.shading) == (True, RGBColor.from_string("FFFFFF"))
 
 
 def test_insert_table_at_a_body_index_returns_the_new_table():
@@ -671,7 +676,7 @@ def test_python_paragraph_and_run_formatting_matches_native_facades():
     reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0]
     assert reopened.style_id == "Strong"
     assert reopened.font.highlight == "yellow"
-    assert reopened.font.shading == "FFFF00"
+    assert reopened.font.shading == RGBColor.from_string("FFFF00")
 
     run.font.shading = "AUTO"
     reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0]
@@ -1059,3 +1064,1023 @@ def test_word_highlight_keywords_round_trip_and_clear():
     assert reopened.paragraphs[0].runs[0].font.highlight == "yellow"
     reopened.paragraphs[0].runs[0].font.highlight = None
     assert Document.from_bytes(reopened.to_bytes()).paragraphs[0].runs[0].font.highlight is None
+
+
+def test_table_indent_accepts_negative_zero_positive_and_none():
+    from rdocx import Document, Inches
+
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    assert table.indent is None
+    for value in (Inches(-0.25), 0, Inches(0.25), None):
+        table.indent = value
+        assert table.indent == value
+
+
+def test_invalid_table_indent_leaves_source_and_handles_unchanged():
+    from rdocx import Document, Inches
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    table.indent = Inches(-0.25)
+    cell = table.cell(0, 0)
+    before = document.to_bytes()
+    from rdocx import RdocxError
+    for value in ("0.25", 0.25, (2**31) * 635, (-(2**31) - 1) * 635):
+        with pytest.raises((TypeError, RdocxError)):
+            table.indent = value
+        assert document.to_bytes() == before
+        assert cell.text == ""
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.tables[0].indent == Inches(-0.25)
+    table.indent = -636
+    assert table.indent == -635
+    assert Document.from_bytes(document.to_bytes()).tables[0].indent == -635
+    table.indent = None
+    assert b"tblInd" not in _document_xml(document.to_bytes()).encode()
+
+
+def _f_x197_word_colour_surface(document, surface):
+    if surface == "style-create":
+        return lambda value: document.add_style("Colour Control", color=value), None
+    if surface == "style-update":
+        document.add_style("Colour Control")
+        return lambda value: document.set_style("Colour Control", color=value), None
+    if surface.startswith("font"):
+        font = document.add_paragraph("").add_run("colour").font
+        if surface == "font-direct":
+            return lambda value: setattr(font, "color", value), lambda: font.color.rgb
+        if surface == "font-rgb":
+            return lambda value: setattr(font.color, "rgb", value), lambda: font.color.rgb
+        return lambda value: setattr(font, "shading", value), lambda: font.shading
+    table = document.add_table(1, 1)
+    if surface == "table-borders":
+        return lambda value: table.set_borders("single", size=4, color=value), lambda: (table.border("top") or (None, None, None))[2]
+    if surface == "table-border":
+        return lambda value: table.set_border("top", "single", size=4, color=value), lambda: (table.border("top") or (None, None, None))[2]
+    cell = table.cell(0, 0)
+    if surface == "cell-border":
+        return lambda value: cell.set_border("left", "single", size=4, color=value), lambda: (cell.border("left") or (None, None, None))[2]
+    assert surface == "cell-shading"
+    return lambda value: setattr(cell, "shading", value), lambda: cell.shading
+
+
+_F_X197_WORD_COLOUR_SURFACES = ["style-create", "style-update", "font-direct", "font-rgb", "font-shading", "table-borders", "table-border", "cell-border", "cell-shading"]
+
+
+@pytest.mark.parametrize("surface", _F_X197_WORD_COLOUR_SURFACES)
+@pytest.mark.parametrize("form", ["rgb", "triple", "hex", "hash"])
+def test_every_word_colour_setter_accepts_rgb_and_optional_hash_hex(surface, form):
+    from rdocx import Document, RGBColor
+    from xml.etree import ElementTree as ET
+    document = Document()
+    expected = RGBColor(0xA1, 0xB2, 0xC3)
+    assert RGBColor.from_string("#a1b2c3") == expected
+    assert RGBColor.from_string("a1b2c3") == expected
+    value = {"rgb": expected, "triple": tuple(expected), "hex": "a1b2c3", "hash": "#a1b2c3"}[form]
+    setter, getter = _f_x197_word_colour_surface(document, surface)
+    setter(value)
+    if getter is not None:
+        assert getter() == expected
+        assert isinstance(getter(), RGBColor)
+    saved = document.to_bytes()
+    if surface != "style-create":
+        setter(value)
+        assert document.to_bytes() == saved
+    reopened = Document.from_bytes(saved)
+    with ZipFile(BytesIO(reopened.to_bytes())) as package:
+        member = "word/styles.xml" if surface.startswith("style") else "word/document.xml"
+        tree = ET.fromstring(package.read(member))
+        namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        if surface.startswith("style"):
+            tree = next(node for node in tree.iter(namespace + "style") if node.get(namespace + "styleId") == "ColourControl")
+        assert any(node.get(namespace + name) == "A1B2C3" for node in tree.iter() for name in ("val", "fill", "color"))
+
+
+def test_style_colour_inputs_are_validated_before_style_mutation():
+    from rdocx import Document
+    document = Document()
+    document.add_style("Colour Control", color="#123456")
+    before = document.to_bytes()
+    with pytest.raises(ValueError, match="hex"):
+        document.set_style("Colour Control", color="##123456")
+    assert document.to_bytes() == before
+
+
+def test_word_font_colour_format_supports_rgb_theme_and_direct_assignment():
+    from rdocx import Document, RGBColor
+    document = Document()
+    font = document.add_paragraph("").add_run("colour").font
+    colour = font.color
+    assert colour.rgb is None
+    assert colour.type is None
+    font.color = "#123456"
+    assert colour.rgb == RGBColor(0x12, 0x34, 0x56)
+    colour.theme_color = "accent1"
+    assert colour.theme_color == "accent1"
+    font.color = None
+    assert colour.rgb is None
+
+
+def test_word_scalar_rgb_getters_return_rgbcolor_and_keep_auto():
+    from rdocx import Document, RGBColor
+    document = Document()
+    cell = document.add_table(1, 1).cell(0, 0)
+    cell.shading = "123456"
+    assert cell.shading == RGBColor(0x12, 0x34, 0x56)
+    cell.shading = "auto"
+    assert cell.shading == "auto"
+
+
+@pytest.mark.parametrize("surface", _F_X197_WORD_COLOUR_SURFACES)
+@pytest.mark.parametrize("value,error_type", [(object(), TypeError), (7, TypeError), ((1, 2), TypeError), ((1.5, 2, 3), TypeError), ((10**100, 2, 3), ValueError), ((256, 2, 3), ValueError), ("##123456", ValueError), ("１２３４５６", ValueError), ("12345\ud800", ValueError), (" 123456", ValueError)])
+def test_invalid_colour_inputs_name_the_parameter_and_leave_source_unchanged(surface, value, error_type):
+    from rdocx import Document
+    document = Document()
+    setter, getter = _f_x197_word_colour_surface(document, surface)
+    before = document.to_bytes()
+    with pytest.raises(error_type) as error:
+        setter(value)
+    parameter = {"style-create": "Document.add_style(color)", "style-update": "Document.set_style(color)", "font-direct": "Font.color", "font-rgb": "Font.color.rgb", "font-shading": "Font.shading", "table-borders": "Table.set_borders(color)", "table-border": "Table.set_border(color)", "cell-border": "Cell.set_border(color)", "cell-shading": "Cell.shading"}[surface]
+    assert parameter in str(error.value)
+    assert "RGBColor" in str(error.value) or "hex" in str(error.value) or "channels" in str(error.value)
+    if error_type is TypeError:
+        assert type(value).__name__ in str(error.value)
+    assert document.to_bytes() == before
+    if getter is not None:
+        assert getter() is None
+
+
+def test_colour_format_handles_follow_structural_invalidation():
+    from rdocx import Document, StaleElementError
+    document = Document()
+    colour = document.add_paragraph("").add_run("colour").font.color
+    assert colour.rgb is None
+    document.add_paragraph("invalidate")
+    with pytest.raises(StaleElementError):
+        _ = colour.rgb
+
+
+def _f_x197_word_pdf_pixels(pdf, tmp_path, name):
+    import shutil
+    import subprocess
+    from PIL import Image
+    executable = shutil.which("pdftoppm")
+    assert executable is not None
+    version = subprocess.run([executable, "-v"], capture_output=True, text=True, timeout=60)
+    assert version.returncode == 0 and "26.01.0" in version.stdout + version.stderr
+    source = tmp_path / (name + ".pdf")
+    source.write_bytes(pdf)
+    assert pdf.startswith(b"%PDF")
+    prefix = tmp_path / name
+    result = subprocess.run([executable, "-f", "1", "-singlefile", "-r", "72", "-png", str(source), str(prefix)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return Image.open(prefix.with_suffix(".png")).convert("RGB")
+
+
+def test_colour_inputs_and_nested_font_formats_reach_actual_rendering(tmp_path):
+    from rdocx import Document, Pt
+    from xml.etree import ElementTree as ET
+    namespace = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    def render(value, theme=None):
+        document = Document()
+        font = document.add_paragraph("").add_run("COLOUR CONTROL").font
+        font.name = "Liberation Sans"
+        font.size = Pt(28)
+        font.color.rgb = value
+        if theme is not None:
+            font.color.theme_color = theme
+        output = BytesIO()
+        with ZipFile(BytesIO(document.to_bytes())) as source, ZipFile(output, "w") as target:
+            for member in source.infolist():
+                data = source.read(member.filename)
+                if member.filename == "word/theme/theme1.xml":
+                    tree = ET.fromstring(data)
+                    for token, rgb in (("accent1", "FF0000"), ("accent2", "0000FF")):
+                        colour = tree.find(".//" + namespace + token + "/" + namespace + "srgbClr")
+                        assert colour is not None
+                        colour.set("val", rgb)
+                    data = ET.tostring(tree)
+                target.writestr(member, data)
+        reopened = Document.from_bytes(output.getvalue())
+        if theme is not None:
+            colour = reopened.paragraphs[0].runs[0].font.color
+            assert colour.theme_color == theme
+            assert colour.rgb == RGBColor(0, 255, 0)
+        return _f_x197_word_pdf_pixels(reopened.to_pdfa_deterministic(), tmp_path, (theme or value).replace("#", "hash"))
+    red = render("#FF0000")
+    blue = render("#0000FF")
+    assert red.tobytes() == render("ff0000").tobytes()
+    assert red.tobytes() != blue.tobytes()
+    assert any(r > g + 40 and r > b + 40 for r, g, b in red.getdata())
+    assert any(b > g + 40 and b > r + 40 for r, g, b in blue.getdata())
+    assert render("00FF00", "accent1").tobytes() == red.tobytes()
+    assert render("00FF00", "accent2").tobytes() == blue.tobytes()
+
+
+def test_word_theme_colour_view_retains_cached_rgb_modifiers_and_opaque_source():
+    from rdocx import Document, RGBColor, MSO_THEME_COLOR
+    from xml.etree import ElementTree as ET
+    document = Document()
+    document.add_paragraph("").add_run("source").font.color = "123456"
+    output = BytesIO()
+    with ZipFile(BytesIO(document.to_bytes())) as source, ZipFile(output, "w") as target:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "word/document.xml":
+                assert data.count(b'w:val="123456"') == 1
+                data = data.replace(b'w:val="123456"', b'w:val="123456" w:themeColor="accent1" w:themeTint="80" w:themeShade="40"')
+                data = data.replace(b"</w:rPr>", b'<w:unknownColourMetadata value="retain"/></w:rPr>', 1)
+            target.writestr(member, data)
+    document = Document.from_bytes(output.getvalue())
+    colour = document.paragraphs[0].runs[0].font.color
+    before = document.to_bytes()
+    assert colour.type == "theme" and colour.theme_color == "accent1"
+    assert colour.rgb == RGBColor(0x12, 0x34, 0x56)
+    assert document.to_bytes() == before
+    colour.theme_color = MSO_THEME_COLOR.ACCENT_2
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.paragraphs[0].runs[0].font.color.theme_color == "accent2"
+    with ZipFile(BytesIO(reopened.to_bytes())) as package:
+        xml = package.read("word/document.xml")
+        assert b'<w:unknownColourMetadata value="retain"/>' in xml
+        root = ET.fromstring(xml)
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        node = root.find(".//" + ns + "color")
+        assert {key: node.get(ns + key) for key in ("val", "themeColor", "themeTint", "themeShade")} == {"val": "123456", "themeColor": "accent2", "themeTint": "80", "themeShade": "40"}
+    before = document.to_bytes()
+    for invalid in ("unknown", 0, -2, 17, True):
+        with pytest.raises((TypeError, ValueError)):
+            colour.theme_color = invalid
+        assert document.to_bytes() == before
+    colour.theme_color = None
+    assert colour.type == "rgb" and colour.rgb == RGBColor(0x12, 0x34, 0x56)
+
+
+@pytest.mark.parametrize("surface", ["font-shading", "table-borders", "table-border", "cell-border", "cell-shading"])
+def test_word_shading_and_border_scalar_auto_remains_distinct_from_rgb(surface):
+    from rdocx import Document
+    document = Document()
+    setter, getter = _f_x197_word_colour_surface(document, surface)
+    setter("auto")
+    assert getter() == "auto"
+    assert '="auto"' in _document_xml(Document.from_bytes(document.to_bytes()).to_bytes())
+
+
+@pytest.mark.parametrize("code,token", list(enumerate(["dark1", "light1", "dark2", "light2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hyperlink", "followedHyperlink", "text1", "background1", "text2", "background2"], start=1)))
+def test_word_supported_theme_enum_values_round_trip_without_invented_rgb(code, token):
+    from rdocx import Document, MSO_THEME_COLOR
+    document = Document()
+    colour = document.add_paragraph("").add_run("theme").font.color
+    colour.theme_color = MSO_THEME_COLOR(code)
+    assert colour.rgb is None and colour.type == "theme"
+    assert colour.theme_color == token
+    assert Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0].font.color.theme_color == token
+
+
+def test_word_unset_colour_view_and_none_clear_preserve_absent_source():
+    from rdocx import Document, ColorFormat
+    document = Document()
+    font = document.add_paragraph("").add_run("unset").font
+    before = document.to_bytes()
+    assert isinstance(font.color, ColorFormat)
+    assert (font.color.rgb, font.color.type, font.color.theme_color) == (None, None, None)
+    font.color.rgb = None
+    font.color.theme_color = None
+    font.color = None
+    assert document.to_bytes() == before
+
+
+def test_word_cell_font_colour_view_uses_accepted_run_paths_and_rejects_structural_staleness():
+    from rdocx import Document, RGBColor, StaleElementError
+    document = Document()
+    cell = document.add_table(1, 1).cell(0, 0)
+    cell.text = "cell colour"
+    cell = document.tables[0].cell(0, 0)
+    colour = cell.paragraphs[0].runs[0].font.color
+    colour.rgb = "#123456"
+    assert colour.rgb == RGBColor(0x12, 0x34, 0x56)
+    assert Document.from_bytes(document.to_bytes()).tables[0].cell(0, 0).paragraphs[0].runs[0].font.color.rgb == colour.rgb
+    document.add_paragraph("invalidate")
+    before = document.to_bytes()
+    with pytest.raises(StaleElementError):
+        _ = colour.rgb
+    with pytest.raises(StaleElementError):
+        colour.rgb = "ABCDEF"
+    assert document.to_bytes() == before
+
+
+def test_fx200_document_defaults_preserve_normal_named_styles_and_live_paragraphs():
+    from rdocx import Document
+    from rdocx.shared import Pt
+
+    document = Document()
+    paragraph = document.add_paragraph("unchanged")
+    from xml.etree import ElementTree as ET
+    def named_style_xml(data):
+        with ZipFile(BytesIO(data)) as package:
+            root = ET.fromstring(package.read("word/styles.xml"))
+        return tuple(ET.tostring(child) for child in root if child.tag.endswith("}style"))
+    original_styles = named_style_xml(document.to_bytes())
+    document.default_font_name = "Gelasio"
+    document.default_font_size = Pt(13)
+    assert document.default_font_name == "Gelasio"
+    assert document.default_font_size == Pt(13)
+    assert paragraph.text == "unchanged"
+    assert named_style_xml(document.to_bytes()) == original_styles
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.default_font_name == "Gelasio"
+    assert reopened.default_font_size == Pt(13)
+    reopened.default_font_name = None
+    reopened.default_font_size = None
+    assert reopened.default_font_name is None and reopened.default_font_size is None
+    assert reopened.paragraphs[0].text == "unchanged"
+
+
+def test_fx200_defaults_absent_read_clear_and_bad_size_preserve_package_bytes():
+    from rdocx import Document
+    import pytest
+
+    from xml.etree import ElementTree as ET
+    source = Document().to_bytes()
+    result = BytesIO()
+    with ZipFile(BytesIO(source)) as package, ZipFile(result, "w") as target:
+        for member in package.infolist():
+            data = package.read(member.filename)
+            if member.filename == "word/styles.xml":
+                root = ET.fromstring(data)
+                for child in list(root):
+                    if child.tag == "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}docDefaults":
+                        root.remove(child)
+                data = ET.tostring(root)
+            target.writestr(member, data)
+    document = Document.from_bytes(result.getvalue())
+    before = document.to_bytes()
+    assert document.default_font_name is None and document.default_font_size is None
+    document.default_font_name = None
+    document.default_font_size = None
+    assert document.to_bytes() == before
+    for invalid in (-1, (2**32) * 6350):
+        with pytest.raises(ValueError, match="default_font_size"):
+            document.default_font_size = invalid
+        assert document.to_bytes() == before
+
+
+@pytest.mark.parametrize("cell_owned", [False, True])
+def test_fx200_tabs_owned_snapshots_stable_insert_delete_and_clear(cell_owned):
+    from rdocx import Document, Inches, WD_TAB_ALIGNMENT, WD_TAB_LEADER
+
+    document = Document()
+    paragraph = document.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0] if cell_owned else document.add_paragraph("tabs")
+    tabs = paragraph.paragraph_format.tab_stops
+    before = document.to_bytes()
+    assert len(tabs) == 0 and list(tabs) == []
+    assert document.to_bytes() == before
+    retained = tabs.add_tab_stop(Inches(2), WD_TAB_ALIGNMENT.END, WD_TAB_LEADER.MIDDLE_DOT)
+    tabs.add_tab_stop(Inches(-1), WD_TAB_ALIGNMENT.START)
+    tabs.add_tab_stop(Inches(2), WD_TAB_ALIGNMENT.LIST, WD_TAB_LEADER.HEAVY)
+    assert [tab.position for tab in tabs] == [Inches(-1), Inches(2), Inches(2)]
+    assert tabs[-1].alignment == WD_TAB_ALIGNMENT.LIST
+    del tabs[-1]
+    assert retained.position == Inches(2) and retained.alignment == WD_TAB_ALIGNMENT.END
+    assert retained.leader == WD_TAB_LEADER.MIDDLE_DOT
+    with pytest.raises(AttributeError):
+        retained.position = Inches(3)
+    before = document.to_bytes()
+    for invalid in (-(2**31 + 1) * 635, 2**31 * 635):
+        with pytest.raises(ValueError, match="signed twip"):
+            tabs.add_tab_stop(invalid)
+        assert document.to_bytes() == before
+    reopened = Document.from_bytes(before)
+    paragraph = reopened.tables[0].cell(0, 0).paragraphs[0] if cell_owned else reopened.paragraphs[0]
+    restored = paragraph.paragraph_format.tab_stops
+    assert [(tab.position, tab.alignment, tab.leader) for tab in restored] == [
+        (Inches(-1), WD_TAB_ALIGNMENT.START, WD_TAB_LEADER.SPACES),
+        (Inches(2), WD_TAB_ALIGNMENT.END, WD_TAB_LEADER.MIDDLE_DOT),
+    ]
+    tabs.clear_all()
+    assert len(tabs) == 0
+    assert retained.position == Inches(2)
+    after = document.to_bytes()
+    tabs.clear_all()
+    assert document.to_bytes() == after
+
+
+@pytest.mark.parametrize("alignment", [0, 1, 2, 3, 4, 6, 7, 102, 103, 104])
+@pytest.mark.parametrize("leader", [None, 0, 1, 2, 3, 4, 5])
+def test_fx200_tabs_exact_vocabulary_round_trip(alignment, leader):
+    from rdocx import Document, Pt
+    document = Document()
+    tabs = document.add_paragraph("typed").paragraph_format.tab_stops
+    result = tabs.add_tab_stop(Pt(18), alignment, leader)
+    reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].paragraph_format.tab_stops[0]
+    assert reopened.position == result.position == Pt(18)
+    assert reopened.alignment == result.alignment == alignment
+    assert reopened.leader == result.leader == (0 if leader is None else leader)
+
+
+@pytest.mark.parametrize("cell_owned", [False, True])
+def test_fx200_paragraph_border_shading_outline_rtl_roundtrip_and_atomic_errors(cell_owned):
+    from rdocx import Document, RGBColor
+    document = Document()
+    paragraph = document.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0] if cell_owned else document.add_paragraph("owner")
+    formatting = paragraph.paragraph_format
+    before = document.to_bytes()
+    assert formatting.border("top") is None and formatting.shading is None
+    assert formatting.outline_level is None and formatting.rtl is None
+    assert document.to_bytes() == before
+    for edge in ("top", "bottom", "left", "right", "between", "bar"):
+        formatting.set_border(edge, "double", size=12, color=RGBColor(18, 52, 86))
+        assert formatting.border(edge) == ("double", 12, RGBColor(18, 52, 86))
+    formatting.shading = "auto"
+    formatting.outline_level = 9
+    formatting.rtl = False
+    before = document.to_bytes()
+    for bad in (-1, 10):
+        with pytest.raises(ValueError, match="outline_level"):
+            formatting.outline_level = bad
+        assert document.to_bytes() == before
+    with pytest.raises(ValueError):
+        formatting.set_border("top", "single", size=12, color="red")
+    assert document.to_bytes() == before
+    reopened = Document.from_bytes(before)
+    paragraph = reopened.tables[0].cell(0, 0).paragraphs[0] if cell_owned else reopened.paragraphs[0]
+    restored = paragraph.paragraph_format
+    assert restored.border("bar") == ("double", 12, RGBColor(18, 52, 86))
+    assert restored.shading == "auto" and restored.outline_level == 9 and restored.rtl is False
+    formatting.clear_border("top")
+    assert formatting.border("top") is None and formatting.border("bar") is not None
+    formatting.clear_borders()
+    formatting.shading = None
+    formatting.outline_level = None
+    formatting.rtl = None
+    assert formatting.border("bar") is None and formatting.shading is None
+    assert formatting.outline_level is None and formatting.rtl is None
+
+def test_fx200_style_keyword_snapshots_round_trip_and_explicit_empty_clears(tmp_path):
+    from rdocx import Document, Pt, Inches
+    from rdocx.enum.text import WD_ALIGN_PARAGRAPH, WD_UNDERLINE, WD_TAB_ALIGNMENT, WD_TAB_LEADER
+    from xml.etree import ElementTree as ET
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    document = Document()
+    document.add_style("Complete", font_name="Gelasio", bold=True,
+        alignment=WD_ALIGN_PARAGRAPH.CENTER, line_spacing=1.5,
+        underline=WD_UNDERLINE.DOUBLE, keep_with_next=True,
+        keep_together=False, page_break_before=False,
+        borders={"bottom": ("single", 8, "123456")}, shading=RGBColor(1, 2, 3),
+        tab_stops=[(Inches(1), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)])
+    paragraph = document.add_paragraph("styled output")
+    paragraph.style = "Complete"
+    path = tmp_path / "style-snapshot.docx"
+    document.save(path)
+    reopened = Document(path)
+    def style_node(document):
+        with ZipFile(BytesIO(document.to_bytes())) as package:
+            root = ET.fromstring(package.read("word/styles.xml"))
+        return next(node for node in root.findall(w + "style") if node.get(w + "styleId") == "Complete")
+    node = style_node(reopened)
+    ppr, rpr = node.find(w + "pPr"), node.find(w + "rPr")
+    assert ppr.find(w + "jc").get(w + "val") == "center"
+    assert ppr.find(w + "spacing").get(w + "line") == "360"
+    assert ppr.find(w + "spacing").get(w + "lineRule") == "auto"
+    assert ppr.find(w + "keepNext") is not None
+    assert ppr.find(w + "keepLines").get(w + "val") in ("0", "false")
+    assert ppr.find(w + "pageBreakBefore").get(w + "val") in ("0", "false")
+    assert ppr.find(w + "pBdr").find(w + "bottom").get(w + "color") == "123456"
+    assert ppr.find(w + "shd").get(w + "fill") == "010203"
+    assert ppr.find(w + "tabs").find(w + "tab").get(w + "pos") == "1440"
+    assert rpr.find(w + "u").get(w + "val") == "double"
+    reopened.set_style("Complete", borders={}, tab_stops=[], keep_with_next=False, line_spacing=Pt(18))
+    reopened.save(path)
+    final = Document(path)
+    node = style_node(final)
+    ppr, rpr = node.find(w + "pPr"), node.find(w + "rPr")
+    selected_borders = ppr.findall(w + "pBdr")[-1]
+    assert all(selected_borders.find(w + edge) is None
+               for edge in ("top", "bottom", "left", "right", "between", "bar"))
+    selected_tabs = ppr.findall(w + "tabs")[-1]
+    assert selected_tabs.findall(w + "tab") == []
+    assert ppr.find(w + "jc").get(w + "val") == "center"
+    assert ppr.find(w + "spacing").get(w + "line") == "360"
+    assert ppr.find(w + "spacing").get(w + "lineRule") == "exact"
+    assert ppr.find(w + "shd").get(w + "fill") == "010203"
+    assert rpr.find(w + "u").get(w + "val") == "double"
+    assert final.paragraphs[-1].text == "styled output"
+    assert final.paragraphs[-1].style == "Complete"
+    saved = final.to_bytes()
+    restored = Document.from_bytes(saved)
+    restored_ppr = style_node(restored).find(w + "pPr")
+    selected_borders = restored_ppr.findall(w + "pBdr")[-1]
+    assert all(selected_borders.find(w + edge) is None
+               for edge in ("top", "bottom", "left", "right", "between", "bar"))
+    selected_tabs = restored_ppr.findall(w + "tabs")[-1]
+    assert selected_tabs.findall(w + "tab") == []
+    assert restored.to_bytes() == saved
+    restored.set_style("Complete", borders={}, tab_stops=[])
+    assert restored.to_bytes() == saved
+
+
+def test_fx200_style_keyword_validation_precedes_every_source_commit():
+    from rdocx import Document, Inches
+    from rdocx.enum.text import WD_TAB_ALIGNMENT
+    document = Document()
+    document.add_style("Existing", bold=True)
+    paragraph = document.add_paragraph("still live")
+    for keyword in [dict(alignment=999), dict(underline=999), dict(line_spacing=float("nan")),
+        dict(borders={"unknown": ("single", 8, "123456")}), dict(shading="invalid"),
+        dict(tab_stops=[(Inches(1), WD_TAB_ALIGNMENT.LEFT, 999)])]:
+        before = document.to_bytes()
+        with pytest.raises(ValueError): document.set_style("Existing", italic=True, **keyword)
+        assert document.to_bytes() == before and paragraph.text == "still live"
+        with pytest.raises(ValueError): document.add_style("MustNotExist", italic=True, **keyword)
+        assert document.to_bytes() == before
+        assert all(style.name != "MustNotExist" for style in document.styles)
+    for keyword in [dict(alignment=0), dict(keep_together=False), dict(borders={}), dict(tab_stops=[])]:
+        before = document.to_bytes()
+        with pytest.raises(ValueError, match="character style"):
+            document.add_style("CharacterRefusal", style_type="character", **keyword)
+        assert document.to_bytes() == before
+
+
+def test_fx200_style_update_preserves_imported_unrelated_xml_and_theme_clear_intent():
+    from rdocx import Document
+    from xml.etree import ElementTree as ET
+    document = Document()
+    document.add_style("Imported", bold=True)
+    source = document.to_bytes()
+    output = BytesIO()
+    with ZipFile(BytesIO(source)) as package, ZipFile(output, "w") as target:
+        for member in package.infolist():
+            data = package.read(member.filename)
+            if member.filename == "word/styles.xml":
+                text = data.decode()
+                start = text.index('w:styleId="Imported"')
+                end = text.index('</w:style>', start)
+                part = text[start:end]
+                assert "<w:rPr>" in part
+                part = part.replace("<w:rPr>", '<w:rPr xmlns:f="urn:foreign" f:keep="&#65;"><w:rFonts w:asciiTheme="minorHAnsi" w:hint="cs"/><f:opaque token="same"/>', 1)
+                text = text[:start] + part + text[end:]
+                data = text.encode()
+            target.writestr(member, data)
+    document = Document.from_bytes(output.getvalue())
+    document.set_style("Imported", font_name="Gelasio", color="123456", keep_together=False)
+    with ZipFile(BytesIO(document.to_bytes())) as package:
+        saved = package.read("word/styles.xml")
+    assert b'<f:opaque token="same"/>' in saved
+    assert b'f:keep="&#65;"' in saved
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    node = next(node for node in ET.fromstring(saved).findall(w+"style") if node.get(w+"styleId")=="Imported")
+    fonts = node.find(w+"rPr").find(w+"rFonts")
+    assert fonts.get(w+"ascii")=="Gelasio" and fonts.get(w+"hint")=="cs"
+    assert fonts.get(w+"asciiTheme") is None
+    reopened=Document.from_bytes(document.to_bytes())
+    assert next(style for style in reopened.styles if style.style_id=="Imported").name=="Imported"
+
+
+@pytest.mark.parametrize("cell_owned",[False,True])
+@pytest.mark.parametrize("name,value",[
+    ("superscript",True),("subscript",True),("all_caps",False),("small_caps",True),
+    ("double_strike",True),("hidden",False),("rtl",True),("language","en-US"),
+    ("language_east_asia","ja-JP"),("language_bidi","ar-SA"),
+    ("name_east_asia","Carlito"),("name_complex_script","Carlito"),("character_spacing",-635),
+])
+def test_fx200_font_added_direct_properties_round_trip_and_clear(cell_owned,name,value):
+    from rdocx import Document
+    document=Document()
+    if cell_owned: paragraph=document.add_table(1,1).cell(0,0).paragraphs[0]
+    else: paragraph=document.add_paragraph("")
+    run=paragraph.add_run("direct")
+    font=run.font
+    assert getattr(font,name) is None
+    before=document.to_bytes()
+    setattr(font,name,None)
+    assert document.to_bytes()==before
+    setattr(font,name,value)
+    assert getattr(font,name)==value
+    reopened=Document.from_bytes(document.to_bytes())
+    restored=(reopened.tables[0].cell(0,0).paragraphs[0] if cell_owned else reopened.paragraphs[0]).runs[0].font
+    assert getattr(restored,name)==value
+    setattr(restored,name,None)
+    assert getattr(restored,name) is None
+    final=Document.from_bytes(reopened.to_bytes())
+    final_run=(final.tables[0].cell(0,0).paragraphs[0] if cell_owned else final.paragraphs[0]).runs[0]
+    assert getattr(final_run.font,name) is None and final_run.text=="direct"
+
+
+@pytest.mark.parametrize("cell_owned",[False,True])
+def test_fx200_font_spacing_checked_range_preserves_bytes_and_live_handles(cell_owned):
+    from rdocx import Document
+    document=Document()
+    paragraph=document.add_table(1,1).cell(0,0).paragraphs[0] if cell_owned else document.add_paragraph("")
+    run=paragraph.add_run("range")
+    font=run.font
+    before=document.to_bytes()
+    for invalid in [(2**31)*635,(-2**31-1)*635]:
+        with pytest.raises(ValueError,match="twip range"): font.character_spacing=invalid
+        assert document.to_bytes()==before and run.text=="range" and font.character_spacing is None
+
+
+def test_fx200_python_style_saved_output_paints_exact_expected_colours_with_deterministic_native_cli(tmp_path):
+    from rdocx import Document, Pt
+    from PIL import Image
+    from pathlib import Path
+    import os,subprocess
+    # The existing CLI render path uses layout_deterministic_with_options.
+    # It consumes Python-authored saved OOXML. This is a companion native paint
+    # gate, rather than adding a new public Python deterministic render API.
+    root=Path(__file__).resolve().parents[3]
+    # Coordinator builds and authenticates this exact current-prefix binary
+    # before admitting this native companion gate. No implicit Cargo fallback.
+    cli_path=os.environ.get("RDOCX_CLI")
+    assert cli_path, "native companion gate requires coordinator-authenticated RDOCX_CLI"
+    assert Path(cli_path).is_file(), "RDOCX_CLI must identify the admitted native binary"
+    cli=[cli_path]
+    document=Document()
+    document.add_style("Paint",font_name="Carlito",font_size=Pt(24),color="FF0000",shading="00FF00")
+    paragraph=document.add_paragraph("MMMMMMMM")
+    paragraph.style="Paint"
+    source=tmp_path/"python-style-paint.docx"
+    rendered=[]
+    for index,(foreground,background) in enumerate([("FF0000","00FF00"),("0000FF","FFFF00")]):
+        if index: document.set_style("Paint",color=foreground,shading=background)
+        document.save(source)
+        saved=source.read_bytes()
+        output=tmp_path/f"native-{index}"
+        result=subprocess.run(cli+["render",str(source),"--output-dir",str(output),"--dpi","144","--page","0"],cwd=root,capture_output=True,text=True,timeout=300)
+        assert result.returncode==0,(result.stdout,result.stderr)
+        assert source.read_bytes()==saved
+        images=list(output.glob("*.png"))
+        assert len(images)==1
+        with Image.open(images[0]) as image: pixels=list(image.convert("RGB").getdata())
+        expected_fg=tuple(bytes.fromhex(foreground));expected_bg=tuple(bytes.fromhex(background))
+        assert sum(pixel==expected_fg for pixel in pixels)>20
+        assert sum(pixel==expected_bg for pixel in pixels)>200
+        rendered.append(images[0].read_bytes())
+        assert Document.from_bytes(saved).paragraphs[0].text=="MMMMMMMM"
+    assert rendered[0]!=rendered[1]
+
+
+
+def test_fx200_checklist_presets_create_real_bullet_definitions_and_reference_them_on_reopen():
+    from rdocx import Document, ListLevel
+    from xml.etree import ElementTree as ET
+    document=Document()
+    expected=[]
+    for checked in [False,True]:
+        preset=ListLevel.checklist(checked=checked)
+        marker="☑" if checked else "☐"
+        assert preset.format=="bullet" and preset.text==marker
+        definition=document.add_numbering_definition([preset])
+        instance=document.add_numbering_instance(definition)
+        paragraph=document.add_paragraph("checked" if checked else "unchecked")
+        paragraph.numbering=(instance,0)
+        expected.append((definition,instance,marker))
+    saved=document.to_bytes()
+    with ZipFile(BytesIO(saved)) as package:
+        numbering=ET.fromstring(package.read("word/numbering.xml"))
+    w="{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    for definition,instance,marker in expected:
+        abstract=next(node for node in numbering.findall(w+"abstractNum") if node.get(w+"abstractNumId")==str(definition))
+        level=abstract.find(w+"lvl")
+        assert level.find(w+"numFmt").get(w+"val")=="bullet"
+        assert level.find(w+"lvlText").get(w+"val")==marker
+        num=next(node for node in numbering.findall(w+"num") if node.get(w+"numId")==str(instance))
+        assert num.find(w+"abstractNumId").get(w+"val")==str(definition)
+    reopened=Document.from_bytes(saved)
+    assert [paragraph.text for paragraph in reopened.paragraphs]==["unchecked","checked"]
+    assert [paragraph.numbering for paragraph in reopened.paragraphs]==[(instance,0) for _,instance,_ in expected]
+    assert document.to_bytes()==saved
+    # Actual U2610/U2611 deterministic glyph paint remains the explicit joint
+    # F200/F210 gate against selected3968-byte provider. No square substitution
+    # or missing glyph is accepted by this semantic-only control.
+
+
+@pytest.mark.parametrize("clear", [False, True])
+@pytest.mark.parametrize("started", [False, True])
+def test_fx200_imported_style_border_root_and_duplicate_clear_survive_save_reopen(clear, started):
+    from rdocx import Document
+    from xml.etree import ElementTree as ET
+    document=Document()
+    document.add_style("ImportedBorder", keep_with_next=True)
+    original=document.to_bytes()
+    output=BytesIO()
+    w="{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    border='''<q:pBdr f:first="&#65;"><q:top q:val="single"/><f:opaque first="same"/></q:pBdr><f:pBdr f:keep="foreign"/><q:pBdr f:last="&#66;"><q:bottom q:val="single" f:edge="&#67;"/><!--border--><f:opaque>  keep  </f:opaque></q:pBdr>'''
+    if started:
+        border=border.replace('<q:bottom q:val="single" f:edge="&#67;"/>', '<q:bottom q:val="single" f:edge="&#67;"><f:inside>  edge  </f:inside><!--inside--></q:bottom>')
+    with ZipFile(BytesIO(original)) as package, ZipFile(output,"w") as target:
+        for member in package.infolist():
+            data=package.read(member.filename)
+            if member.filename=="word/styles.xml":
+                text=data.decode()
+                start=text.index('w:styleId="ImportedBorder"')
+                end=text.index('</w:style>',start)
+                part=text[start:end]
+                assert '<w:pPr>' in part
+                part=part.replace('<w:pPr>', '<w:pPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:f="urn:foreign" f:outer="&#68;">'+border,1)
+                data=(text[:start]+part+text[end:]).encode()
+            target.writestr(member,data)
+    document=Document.from_bytes(output.getvalue())
+    document.set_style("ImportedBorder", borders={} if clear else {"bottom":("double",8,"123456")})
+    saved=document.to_bytes()
+    with ZipFile(BytesIO(saved)) as package: raw=package.read("word/styles.xml")
+    for preserved in [b'f:first="&#65;"', b'f:last="&#66;"', b'f:outer="&#68;"', b'<f:pBdr f:keep="foreign"/>', b'<!--border-->', b'<f:opaque>  keep  </f:opaque>']:
+        assert preserved in raw
+    if clear:
+        assert b'f:edge="&#67;"' not in raw
+        assert b'<f:inside>  edge  </f:inside>' not in raw and b'<!--inside-->' not in raw
+    else:
+        assert b'f:edge="&#67;"' in raw
+        if started:
+            assert b'<f:inside>  edge  </f:inside>' in raw and b'<!--inside-->' in raw
+    style=next(node for node in ET.fromstring(raw).findall(w+"style") if node.get(w+"styleId")=="ImportedBorder")
+    properties=style.findall(w+"pPr")[-1]
+    selected=properties.findall(w+"pBdr")[-1]
+    assert properties.find(w+"keepNext") is not None
+    if clear:
+        assert all(selected.find(w+edge) is None for edge in ["top","bottom","left","right","between","bar"])
+    else:
+        edge=selected.find(w+"bottom")
+        assert edge.get(w+"val")=="double" and edge.get(w+"sz")=="8" and edge.get(w+"color")=="123456"
+    reopened=Document.from_bytes(saved)
+    assert reopened.to_bytes()==saved
+    with ZipFile(BytesIO(reopened.to_bytes())) as package: final=ET.fromstring(package.read("word/styles.xml"))
+    final_style=next(node for node in final.findall(w+"style") if node.get(w+"styleId")=="ImportedBorder")
+    final_border=final_style.findall(w+"pPr")[-1].findall(w+"pBdr")[-1]
+    assert ET.tostring(final_border)==ET.tostring(selected)
+
+
+@pytest.mark.parametrize("physical,logical",[("start","left"),("end","right")])
+def test_fx200_imported_started_logical_border_setters_keep_one_owner_payload_and_shadowed_peers(physical,logical):
+    from rdocx import Document
+    from xml.etree import ElementTree as ET
+    document=Document()
+    document.add_style("Logical",keep_with_next=True)
+    original=document.to_bytes()
+    opaque='<f:opaque xmlns:q="urn:shadow"><q:bottom q:val="double"></q:bottom><w:bottom w:val="double"></w:bottom></f:opaque>'
+    border=f'<q:pBdr f:keep="&#65;">{opaque}<q:{physical} q:val="single" f:edge="&#66;"><f:payload>  unique  </f:payload><!--unique--></q:{physical}></q:pBdr>'
+    output=BytesIO()
+    with ZipFile(BytesIO(original)) as package,ZipFile(output,"w") as target:
+        for member in package.infolist():
+            data=package.read(member.filename)
+            if member.filename=="word/styles.xml":
+                text=data.decode();start=text.index('w:styleId="Logical"');end=text.index('</w:style>',start);part=text[start:end]
+                assert '<w:pPr>' in part
+                part=part.replace('<w:pPr>','<w:pPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:f="urn:foreign">'+border,1)
+                data=(text[:start]+part+text[end:]).encode()
+            target.writestr(member,data)
+    document=Document.from_bytes(output.getvalue())
+    w="{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    for style,size,color in [("double",8,"123456"),("single",12,"654321")]:
+        document.set_style("Logical",borders={logical:(style,size,color)})
+        saved=document.to_bytes()
+        with ZipFile(BytesIO(saved)) as package:raw=package.read("word/styles.xml")
+        assert opaque.encode() in raw
+        assert raw.count(f'<q:{physical} '.encode())==1 and raw.count(f'</q:{physical}>'.encode())==1
+        assert raw.count(b'<f:payload>  unique  </f:payload>')==1 and raw.count(b'<!--unique-->')==1
+        node=next(node for node in ET.fromstring(raw).findall(w+"style") if node.get(w+"styleId")=="Logical")
+        selected=node.find(w+"pPr").findall(w+"pBdr")[-1]
+        assert len(selected.findall(w+physical))==1 and selected.find(w+"bottom") is None
+        edge=selected.find(w+physical)
+        assert (edge.get(w+"val"),edge.get(w+"sz"),edge.get(w+"color"))==(style,str(size),color)
+        document=Document.from_bytes(saved)
+        assert document.to_bytes()==saved
+        document.set_style("Logical",borders={logical:(style,size,color)})
+        assert document.to_bytes()==saved
+
+
+@pytest.mark.parametrize("cell_owned", [False, True])
+@pytest.mark.parametrize("initial", [None, "baseline", "superscript", "subscript", "inherited-super", "inherited-sub"])
+@pytest.mark.parametrize("operation", ["superscript", "subscript"])
+@pytest.mark.parametrize("value", [None, False, True])
+def test_fx200_installed_super_sub_complete_transition_matrix(cell_owned, initial, operation, value):
+    from rdocx import Document, StaleElementError
+    from xml.etree import ElementTree as ET
+
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    document = Document()
+    paragraph = document.add_table(1, 1).cell(0, 0).paragraphs[0] if cell_owned else document.add_paragraph("")
+    paragraph.add_run("matrix")
+    data = document.to_bytes()
+    inherited = initial in ("inherited-super", "inherited-sub")
+    direct = None if inherited else initial
+    if initial is not None:
+        properties = ('<w:rStyle w:val="InheritedScript"/>' if inherited else '<w:vertAlign w:val="' + initial + '"/>')
+        data = _replace_document_xml(data, b'<w:r><w:t>matrix</w:t></w:r>',
+            ('<w:r><w:rPr>' + properties + '</w:rPr><w:t>matrix</w:t></w:r>').encode())
+    if inherited:
+        output = BytesIO()
+        inherited_mode = "superscript" if initial == "inherited-super" else "subscript"
+        with ZipFile(BytesIO(data)) as source, ZipFile(output, "w") as target:
+            for member in source.infolist():
+                payload = source.read(member.filename)
+                if member.filename == "word/styles.xml":
+                    assert payload.count(b"</w:styles>") == 1
+                    style = ('<w:style w:type="character" w:styleId="InheritedScript"><w:name w:val="InheritedScript"/>'
+                             '<w:rPr><w:vertAlign w:val="' + inherited_mode + '"/></w:rPr></w:style>').encode()
+                    payload = payload.replace(b"</w:styles>", style + b"</w:styles>")
+                target.writestr(member, payload)
+        data = output.getvalue()
+    document = Document.from_bytes(data)
+    paragraph = document.tables[0].cell(0, 0).paragraphs[0] if cell_owned else document.paragraphs[0]
+    run = paragraph.runs[0]
+    font = run.font
+    live = run.font
+
+    def package_run(bytes_):
+        with ZipFile(BytesIO(bytes_)) as archive:
+            xml = ET.fromstring(archive.read("word/document.xml"))
+            styles = ET.fromstring(archive.read("word/styles.xml"))
+        nodes = [node for node in xml.iter(w + "r") if ''.join(t.text or '' for t in node.findall(w + "t")) == "matrix"]
+        assert len(nodes) == 1
+        return nodes[0], styles
+
+    def assert_direct(owner_font, mode):
+        assert owner_font.superscript is (None if mode is None else mode == "superscript")
+        assert owner_font.subscript is (None if mode is None else mode == "subscript")
+
+    before = document.to_bytes()
+    original_node, original_styles = package_run(before)
+    assert_direct(font, direct)
+    if initial is None:
+        assert original_node.find(w + "rPr") is None
+    if inherited:
+        inherited_style = next(node for node in original_styles.findall(w + "style") if node.get(w + "styleId") == "InheritedScript")
+        assert inherited_style.find(w + "rPr").find(w + "vertAlign").get(w + "val") == inherited_mode
+        assert run.style_id == "InheritedScript"
+        assert original_node.find(w + "rPr").find(w + "vertAlign") is None
+    setattr(font, operation, value)
+    expected = operation if value is True else (None if value is None or direct == operation else direct)
+    assert_direct(font, expected)
+    assert_direct(live, expected)
+    assert run.text == "matrix" and paragraph.text == "matrix"
+    saved = document.to_bytes()
+    node, styles = package_run(saved)
+    properties = node.find(w + "rPr")
+    alignments = [] if properties is None else properties.findall(w + "vertAlign")
+    assert len(alignments) == (0 if expected is None else 1)
+    if expected is not None:
+        assert alignments[0].get(w + "val") == expected
+    if inherited:
+        assert properties.find(w + "rStyle").get(w + "val") == "InheritedScript"
+        assert ET.tostring(styles) == ET.tostring(original_styles)
+    if initial is None and value is not True:
+        assert properties is None, "absent False/None must not materialize run properties"
+    if expected == direct:
+        assert saved == before, "opposite False, baseline False and absent/null no-ops preserve bytes"
+    reopened = Document.from_bytes(saved)
+    restored = (reopened.tables[0].cell(0, 0).paragraphs[0] if cell_owned else reopened.paragraphs[0]).runs[0]
+    assert_direct(restored.font, expected)
+    assert restored.text == "matrix"
+    assert reopened.to_bytes() == saved
+    again = Document.from_bytes(reopened.to_bytes())
+    final = (again.tables[0].cell(0, 0).paragraphs[0] if cell_owned else again.paragraphs[0]).runs[0]
+    assert_direct(final.font, expected)
+    assert final.text == "matrix" and again.to_bytes() == saved
+    document.add_paragraph("topology change")
+    with pytest.raises(StaleElementError):
+        _ = live.superscript
+
+
+def test_fx200_checked_list_helpers_start_overrides_and_fresh_returned_handles():
+    from rdocx import Document, ListLevel, StaleElementError, RdocxError
+    from xml.etree import ElementTree as ET
+    from io import BytesIO
+    from zipfile import ZipFile
+    import pytest
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    document = Document()
+    original = document.add_paragraph("before")
+    for name in ["add_bullet_list_item", "add_numbered_list_item"]:
+        before = document.to_bytes()
+        for level in [-1, 9]:
+            with pytest.raises(ValueError): getattr(document, name)("bad", level)
+            assert document.to_bytes() == before
+        assert original.text == "before"
+        for level in range(9):
+            paragraph = getattr(document, name)("item", level)
+            assert paragraph.text == "item"
+            if level == 0:
+                with pytest.raises(StaleElementError, match="Document.add_"+name[4:]):
+                    _ = original.text
+            paragraph.add_run(" added")
+        original = document.paragraphs[0]
+    definition = document.add_numbering_definition([ListLevel(format="decimal", text="%1.")])
+    plain = document.add_numbering_instance(definition)
+    restarted = document.add_numbering_instance(definition, start=7)
+    zero = document.add_numbering_instance(definition, start=0)
+    before = document.to_bytes()
+    for kwargs in [dict(level=1), dict(start=-1), dict(start=2**32), dict(start=1, level=9)]:
+        with pytest.raises(ValueError): document.add_numbering_instance(definition, **kwargs)
+        assert document.to_bytes() == before
+    with pytest.raises(RdocxError, match="definition"):
+        document.add_numbering_instance(2**32-1)
+    assert document.to_bytes() == before
+    with ZipFile(BytesIO(before)) as package:
+        numbering = ET.fromstring(package.read("word/numbering.xml"))
+    by_id = {int(node.get(w+"numId")): node for node in numbering.findall(w+"num")}
+    assert by_id[plain].find(w+"lvlOverride") is None
+    for instance, start in [(restarted, "7"), (zero, "0")]:
+        owner = by_id[instance]
+        assert owner.find(w+"abstractNumId").get(w+"val") == str(definition)
+        override = owner.find(w+"lvlOverride")
+        assert override.get(w+"ilvl") == "0" and override.find(w+"startOverride").get(w+"val") == start
+    reopened = Document.from_bytes(before)
+    assert len(reopened.paragraphs) == 19
+    for _ in range(2):
+        reopened = Document.from_bytes(reopened.to_bytes())
+        assert len(reopened.paragraphs) == 19
+
+
+@pytest.mark.parametrize("operation", ["add_row", "insert_column", "delete_column", "split"])
+def test_fx202_issue305_table_surface_on_installed_base(operation):
+    from rdocx import Document
+
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "retained"
+    table = document.tables[0]
+    if operation == "add_row":
+        row = table.add_row()
+        assert len(row.cells) == 2
+        assert [cell.text for cell in row.cells] == ["", ""]
+        assert len(document.tables[0].rows) == 3
+    elif operation == "insert_column":
+        table.insert_column(0, before=True)
+        assert len(document.tables[0].rows[0].cells) == 3
+        assert document.tables[0].cell(0, 1).text == "retained"
+    elif operation == "delete_column":
+        table.delete_column(1)
+        assert len(document.tables[0].rows[0].cells) == 1
+        assert document.tables[0].cell(0, 0).text == "retained"
+    else:
+        before = document.to_bytes()
+        table.cell(0, 0).split()
+        assert document.to_bytes() == before
+        assert table.cell(0, 0).text == "retained"
+    assert Document.from_bytes(document.to_bytes()).tables[0].cell(0, 0).text in (
+        "retained", ""
+    )
+
+
+@pytest.mark.parametrize("property_name", [
+    "autofit", "first_row", "last_row", "first_column", "last_column", "banded_rows", "banded_columns"
+])
+def test_fx202_table_look_and_layout_on_installed_base(property_name):
+    from rdocx import Document
+
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    setattr(table, property_name, True)
+    assert getattr(table, property_name) is True
+    assert getattr(Document.from_bytes(document.to_bytes()).tables[0], property_name) is True
+    setattr(table, property_name, False)
+    assert getattr(table, property_name) is False
+
+
+def test_fx202_table_style_rejects_undefined_without_publication():
+    from rdocx import Document
+
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    before = document.to_bytes()
+    with pytest.raises(KeyError):
+        table.style = "X202UndefinedTableStyle"
+    assert document.to_bytes() == before
+
+
+def test_fx202_completed_nested_table_provider_remains_available():
+    from rdocx import Document
+
+    document = Document()
+    table = document.add_table(rows=1, cols=1)
+    nested = table.cell(0, 0).add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "nested retained"
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.tables[0].cell(0, 0).tables[0].cell(0, 0).text == "nested retained"
+
+
+def test_fx202_direct_table_after_nested_owner_does_not_edit_the_nested_table():
+    from rdocx import Document
+    document = Document()
+    nested = document.add_table(rows=1, cols=1).cell(0, 0).add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "nested retained"
+    document.add_table(rows=1, cols=1)
+    assert len(document.tables) == 2
+    document.tables[1].cell(0, 0).text = "second direct retained"
+    assert document.tables[0].cell(0, 0).tables[0].cell(0, 0).text == "nested retained"
+    assert document.tables[1].cell(0, 0).text == "second direct retained"
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.tables[0].cell(0, 0).tables[0].cell(0, 0).text == "nested retained"
+    assert reopened.tables[1].cell(0, 0).text == "second direct retained"
+
+
+def test_fx202_table_look_setter_preserves_default_banding():
+    import rdocx
+    document = rdocx.Document()
+    table = document.add_table(1, 1)
+    assert table.banded_rows is True
+    assert table.banded_columns is True
+    table.first_row = True
+    assert table.first_row is True
+    assert table.banded_rows is True
+    assert table.banded_columns is True

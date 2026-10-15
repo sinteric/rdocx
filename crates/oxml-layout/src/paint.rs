@@ -26,6 +26,14 @@ pub enum Paint {
         stops: Vec<GradientStop>,
         extend: (bool, bool),
     },
+    /// A source-derived colour grid, repeated over its physical tile bounds.
+    /// Path gradients use one tile covering the complete painted owner.
+    Grid {
+        bounds: Rect,
+        columns: u16,
+        rows: u16,
+        colors: Vec<Color>,
+    },
     Tile {
         image: MediaId,
         tile: Rect,
@@ -34,6 +42,31 @@ pub enum Paint {
 }
 
 impl Paint {
+    /// Validate a bounded colour grid before publishing backend-neutral paint.
+    pub fn grid(bounds: Rect, columns: u16, rows: u16, colors: Vec<Color>) -> Option<Self> {
+        let count = usize::from(columns) * usize::from(rows);
+        (columns > 0
+            && rows > 0
+            && count <= 65_536
+            && colors.len() == count
+            && [bounds.x, bounds.y, bounds.width, bounds.height]
+                .into_iter()
+                .all(f64::is_finite)
+            && bounds.width > 0.0
+            && bounds.height > 0.0
+            && colors.iter().all(|c| {
+                [c.r, c.g, c.b, c.a]
+                    .into_iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(&v))
+            }))
+        .then_some(Self::Grid {
+            bounds,
+            columns,
+            rows,
+            colors,
+        })
+    }
+
     /// Construct a linear gradient, degrading one stop to a solid paint.
     pub fn linear(
         start: Point,

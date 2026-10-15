@@ -655,6 +655,14 @@ impl Document {
     /// Unmatched, reversed and crossing markers are rejected. Unsupported
     /// marker families remain opaque and are not included.
     pub fn story_ranges(&self) -> Result<Vec<StoryRangeRef>> {
+        Self::story_ranges_in(&self.story_range_paragraphs()?)
+    }
+
+    /// Pair the markers of checked range paragraphs listed in physical story
+    /// order, as `story_range_paragraphs` returns them.
+    pub(crate) fn story_ranges_in(
+        paragraphs: &[(ContentLocation, Vec<u8>)],
+    ) -> Result<Vec<StoryRangeRef>> {
         let mut ranges = Vec::new();
         let mut open = Vec::<StoryMarker>::new();
         let mut story = None;
@@ -663,7 +671,7 @@ impl Document {
         let mut comment_ids = HashSet::new();
         let mut permission_ids = HashSet::new();
         let mut marker_ordinal = 0usize;
-        for (location, xml) in self.story_range_paragraphs()? {
+        for (location, xml) in paragraphs {
             if story.as_ref() != Some(location.story()) {
                 if !open.is_empty() {
                     return Err(Error::Other(
@@ -673,7 +681,7 @@ impl Document {
                 story = Some(location.story().clone());
                 marker_ordinal = 0;
             }
-            for mut marker in scan_story_markers(&xml, &location)? {
+            for mut marker in scan_story_markers(xml, location)? {
                 marker.ordinal = marker_ordinal;
                 marker_ordinal += 1;
                 if marker.start {
@@ -1886,7 +1894,7 @@ fn comment_text_paragraphs(
     Ok((paragraphs, paragraph_ids, para_id))
 }
 
-fn validate_bookmark_name(name: &str) -> Result<()> {
+pub(crate) fn validate_bookmark_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::Other("bookmark name must not be empty".to_owned()));
     }
@@ -2925,7 +2933,7 @@ impl Document {
         Ok(target)
     }
 
-    fn comment_source_inventory_at(
+    pub(crate) fn comment_source_inventory_at(
         &self,
         owner: &str,
     ) -> Result<BTreeMap<String, Vec<CommentSourceMarker>>> {

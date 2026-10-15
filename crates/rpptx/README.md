@@ -28,7 +28,7 @@ presentation, notes, handout, PDF, and animation outputs.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx | 463,774 compressed bytes, 2,402,681 member bytes, 16 members | 0.14.0 | Debian 13.6, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
+| Crates.io archive: rpptx | 715,778 compressed bytes, 3,831,402 member bytes, 16 members | 0.14.1 | Debian 13.7, x86_64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
@@ -52,12 +52,34 @@ let bytes = deck.to_bytes()?;
 
 ```toml
 [dependencies]
-rpptx = "0.14.0"
+rpptx = "0.14.1"
 ```
 
 Enable native encryption and signing explicitly:
 
 ```toml
 [dependencies]
-rpptx = { version = "0.14.0", features = ["agile-encryption", "digital-signatures"] }
+rpptx = { version = "0.14.1", features = ["agile-encryption", "digital-signatures"] }
 ```
+
+## Licensed font embedding
+
+```rust,no_run
+use rpptx::{Presentation, EmbeddedFont, EmbeddedFontKind, FontEmbeddingLicense};
+
+let mut deck = Presentation::new()?;
+let bytes = std::fs::read("MyFace-Regular.ttf")?;
+deck.embed_font("My Face", EmbeddedFont::new(
+    EmbeddedFontKind::Regular, bytes,
+    FontEmbeddingLicense::new(true, "SIL Open Font License 1.1"),
+))?;
+let faces = deck.embedded_fonts()?;
+assert_eq!(faces[0].typeface, "My Face");
+deck.save("embedded.pptx")?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Confirm the caller font's embedding license before authorizing it. Native
+embedding writes checked uncompressed EOT and stages the face relationship
+with the presentation model and flags. Imported compressed/unknown data remains
+preserved with absent decoded bytes. Caller render faces retain precedence.

@@ -437,18 +437,24 @@ pub enum ST_TabJc {
     Bar,
     Clear,
     Num,
+    List,
+    Start,
+    End,
 }
 
 impl ST_TabJc {
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
-            "left" | "start" => Ok(Self::Left),
+            "left" => Ok(Self::Left),
             "center" => Ok(Self::Center),
-            "right" | "end" => Ok(Self::Right),
+            "right" => Ok(Self::Right),
             "decimal" => Ok(Self::Decimal),
             "bar" => Ok(Self::Bar),
             "clear" => Ok(Self::Clear),
             "num" => Ok(Self::Num),
+            "list" => Ok(Self::List),
+            "start" => Ok(Self::Start),
+            "end" => Ok(Self::End),
             _ => Err(OxmlError::InvalidValue(format!("invalid ST_TabJc: {s}"))),
         }
     }
@@ -462,6 +468,9 @@ impl ST_TabJc {
             Self::Bar => "bar",
             Self::Clear => "clear",
             Self::Num => "num",
+            Self::List => "list",
+            Self::Start => "start",
+            Self::End => "end",
         }
     }
 }

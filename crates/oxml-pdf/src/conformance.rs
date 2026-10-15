@@ -63,7 +63,7 @@ impl fmt::Display for PdfError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingEmbeddedFont { font_id } => {
-                write!(formatter, "font {font_id} cannot be embedded for PDF/A")
+                write!(formatter, "font {font_id} cannot be embedded in PDF")
             }
             Self::InvalidStructure => formatter.write_str("invalid tagged PDF structure"),
             Self::ForbiddenAction { action } => {
@@ -79,27 +79,16 @@ impl fmt::Display for PdfError {
 
 impl Error for PdfError {}
 
-pub(crate) fn preflight(layout: &LayoutResult) -> Result<(), PdfError> {
+pub(crate) fn preflight(
+    layout: &LayoutResult,
+) -> Result<std::collections::BTreeMap<oxml_layout::FontId, font::PreparedFont>, PdfError> {
     if let Some(structure) = &layout.structure
         && !valid_structure(structure, &layout.pages)
     {
         return Err(PdfError::InvalidStructure);
     }
 
-    let mut usage = font::collect_glyph_usage(layout);
-    let fonts = layout
-        .fonts
-        .iter()
-        .map(|font| (font.id, font))
-        .collect::<std::collections::HashMap<_, _>>();
-    for (font_id, font_usage) in &mut usage {
-        let Some(font_data) = fonts.get(font_id) else {
-            return Err(PdfError::MissingEmbeddedFont { font_id: font_id.0 });
-        };
-        if font::prepare_font(font_data, font_usage).is_none() {
-            return Err(PdfError::MissingEmbeddedFont { font_id: font_id.0 });
-        }
-    }
+    let prepared_fonts = font::prepare_fonts(layout)?;
 
     for page in &layout.pages {
         if let Some(background) = &page.background {
@@ -107,7 +96,7 @@ pub(crate) fn preflight(layout: &LayoutResult) -> Result<(), PdfError> {
         }
         validate_elements(&page.elements)?;
     }
-    Ok(())
+    Ok(prepared_fonts)
 }
 
 fn validate_elements(elements: &[PositionedElement]) -> Result<(), PdfError> {
@@ -168,6 +157,12 @@ fn validate_paint(paint: &Paint) -> Result<(), PdfError> {
                     return Err(PdfError::UnsupportedColor);
                 }
                 validate_color(stop.color)?;
+            }
+            Ok(())
+        }
+        Paint::Grid { colors, .. } => {
+            for color in colors {
+                validate_color(*color)?;
             }
             Ok(())
         }

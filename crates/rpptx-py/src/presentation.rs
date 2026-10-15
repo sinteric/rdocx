@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 
 use oxml_py_support::RevisionCounter;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyList, PyString, PyTuple};
 use smallvec::smallvec;
 
 use crate::layout::PyTextFrameLayout;
 use crate::shape::length;
-use crate::slide::{PySlideCollection, PySlideLayoutCollection};
+use crate::slide::{
+    PySlideCollection, PySlideLayoutCollection, PySlideMaster, PySlideMasterCollection,
+};
 use crate::{replacement_count_to_pyerr, rpptx_to_pyerr, rpptx_value_to_pyerr};
 
 /// The bundled 16:9 slide size, paired with the first dimension set on a deck
@@ -148,20 +151,716 @@ impl From<&rpptx::ValidationIssue> for PyValidationIssue {
     }
 }
 
+/// One presentation section: a named, contiguous run of slides.
+#[pyclass(name = "Section", frozen, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PySection {
+    /// The braced GUID PowerPoint identifies the section by.
+    pub id: String,
+    pub name: String,
+    /// The zero-based indices of the section's slides, in order.
+    pub slide_indices: Vec<usize>,
+    pub slide_ids: Vec<u32>,
+}
+
+#[pymethods]
+impl PySection {
+    #[getter]
+    fn id(&self) -> &str {
+        &self.id
+    }
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+    #[getter]
+    fn slide_indices<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.slide_indices)
+    }
+    #[getter]
+    fn slide_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.slide_ids)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "Section(id={}, name={}, slide_indices={:?})",
+            pyo3::types::PyString::new(py, &self.id).repr()?,
+            pyo3::types::PyString::new(py, &self.name).repr()?,
+            self.slide_indices
+        ))
+    }
+}
+
+fn section_guid(name: &str, position: usize, attempt: u32) -> String {
+    let hash = |seed: u64| {
+        let mut hash = seed;
+        for byte in name
+            .bytes()
+            .chain(position.to_le_bytes())
+            .chain(attempt.to_le_bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        hash
+    };
+    let (high, low) = (hash(0xCBF2_9CE4_8422_2325), hash(0x6C62_272E_07BB_0142));
+    format!(
+        "{{{:08X}-{:04X}-4{:03X}-8{:03X}-{:012X}}}",
+        high >> 32,
+        (high >> 16) & 0xFFFF,
+        high & 0x0FFF,
+        (low >> 48) & 0x0FFF,
+        low & 0xFFFF_FFFF_FFFF
+    )
+}
+
+const DEFAULT_JPEG_QUALITY: u8 = 90;
+
+/// Reads a raster format, refusing an option the format would ignore.
+fn raster_format(
+    format: &str,
+    quality: Option<i64>,
+    transparent: bool,
+) -> PyResult<rpptx::RasterFormat> {
+    if quality.is_some() && !matches!(format, "jpg" | "jpeg") {
+        return Err(PyValueError::new_err(format!(
+            "quality applies to JPEG only, drop it or pass format=\"jpeg\" (format is {format:?})"
+        )));
+    }
+    if transparent && format != "png" {
+        return Err(PyValueError::new_err(format!(
+            "transparent applies to PNG only, drop it or pass format=\"png\" (format is {format:?})"
+        )));
+    }
+    match format {
+        "png" => Ok(rpptx::RasterFormat::Png {
+            transparent_background: transparent,
+        }),
+        "jpg" | "jpeg" => match quality.unwrap_or(i64::from(DEFAULT_JPEG_QUALITY)) {
+            quality @ 1..=100 => Ok(rpptx::RasterFormat::Jpeg {
+                quality: quality as u8,
+            }),
+            quality => Err(PyValueError::new_err(format!(
+                "JPEG quality must be from 1 to 100, got {quality}"
+            ))),
+        },
+        "tif" | "tiff" => Ok(rpptx::RasterFormat::Tiff),
+        other => Err(PyValueError::new_err(format!(
+            "unknown raster format {other:?}, expected png, jpeg, or tiff"
+        ))),
+    }
+}
+
+fn handout_layout(slides_per_page: u8) -> PyResult<rpptx::HandoutLayout> {
+    Ok(match slides_per_page {
+        1 => rpptx::HandoutLayout::One,
+        2 => rpptx::HandoutLayout::Two,
+        3 => rpptx::HandoutLayout::Three,
+        4 => rpptx::HandoutLayout::Four,
+        6 => rpptx::HandoutLayout::Six,
+        9 => rpptx::HandoutLayout::Nine,
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "slides_per_page must be 1, 2, 3, 4, 6, or 9, got {slides_per_page}"
+            )));
+        }
+    })
+}
+
+/// One ODP conversion diagnostic as a `(path, message)` pair.
+type OdpDiagnostics = Vec<(String, String)>;
+
+fn odp_diagnostics(diagnostics: &[rpptx::OdpDiagnostic]) -> OdpDiagnostics {
+    diagnostics
+        .iter()
+        .map(|diagnostic| (diagnostic.path.clone(), diagnostic.message.clone()))
+        .collect()
+}
+
+#[pyclass(name = "AppProperties")]
+pub struct PyAppProperties {
+    presentation: Py<PyPresentation>,
+}
+impl PyAppProperties {
+    fn read<T: Clone>(
+        &self,
+        py: Python<'_>,
+        field: fn(&mut rpptx::AppProperties) -> &mut Option<T>,
+    ) -> Option<T> {
+        let mut properties = self
+            .presentation
+            .borrow(py)
+            .inner
+            .application_properties()?
+            .clone();
+        field(&mut properties).clone()
+    }
+    fn write<T: Clone + PartialEq>(
+        &self,
+        py: Python<'_>,
+        field: fn(&mut rpptx::AppProperties) -> &mut Option<T>,
+        value: Option<T>,
+    ) -> PyResult<()> {
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut properties = presentation
+            .inner
+            .application_properties()
+            .cloned()
+            .unwrap_or_default();
+        if *field(&mut properties) == value {
+            return Ok(());
+        }
+        *field(&mut properties) = value;
+        presentation
+            .inner
+            .set_application_properties(properties)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+}
+#[pymethods]
+impl PyAppProperties {
+    #[getter]
+    fn template(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |p| &mut p.template)
+    }
+    #[setter]
+    fn set_template(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |p| &mut p.template, value)
+    }
+    #[getter]
+    fn manager(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |p| &mut p.manager)
+    }
+    #[setter]
+    fn set_manager(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |p| &mut p.manager, value)
+    }
+    #[getter]
+    fn company(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |p| &mut p.company)
+    }
+    #[setter]
+    fn set_company(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |p| &mut p.company, value)
+    }
+    #[getter]
+    fn pages(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.pages)
+    }
+    #[setter]
+    fn set_pages(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.pages, value)
+    }
+    #[getter]
+    fn words(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.words)
+    }
+    #[setter]
+    fn set_words(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.words, value)
+    }
+    #[getter]
+    fn characters(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.characters)
+    }
+    #[setter]
+    fn set_characters(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.characters, value)
+    }
+    #[getter]
+    fn presentation_format(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |p| &mut p.presentation_format)
+    }
+    #[setter]
+    fn set_presentation_format(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |p| &mut p.presentation_format, value)
+    }
+    #[getter]
+    fn lines(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.lines)
+    }
+    #[setter]
+    fn set_lines(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.lines, value)
+    }
+    #[getter]
+    fn paragraphs(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.paragraphs)
+    }
+    #[setter]
+    fn set_paragraphs(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.paragraphs, value)
+    }
+    #[getter]
+    fn slides(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.slides)
+    }
+    #[setter]
+    fn set_slides(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.slides, value)
+    }
+    #[getter]
+    fn notes(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.notes)
+    }
+    #[setter]
+    fn set_notes(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.notes, value)
+    }
+    #[getter]
+    fn total_time(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.total_time)
+    }
+    #[setter]
+    fn set_total_time(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.total_time, value)
+    }
+    #[getter]
+    fn hidden_slides(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.hidden_slides)
+    }
+    #[setter]
+    fn set_hidden_slides(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.hidden_slides, value)
+    }
+    #[getter]
+    fn multimedia_clips(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.multimedia_clips)
+    }
+    #[setter]
+    fn set_multimedia_clips(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.multimedia_clips, value)
+    }
+    #[getter]
+    fn scale_crop(&self, py: Python<'_>) -> Option<bool> {
+        self.read(py, |p| &mut p.scale_crop)
+    }
+    #[setter]
+    fn set_scale_crop(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.write(py, |p| &mut p.scale_crop, value)
+    }
+    #[getter]
+    fn links_up_to_date(&self, py: Python<'_>) -> Option<bool> {
+        self.read(py, |p| &mut p.links_up_to_date)
+    }
+    #[setter]
+    fn set_links_up_to_date(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.write(py, |p| &mut p.links_up_to_date, value)
+    }
+    #[getter]
+    fn characters_with_spaces(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |p| &mut p.characters_with_spaces)
+    }
+    #[setter]
+    fn set_characters_with_spaces(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        self.write(py, |p| &mut p.characters_with_spaces, value)
+    }
+    #[getter]
+    fn shared_document(&self, py: Python<'_>) -> Option<bool> {
+        self.read(py, |p| &mut p.shared_document)
+    }
+    #[setter]
+    fn set_shared_document(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.write(py, |p| &mut p.shared_document, value)
+    }
+    #[getter]
+    fn hyperlinks_changed(&self, py: Python<'_>) -> Option<bool> {
+        self.read(py, |p| &mut p.hyperlinks_changed)
+    }
+    #[setter]
+    fn set_hyperlinks_changed(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.write(py, |p| &mut p.hyperlinks_changed, value)
+    }
+    #[getter]
+    fn application(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |p| &mut p.application)
+    }
+    #[setter]
+    fn set_application(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |p| &mut p.application, value)
+    }
+    #[getter]
+    fn application_version(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |p| &mut p.application_version)
+    }
+    #[setter]
+    fn set_application_version(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |p| &mut p.application_version, value)
+    }
+}
+
+#[pyclass(name = "CustomFileTime", frozen, get_all)]
+pub struct PyCustomFileTime {
+    value: String,
+}
+#[pymethods]
+impl PyCustomFileTime {
+    #[new]
+    fn new(value: String) -> Self {
+        Self { value }
+    }
+}
+#[pyclass(name = "CustomProperty", frozen, get_all)]
+pub struct PyCustomProperty {
+    name: Option<String>,
+    pid: i32,
+    fmtid: String,
+    kind: &'static str,
+    value: Py<PyAny>,
+}
+fn custom_property_result(
+    py: Python<'_>,
+    property: &rpptx::CustomProperty,
+) -> PyResult<Py<PyCustomProperty>> {
+    use rpptx::CustomPropertyValue as Value;
+    let (kind, value) = match &property.value {
+        Value::Lpstr(v) => ("lpstr", v.clone().into_pyobject(py)?.into_any().unbind()),
+        Value::Lpwstr(v) => ("lpwstr", v.clone().into_pyobject(py)?.into_any().unbind()),
+        Value::I4(v) => ("i4", v.into_pyobject(py)?.into_any().unbind()),
+        Value::R8(v) => ("r8", v.into_pyobject(py)?.into_any().unbind()),
+        Value::Bool(v) => ("bool", v.into_pyobject(py)?.to_owned().into_any().unbind()),
+        Value::FileTime(v) => (
+            "filetime",
+            Py::new(py, PyCustomFileTime { value: v.clone() })?.into_any(),
+        ),
+        Value::Empty => ("empty", py.None()),
+        Value::Raw(v) => ("raw", PyBytes::new(py, v).into_any().unbind()),
+    };
+    Py::new(
+        py,
+        PyCustomProperty {
+            name: property.name.clone(),
+            pid: property.pid,
+            fmtid: property.fmtid.clone(),
+            kind,
+            value,
+        },
+    )
+}
+#[pyclass(name = "CustomProperties")]
+pub struct PyCustomProperties {
+    presentation: Py<PyPresentation>,
+}
+#[pymethods]
+impl PyCustomProperties {
+    fn __len__(&self, py: Python<'_>) -> usize {
+        self.presentation.borrow(py).inner.custom_properties().len()
+    }
+    fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyCustomProperty>>> {
+        self.presentation
+            .borrow(py)
+            .inner
+            .custom_property(name)
+            .map(|p| custom_property_result(py, p))
+            .transpose()
+    }
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let p = self.presentation.borrow(py);
+        let values = p
+            .inner
+            .custom_properties()
+            .iter()
+            .map(|p| custom_property_result(py, p))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)?
+            .call_method0("__iter__")
+            .map(Bound::unbind)
+    }
+    fn set(&self, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        use rpptx::CustomPropertyValue as Value;
+        let mut p = self.presentation.borrow_mut(py);
+        let existing = p.inner.custom_property(&name);
+        let converted = if value.is_none() {
+            Value::Empty
+        } else if value.is_instance_of::<pyo3::types::PyBool>() {
+            Value::Bool(value.extract()?)
+        } else if value.is_instance_of::<pyo3::types::PyInt>() {
+            Value::I4(value.extract::<i32>()?)
+        } else if value.is_instance_of::<pyo3::types::PyFloat>() {
+            let number = value.extract::<f64>()?;
+            if !number.is_finite() {
+                return Err(PyValueError::new_err("custom float must be finite"));
+            }
+            Value::R8(number)
+        } else if value.is_instance_of::<PyString>() {
+            let text = value.extract::<String>()?;
+            if existing.is_some_and(|p| matches!(p.value, Value::Lpstr(_))) {
+                Value::Lpstr(text)
+            } else {
+                Value::Lpwstr(text)
+            }
+        } else if let Ok(filetime) = value.extract::<PyRef<'_, PyCustomFileTime>>() {
+            Value::FileTime(filetime.value.clone())
+        } else {
+            return Err(PyTypeError::new_err(
+                "custom value must be string, signed32 int, finite float, bool, CustomFileTime or None",
+            ));
+        };
+        let (pid, fmtid) = if let Some(old) = existing {
+            (old.pid, old.fmtid.clone())
+        } else {
+            let mut pid = 2i32;
+            while p
+                .inner
+                .custom_properties()
+                .iter()
+                .any(|prop| prop.pid == pid)
+            {
+                pid = pid.checked_add(1).ok_or_else(|| {
+                    pyo3::exceptions::PyOverflowError::new_err("custom property PID exhausted")
+                })?;
+            }
+            (pid, "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}".to_owned())
+        };
+        p.inner
+            .set_custom_property(rpptx::CustomProperty {
+                fmtid,
+                pid,
+                name: Some(name),
+                value: converted,
+            })
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+    fn delete(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        self.presentation
+            .borrow_mut(py)
+            .inner
+            .remove_custom_property(name)
+            .map(|_| ())
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+}
+
+type CoreField = fn(&mut rpptx::CoreProperties) -> &mut Option<String>;
+
+/// The longest text python-docx accepts for a core property.
+const CORE_TEXT_LIMIT: usize = 255;
+
+#[pyclass(name = "CoreProperties")]
+pub struct PyCoreProperties {
+    presentation: Py<PyPresentation>,
+}
+
+impl PyCoreProperties {
+    fn read(&self, py: Python<'_>, field: CoreField) -> Option<String> {
+        let presentation = self.presentation.borrow(py);
+        let mut properties = presentation.inner.core_properties()?.clone();
+        field(&mut properties).take()
+    }
+
+    fn write(&self, py: Python<'_>, field: CoreField, value: Option<String>) -> PyResult<()> {
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut properties = presentation
+            .inner
+            .core_properties()
+            .cloned()
+            .unwrap_or_default();
+        let value = value.filter(|value| !value.is_empty());
+        if *field(&mut properties) == value {
+            return Ok(());
+        }
+        *field(&mut properties) = value;
+        presentation
+            .inner
+            .set_core_properties(properties)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    fn text(&self, py: Python<'_>, field: CoreField) -> String {
+        self.read(py, field).unwrap_or_default()
+    }
+
+    fn set_text(&self, py: Python<'_>, field: CoreField, value: Option<String>) -> PyResult<()> {
+        if value
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > CORE_TEXT_LIMIT)
+        {
+            return Err(PyValueError::new_err(format!(
+                "a core property holds at most {CORE_TEXT_LIMIT} characters"
+            )));
+        }
+        self.write(py, field, value)
+    }
+}
+
+#[pymethods]
+impl PyCoreProperties {
+    #[getter]
+    fn author(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |properties| &mut properties.creator)
+    }
+    #[setter]
+    fn set_author(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.creator, value)
+    }
+    #[getter]
+    fn category(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.category)
+    }
+    #[setter]
+    fn set_category(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.category, value)
+    }
+    #[getter]
+    fn comments(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.description)
+    }
+    #[setter]
+    fn set_comments(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.description, value)
+    }
+    #[getter]
+    fn content_status(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.content_status)
+    }
+    #[setter]
+    fn set_content_status(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.content_status, value)
+    }
+    #[getter]
+    fn created(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |properties| &mut properties.created)
+    }
+    #[setter]
+    fn set_created(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |properties| &mut properties.created, value)
+    }
+    #[getter]
+    fn identifier(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.identifier)
+    }
+    #[setter]
+    fn set_identifier(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.identifier, value)
+    }
+    #[getter]
+    fn keywords(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.keywords)
+    }
+    #[setter]
+    fn set_keywords(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.keywords, value)
+    }
+    #[getter]
+    fn language(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.language)
+    }
+    #[setter]
+    fn set_language(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.language, value)
+    }
+    #[getter]
+    fn last_modified_by(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.last_modified_by)
+    }
+    #[setter]
+    fn set_last_modified_by(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.last_modified_by, value)
+    }
+    #[getter]
+    fn last_printed(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |properties| &mut properties.last_printed)
+    }
+    #[setter]
+    fn set_last_printed(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |properties| &mut properties.last_printed, value)
+    }
+    #[getter]
+    fn modified(&self, py: Python<'_>) -> Option<String> {
+        self.read(py, |properties| &mut properties.modified)
+    }
+    #[setter]
+    fn set_modified(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.write(py, |properties| &mut properties.modified, value)
+    }
+    #[getter]
+    fn revision(&self, py: Python<'_>) -> i64 {
+        self.read(py, |properties| &mut properties.revision)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .map_or(0, |value| value.max(0))
+    }
+    #[setter]
+    fn set_revision(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        if value.is_some_and(|value| value < 1) {
+            return Err(PyValueError::new_err("revision must be a positive integer"));
+        }
+        self.write(
+            py,
+            |properties| &mut properties.revision,
+            value.map(|value| value.to_string()),
+        )
+    }
+    #[getter]
+    fn subject(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.subject)
+    }
+    #[setter]
+    fn set_subject(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.subject, value)
+    }
+    #[getter]
+    fn title(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.title)
+    }
+    #[setter]
+    fn set_title(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.title, value)
+    }
+    #[getter]
+    fn version(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.version)
+    }
+    #[setter]
+    fn set_version(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.version, value)
+    }
+}
+
+/// Detached semantic text, owned image bytes, and loss diagnostics.
+#[pyclass(name = "PresentationTextExport", frozen)]
+pub struct PyPresentationTextExport {
+    result: rpptx::PresentationTextExport,
+}
+
+#[pymethods]
+impl PyPresentationTextExport {
+    #[getter]
+    fn text(&self) -> &str {
+        &self.result.text
+    }
+
+    #[getter]
+    fn assets<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(
+            py,
+            self.result
+                .assets
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), PyBytes::new(py, bytes))),
+        )
+    }
+
+    #[getter]
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.result.diagnostics)
+    }
+}
+
 #[pyclass(name = "Presentation")]
 pub struct PyPresentation {
     pub(crate) inner: rpptx::Presentation,
     pub(crate) revisions: RevisionCounter,
+    owners: Vec<LiveOwner>,
+    pub(crate) gradient_stops: Vec<crate::dml::GradientStopTokens>,
+    pub(crate) next_gradient_stop: u64,
+    slides: oxml_py_support::RevisionState,
+    layouts: oxml_py_support::RevisionState,
+    masters: oxml_py_support::RevisionState,
 }
 
 impl PyPresentation {
-    fn from_presentation(inner: rpptx::Presentation) -> Self {
-        Self {
-            inner,
-            revisions: RevisionCounter::new(),
-        }
-    }
-
     fn set_slide_size(
         &mut self,
         py: Python<'_>,
@@ -188,19 +887,19 @@ impl PyPresentation {
     fn new(path: Option<PathBuf>, py: Python<'_>) -> PyResult<Self> {
         match path {
             Some(path) => rpptx::Presentation::open(path)
-                .map(Self::from_presentation)
-                .map_err(|error| rpptx_to_pyerr(py, error)),
+                .map_err(|error| rpptx_to_pyerr(py, error))
+                .and_then(Self::from_presentation_owned),
             None => rpptx::Presentation::new()
-                .map(Self::from_presentation)
-                .map_err(|error| rpptx_to_pyerr(py, error)),
+                .map_err(|error| rpptx_to_pyerr(py, error))
+                .and_then(Self::from_presentation_owned),
         }
     }
 
     #[staticmethod]
     fn from_bytes(bytes: &[u8], py: Python<'_>) -> PyResult<Self> {
         rpptx::Presentation::from_bytes(bytes)
-            .map(Self::from_presentation)
             .map_err(|error| rpptx_to_pyerr(py, error))
+            .and_then(Self::from_presentation_owned)
     }
 
     fn save(&self, path: PathBuf, py: Python<'_>) -> PyResult<()> {
@@ -217,63 +916,722 @@ impl PyPresentation {
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    fn to_pdf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        py.detach(|| self.inner.to_pdf_deterministic())
-            .map(|bytes| PyBytes::new(py, &bytes))
+    #[getter]
+    fn custom_properties(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyCustomProperties>> {
+        Py::new(py, PyCustomProperties { presentation: slf })
+    }
+
+    #[getter]
+    fn app_properties(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyAppProperties>> {
+        Py::new(py, PyAppProperties { presentation: slf })
+    }
+
+    #[getter]
+    fn core_properties(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyCoreProperties>> {
+        Py::new(py, PyCoreProperties { presentation: slf })
+    }
+
+    /// The presentation sections in order, empty without sections.
+    #[getter]
+    fn sections<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let indices = self
+            .inner
+            .slides()
+            .enumerate()
+            .map(|(index, slide)| (slide.id(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        PyTuple::new(
+            py,
+            self.inner.sections().iter().map(|section| PySection {
+                id: section.id.clone().unwrap_or_default(),
+                name: section.name.clone().unwrap_or_default(),
+                slide_ids: section.slide_ids.clone(),
+                slide_indices: section
+                    .slide_ids
+                    .iter()
+                    .filter_map(|id| indices.get(id).copied())
+                    .collect(),
+            }),
+        )
+    }
+
+    /// Replaces the sections with `(name, slide_indices)` pairs. The
+    /// sections must take every slide once, in slide order, as PowerPoint
+    /// requires, and an empty list removes them. A section keeps the id of
+    /// a current section with the same name.
+    fn set_sections(
+        &mut self,
+        py: Python<'_>,
+        sections: Vec<(String, Vec<usize>)>,
+    ) -> PyResult<()> {
+        let slide_ids = self
+            .inner
+            .slides()
+            .map(|slide| slide.id())
+            .collect::<Vec<_>>();
+        let assigned = sections
+            .iter()
+            .flat_map(|(_, indices)| indices.iter().copied())
+            .collect::<Vec<_>>();
+        if !sections.is_empty() && assigned != (0..slide_ids.len()).collect::<Vec<_>>() {
+            return Err(PyValueError::new_err(
+                "sections must take every slide once, in slide order",
+            ));
+        }
+        let mut current = self
+            .inner
+            .sections()
+            .iter()
+            .filter_map(|section| Some((section.name.clone()?, section.id.clone()?)))
+            .collect::<Vec<_>>();
+        let mut used = std::collections::HashSet::new();
+        let mut native = Vec::with_capacity(sections.len());
+        for (position, (name, indices)) in sections.into_iter().enumerate() {
+            let reused = current
+                .iter()
+                .position(|(current_name, _)| *current_name == name)
+                .map(|index| current.remove(index).1);
+            let id = match reused {
+                Some(id) if !used.contains(&id) => id,
+                _ => (0..)
+                    .map(|attempt| section_guid(&name, position, attempt))
+                    .find(|id| !used.contains(id))
+                    .expect("an unused section id exists"),
+            };
+            used.insert(id.clone());
+            let ids = indices.iter().map(|index| slide_ids[*index]).collect();
+            native.push(
+                rpptx::Section::new(id, name, ids)
+                    .map_err(|error| rpptx_value_to_pyerr(py, error.to_string()))?,
+            );
+        }
+        self.inner
+            .set_sections(native)
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (slide_index, dpi = 150.0))]
+    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None))]
+    fn to_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+
+        py.detach(|| match &font_refs {
+            None => self.inner.to_pdf_deterministic(),
+            Some(fonts) => self.inner.to_pdf_deterministic_with_fonts(fonts),
+        })
+        .map(|bytes| PyBytes::new(py, &bytes))
+        .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None))]
+    fn to_pdf_with_diagnostics<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyTuple>)> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+        let font_refs = font_refs.as_deref().unwrap_or(&[]);
+        let (payload, diagnostics) = py
+            .detach(|| self.inner.to_pdf_with_diagnostics(font_refs))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let messages = PyTuple::new(py, diagnostics.iter().map(|d| d.message.as_str()))?;
+        Ok((PyBytes::new(py, &payload), messages))
+    }
+    #[pyo3(signature = (slide_index, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    #[allow(clippy::too_many_arguments)]
     fn render_slide_to_png<'py>(
         &self,
         py: Python<'py>,
         slide_index: usize,
         dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        py.detach(|| self.inner.slide_png_deterministic(slide_index, dpi))
-            .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
-            .map_err(|error| rpptx_to_pyerr(py, error))
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+
+        py.detach(|| match &font_refs {
+            None => self.inner.slide_png_deterministic(slide_index, dpi),
+            Some(fonts) => self
+                .inner
+                .slide_png_deterministic_with_fonts(slide_index, dpi, fonts),
+        })
+        .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
+        .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (dpi = 150.0))]
-    fn render_all_slides<'py>(&self, py: Python<'py>, dpi: f64) -> PyResult<Bound<'py, PyList>> {
+    #[pyo3(signature = (slide_index, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn render_slide_to_png_with_diagnostics<'py>(
+        &self,
+        py: Python<'py>,
+        slide_index: usize,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<(Option<Bound<'py, PyBytes>>, Bound<'py, PyTuple>)> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+        let font_refs = font_refs.as_deref().unwrap_or(&[]);
+        let (payload, diagnostics) = py
+            .detach(|| {
+                self.inner
+                    .render_slide_to_png_with_diagnostics(slide_index, dpi, font_refs)
+            })
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let messages = PyTuple::new(py, diagnostics.iter().map(|d| d.message.as_str()))?;
+        Ok((payload.map(|bytes| PyBytes::new(py, &bytes)), messages))
+    }
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    fn render_all_slides<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+
         let slides = py
-            .detach(|| self.inner.slide_pngs_deterministic(dpi))
+            .detach(|| match &font_refs {
+                None => self.inner.slide_pngs_deterministic(dpi),
+                Some(fonts) => self.inner.slide_pngs_deterministic_with_fonts(dpi, fonts),
+            })
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyList::new(py, slides.iter().map(|slide| PyBytes::new(py, slide)))
     }
 
-    #[pyo3(signature = (*, width_factor = 1.0))]
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    fn render_all_slides_with_diagnostics<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+        let font_refs = font_refs.as_deref().unwrap_or(&[]);
+        let (payload, diagnostics) = py
+            .detach(|| {
+                self.inner
+                    .render_all_slides_with_diagnostics(dpi, font_refs)
+            })
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let messages = PyTuple::new(py, diagnostics.iter().map(|d| d.message.as_str()))?;
+        Ok((
+            PyList::new(py, payload.iter().map(|bytes| PyBytes::new(py, bytes)))?,
+            messages,
+        ))
+    }
+    #[pyo3(signature = (*, width_factor = 1.0, fonts = None, font_dir = None, font_dirs = None))]
     fn text_layout<'py>(
         &self,
         py: Python<'py>,
         width_factor: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyTuple>> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+
         let frames = py
-            .detach(|| self.inner.text_layout_deterministic(width_factor))
+            .detach(|| match &font_refs {
+                None => self.inner.text_layout_deterministic(width_factor),
+                Some(fonts) => self
+                    .inner
+                    .text_layout_deterministic_with_fonts(width_factor, fonts),
+            })
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyTuple::new(py, frames.iter().map(PyTextFrameLayout::from))
     }
 
-    fn to_notes_pdf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        py.detach(|| self.inner.to_notes_pdf_deterministic())
+    /// Renders slides as PNG or JPEG images, one per slide, or as one
+    /// multi-page TIFF. `slides` picks zero-based slides, all by default.
+    /// `quality` (JPEG, 90 by default) and `transparent` (PNG) raise for
+    /// another format rather than being ignored.
+    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = None, transparent = false, slides = None, fonts = None, font_dir = None, font_dirs = None))]
+    #[allow(clippy::too_many_arguments)] // Preserve the eight public keyword options at this PyO3 boundary.
+    fn render_slides<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        format: &str,
+        quality: Option<i64>,
+        transparent: bool,
+        slides: Option<Vec<usize>>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let format = raster_format(format, quality, transparent)?;
+        let slides = slides.unwrap_or_else(|| (0..self.inner.len()).collect());
+        let files = collect_caller_fonts(py, fonts, font_dir, font_dirs)?.unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|font| (font.family.as_str(), font.data.as_slice()))
+            .collect::<Vec<_>>();
+        let (rendered, _) = py
+            .detach(|| {
+                self.inner.render_slides_with_diagnostics(
+                    &slides,
+                    rpptx::RasterOptions { dpi, format },
+                    &refs,
+                )
+            })
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        match rendered {
+            rpptx::RasterOutput::SeparatePages(pages) => Ok(PyList::new(
+                py,
+                pages.iter().map(|page| PyBytes::new(py, page)),
+            )?
+            .into_any()
+            .unbind()),
+            rpptx::RasterOutput::MultiPageTiff(tiff) => {
+                Ok(PyBytes::new(py, &tiff).into_any().unbind())
+            }
+        }
+    }
+
+    /// Read-only fit facts from the shared native solver, with caller fonts.
+    #[pyo3(signature=(*,fonts=None,font_dir=None,font_dirs=None))]
+    fn fit_report<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<crate::layout::PyFitReport> {
+        let files = collect_caller_fonts(py, fonts, font_dir, font_dirs)?.unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|f| (f.family.as_str(), f.data.as_slice()))
+            .collect::<Vec<_>>();
+        let result = py
+            .detach(|| self.inner.fit_report(&refs))
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        Ok(crate::layout::PyFitReport::from(&result))
+    }
+
+    /// Explicit authoring transaction. Existing content handles keep their paths.
+    #[pyo3(signature=(*,fonts=None,font_dir=None,font_dirs=None))]
+    fn refresh_autofit<'py>(
+        &mut self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<crate::layout::PyAutofitRefreshResult> {
+        let files = collect_caller_fonts(py, fonts, font_dir, font_dirs)?.unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|f| (f.family.as_str(), f.data.as_slice()))
+            .collect::<Vec<_>>();
+        let result = py
+            .detach(|| self.inner.refresh_autofit(&refs))
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        Ok(crate::layout::PyAutofitRefreshResult::from(&result))
+    }
+
+    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None))]
+    fn to_notes_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+
+        py.detach(|| match &font_refs {
+            None => self.inner.to_notes_pdf_deterministic(),
+            Some(fonts) => self.inner.to_notes_pdf_deterministic_with_fonts(fonts),
+        })
+        .map(|bytes| PyBytes::new(py, &bytes))
+        .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    /// Archival PDF from one caller-font bundle with the selected exact profile.
+    #[pyo3(signature = (profile = "pdfa-2b", *, fonts = None, font_dir = None, font_dirs = None))]
+    fn to_pdfa<'py>(
+        &self,
+        py: Python<'py>,
+        profile: &str,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let profile = match profile {
+            "pdfa-2b" => rpptx::PdfConformance::PdfA2b,
+            "pdfa-3b" => rpptx::PdfConformance::PdfA3b,
+            _ => return Err(PyValueError::new_err("profile must be pdfa-2b or pdfa-3b")),
+        };
+        let files = collect_caller_fonts(py, fonts, font_dir, font_dirs)?.unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|font| (font.family.as_str(), font.data.as_slice()))
+            .collect::<Vec<_>>();
+        py.detach(|| self.inner.to_pdfa_deterministic_with_fonts(profile, &refs))
             .map(|bytes| PyBytes::new(py, &bytes))
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (dpi = 150.0))]
-    fn render_all_notes<'py>(&self, py: Python<'py>, dpi: f64) -> PyResult<Bound<'py, PyList>> {
+    /// Audience handout PDF. Legal absent masters use read-only neutral defaults.
+    #[pyo3(signature = (slides_per_page = 6, *, fonts = None, font_dir = None, font_dirs = None))]
+    fn to_handout_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        slides_per_page: u8,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let arrangement = handout_layout(slides_per_page)?;
+        let files = collect_caller_fonts(py, fonts, font_dir, font_dirs)?.unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|font| (font.family.as_str(), font.data.as_slice()))
+            .collect::<Vec<_>>();
+        py.detach(|| {
+            self.inner
+                .to_handout_pdf_deterministic_with_fonts(arrangement, &refs)
+        })
+        .map(|bytes| PyBytes::new(py, &bytes))
+        .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    #[pyo3(signature = (slides_per_page = 6, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    fn render_all_handouts<'py>(
+        &self,
+        py: Python<'py>,
+        slides_per_page: u8,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let arrangement = handout_layout(slides_per_page)?;
+        let files = collect_caller_fonts(py, fonts, font_dir, font_dirs)?.unwrap_or_default();
+        let refs = files
+            .iter()
+            .map(|font| (font.family.as_str(), font.data.as_slice()))
+            .collect::<Vec<_>>();
+        let pages = py
+            .detach(|| {
+                self.inner
+                    .handout_page_pngs_deterministic_with_fonts(arrangement, dpi, &refs)
+            })
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        PyList::new(py, pages.iter().map(|bytes| PyBytes::new(py, bytes)))
+    }
+
+    /// Returns semantic html text. Use export_html for diagnostics and assets.
+    #[pyo3(signature = (*, include_notes = false, skip_hidden = false, inline_images = true))]
+    fn to_html(
+        &self,
+        py: Python<'_>,
+        include_notes: bool,
+        skip_hidden: bool,
+        inline_images: bool,
+    ) -> PyResult<String> {
+        if !inline_images {
+            return Err(PyValueError::new_err(
+                "inline_images=False requires export_html or save_html to retain image assets",
+            ));
+        }
+        let options = rpptx::PresentationTextExportOptions {
+            include_notes,
+            skip_hidden,
+            inline_images,
+        };
+        py.detach(|| self.inner.to_html_with_options(&options))
+            .map(|result| result.text)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    /// Returns detached semantic text, image assets, and diagnostics.
+    #[pyo3(signature = (*, include_notes = false, skip_hidden = false, inline_images = true))]
+    fn export_html(
+        &self,
+        py: Python<'_>,
+        include_notes: bool,
+        skip_hidden: bool,
+        inline_images: bool,
+    ) -> PyResult<PyPresentationTextExport> {
+        let options = rpptx::PresentationTextExportOptions {
+            include_notes,
+            skip_hidden,
+            inline_images,
+        };
+        py.detach(|| self.inner.to_html_with_options(&options))
+            .map(|result| PyPresentationTextExport { result })
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    /// Atomically saves semantic text and adjacent assets, returning diagnostics.
+    #[pyo3(signature = (path, *, include_notes = false, skip_hidden = false, inline_images = false))]
+    fn save_html<'py>(
+        &self,
+        py: Python<'py>,
+        path: PathBuf,
+        include_notes: bool,
+        skip_hidden: bool,
+        inline_images: bool,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let options = rpptx::PresentationTextExportOptions {
+            include_notes,
+            skip_hidden,
+            inline_images,
+        };
+        let diagnostics = py
+            .detach(|| self.inner.save_html(&path, &options))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        PyTuple::new(py, diagnostics)
+    }
+
+    /// Returns semantic markdown text. Use export_markdown for diagnostics and assets.
+    #[pyo3(signature = (*, include_notes = false, skip_hidden = false, inline_images = true))]
+    fn to_markdown(
+        &self,
+        py: Python<'_>,
+        include_notes: bool,
+        skip_hidden: bool,
+        inline_images: bool,
+    ) -> PyResult<String> {
+        if !inline_images {
+            return Err(PyValueError::new_err(
+                "inline_images=False requires export_markdown or save_markdown to retain image assets",
+            ));
+        }
+        let options = rpptx::PresentationTextExportOptions {
+            include_notes,
+            skip_hidden,
+            inline_images,
+        };
+        py.detach(|| self.inner.to_markdown_with_options(&options))
+            .map(|result| result.text)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    /// Returns detached semantic text, image assets, and diagnostics.
+    #[pyo3(signature = (*, include_notes = false, skip_hidden = false, inline_images = true))]
+    fn export_markdown(
+        &self,
+        py: Python<'_>,
+        include_notes: bool,
+        skip_hidden: bool,
+        inline_images: bool,
+    ) -> PyResult<PyPresentationTextExport> {
+        let options = rpptx::PresentationTextExportOptions {
+            include_notes,
+            skip_hidden,
+            inline_images,
+        };
+        py.detach(|| self.inner.to_markdown_with_options(&options))
+            .map(|result| PyPresentationTextExport { result })
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    /// Atomically saves semantic text and adjacent assets, returning diagnostics.
+    #[pyo3(signature = (path, *, include_notes = false, skip_hidden = false, inline_images = false))]
+    fn save_markdown<'py>(
+        &self,
+        py: Python<'py>,
+        path: PathBuf,
+        include_notes: bool,
+        skip_hidden: bool,
+        inline_images: bool,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let options = rpptx::PresentationTextExportOptions {
+            include_notes,
+            skip_hidden,
+            inline_images,
+        };
+        let diagnostics = py
+            .detach(|| self.inner.save_markdown(&path, &options))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        PyTuple::new(py, diagnostics)
+    }
+
+    /// Converts an OpenDocument presentation, from a path or bytes, and
+    /// returns the deck with the `(path, message)` diagnostics of what the
+    /// conversion changed or left out.
+    #[staticmethod]
+    fn from_odp(py: Python<'_>, file: &Bound<'_, PyAny>) -> PyResult<(Self, OdpDiagnostics)> {
+        let result = if let Ok(bytes) = file.extract::<Vec<u8>>()
+            && !file.is_instance_of::<pyo3::types::PyString>()
+        {
+            py.detach(|| rpptx::Presentation::from_odp_bytes(&bytes))
+        } else {
+            let path = file.extract::<PathBuf>()?;
+            py.detach(|| rpptx::Presentation::open_odp(path))
+        }
+        .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let diagnostics = odp_diagnostics(&result.diagnostics);
+        Ok((
+            Self::from_presentation_owned(result.presentation)?,
+            diagnostics,
+        ))
+    }
+
+    /// Serializes the deck as an OpenDocument presentation and returns the
+    /// bytes with the `(path, message)` diagnostics of what was left out.
+    fn to_odp<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyBytes>, OdpDiagnostics)> {
+        let result = py
+            .detach(|| self.inner.to_odp_bytes())
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        Ok((
+            PyBytes::new(py, &result.bytes),
+            odp_diagnostics(&result.diagnostics),
+        ))
+    }
+
+    /// Saves the deck as an OpenDocument presentation and returns the
+    /// `(path, message)` diagnostics of what was left out.
+    fn save_odp(&self, py: Python<'_>, path: PathBuf) -> PyResult<OdpDiagnostics> {
+        py.detach(|| self.inner.save_odp(path))
+            .map(|diagnostics| odp_diagnostics(&diagnostics))
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    fn render_all_notes<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+
         let notes = py
-            .detach(|| self.inner.notes_page_pngs_deterministic(dpi))
+            .detach(|| match &font_refs {
+                None => self.inner.notes_page_pngs_deterministic(dpi),
+                Some(fonts) => self
+                    .inner
+                    .notes_page_pngs_deterministic_with_fonts(dpi, fonts),
+            })
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyList::new(py, notes.iter().map(|page| PyBytes::new(py, page)))
+    }
+
+    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None))]
+    fn to_notes_pdf_with_diagnostics<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyTuple>)> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+        let font_refs = font_refs.as_deref().unwrap_or(&[]);
+        let (payload, diagnostics) = py
+            .detach(|| self.inner.to_notes_pdf_with_diagnostics(font_refs))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let messages = PyTuple::new(py, diagnostics.iter().map(|d| d.message.as_str()))?;
+        Ok((PyBytes::new(py, &payload), messages))
+    }
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None))]
+    fn render_all_notes_with_diagnostics<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+        font_dirs: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
+        let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
+        let font_refs = caller_fonts.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|font| (font.family.as_str(), font.data.as_slice()))
+                .collect::<Vec<_>>()
+        });
+        let font_refs = font_refs.as_deref().unwrap_or(&[]);
+        let (payload, diagnostics) = py
+            .detach(|| self.inner.render_all_notes_with_diagnostics(dpi, font_refs))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let messages = PyTuple::new(py, diagnostics.iter().map(|d| d.message.as_str()))?;
+        Ok((
+            PyList::new(py, payload.iter().map(|bytes| PyBytes::new(py, bytes)))?,
+            messages,
+        ))
     }
 
     /// Replaces literal text in slides and speaker notes and returns the count.
     ///
     /// With `expect`, the replacement runs on a clone, so a count that
     /// differs raises and leaves the presentation and its revision as they
-    /// were. Without it, the staged facade call runs in place. The revision
+    /// were. Both paths prepare owner retirement before publication. The revision
     /// advances once only when something was replaced.
     #[pyo3(signature = (placeholder, replacement, *, expect = None))]
     fn try_replace_text(
@@ -283,30 +1641,75 @@ impl PyPresentation {
         replacement: &str,
         expect: Option<usize>,
     ) -> PyResult<usize> {
-        let count = match expect {
-            None => py
-                .detach(|| self.inner.try_replace_text(placeholder, replacement))
-                .map_err(|error| rpptx_to_pyerr(py, error))?,
-            Some(expected) => {
-                let (candidate, count) = py
-                    .detach(|| {
-                        let mut candidate = self.inner.clone();
-                        candidate
-                            .try_replace_text(placeholder, replacement)
-                            .map(|count| (candidate, count))
-                    })
-                    .map_err(|error| rpptx_to_pyerr(py, error))?;
-                if count != expected {
-                    return Err(replacement_count_to_pyerr(py, placeholder, expected, count));
-                }
-                self.inner = candidate;
-                count
-            }
-        };
-        if count > 0 {
-            self.revisions.bump();
+        self.replace_text_candidate(
+            py,
+            placeholder,
+            replacement,
+            expect,
+            "Presentation.try_replace_text",
+        )
+    }
+
+    /// Applies an ordered counted batch and publishes one owner revision.
+    fn replace_all<'py>(
+        &mut self,
+        py: Python<'py>,
+        pairs: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let mut owned = Vec::new();
+        for (index, pair) in pairs.try_iter()?.enumerate() {
+            let pair = pair?;
+            let parsed = match pair.extract::<(String, String)>() {
+                Ok((old, new)) => (old, new, None),
+                Err(_) => pair.extract::<(String, String, Option<usize>)>().map_err(|_| {
+                    PyTypeError::new_err(format!("pair {index} must be an (old, new) or (old, new, expected) tuple, where expected is a nonnegative int or None"))
+                })?,
+            };
+            owned.push(parsed);
         }
-        Ok(count)
+        let pairs = owned
+            .iter()
+            .map(|(old, new, expected)| (old.as_str(), new.as_str(), *expected))
+            .collect::<Vec<_>>();
+        let mut candidate = self.inner.clone();
+        let counts = py
+            .detach(|| candidate.try_replace_all_expected(&pairs))
+            .map_err(|error| rpptx_to_pyerr(py, error))?
+            .map_err(|mismatch| {
+                let error = replacement_count_to_pyerr(
+                    py,
+                    &mismatch.placeholder,
+                    mismatch.expected,
+                    mismatch.found,
+                );
+                if let Err(attribute_error) = error
+                    .value(py)
+                    .setattr("index", mismatch.index)
+                    .and_then(|()| error.value(py).setattr("placeholder", mismatch.placeholder))
+                {
+                    return attribute_error;
+                }
+                error
+            })?;
+        let result = PyTuple::new(py, counts)?;
+        let changed = py
+            .detach(|| -> rpptx::Result<bool> {
+                Ok(self.inner.to_bytes()? != candidate.to_bytes()?)
+            })
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        if changed {
+            let survivors = self.replaced_text_owners(&candidate)?;
+            let prepared = self.prepare_owners(
+                &candidate,
+                "Presentation.replace_all",
+                &survivors,
+                false,
+                false,
+                false,
+            )?;
+            self.publish_owners(candidate, prepared)?;
+        }
+        Ok(result)
     }
 
     /// Alias for the checked literal replacement operation.
@@ -318,7 +1721,13 @@ impl PyPresentation {
         replacement: &str,
         expect: Option<usize>,
     ) -> PyResult<usize> {
-        self.try_replace_text(py, placeholder, replacement, expect)
+        self.replace_text_candidate(
+            py,
+            placeholder,
+            replacement,
+            expect,
+            "Presentation.replace_text",
+        )
     }
 
     /// Returns every package and PresentationML invariant violation.
@@ -358,6 +1767,46 @@ impl PyPresentation {
         )
     }
 
+    /// Applies selected branding schemes, optionally importing a fresh master graph.
+    #[pyo3(signature = (source, *, source_master=None, import_masters=false, layout_map=None))]
+    fn apply_theme(
+        &mut self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        source_master: Option<usize>,
+        import_masters: bool,
+        layout_map: Option<Vec<(usize, usize)>>,
+    ) -> PyResult<()> {
+        let bytes = if source.is_instance_of::<PyBytes>() {
+            source.extract::<Vec<u8>>()?
+        } else {
+            let path = source.extract::<PathBuf>()?;
+            std::fs::read(path)
+                .map_err(|error| pyo3::exceptions::PyOSError::new_err(error.to_string()))?
+        };
+        let package = rpptx::OpcPackage::from_reader(std::io::Cursor::new(bytes))
+            .map_err(|error| rpptx_to_pyerr(py, error.into()))?;
+        let mut candidate = self.inner.clone();
+        candidate
+            .apply_theme(
+                &package,
+                source_master,
+                import_masters,
+                layout_map.as_deref().unwrap_or(&[]),
+            )
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let proofs = self.unchanged_owners()?;
+        let prepared = self.prepare_owners(
+            &candidate,
+            "Presentation.apply_theme",
+            &proofs,
+            false,
+            import_masters,
+            import_masters,
+        )?;
+        self.publish_owners(candidate, prepared)
+    }
+
     #[pyo3(signature = (*, id, name, user_id, provider_id, initials = None))]
     fn add_comment_author(
         &mut self,
@@ -370,22 +1819,2542 @@ impl PyPresentation {
     ) -> PyResult<()> {
         let author = rpptx::CommentAuthor::new(id, name, initials, user_id, provider_id)
             .map_err(|error| rpptx_value_to_pyerr(py, error.to_string()))?;
-        self.inner
+        let mut candidate = self.inner.clone();
+        candidate
             .add_comment_author(author)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        self.revisions.bump();
+        let survivors = self.unchanged_owners()?;
+        let prepared = self.prepare_owners(
+            &candidate,
+            "Presentation.add_comment_author",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        self.publish_owners(candidate, prepared)?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (slide_number=true, footer=None, date=None, hide_on_title=true, date_format="datetime1", *, date_cache=None))]
+    fn set_header_footer(
+        mut slf: PyRefMut<'_, Self>,
+        slide_number: bool,
+        footer: Option<String>,
+        date: Option<String>,
+        hide_on_title: bool,
+        date_format: &str,
+        date_cache: Option<String>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        let presentation = &mut *slf;
+        let settings = crate::slide::header_footer_settings(
+            slide_number,
+            footer,
+            date,
+            date_format,
+            date_cache,
+        );
+        let mut candidate = presentation.inner.clone();
+        if candidate
+            .set_header_footer(&settings, hide_on_title)
+            .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            let proofs = presentation.footer_owners(&candidate)?;
+            let prepared = presentation.prepare_owners(
+                &candidate,
+                "Presentation.set_header_footer",
+                &proofs,
+                false,
+                false,
+                false,
+            )?;
+            presentation.publish_owners(candidate, prepared)?;
+        }
         Ok(())
     }
 
     #[getter]
+    fn slide_number_start(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        self.inner
+            .slide_number_start()
+            .map_err(|e| rpptx_to_pyerr(py, e))
+    }
+
+    #[setter]
+    fn set_slide_number_start(&mut self, py: Python<'_>, value: Option<u32>) -> PyResult<()> {
+        if self
+            .inner
+            .slide_number_start()
+            .map_err(|e| rpptx_to_pyerr(py, e))?
+            == value
+        {
+            return Ok(());
+        }
+        let mut candidate = self.inner.clone();
+        candidate
+            .set_slide_number_start(value)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let proofs = self.unchanged_owners()?;
+        let prepared = self.prepare_owners(
+            &candidate,
+            "Presentation.slide_number_start",
+            &proofs,
+            false,
+            false,
+            false,
+        )?;
+        self.publish_owners(candidate, prepared)
+    }
+
+    #[getter]
+    fn slide_masters(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideMasterCollection>> {
+        let path = slf
+            .borrow(py)
+            .revisions
+            .capture_scopes(smallvec![], &[slf.borrow(py).masters.clone()])
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        Py::new(py, PySlideMasterCollection::new(slf, path))
+    }
+
+    #[getter]
+    fn slide_master(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideMaster>> {
+        let path = slf
+            .borrow(py)
+            .revisions
+            .capture_scopes(smallvec![], &[slf.borrow(py).masters.clone()])
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        PySlideMasterCollection::new(slf, path).item(py, 0)
+    }
+
+    #[getter]
     fn slide_layouts(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideLayoutCollection>> {
-        let path = slf.borrow(py).revisions.capture(smallvec![]);
+        let path = slf
+            .borrow(py)
+            .revisions
+            .capture_scopes(smallvec![], &[slf.borrow(py).layouts.clone()])
+            .map_err(oxml_py_support::revision_to_pyerr)?;
         Py::new(py, PySlideLayoutCollection::new(slf, path))
     }
 
     #[getter]
     fn slides(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideCollection>> {
-        let path = slf.borrow(py).revisions.capture(smallvec![]);
+        let path = slf.borrow(py).capture_path(smallvec![], None)?;
         Py::new(py, PySlideCollection::new(slf, path))
+    }
+
+    #[getter]
+    fn embedded_fonts(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let fonts = self
+            .inner
+            .embedded_fonts()
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        let mut snapshots = Vec::new();
+        snapshots.try_reserve_exact(fonts.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("font listing allocation failed")
+        })?;
+        let mut bodies = std::collections::BTreeMap::new();
+        for font in fonts {
+            snapshots.push(PyEmbeddedTypeface::snapshot(py, font, &mut bodies)?);
+        }
+        Ok(PyTuple::new(py, snapshots)?.unbind())
+    }
+    #[pyo3(signature = (name, font, kind="regular", *, license))]
+    fn embed_font(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        font: &Bound<'_, PyAny>,
+        kind: &str,
+        license: PyRef<'_, PyFontEmbeddingLicense>,
+    ) -> PyResult<()> {
+        let kind = checked_font_kind(kind)?;
+        let license = checked_font_license(&license)?;
+        let data = if let Ok(value) = font.extract::<PyRef<'_, PyEmbeddedFont>>() {
+            let original = value.license.borrow(py);
+            if original.authorized != license.authorized
+                || original.identity != license.identity
+                || checked_font_kind(value.kind)? != kind
+            {
+                return Err(PyValueError::new_err(
+                    "authored font kind and license must match the embedding request",
+                ));
+            }
+            checked_font_input(value.data.bind(py).as_any())?
+        } else {
+            checked_font_input(font)?
+        };
+        let mut candidate = self.inner.clone();
+        candidate
+            .embed_font(name, rpptx::EmbeddedFont::new(kind, data, license))
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        self.publish_font_candidate(py, candidate, "Presentation.embed_font")
+    }
+    #[pyo3(signature = (name, kind="regular"))]
+    fn remove_embedded_font(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        kind: &str,
+    ) -> PyResult<Option<Py<PyEmbeddedFontFace>>> {
+        let kind = checked_font_kind(kind)?;
+        let mut candidate = self.inner.clone();
+        let removed = candidate
+            .remove_embedded_font(name, kind)
+            .map_err(|e| rpptx_to_pyerr(py, e))?
+            .map(|font| {
+                PyEmbeddedFontFace::snapshot(py, font, &mut std::collections::BTreeMap::new())
+            })
+            .transpose()?;
+        self.publish_font_candidate(py, candidate, "Presentation.remove_embedded_font")?;
+        Ok(removed)
+    }
+    fn remove_font(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+    ) -> PyResult<Option<Py<PyEmbeddedTypeface>>> {
+        let mut candidate = self.inner.clone();
+        let removed = candidate
+            .remove_font(name)
+            .map_err(|e| rpptx_to_pyerr(py, e))?
+            .map(|font| {
+                PyEmbeddedTypeface::snapshot(py, font, &mut std::collections::BTreeMap::new())
+            })
+            .transpose()?;
+        self.publish_font_candidate(py, candidate, "Presentation.remove_font")?;
+        Ok(removed)
+    }
+
+    #[getter]
+    fn embed_true_type_fonts(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.inner
+            .embed_true_type_fonts()
+            .map_err(|e| rpptx_to_pyerr(py, e))
+    }
+    #[setter]
+    fn set_embed_true_type_fonts(&mut self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        let mut candidate = self.inner.clone();
+        candidate
+            .set_embed_true_type_fonts(value)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        self.publish_font_candidate(py, candidate, "Presentation.set_embed_true_type_fonts")
+    }
+    #[getter]
+    fn save_subset_fonts(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.inner
+            .save_subset_fonts()
+            .map_err(|e| rpptx_to_pyerr(py, e))
+    }
+    #[setter]
+    fn set_save_subset_fonts(&mut self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        let mut candidate = self.inner.clone();
+        candidate
+            .set_save_subset_fonts(value)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        self.publish_font_candidate(py, candidate, "Presentation.set_save_subset_fonts")
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PptElementKind {
+    Shape,
+    Table,
+    Cell,
+    TextBody,
+    Paragraph,
+    Run,
+    Slide,
+    Layout,
+    Master,
+}
+
+/// A checked physical XML owner. Snapshots are detached strings, while writes
+/// stage the native package and all owner tokens before one publication.
+#[pyclass(name = "Element", frozen)]
+pub struct PyPptElement {
+    presentation: Py<PyPresentation>,
+    path: oxml_py_support::ContentPath,
+    kind: PptElementKind,
+}
+
+impl PyPptElement {
+    pub(crate) fn new_checked(
+        py: Python<'_>,
+        presentation: Py<PyPresentation>,
+        path: oxml_py_support::ContentPath,
+        kind: PptElementKind,
+    ) -> PyResult<Py<Self>> {
+        let element = Self {
+            presentation,
+            path,
+            kind,
+        };
+        let owner = element.presentation.borrow(py);
+        let path = element.checked_path(py, &owner)?;
+        element.read_xml(py, &owner.inner, &path)?;
+        drop(owner);
+        Py::new(py, element)
+    }
+
+    fn checked_path(
+        &self,
+        py: Python<'_>,
+        owner: &PyPresentation,
+    ) -> PyResult<oxml_py_support::ContentPath> {
+        crate::validate_path(py, owner, &self.path, "Element", ".element")?;
+        let generation = self.path.owner_generation().ok_or_else(|| {
+            pyo3::exceptions::PyNotImplementedError::new_err(
+                "Element requires a physical XML owner",
+            )
+        })?;
+        let actual = owner
+            .owners
+            .iter()
+            .find(|item| item.owner.generation() == generation)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let valid = matches!(
+            (self.kind, &actual.address.physical),
+            (
+                PptElementKind::Shape | PptElementKind::Table,
+                PhysicalOwner::Shape { .. }
+            ) | (PptElementKind::Cell, PhysicalOwner::Cell { .. })
+                | (PptElementKind::TextBody, PhysicalOwner::TextBody { .. })
+                | (PptElementKind::Paragraph, PhysicalOwner::Paragraph { .. })
+                | (PptElementKind::Run, PhysicalOwner::Run { .. })
+                | (PptElementKind::Slide, PhysicalOwner::Slide(_))
+                | (PptElementKind::Layout, PhysicalOwner::Layout(_))
+                | (PptElementKind::Master, PhysicalOwner::Master(_))
+        );
+        if !valid {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "Element is not backed by the requested physical XML owner",
+            ));
+        }
+        owner
+            .current_path(&self.path)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))
+    }
+
+    fn read_xml(
+        &self,
+        py: Python<'_>,
+        inner: &rpptx::Presentation,
+        path: &oxml_py_support::ContentPath,
+    ) -> PyResult<Vec<u8>> {
+        use oxml_py_support::PathSeg;
+        let part = crate::shape::shape_owner(path)?;
+        let shapes = path
+            .segs
+            .iter()
+            .filter_map(|seg| {
+                if let PathSeg::Shape(i) = seg {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let row = path.segs.iter().find_map(|seg| {
+            if let PathSeg::Row(i) = seg {
+                Some(*i)
+            } else {
+                None
+            }
+        });
+        let col = path.segs.iter().find_map(|seg| {
+            if let PathSeg::Cell(i) = seg {
+                Some(*i)
+            } else {
+                None
+            }
+        });
+        let cell = row.zip(col);
+        let paragraph = path
+            .segs
+            .iter()
+            .find_map(|seg| {
+                if let PathSeg::Para(i) = seg {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let run = path
+            .segs
+            .iter()
+            .find_map(|seg| {
+                if let PathSeg::Run(i) = seg {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let result = match self.kind {
+            PptElementKind::Shape => inner.shape_xml_at(part, &shapes),
+            PptElementKind::Table => inner.table_xml_at(part, &shapes),
+            PptElementKind::Cell => {
+                let (r, c) = cell.ok_or_else(|| PyValueError::new_err("cell address is absent"))?;
+                inner.cell_xml_at(part, &shapes, r, c)
+            }
+            PptElementKind::TextBody => inner.text_body_xml_at(part, &shapes, cell),
+            PptElementKind::Paragraph => inner.paragraph_xml_at(part, &shapes, cell, paragraph),
+            PptElementKind::Run => inner.run_xml_at(part, &shapes, cell, paragraph, run),
+            PptElementKind::Slide => {
+                let rpptx::ShapeOwner::Slide(i) = part else {
+                    return Err(PyValueError::new_err("slide address is absent"));
+                };
+                inner.slide_xml(i)
+            }
+            PptElementKind::Layout => {
+                let rpptx::ShapeOwner::Layout(i) = part else {
+                    return Err(PyValueError::new_err("layout address is absent"));
+                };
+                inner.layout_xml(i)
+            }
+            PptElementKind::Master => {
+                let rpptx::ShapeOwner::Master(i) = part else {
+                    return Err(PyValueError::new_err("master address is absent"));
+                };
+                inner.master_xml(i)
+            }
+        };
+        result.map_err(|error| rpptx_to_pyerr(py, error))
+    }
+}
+
+#[pymethods]
+impl PyPptElement {
+    #[getter]
+    fn xml(&self, py: Python<'_>) -> PyResult<String> {
+        let owner = self.presentation.borrow(py);
+        let path = self.checked_path(py, &owner)?;
+        String::from_utf8(self.read_xml(py, &owner.inner, &path)?)
+            .map_err(|_| PyValueError::new_err("physical XML snapshot is not UTF-8"))
+    }
+
+    fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
+        use oxml_py_support::PathSeg;
+        let mut owner = self.presentation.borrow_mut(py);
+        let path = self.checked_path(py, &owner)?;
+        let part = crate::shape::shape_owner(&path)?;
+        let shapes = path
+            .segs
+            .iter()
+            .filter_map(|seg| {
+                if let PathSeg::Shape(i) = seg {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let row = path.segs.iter().find_map(|seg| {
+            if let PathSeg::Row(i) = seg {
+                Some(*i)
+            } else {
+                None
+            }
+        });
+        let col = path.segs.iter().find_map(|seg| {
+            if let PathSeg::Cell(i) = seg {
+                Some(*i)
+            } else {
+                None
+            }
+        });
+        let cell = row.zip(col);
+        let paragraph = path
+            .segs
+            .iter()
+            .find_map(|seg| {
+                if let PathSeg::Para(i) = seg {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let run = path
+            .segs
+            .iter()
+            .find_map(|seg| {
+                if let PathSeg::Run(i) = seg {
+                    Some(*i)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let mut candidate = owner.inner.clone();
+        let result = match self.kind {
+            PptElementKind::Shape => candidate.replace_shape_xml_at(part, &shapes, xml),
+            PptElementKind::Table => candidate.replace_table_xml_at(part, &shapes, xml),
+            PptElementKind::Cell => {
+                let (r, c) = cell.ok_or_else(|| PyValueError::new_err("cell address is absent"))?;
+                candidate.replace_cell_xml_at(part, &shapes, r, c, xml)
+            }
+            PptElementKind::TextBody => {
+                candidate.replace_text_body_xml_at(part, &shapes, cell, xml)
+            }
+            PptElementKind::Paragraph => {
+                candidate.replace_paragraph_xml_at(part, &shapes, cell, paragraph, xml)
+            }
+            PptElementKind::Run => {
+                candidate.replace_run_xml_at(part, &shapes, cell, paragraph, run, xml)
+            }
+            PptElementKind::Slide => {
+                let rpptx::ShapeOwner::Slide(i) = part else {
+                    return Err(PyValueError::new_err("slide address is absent"));
+                };
+                candidate.replace_slide_xml(i, xml)
+            }
+            PptElementKind::Layout => {
+                let rpptx::ShapeOwner::Layout(i) = part else {
+                    return Err(PyValueError::new_err("layout address is absent"));
+                };
+                candidate.replace_layout_xml(i, xml)
+            }
+            PptElementKind::Master => {
+                let rpptx::ShapeOwner::Master(i) = part else {
+                    return Err(PyValueError::new_err("master address is absent"));
+                };
+                candidate.replace_master_xml(i, xml)
+            }
+        };
+        result.map_err(|error| rpptx_to_pyerr(py, error))?;
+        if self.kind == PptElementKind::Shape {
+            let before = crate::shape::native_shape_ref_at(&owner.inner, &path)
+                .is_some_and(|shape| shape.table().is_some());
+            let after = crate::shape::native_shape_ref_at(&candidate, &path)
+                .is_some_and(|shape| shape.table().is_some());
+            if before != after {
+                return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                    "Shape.element.replace_xml does not support changing table payload presence",
+                ));
+            }
+        }
+        let before = owner
+            .inner
+            .to_bytes()
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let after = candidate
+            .to_bytes()
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        if before == after {
+            return Ok(());
+        }
+        let generation = self
+            .path
+            .owner_generation()
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let mut survivors = owner.unchanged_owners()?;
+        survivors.retain_mut(|proof| {
+            let old = owner
+                .owners
+                .iter()
+                .find(|item| item.owner.generation() == proof.generation)
+                .expect("unchanged owner proof");
+            let old_path = if let Some(index) = old.address.layout_index {
+                smallvec![PathSeg::Layout(index)]
+            } else {
+                old.address.path.clone()
+            };
+            if proof.generation == generation {
+                proof.xml_children_changed = self.kind != PptElementKind::Table;
+                proof.text_changed = self.kind != PptElementKind::Run;
+                proof.grid_changed = old.address.table;
+                return true;
+            }
+            if !old_path.starts_with(&path.segs) {
+                return true;
+            }
+            match self.kind {
+                PptElementKind::Run => true,
+                PptElementKind::Paragraph => {
+                    !matches!(old.address.physical, PhysicalOwner::Run { .. })
+                }
+                PptElementKind::TextBody => !matches!(
+                    old.address.physical,
+                    PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+                ),
+                _ => false,
+            }
+        });
+        let prepared = owner.prepare_owners(
+            &candidate,
+            "Element.replace_xml",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        owner.publish_owners(candidate, prepared)
+    }
+}
+
+// Physical addresses are current lookup locations, not lifetime identities.
+#[derive(Clone, Copy)]
+pub(crate) enum SlideOwnerEdit {
+    Insert(usize),
+    InsertMany { at: usize, count: usize },
+    Remove(usize),
+    Move { from: usize, to: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PartIdentity {
+    Slide(u32),
+    Layout(String),
+    Master(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PhysicalOwner {
+    Master(String),
+    Slide(u32),
+    Shape {
+        slide: PartIdentity,
+        id: Option<u32>,
+        kind: rpptx::ShapeKind,
+    },
+    Cell {
+        slide: PartIdentity,
+        table: Option<u32>,
+        row: usize,
+        column: usize,
+    },
+    Layout(String),
+    TextBody {
+        slide: PartIdentity,
+        shape: Option<u32>,
+        cell: Option<(usize, usize)>,
+    },
+    Paragraph {
+        slide: PartIdentity,
+        shape: Option<u32>,
+        cell: Option<(usize, usize)>,
+        index: usize,
+    },
+    Run {
+        slide: PartIdentity,
+        shape: Option<u32>,
+        cell: Option<(usize, usize)>,
+        paragraph: usize,
+        index: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct OwnerAddress {
+    physical: PhysicalOwner,
+    path: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+    layout_index: Option<usize>,
+    table: bool,
+}
+
+#[derive(Clone, Debug)]
+struct LiveOwner {
+    address: OwnerAddress,
+    owner: oxml_py_support::RevisionState,
+    text: oxml_py_support::RevisionState,
+    xml_children: oxml_py_support::RevisionState,
+    grid: Option<oxml_py_support::RevisionState>,
+}
+
+/// An operation's explicit survival proof. Omitted old generations are deleted.
+/// A matching native ID never constructs this proof automatically.
+pub(crate) struct OwnerSurvival {
+    pub(crate) generation: u64,
+    pub(crate) destination: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+    pub(crate) layout_index: Option<usize>,
+    pub(crate) text_changed: bool,
+    pub(crate) xml_children_changed: bool,
+    pub(crate) grid_changed: bool,
+}
+
+pub(crate) struct PreparedOwners {
+    revision: oxml_py_support::PreparedRevision,
+    owners: Vec<LiveOwner>,
+    slides: oxml_py_support::RevisionState,
+    layouts: oxml_py_support::RevisionState,
+    masters: oxml_py_support::RevisionState,
+}
+
+fn owner_addresses(inner: &rpptx::Presentation) -> PyResult<Vec<OwnerAddress>> {
+    use oxml_py_support::PathSeg;
+    fn text_nodes(
+        frame: rpptx::TextFrameRef<'_>,
+        slide: PartIdentity,
+        shape: Option<u32>,
+        cell: Option<(usize, usize)>,
+        path: smallvec::SmallVec<[PathSeg; 5]>,
+        out: &mut Vec<OwnerAddress>,
+    ) -> PyResult<()> {
+        out.try_reserve(1).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("text body owner allocation failed")
+        })?;
+        out.push(OwnerAddress {
+            physical: PhysicalOwner::TextBody {
+                slide: slide.clone(),
+                shape,
+                cell,
+            },
+            path: path.clone(),
+            layout_index: None,
+            table: false,
+        });
+        for index in 0..frame.paragraph_count() {
+            let paragraph = frame
+                .paragraph(index)
+                .ok_or_else(|| PyValueError::new_err("physical paragraph is absent"))?;
+            let mut paragraph_path = path.clone();
+            paragraph_path.try_reserve(1).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("paragraph owner path allocation failed")
+            })?;
+            paragraph_path.push(PathSeg::Para(index));
+            out.try_reserve(1).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("paragraph owner allocation failed")
+            })?;
+            out.push(OwnerAddress {
+                physical: PhysicalOwner::Paragraph {
+                    slide: slide.clone(),
+                    shape,
+                    cell,
+                    index,
+                },
+                path: paragraph_path.clone(),
+                layout_index: None,
+                table: false,
+            });
+            for run in 0..paragraph.run_count() {
+                let mut run_path = paragraph_path.clone();
+                run_path.try_reserve(1).map_err(|_| {
+                    pyo3::exceptions::PyMemoryError::new_err("run owner path allocation failed")
+                })?;
+                run_path.push(PathSeg::Run(run));
+                out.try_reserve(1).map_err(|_| {
+                    pyo3::exceptions::PyMemoryError::new_err("run owner allocation failed")
+                })?;
+                out.push(OwnerAddress {
+                    physical: PhysicalOwner::Run {
+                        slide: slide.clone(),
+                        shape,
+                        cell,
+                        paragraph: index,
+                        index: run,
+                    },
+                    path: run_path,
+                    layout_index: None,
+                    table: false,
+                });
+            }
+        }
+        Ok(())
+    }
+    fn children(
+        shape: rpptx::ShapeRef<'_>,
+        slide: PartIdentity,
+        path: smallvec::SmallVec<[PathSeg; 5]>,
+        out: &mut Vec<OwnerAddress>,
+    ) -> PyResult<()> {
+        // AlternateContent remains an opaque physical owner. Its fallback
+        // children cannot become mutable addresses by traversing this inventory.
+        out.try_reserve(1).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
+        })?;
+        out.push(OwnerAddress {
+            physical: PhysicalOwner::Shape {
+                slide: slide.clone(),
+                id: shape.non_visual_id(),
+                kind: shape.kind(),
+            },
+            path: path.clone(),
+            layout_index: None,
+            table: shape.table().is_some(),
+        });
+        if let Some(frame) = shape.text_frame() {
+            text_nodes(
+                frame,
+                slide.clone(),
+                shape.non_visual_id(),
+                None,
+                path.clone(),
+                out,
+            )?;
+        }
+        if let Some(table) = shape.table() {
+            for row in 0..table.row_count() {
+                for column in 0..table.column_count() {
+                    let Some(cell) = table.cell(row, column) else {
+                        continue;
+                    };
+                    let mut cell_path = path.clone();
+                    cell_path.try_reserve(2).map_err(|_| {
+                        pyo3::exceptions::PyMemoryError::new_err(
+                            "cell owner path allocation failed",
+                        )
+                    })?;
+                    cell_path.extend([PathSeg::Row(row), PathSeg::Cell(column)]);
+                    out.try_reserve(1).map_err(|_| {
+                        pyo3::exceptions::PyMemoryError::new_err("cell inventory allocation failed")
+                    })?;
+                    out.push(OwnerAddress {
+                        physical: PhysicalOwner::Cell {
+                            slide: slide.clone(),
+                            table: shape.non_visual_id(),
+                            row,
+                            column,
+                        },
+                        path: cell_path.clone(),
+                        layout_index: None,
+                        table: false,
+                    });
+                    if let Some(frame) = cell.text_frame() {
+                        text_nodes(
+                            frame,
+                            slide.clone(),
+                            shape.non_visual_id(),
+                            Some((row, column)),
+                            cell_path,
+                            out,
+                        )?;
+                    }
+                }
+            }
+        }
+        if shape.kind() == rpptx::ShapeKind::Group {
+            for (index, child) in shape.children().enumerate() {
+                let mut nested = path.clone();
+                nested.try_reserve(1).map_err(|_| {
+                    pyo3::exceptions::PyMemoryError::new_err("owner path allocation failed")
+                })?;
+                nested.push(PathSeg::Shape(index));
+                children(child, slide.clone(), nested, out)?;
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    for (index, slide) in inner.slides().enumerate() {
+        out.try_reserve(1).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
+        })?;
+        out.push(OwnerAddress {
+            physical: PhysicalOwner::Slide(slide.id()),
+            path: smallvec![PathSeg::Slide(index)],
+            layout_index: None,
+            table: false,
+        });
+        for (shape_index, shape) in slide.shapes().enumerate() {
+            children(
+                shape,
+                PartIdentity::Slide(slide.id()),
+                smallvec![PathSeg::Slide(index), PathSeg::Shape(shape_index)],
+                &mut out,
+            )?;
+        }
+    }
+    for index in 0..inner.layout_count() {
+        // Originating layout parts provide physical ownership independently of order.
+        let part = inner
+            .layout_part_name(index)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("layout owner is absent"))?;
+        out.try_reserve(1).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
+        })?;
+        out.push(OwnerAddress {
+            physical: PhysicalOwner::Layout(part.to_owned()),
+            path: smallvec![],
+            layout_index: Some(index),
+            table: false,
+        });
+    }
+    for index in 0..inner.layout_count() {
+        let part = inner
+            .layout_part_name(index)
+            .expect("layout inventory")
+            .to_owned();
+        for (shape_index, _) in inner
+            .layout(index)
+            .expect("layout inventory")
+            .common_slide_data
+            .shape_tree
+            .children
+            .iter()
+            .enumerate()
+        {
+            children(
+                inner
+                    .part_shape_at(rpptx::ShapeOwner::Layout(index), &[shape_index])
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                PartIdentity::Layout(part.clone()),
+                smallvec![PathSeg::Layout(index), PathSeg::Shape(shape_index)],
+                &mut out,
+            )?;
+        }
+    }
+    for index in 0..inner.master_count() {
+        let part = inner
+            .slide_master_part_name(index)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .ok_or_else(|| PyValueError::new_err("master owner absent"))?;
+        out.try_reserve(1).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("master owner allocation failed")
+        })?;
+        out.push(OwnerAddress {
+            physical: PhysicalOwner::Master(part.clone()),
+            path: smallvec![PathSeg::Master(index)],
+            layout_index: None,
+            table: false,
+        });
+        if let Some(master) = inner.master(index) {
+            for shape_index in 0..master.common_slide_data.shape_tree.children.len() {
+                children(
+                    inner
+                        .part_shape_at(rpptx::ShapeOwner::Master(index), &[shape_index])
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                    PartIdentity::Master(part.clone()),
+                    smallvec![PathSeg::Master(index), PathSeg::Shape(shape_index)],
+                    &mut out,
+                )?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+impl PyPresentation {
+    /// Fallible construction before any Python handles can escape.
+    fn from_presentation_owned(inner: rpptx::Presentation) -> PyResult<Self> {
+        use oxml_py_support::RevisionScope as S;
+        let addresses = owner_addresses(&inner)?;
+        let mut kinds = vec![S::SlideInventory, S::LayoutInventory, S::MasterInventory];
+        for address in &addresses {
+            kinds.try_reserve(4).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("owner scopes allocation failed")
+            })?;
+            kinds.extend([S::Owner, S::Text, S::Text]);
+            if address.table {
+                kinds.push(S::Grid);
+            }
+        }
+        let mut revisions = oxml_py_support::RevisionCounter::new();
+        let mut states = revisions
+            .initialize_scopes(&kinds)
+            .map_err(oxml_py_support::revision_to_pyerr)?
+            .into_iter();
+        let slides = states
+            .next()
+            .expect("three inventory scopes were initialized");
+        let layouts = states
+            .next()
+            .expect("three inventory scopes were initialized");
+        let masters = states
+            .next()
+            .expect("three inventory scopes were initialized");
+        let mut owners = Vec::new();
+        owners.try_reserve_exact(addresses.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
+        })?;
+        for address in addresses {
+            let owner = states.next().expect("owner scope was initialized");
+            let text = states.next().expect("text scope was initialized");
+            let xml_children = states.next().expect("XML child scope was initialized");
+            let grid = address
+                .table
+                .then(|| states.next().expect("table grid scope was initialized"));
+            owners.push(LiveOwner {
+                address,
+                owner,
+                text,
+                xml_children,
+                grid,
+            });
+        }
+        Ok(Self {
+            inner,
+            revisions,
+            owners,
+            gradient_stops: Vec::new(),
+            next_gradient_stop: 0,
+            slides,
+            layouts,
+            masters,
+        })
+    }
+
+    fn owner_at(
+        &self,
+        path: &[oxml_py_support::PathSeg],
+        layout_index: Option<usize>,
+    ) -> Option<&LiveOwner> {
+        self.owners.iter().find(|owner| {
+            owner.address.path.as_slice() == path
+                && owner.address.layout_index == layout_index
+                && !matches!(owner.address.physical, PhysicalOwner::TextBody { .. })
+        })
+    }
+
+    fn body_owner_at(&self, path: &[oxml_py_support::PathSeg]) -> Option<&LiveOwner> {
+        self.owners.iter().find(|owner| {
+            owner.address.path.as_slice() == path
+                && matches!(owner.address.physical, PhysicalOwner::TextBody { .. })
+        })
+    }
+
+    pub(crate) fn current_path(
+        &self,
+        captured: &oxml_py_support::ContentPath,
+    ) -> Option<oxml_py_support::ContentPath> {
+        use oxml_py_support::PathSeg;
+        if !captured.belongs_to(&self.revisions) {
+            return None;
+        }
+        let Some(generation) = captured.owner_generation() else {
+            return Some(captured.clone());
+        };
+        let owner = self
+            .owners
+            .iter()
+            .find(|owner| owner.owner.generation() == generation)?;
+        let mut path = captured.clone();
+        let end = match &owner.address.physical {
+            PhysicalOwner::TextBody { cell, .. } => {
+                let native_path = oxml_py_support::ContentPath::new(
+                    owner.address.path.clone(),
+                    self.revisions.current(),
+                );
+                let shape = crate::shape::native_shape_ref_at(&self.inner, &native_path)?;
+                let exists = match cell {
+                    Some((row, column)) => {
+                        shape.table()?.cell(*row, *column)?.text_frame().is_some()
+                    }
+                    None => shape.text_frame().is_some(),
+                };
+                if !exists {
+                    return None;
+                }
+                captured
+                    .segs
+                    .iter()
+                    .rposition(|seg| matches!(seg, PathSeg::Shape(_) | PathSeg::Cell(_)))?
+            }
+            PhysicalOwner::Paragraph { .. } => captured
+                .segs
+                .iter()
+                .rposition(|seg| matches!(seg, PathSeg::Para(_)))?,
+            PhysicalOwner::Run { .. } => captured
+                .segs
+                .iter()
+                .rposition(|seg| matches!(seg, PathSeg::Run(_)))?,
+            PhysicalOwner::Cell { .. } => captured
+                .segs
+                .iter()
+                .rposition(|seg| matches!(seg, PathSeg::Cell(_)))?,
+            PhysicalOwner::Shape { .. } => captured
+                .segs
+                .iter()
+                .rposition(|seg| matches!(seg, PathSeg::Shape(_)))?,
+            PhysicalOwner::Slide(_) => captured
+                .segs
+                .iter()
+                .position(|seg| matches!(seg, PathSeg::Slide(_)))?,
+            PhysicalOwner::Layout(_) => {
+                if let Some(index) = owner.address.layout_index {
+                    for segment in &mut path.segs {
+                        if let PathSeg::Layout(at) = segment {
+                            *at = index;
+                        }
+                    }
+                }
+                return Some(path);
+            }
+            PhysicalOwner::Master(_) => captured
+                .segs
+                .iter()
+                .position(|seg| matches!(seg, PathSeg::Master(_)))?,
+        };
+        let suffix = captured.segs.iter().skip(end + 1).copied();
+        path.segs = owner.address.path.clone();
+        path.segs.extend(suffix);
+        Some(path)
+    }
+
+    /// ID-based native operations require one qualified current physical owner.
+    /// A parsed duplicate ID remains inspectable but cannot select another shape.
+    pub(crate) fn checked_shape_id(&self, path: &oxml_py_support::ContentPath) -> PyResult<u32> {
+        let current = self
+            .current_path(path)
+            .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err("shape owner is absent"))?;
+        let owner = self.owner_at(&current.segs, None).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("shape is not a modeled mutable owner")
+        })?;
+        let PhysicalOwner::Shape {
+            slide,
+            id: Some(id),
+            kind,
+        } = &owner.address.physical
+        else {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "shape has no qualified id",
+            ));
+        };
+        if *kind == rpptx::ShapeKind::AlternateContent || self.owners.iter().filter(|candidate| {
+            matches!(&candidate.address.physical, PhysicalOwner::Shape { slide: other_slide, id: Some(other_id), .. } if other_slide == slide && other_id == id)
+        }).count() != 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err("shape id is ambiguous or read-only"));
+        }
+        Ok(*id)
+    }
+
+    pub(crate) fn capture_path(
+        &self,
+        segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+        descendants: Option<oxml_py_support::RevisionScope>,
+    ) -> PyResult<oxml_py_support::ContentPath> {
+        self.capture_owner_path(
+            &self.owners,
+            &self.slides,
+            self.revisions.current(),
+            segs,
+            (descendants, false, false),
+        )
+    }
+
+    pub(crate) fn capture_prepared_path(
+        &self,
+        prepared: &PreparedOwners,
+        segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+        descendants: Option<oxml_py_support::RevisionScope>,
+    ) -> PyResult<oxml_py_support::ContentPath> {
+        self.capture_owner_path(
+            &prepared.owners,
+            &prepared.slides,
+            prepared.revision.committed_serial(),
+            segs,
+            (descendants, false, false),
+        )
+    }
+
+    pub(crate) fn capture_text_body_path(
+        &self,
+        segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+        descendants: Option<oxml_py_support::RevisionScope>,
+    ) -> PyResult<oxml_py_support::ContentPath> {
+        self.capture_owner_path(
+            &self.owners,
+            &self.slides,
+            self.revisions.current(),
+            segs,
+            (descendants, true, false),
+        )
+    }
+
+    pub(crate) fn capture_xml_children_path(
+        &self,
+        segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+    ) -> PyResult<oxml_py_support::ContentPath> {
+        self.capture_owner_path(
+            &self.owners,
+            &self.slides,
+            self.revisions.current(),
+            segs,
+            (None, false, true),
+        )
+    }
+
+    fn capture_owner_path(
+        &self,
+        owners: &[LiveOwner],
+        slides: &oxml_py_support::RevisionState,
+        serial: u64,
+        segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
+        selection: (Option<oxml_py_support::RevisionScope>, bool, bool),
+    ) -> PyResult<oxml_py_support::ContentPath> {
+        use oxml_py_support::PathSeg;
+        let (descendants, select_body, xml_children) = selection;
+        let owner_at = |path: &[PathSeg], layout_index: Option<usize>, body: bool| {
+            owners.iter().find(|owner| {
+                owner.address.path.as_slice() == path
+                    && owner.address.layout_index == layout_index
+                    && matches!(owner.address.physical, PhysicalOwner::TextBody { .. }) == body
+            })
+        };
+        if segs.is_empty() {
+            let mut path = self
+                .revisions
+                .capture_scopes(segs, std::slice::from_ref(slides))
+                .map_err(oxml_py_support::revision_to_pyerr)?;
+            path.revision = serial;
+            return Ok(path);
+        }
+        let physical = segs
+            .iter()
+            .filter(|seg| {
+                matches!(
+                    seg,
+                    PathSeg::Slide(_) | PathSeg::Layout(_) | PathSeg::Master(_) | PathSeg::Shape(_)
+                )
+            })
+            .copied()
+            .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
+        let cell = segs.iter().any(|seg| matches!(seg, PathSeg::Row(_)))
+            && segs.iter().any(|seg| matches!(seg, PathSeg::Cell(_)));
+        let styled = segs.iter().any(|seg| matches!(seg, PathSeg::TextStyle(_)));
+        let node = !styled
+            && segs
+                .iter()
+                .any(|seg| matches!(seg, PathSeg::Para(_) | PathSeg::Run(_)));
+        let base = if cell {
+            segs.iter()
+                .filter(|seg| !matches!(seg, PathSeg::Para(_) | PathSeg::Run(_)))
+                .copied()
+                .collect::<smallvec::SmallVec<[PathSeg; 5]>>()
+        } else {
+            physical.clone()
+        };
+        let owner_path = if node { segs.clone() } else { base.clone() };
+        // An absent cell body has one established virtual paragraph view. It
+        // remains bound to the cell, never inventing a physical paragraph.
+        let virtual_cell = cell
+            && node
+            && !select_body
+            && segs.last() == Some(&PathSeg::Para(0))
+            && owner_at(&base, None, true).is_none();
+        let direct = if virtual_cell {
+            owner_at(&base, None, false)
+        } else {
+            match owner_path.as_slice() {
+                [PathSeg::Layout(index)] if !select_body => owner_at(&[], Some(*index), false),
+                _ => owner_at(&owner_path, None, select_body),
+            }
+        };
+        let owner = match direct {
+            Some(owner) => owner,
+            None => {
+                let opaque_parent = !select_body
+                    && owners.iter().any(|owner| {
+                        matches!(
+                            &owner.address.physical,
+                            PhysicalOwner::Shape {
+                                kind: rpptx::ShapeKind::AlternateContent,
+                                ..
+                            }
+                        ) && owner_path.starts_with(&owner.address.path)
+                            && owner_path.len() > owner.address.path.len()
+                    });
+                if opaque_parent && serial == self.revisions.current() {
+                    return Ok(self.revisions.capture(segs));
+                }
+                if select_body {
+                    return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                        "TextFrame.element requires an existing physical text body, not a virtual cell or inherited text-style view",
+                    ));
+                }
+                return Err(pyo3::exceptions::PyIndexError::new_err(
+                    "physical XML owner is absent",
+                ));
+            }
+        };
+        let part_path = physical
+            .first()
+            .copied()
+            .into_iter()
+            .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
+        let part = match part_path.as_slice() {
+            [PathSeg::Layout(index)] => owner_at(&[], Some(*index), false),
+            _ => owner_at(&part_path, None, false),
+        }
+        .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err("part owner is absent"))?;
+        let mut scopes = smallvec::SmallVec::<[oxml_py_support::RevisionState; 4]>::new();
+        scopes.try_reserve(segs.len() + 4).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("captured owner scopes allocation failed")
+        })?;
+        scopes.push(part.owner.clone());
+        let mut prefix = smallvec::SmallVec::<[PathSeg; 5]>::new();
+        prefix.try_reserve(segs.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("captured owner path allocation failed")
+        })?;
+        for segment in &segs {
+            prefix.push(*segment);
+            if matches!(segment, PathSeg::Para(_)) && !styled && !virtual_cell {
+                let body = owner_at(&base, None, true).ok_or_else(|| {
+                    pyo3::exceptions::PyIndexError::new_err("text body owner is absent")
+                })?;
+                if !scopes.iter().any(|state| state.same_state(&body.owner)) {
+                    scopes.push(body.owner.clone());
+                }
+            }
+            if matches!(
+                segment,
+                PathSeg::Shape(_) | PathSeg::Cell(_) | PathSeg::Para(_) | PathSeg::Run(_)
+            ) && !styled
+                && (!matches!(segment, PathSeg::Shape(_)) || prefix == physical)
+                && let Some(ancestor) = owner_at(&prefix, None, false)
+                && !scopes.iter().any(|state| state.same_state(&ancestor.owner))
+            {
+                scopes.push(ancestor.owner.clone());
+            }
+        }
+        if !scopes.iter().any(|state| state.same_state(&owner.owner)) {
+            scopes.push(owner.owner.clone());
+        }
+        if descendants == Some(oxml_py_support::RevisionScope::Grid)
+            || cell
+            || segs.iter().any(|seg| matches!(seg, PathSeg::Row(_)))
+        {
+            let table = owner_at(&physical, None, false)
+                .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err("table owner is absent"))?;
+            scopes.push(
+                table
+                    .grid
+                    .as_ref()
+                    .ok_or_else(|| PyValueError::new_err("owner has no table grid"))?
+                    .clone(),
+            );
+        }
+        if descendants == Some(oxml_py_support::RevisionScope::Text) || virtual_cell || styled {
+            scopes.push(owner.text.clone());
+        }
+        if xml_children || virtual_cell || styled {
+            scopes.push(owner.xml_children.clone());
+        }
+        let mut path = self
+            .revisions
+            .capture_scopes(segs, &scopes)
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        path.revision = serial;
+        Ok(path)
+    }
+
+    pub(crate) fn capture_layout(&self, index: usize) -> PyResult<oxml_py_support::ContentPath> {
+        let owner = self
+            .owner_at(&[], Some(index))
+            .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err("layout owner is absent"))?;
+        self.revisions
+            .capture_scopes(smallvec![], std::slice::from_ref(&owner.owner))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    pub(crate) fn current_layout_index(
+        &self,
+        path: &oxml_py_support::ContentPath,
+    ) -> Option<usize> {
+        let generation = path.owner_generation()?;
+        self.owners
+            .iter()
+            .find(|owner| owner.owner.generation() == generation)?
+            .address
+            .layout_index
+    }
+
+    /// Build a complete candidate inventory, checking all survival proofs.
+    /// It never infers that an ID still names the same incarnation.
+    pub(crate) fn prepare_owners(
+        &self,
+        candidate: &rpptx::Presentation,
+        operation: &'static str,
+        preserved: &[OwnerSurvival],
+        slides_changed: bool,
+        layouts_changed: bool,
+        masters_changed: bool,
+    ) -> PyResult<PreparedOwners> {
+        use oxml_py_support::RevisionScope as S;
+        let next = owner_addresses(candidate)?;
+        let fail = |message: &str| pyo3::exceptions::PyValueError::new_err(message.to_owned());
+        let mut seen = std::collections::HashSet::new();
+        let mut destinations = std::collections::HashSet::new();
+        seen.try_reserve(preserved.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("survival identities allocation failed")
+        })?;
+        destinations.try_reserve(preserved.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("survival destinations allocation failed")
+        })?;
+        let mut retained = Vec::new();
+        retained.try_reserve_exact(preserved.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("survival proof allocation failed")
+        })?;
+        for proof in preserved {
+            if !seen.insert(proof.generation) {
+                return Err(fail("duplicate owner survival proof"));
+            }
+            let old = self
+                .owners
+                .iter()
+                .find(|owner| owner.owner.generation() == proof.generation)
+                .ok_or_else(|| fail("survival proof has no current owner"))?;
+            let index = next
+                .iter()
+                .position(|address| {
+                    address.path == proof.destination
+                        && address.layout_index == proof.layout_index
+                        && std::mem::discriminant(&address.physical)
+                            == std::mem::discriminant(&old.address.physical)
+                })
+                .ok_or_else(|| fail("survival destination is absent"))?;
+            if !destinations.insert(index) {
+                return Err(fail("two owners claim one destination"));
+            }
+            if old.address.physical != next[index].physical
+                || old.address.table != next[index].table
+            {
+                return Err(fail("survival proof changes physical owner identity"));
+            }
+            retained.push((index, old, proof));
+        }
+        let structural = next.len() != self.owners.len()
+            || retained.iter().any(|(_, old, proof)| {
+                old.address.path != proof.destination
+                    || old.address.layout_index != proof.layout_index
+            });
+        if structural {
+            // A mutation cannot disambiguate imported missing/duplicate IDs by
+            // merely finding the same number again in a candidate tree.
+            for (_, old, _) in &retained {
+                if let PhysicalOwner::Shape { slide, id, kind } = &old.address.physical {
+                    if *kind == rpptx::ShapeKind::AlternateContent {
+                        continue;
+                    }
+                    let Some(id) = id else {
+                        return Err(fail("structural owner proof requires a shape id"));
+                    };
+                    let original_count = self.owners.iter().filter(|owner| matches!(&owner.address.physical,
+                        PhysicalOwner::Shape { slide: at, id: Some(value), .. } if at == slide && value == id)).count();
+                    let candidate_count = next.iter().filter(|address| matches!(&address.physical,
+                        PhysicalOwner::Shape { slide: at, id: Some(value), .. } if at == slide && value == id)).count();
+                    if original_count != 1 || candidate_count != 1 {
+                        return Err(fail("structural owner proof has an ambiguous shape id"));
+                    }
+                }
+            }
+        }
+        let mut affected = Vec::new();
+        let mut replacements = Vec::new();
+        let mut xml_replacements = Vec::new();
+        xml_replacements
+            .try_reserve_exact(preserved.len())
+            .map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("XML child replacements allocation failed")
+            })?;
+        let affected_capacity = self
+            .owners
+            .len()
+            .checked_mul(4)
+            .and_then(|count| count.checked_add(3))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("owner retirement count overflow")
+            })?;
+        affected.try_reserve_exact(affected_capacity).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner retirement allocation failed")
+        })?;
+        replacements
+            .try_reserve_exact(preserved.len().checked_mul(2).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("owner replacement count overflow")
+            })?)
+            .map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("owner replacements allocation failed")
+            })?;
+        for old in &self.owners {
+            if !seen.contains(&old.owner.generation()) {
+                affected.push(old.owner.clone());
+                affected.push(old.text.clone());
+                affected.push(old.xml_children.clone());
+                if let Some(grid) = &old.grid {
+                    affected.push(grid.clone());
+                }
+            }
+        }
+        for (index, old, proof) in &retained {
+            if proof.xml_children_changed {
+                xml_replacements.push((*index, affected.len()));
+                affected.push(old.xml_children.clone());
+            }
+            if proof.text_changed {
+                replacements.push((*index, S::Text, affected.len()));
+                affected.push(old.text.clone());
+            }
+            if proof.grid_changed {
+                replacements.push((*index, S::Grid, affected.len()));
+                affected.push(
+                    old.grid
+                        .as_ref()
+                        .ok_or_else(|| fail("grid change on non-table"))?
+                        .clone(),
+                );
+            }
+        }
+        let slides_at = slides_changed.then(|| {
+            let index = affected.len();
+            affected.push(self.slides.clone());
+            index
+        });
+        let layouts_at = layouts_changed.then(|| {
+            let index = affected.len();
+            affected.push(self.layouts.clone());
+            index
+        });
+        let masters_at = masters_changed.then(|| {
+            let index = affected.len();
+            affected.push(self.masters.clone());
+            index
+        });
+        let mut births = Vec::new();
+        let mut birth_offsets = Vec::new();
+        births
+            .try_reserve_exact(next.len().checked_mul(4).ok_or_else(|| {
+                pyo3::exceptions::PyOverflowError::new_err("owner birth count overflow")
+            })?)
+            .map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("owner births allocation failed")
+            })?;
+        birth_offsets.try_reserve_exact(next.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner birth offsets allocation failed")
+        })?;
+        for (index, address) in next.iter().enumerate() {
+            if !destinations.contains(&index) {
+                birth_offsets.push((index, births.len()));
+                births.extend([S::Owner, S::Text, S::Text]);
+                if address.table {
+                    births.push(S::Grid);
+                }
+            }
+        }
+        let revision = self
+            .revisions
+            .prepare_scopes(operation, &affected, &births)
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        let mut owners = Vec::new();
+        owners.try_reserve_exact(next.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("candidate owner inventory allocation failed")
+        })?;
+        for (index, address) in next.into_iter().enumerate() {
+            if let Some((_, old, _)) = retained.iter().find(|(at, _, _)| *at == index) {
+                let mut owner = (**old).clone();
+                owner.address = address;
+                for (_, scope, at) in replacements.iter().filter(|(at, _, _)| *at == index) {
+                    let successor = revision
+                        .successor(*at)
+                        .expect("affected scope successor exists");
+                    match scope {
+                        S::Text => owner.text = successor,
+                        S::Grid => owner.grid = Some(successor),
+                        _ => unreachable!(),
+                    }
+                }
+                if let Some((_, at)) = xml_replacements.iter().find(|(at, _)| *at == index) {
+                    owner.xml_children =
+                        revision.successor(*at).expect("XML child successor exists");
+                }
+                owners.push(owner);
+            } else {
+                let start = birth_offsets
+                    .iter()
+                    .find(|(at, _)| *at == index)
+                    .expect("every unclaimed address has birth scopes")
+                    .1;
+                let grid = address
+                    .table
+                    .then(|| revision.born(start + 3).expect("table birth exists"));
+                owners.push(LiveOwner {
+                    address,
+                    owner: revision.born(start).expect("owner birth exists"),
+                    text: revision.born(start + 1).expect("text birth exists"),
+                    xml_children: revision.born(start + 2).expect("XML child birth exists"),
+                    grid,
+                });
+            }
+        }
+        let slides = slides_at.map_or_else(
+            || self.slides.clone(),
+            |at| revision.successor(at).expect("inventory successor exists"),
+        );
+        let layouts = layouts_at.map_or_else(
+            || self.layouts.clone(),
+            |at| revision.successor(at).expect("inventory successor exists"),
+        );
+        let masters = masters_at.map_or_else(
+            || self.masters.clone(),
+            |at| revision.successor(at).expect("inventory successor exists"),
+        );
+        Ok(PreparedOwners {
+            revision,
+            owners,
+            slides,
+            layouts,
+            masters,
+        })
+    }
+
+    /// No fallible action or Python allocation follows successful token commit.
+    pub(crate) fn publish_owners(
+        &mut self,
+        candidate: rpptx::Presentation,
+        prepared: PreparedOwners,
+    ) -> PyResult<()> {
+        self.revisions
+            .commit_scopes(prepared.revision)
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        self.inner = candidate;
+        self.owners = prepared.owners;
+        self.slides = prepared.slides;
+        self.layouts = prepared.layouts;
+        self.masters = prepared.masters;
+        Ok(())
+    }
+}
+
+// Existing presentation.rs helpers. No current-owner history is retained.
+impl PyPresentation {
+    fn replace_text_candidate(
+        &mut self,
+        py: Python<'_>,
+        placeholder: &str,
+        replacement: &str,
+        expect: Option<usize>,
+        operation: &'static str,
+    ) -> PyResult<usize> {
+        let mut candidate = self.inner.clone();
+        let count = py
+            .detach(|| candidate.try_replace_text(placeholder, replacement))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        if let Some(expected) = expect.filter(|expected| *expected != count) {
+            return Err(replacement_count_to_pyerr(py, placeholder, expected, count));
+        }
+        if count > 0 {
+            let survivors = self.replaced_text_owners(&candidate)?;
+            let prepared =
+                self.prepare_owners(&candidate, operation, &survivors, false, false, false)?;
+            self.publish_owners(candidate, prepared)?;
+        }
+        Ok(count)
+    }
+
+    /// Footer staging only removes owned footer shapes, appends fresh copies,
+    /// and preserves every surviving physical identity. Match that explicit
+    /// native guarantee and compare complete text owners before publication.
+    pub(crate) fn footer_owners(
+        &self,
+        candidate: &rpptx::Presentation,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::ContentPath;
+        let next = owner_addresses(candidate)?;
+        let mut proofs = Vec::new();
+        proofs.try_reserve_exact(self.owners.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("footer owner allocation failed")
+        })?;
+        let mut changed_bodies: Vec<&[oxml_py_support::PathSeg]> = Vec::new();
+        changed_bodies.try_reserve(self.owners.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("footer text inventory allocation failed")
+        })?;
+        for old in &self.owners {
+            // The native footer provider retains the body but replaces its
+            // text children. Earlier nodes do not survive by ordinal.
+            if matches!(
+                old.address.physical,
+                PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+            ) && changed_bodies
+                .iter()
+                .any(|base| old.address.path.starts_with(base))
+            {
+                continue;
+            }
+            let matching = next
+                .iter()
+                .filter(|address| address.physical == old.address.physical)
+                .collect::<Vec<_>>();
+            let [after] = matching.as_slice() else {
+                if matching.is_empty() {
+                    continue;
+                }
+                return Err(PyValueError::new_err("footer owner identity is ambiguous"));
+            };
+            let before_path = ContentPath::new(old.address.path.clone(), self.revisions.current());
+            let after_path = ContentPath::new(after.path.clone(), self.revisions.current());
+            let text_changed = match &old.address.physical {
+                PhysicalOwner::Shape { .. } => {
+                    crate::shape::native_shape_ref_at(&self.inner, &before_path)
+                        .and_then(|shape| shape.text_frame())
+                        != crate::shape::native_shape_ref_at(candidate, &after_path)
+                            .and_then(|shape| shape.text_frame())
+                }
+                PhysicalOwner::TextBody { cell, .. } => {
+                    let frame = |inner, path| {
+                        let shape = crate::shape::native_shape_ref_at(inner, path)?;
+                        match cell {
+                            Some((row, col)) => shape.table()?.cell(*row, *col)?.text_frame(),
+                            None => shape.text_frame(),
+                        }
+                    };
+                    frame(&self.inner, &before_path) != frame(candidate, &after_path)
+                }
+                // Footer publication does not change notes or any table cell.
+                PhysicalOwner::Slide(_)
+                | PhysicalOwner::Cell { .. }
+                | PhysicalOwner::Layout(_)
+                | PhysicalOwner::Master(_)
+                | PhysicalOwner::Paragraph { .. }
+                | PhysicalOwner::Run { .. } => false,
+            };
+            if text_changed && matches!(old.address.physical, PhysicalOwner::TextBody { .. }) {
+                changed_bodies.push(old.address.path.as_slice());
+            }
+            proofs.push(OwnerSurvival {
+                generation: old.owner.generation(),
+                destination: after.path.clone(),
+                layout_index: after.layout_index,
+                text_changed,
+                xml_children_changed: false,
+                grid_changed: false,
+            });
+        }
+        Ok(proofs)
+    }
+
+    pub(crate) fn unchanged_owners(&self) -> PyResult<Vec<OwnerSurvival>> {
+        let mut proofs = Vec::new();
+        proofs.try_reserve_exact(self.owners.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner proofs allocation failed")
+        })?;
+        proofs.extend(self.owners.iter().map(|owner| OwnerSurvival {
+            generation: owner.owner.generation(),
+            destination: owner.address.path.clone(),
+            layout_index: owner.address.layout_index,
+            text_changed: false,
+            xml_children_changed: false,
+            grid_changed: false,
+        }));
+        Ok(proofs)
+    }
+
+    /// Retires one removed layout and its descendants, preserving exact surviving part owners.
+    pub(crate) fn removed_layout_owners(&self, removed: usize) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let mut proofs = self.unchanged_owners()?;
+        proofs.retain(|proof| proof.layout_index != Some(removed)
+            && !matches!(proof.destination.first(), Some(PathSeg::Layout(index)) if *index == removed));
+        for proof in &mut proofs {
+            if let Some(index) = &mut proof.layout_index
+                && *index > removed
+            {
+                *index -= 1;
+            }
+            if let Some(PathSeg::Layout(index)) = proof.destination.first_mut()
+                && *index > removed
+            {
+                *index -= 1;
+            }
+        }
+        Ok(proofs)
+    }
+
+    /// Remap exactly one existing sibling ordinal. The operation must use this
+    /// same permutation on its staged native tree before preparing publication.
+    pub(crate) fn moved_shape_owners(
+        &self,
+        parent: &[oxml_py_support::PathSeg],
+        from: usize,
+        to: usize,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let mut proofs = self.unchanged_owners()?;
+        for proof in &mut proofs {
+            if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
+                continue;
+            }
+            let Some(PathSeg::Shape(index)) = proof.destination.get_mut(parent.len()) else {
+                continue;
+            };
+            *index = if *index == from {
+                to
+            } else if from < to && *index > from && *index <= to {
+                *index - 1
+            } else if to < from && *index >= to && *index < from {
+                *index + 1
+            } else {
+                *index
+            };
+        }
+        Ok(proofs)
+    }
+
+    pub(crate) fn removed_shape_owners(
+        &self,
+        parent: &[oxml_py_support::PathSeg],
+        removed: usize,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let mut proofs = self.unchanged_owners()?;
+        proofs.retain_mut(|proof| {
+            if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
+                return true;
+            }
+            let Some(PathSeg::Shape(index)) = proof.destination.get_mut(parent.len()) else {
+                return true;
+            };
+            if *index == removed {
+                return false;
+            }
+            if *index > removed {
+                *index -= 1;
+            }
+            true
+        });
+        Ok(proofs)
+    }
+
+    /// Apply the same explicit ordinal operation to every surviving physical
+    /// slide descendant. Removed members never contribute a survival proof.
+    pub(crate) fn slide_owner_edit(&self, edit: SlideOwnerEdit) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let mut proofs = self.unchanged_owners()?;
+        proofs.retain_mut(|proof| {
+            let Some(PathSeg::Slide(index)) = proof.destination.first_mut() else {
+                return true;
+            };
+            match edit {
+                SlideOwnerEdit::Insert(at) => {
+                    if *index >= at {
+                        *index += 1;
+                    }
+                }
+                SlideOwnerEdit::InsertMany { at, count } => {
+                    if *index >= at {
+                        *index = index
+                            .checked_add(count)
+                            .expect("native slide count was checked");
+                    }
+                }
+                SlideOwnerEdit::Remove(at) => {
+                    if *index == at {
+                        return false;
+                    }
+                    if *index > at {
+                        *index -= 1;
+                    }
+                }
+                SlideOwnerEdit::Move { from, to } => {
+                    *index = if *index == from {
+                        to
+                    } else if from < to && *index > from && *index <= to {
+                        *index - 1
+                    } else if to < from && *index >= to && *index < from {
+                        *index + 1
+                    } else {
+                        *index
+                    };
+                }
+            }
+            true
+        });
+        Ok(proofs)
+    }
+
+    /// Literal edits preserve bodies but retire the actual old text nodes in
+    /// each changed body. Matching ordinals are not survival evidence.
+    pub(crate) fn replaced_text_owners(
+        &self,
+        candidate: &rpptx::Presentation,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::ContentPath;
+        let mut changed = Vec::new();
+        changed.try_reserve(self.owners.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("changed text inventory allocation failed")
+        })?;
+        let mut proofs = self.unchanged_owners()?;
+        for (owner, proof) in self.owners.iter().zip(&mut proofs) {
+            let path = ContentPath::new(owner.address.path.clone(), self.revisions.current());
+            proof.text_changed = match &owner.address.physical {
+                PhysicalOwner::Slide(_) => {
+                    let index = crate::shape::slide_index(&path)?;
+                    match (self.inner.slide(index), candidate.slide(index)) {
+                        (Some(before), Some(after)) => !before.notes_text_matches(&after),
+                        (None, None) => false,
+                        _ => true,
+                    }
+                }
+                PhysicalOwner::TextBody { cell, .. } => {
+                    let frame = |inner| {
+                        let shape = crate::shape::native_shape_ref_at(inner, &path)?;
+                        match cell {
+                            Some((row, col)) => shape.table()?.cell(*row, *col)?.text_frame(),
+                            None => shape.text_frame(),
+                        }
+                    };
+                    frame(&self.inner) != frame(candidate)
+                }
+                _ => false,
+            };
+            if proof.text_changed
+                && matches!(owner.address.physical, PhysicalOwner::TextBody { .. })
+            {
+                changed.push(owner.address.path.as_slice());
+            }
+        }
+        proofs.retain(|proof| {
+            let owner = self
+                .owners
+                .iter()
+                .find(|owner| owner.owner.generation() == proof.generation)
+                .expect("unchanged owner proof");
+            !matches!(
+                owner.address.physical,
+                PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+            ) || !changed
+                .iter()
+                .any(|base| owner.address.path.starts_with(base))
+        });
+        Ok(proofs)
+    }
+
+    pub(crate) fn cell_text_owners(
+        &self,
+        path: &oxml_py_support::ContentPath,
+        first_row: usize,
+        last_row: usize,
+        first_column: usize,
+        last_column: usize,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let table_path = path
+            .segs
+            .iter()
+            .filter(|seg| {
+                matches!(
+                    seg,
+                    PathSeg::Slide(_) | PathSeg::Layout(_) | PathSeg::Master(_) | PathSeg::Shape(_)
+                )
+            })
+            .copied()
+            .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
+        let mut proofs = self.unchanged_owners()?;
+        proofs.retain_mut(|proof| {
+            let owner = self
+                .owners
+                .iter()
+                .find(|owner| owner.owner.generation() == proof.generation)
+                .expect("unchanged owner proof");
+            if owner.address.layout_index.is_some() || !owner.address.path.starts_with(&table_path)
+            {
+                return true;
+            }
+            let cell = match owner.address.physical {
+                PhysicalOwner::Cell { row, column, .. } => Some((row, column)),
+                PhysicalOwner::TextBody { cell, .. }
+                | PhysicalOwner::Paragraph { cell, .. }
+                | PhysicalOwner::Run { cell, .. } => cell,
+                _ => None,
+            };
+            let affected = cell.is_some_and(|(row, column)| {
+                row >= first_row
+                    && row <= last_row
+                    && column >= first_column
+                    && column <= last_column
+            });
+            if affected
+                && matches!(
+                    owner.address.physical,
+                    PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+                )
+            {
+                return false;
+            }
+            proof.text_changed = affected;
+            true
+        });
+        Ok(proofs)
+    }
+
+    /// Preserve the existing append contract: the body survives, while
+    /// prior paragraph/run views retire on collection topology changes.
+    pub(crate) fn appended_text_owners(
+        &self,
+        path: &oxml_py_support::ContentPath,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        let generation = path
+            .owner_generation()
+            .ok_or_else(|| PyValueError::new_err("text append needs a bound owner"))?;
+        let selected = self
+            .owners
+            .iter()
+            .find(|owner| owner.owner.generation() == generation)
+            .ok_or_else(|| PyValueError::new_err("text append owner is absent"))?;
+        let base = &selected.address.path;
+        let mut proofs = self.unchanged_owners()?;
+        proofs.retain_mut(|proof| {
+            let old = self
+                .owners
+                .iter()
+                .find(|owner| owner.owner.generation() == proof.generation)
+                .expect("unchanged owner proof");
+            if matches!(
+                old.address.physical,
+                PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+            ) && old.address.path.starts_with(base)
+            {
+                return false;
+            }
+            if proof.generation == generation {
+                proof.text_changed = true;
+            }
+            true
+        });
+        Ok(proofs)
+    }
+
+    /// Text replacement retains its physical paragraph and body ancestors,
+    /// while the replaced runs and whole-body paragraph descendants retire.
+    pub(crate) fn text_changed_owners(
+        &self,
+        path: &oxml_py_support::ContentPath,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let current = self
+            .current_path(path)
+            .ok_or_else(|| PyValueError::new_err("text mutation owner is absent"))?;
+        let generation = path
+            .owner_generation()
+            .ok_or_else(|| PyValueError::new_err("text mutation needs a bound owner"))?;
+        let paragraph = current
+            .segs
+            .iter()
+            .any(|seg| matches!(seg, PathSeg::Para(_)));
+        let base = current
+            .segs
+            .iter()
+            .filter(|seg| !matches!(seg, PathSeg::Para(_) | PathSeg::Run(_)))
+            .copied()
+            .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
+        let body = self
+            .body_owner_at(&base)
+            .map(|owner| owner.owner.generation());
+        let mut proofs = self.unchanged_owners()?;
+        // The slide scalar setter edits only the notes part. Slide body
+        // owners are unrelated and cannot be retired by that operation.
+        if self.owners.iter().any(|owner| {
+            owner.owner.generation() == generation
+                && matches!(owner.address.physical, PhysicalOwner::Slide(_))
+        }) {
+            proofs
+                .iter_mut()
+                .find(|proof| proof.generation == generation)
+                .expect("unchanged slide proof")
+                .text_changed = true;
+            return Ok(proofs);
+        }
+
+        proofs.retain_mut(|proof| {
+            let old = self
+                .owners
+                .iter()
+                .find(|owner| owner.owner.generation() == proof.generation)
+                .expect("unchanged owner proof");
+            let removed = if paragraph {
+                matches!(old.address.physical, PhysicalOwner::Run { .. })
+                    && old.address.path.starts_with(&current.segs)
+            } else {
+                matches!(
+                    old.address.physical,
+                    PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+                ) && old.address.path.starts_with(&base)
+            };
+            if removed {
+                return false;
+            }
+            if proof.generation == generation || !paragraph && Some(proof.generation) == body {
+                proof.text_changed = true;
+            }
+            true
+        });
+        Ok(proofs)
+    }
+
+    pub(crate) fn grid_changed_owners(
+        &self,
+        path: &oxml_py_support::ContentPath,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let current = self
+            .current_path(path)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("grid owner is absent"))?;
+        let table_path = current
+            .segs
+            .iter()
+            .filter(|seg| {
+                matches!(
+                    seg,
+                    PathSeg::Slide(_) | PathSeg::Layout(_) | PathSeg::Master(_) | PathSeg::Shape(_)
+                )
+            })
+            .copied()
+            .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
+        let table = self
+            .owner_at(&table_path, None)
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("table owner is absent"))?;
+        let mut proofs = self.unchanged_owners()?;
+        // Every old physical cell retires on grid restructure. The table
+        // survives with a fresh grid generation, and new cells get births.
+        proofs.retain(|proof| {
+            !(proof.destination.starts_with(&table_path)
+                && proof
+                    .destination
+                    .get(table_path.len())
+                    .is_some_and(|seg| matches!(seg, PathSeg::Row(_))))
+        });
+        proofs
+            .iter_mut()
+            .find(|proof| proof.generation == table.owner.generation())
+            .expect("table inventory supplied survival proof")
+            .grid_changed = true;
+        Ok(proofs)
+    }
+}
+
+// Replacement of existing shape.rs move_shape body AFTER range validation.
+// Concrete source insertion, not a forwarding wrapper.
+// let parent = smallvec![PathSeg::Slide(slide_index)];
+// let mut presentation = self.presentation.borrow_mut(py);
+// let mut candidate = presentation.inner.clone();
+// candidate.move_shape(slide_index, from_, to).map_err(|e| rpptx_to_pyerr(py, e))?;
+// let proofs = presentation.moved_shape_owners(&parent, from_, to)?;
+// let prepared = presentation.prepare_owners(&candidate, "ShapeCollection.move", &proofs, false, false, false)?;
+// presentation.publish_owners(candidate, prepared)
+// Preserve the existing native no-op definition for from_==to before serial prep.
+
+// Removal cannot use remove_shape alone as final acceptance. It must first
+// detach incoming endpoints and preserve their last resolved geometry in this
+// SAME candidate. The final authored removal method returns only after both
+// detachment and native structural removal succeed. The owner proof excludes
+// the removed subtree and shifts surviving ordinals. Publication is one serial.
+
+// Candidate additions inside existing presentation.rs impl, not a new module.
+impl PyPresentation {
+    pub(crate) fn grouped_shape_owners(
+        &self,
+        parent: &[oxml_py_support::PathSeg],
+        start: usize,
+        count: usize,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let end = start
+            .checked_add(count)
+            .ok_or_else(|| pyo3::exceptions::PyOverflowError::new_err("group range overflow"))?;
+        if count == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "empty group selection",
+            ));
+        }
+        let mut proofs = self.unchanged_owners()?;
+        for proof in &mut proofs {
+            if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
+                continue;
+            }
+            let Some(PathSeg::Shape(index)) = proof.destination.get(parent.len()).copied() else {
+                continue;
+            };
+            if index >= start && index < end {
+                proof.destination.try_reserve(1).map_err(|_| {
+                    pyo3::exceptions::PyMemoryError::new_err("group path allocation failed")
+                })?;
+                proof.destination[parent.len()] = PathSeg::Shape(start);
+                proof
+                    .destination
+                    .insert(parent.len() + 1, PathSeg::Shape(index - start));
+            } else if index >= end {
+                proof.destination[parent.len()] = PathSeg::Shape(index - (count - 1));
+            }
+        }
+        Ok(proofs)
+    }
+    pub(crate) fn ungrouped_shape_owners(
+        &self,
+        parent: &[oxml_py_support::PathSeg],
+        index: usize,
+        count: usize,
+    ) -> PyResult<Vec<OwnerSurvival>> {
+        use oxml_py_support::PathSeg;
+        let mut proofs = self.unchanged_owners()?;
+        proofs.retain(|proof| {
+            !(proof.destination.starts_with(parent)
+                && proof.destination.len() == parent.len() + 1
+                && proof.destination[parent.len()] == PathSeg::Shape(index))
+        });
+        for proof in &mut proofs {
+            if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
+                continue;
+            }
+            let Some(PathSeg::Shape(at)) = proof.destination.get(parent.len()).copied() else {
+                continue;
+            };
+            if at == index {
+                let Some(PathSeg::Shape(child)) = proof.destination.get(parent.len() + 1).copied()
+                else {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "invalid group child proof",
+                    ));
+                };
+                if child >= count {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "group child proof out of range",
+                    ));
+                }
+                proof.destination[parent.len()] =
+                    PathSeg::Shape(index.checked_add(child).ok_or_else(|| {
+                        pyo3::exceptions::PyOverflowError::new_err("ungroup index overflow")
+                    })?);
+                proof.destination.remove(parent.len() + 1);
+            } else if at > index {
+                proof.destination[parent.len()] = PathSeg::Shape(
+                    at.checked_sub(1)
+                        .and_then(|v| v.checked_add(count))
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyOverflowError::new_err("ungroup index overflow")
+                        })?,
+                );
+            }
+        }
+        Ok(proofs)
+    }
+}
+
+pub(crate) fn collect_caller_fonts<'py>(
+    py: Python<'py>,
+    fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+    font_dir: Option<PathBuf>,
+    font_dirs: Option<Bound<'py, PyAny>>,
+) -> PyResult<Option<Vec<oxml_layout::FontFile>>> {
+    if fonts.is_none() && font_dir.is_none() && font_dirs.is_none() {
+        return Ok(None);
+    }
+    if font_dir.is_some() && font_dirs.is_some() {
+        return Err(PyValueError::new_err(
+            "font_dir and font_dirs cannot be supplied together",
+        ));
+    }
+    let explicit = fonts
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(family, data)| oxml_layout::FontFile {
+            family,
+            data: data.as_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let directories = match font_dirs {
+        Some(paths) => {
+            if paths.is_instance_of::<PyString>() || paths.is_instance_of::<PyBytes>() {
+                return Err(PyTypeError::new_err(
+                    "font_dirs must be a sequence of paths, not a scalar string or bytes",
+                ));
+            }
+            paths
+                .extract::<Vec<PathBuf>>()
+                .map_err(|_| PyTypeError::new_err("font_dirs must be a sequence of paths"))?
+        }
+        None => font_dir.into_iter().collect(),
+    };
+    py.detach(|| {
+        for directory in &directories {
+            let metadata = std::fs::metadata(directory).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("font directory {}: {error}", directory.display()),
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("font directory {} is not a directory", directory.display()),
+                ));
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .map_err(PyErr::from)?;
+    let selected = py
+        .detach(|| {
+            let mut selected = Vec::new();
+            for directory in directories {
+                selected.extend(oxml_layout::FontFile::from_dir(&directory)?);
+            }
+            selected.extend(explicit);
+            Ok::<_, oxml_layout::LayoutError>(selected)
+        })
+        .map_err(|error| rpptx_value_to_pyerr(py, error.to_string()))?;
+    Ok((!selected.is_empty()).then_some(selected))
+}
+
+/// Caller authorization is required independently of the font's own fsType bits.
+#[pyclass(
+    name = "FontEmbeddingLicense",
+    frozen,
+    get_all,
+    eq,
+    skip_from_py_object
+)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PyFontEmbeddingLicense {
+    pub authorized: bool,
+    pub identity: String,
+}
+#[pymethods]
+impl PyFontEmbeddingLicense {
+    #[new]
+    #[pyo3(signature = (*, authorized, identity))]
+    fn new(authorized: bool, identity: String) -> Self {
+        Self {
+            authorized,
+            identity,
+        }
+    }
+}
+
+fn checked_font_input(font: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    use std::io::Read;
+    const LIMIT: usize = 64 * 1024 * 1024;
+    let copy = |source: &[u8]| -> PyResult<Vec<u8>> {
+        if source.len() > LIMIT {
+            return Err(PyValueError::new_err("font exceeds 64 MiB input bound"));
+        }
+        let mut data = Vec::new();
+        data.try_reserve_exact(source.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("font input allocation failed")
+        })?;
+        data.extend_from_slice(source);
+        Ok(data)
+    };
+    if let Ok(bytes) = font.cast::<PyBytes>() {
+        return copy(bytes.as_bytes());
+    }
+    if let Ok(path) = font.extract::<PathBuf>() {
+        let file = std::fs::File::open(path)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+        if file
+            .metadata()
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?
+            .len()
+            > LIMIT as u64
+        {
+            return Err(PyValueError::new_err("font exceeds 64 MiB input bound"));
+        }
+        let mut data = Vec::new();
+        let mut input = file.take((LIMIT + 1) as u64);
+        let mut chunk = [0u8; 8192];
+        loop {
+            let count = input
+                .read(&mut chunk)
+                .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            if count > LIMIT - data.len() {
+                return Err(PyValueError::new_err("font exceeds 64 MiB input bound"));
+            }
+            data.try_reserve_exact(count).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("font input allocation failed")
+            })?;
+            data.extend_from_slice(&chunk[..count]);
+        }
+        return Ok(data);
+    }
+    let read = font.getattr("read").map_err(|_| {
+        PyTypeError::new_err("font must be bytes, a filesystem path or a binary reader")
+    })?;
+    let mut data = Vec::new();
+    loop {
+        let remaining = LIMIT - data.len();
+        let value = read.call1(((remaining + 1).min(8192),))?;
+        let bytes = value
+            .cast::<PyBytes>()
+            .map_err(|_| PyTypeError::new_err("font reader must return bytes"))?;
+        let chunk = bytes.as_bytes();
+        if chunk.is_empty() {
+            return Ok(data);
+        }
+        if chunk.len() > remaining {
+            return Err(PyValueError::new_err("font exceeds 64 MiB input bound"));
+        }
+        let needed = data.len() + chunk.len();
+        if needed > data.capacity() {
+            let capacity = data
+                .capacity()
+                .saturating_mul(2)
+                .clamp(8192, LIMIT)
+                .max(needed);
+            data.try_reserve_exact(capacity - data.len()).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("font input allocation failed")
+            })?;
+        }
+        data.extend_from_slice(chunk);
+    }
+}
+
+fn font_kind_name(kind: rpptx::EmbeddedFontKind) -> &'static str {
+    match kind {
+        rpptx::EmbeddedFontKind::Regular => "regular",
+        rpptx::EmbeddedFontKind::Bold => "bold",
+        rpptx::EmbeddedFontKind::Italic => "italic",
+        rpptx::EmbeddedFontKind::BoldItalic => "bold_italic",
+    }
+}
+fn checked_font_kind(kind: &str) -> PyResult<rpptx::EmbeddedFontKind> {
+    match kind {
+        "regular" => Ok(rpptx::EmbeddedFontKind::Regular),
+        "bold" => Ok(rpptx::EmbeddedFontKind::Bold),
+        "italic" => Ok(rpptx::EmbeddedFontKind::Italic),
+        "bold_italic" => Ok(rpptx::EmbeddedFontKind::BoldItalic),
+        _ => Err(PyValueError::new_err(
+            "font kind must be regular, bold, italic or bold_italic",
+        )),
+    }
+}
+fn checked_font_license(license: &PyFontEmbeddingLicense) -> PyResult<rpptx::FontEmbeddingLicense> {
+    if !license.authorized || license.identity.trim().is_empty() {
+        return Err(PyValueError::new_err(
+            "font embedding requires explicit authorization and nonempty license identity",
+        ));
+    }
+    Ok(rpptx::FontEmbeddingLicense::new(
+        license.authorized,
+        license.identity.clone(),
+    ))
+}
+
+#[pyclass(name = "EmbeddedFont", frozen, get_all, skip_from_py_object)]
+pub struct PyEmbeddedFont {
+    pub kind: &'static str,
+    pub data: Py<PyBytes>,
+    pub license: Py<PyFontEmbeddingLicense>,
+}
+#[pymethods]
+impl PyEmbeddedFont {
+    #[new]
+    #[pyo3(signature = (font, kind="regular", *, license))]
+    fn new(
+        py: Python<'_>,
+        font: &Bound<'_, PyAny>,
+        kind: &str,
+        license: PyRef<'_, PyFontEmbeddingLicense>,
+    ) -> PyResult<Self> {
+        let kind = checked_font_kind(kind)?;
+        checked_font_license(&license)?;
+        let bytes = checked_font_input(font)?;
+        let data = PyBytes::new_with(py, bytes.len(), |out| {
+            out.copy_from_slice(&bytes);
+            Ok(())
+        })?
+        .unbind();
+        let license = Py::new(py, license.clone())?;
+        Ok(Self {
+            kind: font_kind_name(kind),
+            data,
+            license,
+        })
+    }
+}
+#[pyclass(name = "EmbeddedFontFace", frozen, get_all, skip_from_py_object)]
+pub struct PyEmbeddedFontFace {
+    pub kind: &'static str,
+    pub relationship_id: String,
+    pub part_name: Option<String>,
+    pub format: &'static str,
+    pub stored_len: usize,
+    pub data: Option<Py<PyBytes>>,
+}
+impl PyEmbeddedFontFace {
+    fn snapshot(
+        py: Python<'_>,
+        font: rpptx::EmbeddedFontFace,
+        bodies: &mut std::collections::BTreeMap<String, Py<PyBytes>>,
+    ) -> PyResult<Py<Self>> {
+        let data = if let Some(bytes) = &font.data {
+            let part = font
+                .part_name
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("decoded font has no source part"))?;
+            if let Some(bytes) = bodies.get(part) {
+                Some(bytes.clone_ref(py))
+            } else {
+                let body = PyBytes::new_with(py, bytes.len(), |out| {
+                    out.copy_from_slice(bytes);
+                    Ok(())
+                })?
+                .unbind();
+                bodies.insert(part.clone(), body.clone_ref(py));
+                Some(body)
+            }
+        } else {
+            None
+        };
+        let format = match font.format {
+            rpptx::EmbeddedFontFormat::Eot => "eot",
+            rpptx::EmbeddedFontFormat::CompressedEot => "compressed_eot",
+            rpptx::EmbeddedFontFormat::Sfnt => "sfnt",
+            rpptx::EmbeddedFontFormat::Unknown => "unknown",
+        };
+        Py::new(
+            py,
+            Self {
+                kind: font_kind_name(font.kind),
+                relationship_id: font.relationship_id,
+                part_name: font.part_name,
+                format,
+                stored_len: font.stored_len,
+                data,
+            },
+        )
+    }
+}
+#[pyclass(name = "EmbeddedTypeface", frozen, get_all, skip_from_py_object)]
+pub struct PyEmbeddedTypeface {
+    pub typeface: String,
+    pub panose: Option<String>,
+    pub pitch_family: Option<i8>,
+    pub charset: Option<i8>,
+    pub faces: Py<PyTuple>,
+}
+impl PyEmbeddedTypeface {
+    fn snapshot(
+        py: Python<'_>,
+        font: rpptx::EmbeddedTypeface,
+        bodies: &mut std::collections::BTreeMap<String, Py<PyBytes>>,
+    ) -> PyResult<Py<Self>> {
+        let mut faces = Vec::new();
+        faces.try_reserve_exact(font.faces.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("font snapshot allocation failed")
+        })?;
+        for face in font.faces {
+            faces.push(PyEmbeddedFontFace::snapshot(py, face, bodies)?);
+        }
+        let faces = PyTuple::new(py, faces)?.unbind();
+        Py::new(
+            py,
+            Self {
+                typeface: font.typeface,
+                panose: font.panose,
+                pitch_family: font.pitch_family,
+                charset: font.charset,
+                faces,
+            },
+        )
+    }
+}
+impl PyPresentation {
+    fn publish_font_candidate(
+        &mut self,
+        py: Python<'_>,
+        candidate: rpptx::Presentation,
+        operation: &'static str,
+    ) -> PyResult<()> {
+        let before = self.inner.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?;
+        let after = candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?;
+        if before == after {
+            return Ok(());
+        }
+        let survivors = self.unchanged_owners()?;
+        let prepared =
+            self.prepare_owners(&candidate, operation, &survivors, false, false, false)?;
+        self.publish_owners(candidate, prepared)
     }
 }

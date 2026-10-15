@@ -4,7 +4,7 @@ use std::fmt;
 
 use oxml_drawing::color::ColorChoice;
 use oxml_drawing::effect::CT_EffectList;
-use oxml_drawing::fill::Fill;
+use oxml_drawing::fill::{Fill, GradientGeometry};
 use oxml_drawing::line::CT_LineProperties;
 use oxml_drawing::shape_props::CT_ShapeProperties;
 use oxml_drawing::style_ref::FontCollectionIndex;
@@ -73,6 +73,23 @@ impl ResolveCtx<'_> {
         &self,
         shape: &CT_Shape,
     ) -> Result<EffectiveShapeStyle, ResolveError> {
+        let (mut effective, referenced_effect_style) =
+            self.shape_style_for_placement(shape, false)?;
+        effective.effects = resolve_effects(
+            referenced_effect_style,
+            shape.style(),
+            &shape.shape_properties,
+        )?;
+        Ok(effective)
+    }
+
+    // The boundsless validator cannot normalize shape-relative gradient rotation.
+    // Placed rendering retains its existing substitution and normalization policy.
+    pub(crate) fn shape_style_for_placement(
+        &self,
+        shape: &CT_Shape,
+        unplaced: bool,
+    ) -> Result<(EffectiveShapeStyle, Option<CT_EffectStyle>), ResolveError> {
         let matrix = &self.theme.theme_elements.format_scheme;
         let referenced_effect_style = self.referenced_effect_style(shape.style())?;
         let mut effective = if let Some(style) = shape.style() {
@@ -107,20 +124,20 @@ impl ResolveCtx<'_> {
         let line_reference = shape
             .style()
             .and_then(|style| style.line_reference.color.as_ref());
-        if let Some(fill) = effective.fill.as_mut() {
+        if let Some(fill) = effective.fill.as_mut()
+            && !(unplaced
+                && matches!(fill, Fill::Gradient(gradient) if gradient.rotate_with_shape == Some(false)))
+        {
             substitute_fill(fill, fill_reference, "fill")?;
         }
         if let Some(line) = effective.line.as_mut()
             && let Some(fill) = line.fill.as_mut()
+            && !(unplaced
+                && matches!(fill, Fill::Gradient(gradient) if gradient.rotate_with_shape == Some(false)))
         {
             substitute_fill(fill, line_reference, "line")?;
         }
-        effective.effects = resolve_effects(
-            referenced_effect_style,
-            shape.style(),
-            &shape.shape_properties,
-        )?;
-        Ok(effective)
+        Ok((effective, referenced_effect_style))
     }
 
     /// Resolves the effects of an ordinary shape or a connector: the theme
@@ -155,6 +172,7 @@ impl ResolveCtx<'_> {
     pub(crate) fn effective_connector_line(
         &self,
         connector: &CT_ConnectionShape,
+        unplaced: bool,
     ) -> Result<Option<CT_LineProperties>, ResolveError> {
         let style = connector.style();
         let mut line = match style {
@@ -172,7 +190,10 @@ impl ResolveCtx<'_> {
                 line = Some(explicit.clone());
             }
         }
-        if let Some(fill) = line.as_mut().and_then(|line| line.fill.as_mut()) {
+        if let Some(fill) = line.as_mut().and_then(|line| line.fill.as_mut())
+            && !(unplaced
+                && matches!(fill, Fill::Gradient(gradient) if gradient.rotate_with_shape == Some(false)))
+        {
             let reference = style.and_then(|style| style.line_reference.color.as_ref());
             substitute_fill(fill, reference, "line")?;
         }
@@ -289,7 +310,19 @@ pub(crate) fn substitute_fill(
     match fill {
         Fill::Solid(fill) => substitute_optional_color(&mut fill.color, reference, kind),
         Fill::Gradient(fill) => {
+            // Match the paint boundary before resolving colours that cannot be drawn.
+            if matches!(fill.flip.as_deref(), Some("x" | "y" | "xy"))
+                || fill.tile_rect.is_some()
+                || matches!(fill.geometry.as_ref(), Some(GradientGeometry::Path(path)) if !path.fill_to_rect.as_ref().is_some_and(|rect| {
+                    [rect.left, rect.top, rect.right, rect.bottom].into_iter().all(|value| value.is_some_and(|value| value.0 == 50_000))
+                }))
+            {
+                return Ok(());
+            }
             for stop in &mut fill.stops {
+                if stop.color.is_none() {
+                    break;
+                }
                 substitute_optional_color(&mut stop.color, reference, kind)?;
             }
             Ok(())

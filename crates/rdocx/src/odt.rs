@@ -450,6 +450,7 @@ impl<'a> OdtWriter<'a> {
                 )?;
                 self.scan_flattened_producer_list_losses(num_id, level)?;
             } else {
+                self.scan_shared_definition_continuation_loss(num_id, level)?;
                 self.used_list_levels.insert((num_id, level));
                 self.ensure_list_style(num_id, path)?;
             }
@@ -1110,6 +1111,53 @@ impl<'a> OdtWriter<'a> {
             effective.merge_from(direct);
         }
         effective
+    }
+
+    fn scan_shared_definition_continuation_loss(&mut self, num_id: u32, level: u32) -> Result<()> {
+        let Some(numbering) = &self.document.numbering else {
+            return Ok(());
+        };
+        let Some(instance) = numbering.nums.iter().find(|value| value.num_id == num_id) else {
+            return Ok(());
+        };
+        let Some(definition) = numbering.get_abstract_num_for(num_id) else {
+            return Ok(());
+        };
+        let Some(definition_level) = definition.levels.iter().find(|value| value.ilvl == level)
+        else {
+            return Ok(());
+        };
+        let level_override = instance
+            .level_overrides
+            .iter()
+            .find(|value| value.ilvl == level);
+        let effective_level = level_override
+            .and_then(|value| value.level.as_ref())
+            .unwrap_or(definition_level);
+        if matches!(
+            effective_level.num_fmt.as_ref(),
+            Some(ST_NumberFormat::Bullet | ST_NumberFormat::None | ST_NumberFormat::Other(_))
+        ) || level_override.is_some_and(|value| value.start_override.is_some())
+        {
+            return Ok(());
+        }
+        let continued = self
+            .used_list_levels
+            .iter()
+            .any(|(previous, previous_level)| {
+                *previous != num_id
+                    && *previous_level == level
+                    && numbering
+                        .get_abstract_num_for(*previous)
+                        .is_some_and(|previous| {
+                            previous.abstract_num_id == definition.abstract_num_id
+                        })
+            });
+        if continued {
+            self.diagnose(&format!("numbering[{num_id}]/level[{level}]/shared-definition-continuation"),
+                "shared-definition numbering continuation cannot be represented by the concrete ODT list writer")?;
+        }
+        Ok(())
     }
 
     fn paragraph_numbering(&self, paragraph: &CT_P) -> Option<(u32, u32)> {
@@ -2009,6 +2057,11 @@ fn final_section_has_unsupported_properties(section: &rdocx_oxml::document::CT_S
     let mut projected = section.clone();
     projected.header_refs.clear();
     projected.footer_refs.clear();
+    // The section writer omits explicit portrait. Reopening that same source
+    // leaves orientation absent, which has the same effective portrait value.
+    if projected.orientation.is_none() {
+        projected.orientation = Some(rdocx_oxml::shared::ST_PageOrientation::Portrait);
+    }
     projected != rdocx_oxml::document::CT_SectPr::default_letter()
 }
 
@@ -7408,5 +7461,120 @@ mod tests {
         assert!(document.save_odt(&destination).is_err());
         assert_eq!(std::fs::read(&destination).unwrap(), original);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn odt_default_portrait_source_roundtrip_keeps_loss_diagnostics() {
+        use rdocx_oxml::document::CT_SectPr;
+        use rdocx_oxml::shared::ST_PageOrientation;
+        let mut document = Document::new();
+        document.add_paragraph("default portrait");
+        let source = document.to_bytes().unwrap();
+        let section = document.document.body.sect_pr.as_ref().unwrap();
+        assert_eq!(section, &CT_SectPr::default_letter());
+        let reopened = Document::from_bytes(&source).unwrap();
+        let parsed = reopened.document.body.sect_pr.as_ref().unwrap();
+        assert_eq!(parsed.orientation, None);
+        let mut explicit = parsed.clone();
+        explicit.orientation = Some(ST_PageOrientation::Portrait);
+        assert_eq!(&explicit, section);
+        assert!(!final_section_has_unsupported_properties(section));
+        assert!(!final_section_has_unsupported_properties(parsed));
+        assert_eq!(
+            document.to_odt_bytes().unwrap().diagnostics,
+            reopened.to_odt_bytes().unwrap().diagnostics
+        );
+        assert_eq!(document.to_bytes().unwrap(), source);
+
+        // Real unsupported properties still cause the exact existing loss.
+        for changed in ["landscape", "margin", "opaque"] {
+            let mut candidate = reopened.clone_for_staging();
+            let section = candidate.document.body.sect_pr.as_mut().unwrap();
+            match changed {
+                "landscape" => section.orientation = Some(ST_PageOrientation::Landscape),
+                "margin" => section.margin_left = Some(Twips(1441)),
+                "opaque" => section
+                    .extra_xml
+                    .push(b"<x:opaque xmlns:x=\"urn:section-proof\" value=\"kept\"/>".to_vec()),
+                _ => unreachable!(),
+            }
+            assert!(final_section_has_unsupported_properties(section));
+            let original = candidate.to_bytes().unwrap();
+            let written = candidate.to_odt_bytes().unwrap();
+            assert!(
+                written
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.path == "document/sectPr"
+                        && diagnostic.message
+                            == "final section properties were dropped during ODT export")
+            );
+            assert_eq!(candidate.to_bytes().unwrap(), original);
+            let reparsed = Document::from_bytes(&original).unwrap();
+            assert_eq!(
+                reparsed.to_odt_bytes().unwrap().diagnostics,
+                written.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn fx200_odt_reports_only_selected_plain_shared_definition_continuation_loss() {
+        for mode in ["plain", "override", "independent", "unused"] {
+            let mut document = Document::new();
+            let definition = document
+                .add_numbering_definition(&[ListLevel::decimal()])
+                .unwrap();
+            let first = document.add_numbering_instance(definition, &[]).unwrap();
+            let second_definition = if mode == "independent" {
+                document
+                    .add_numbering_definition(&[ListLevel::decimal()])
+                    .unwrap()
+            } else {
+                definition
+            };
+            let overrides = if mode == "override" {
+                vec![crate::NumberingLevelOverride::new(0).start(8)]
+            } else {
+                vec![]
+            };
+            let second = document
+                .add_numbering_instance(second_definition, &overrides)
+                .unwrap();
+            for (index, instance) in [first, first, second, second].into_iter().enumerate() {
+                if mode == "unused" && index >= 2 {
+                    continue;
+                }
+                document
+                    .add_paragraph(&format!("item{index}"))
+                    .set_numbering(instance, 0);
+            }
+            let source = document.to_bytes().unwrap();
+            let written = document.to_odt_bytes().unwrap();
+            let repeated = document.to_odt_bytes().unwrap();
+            assert_eq!(written.bytes, repeated.bytes);
+            assert_eq!(written.diagnostics, repeated.diagnostics);
+            assert_eq!(document.to_bytes().unwrap(), source);
+            let paths = written.diagnostics.iter().filter(|value| value.message == "shared-definition numbering continuation cannot be represented by the concrete ODT list writer").map(|value| value.path.as_str()).collect::<Vec<_>>();
+            if mode == "plain" {
+                assert_eq!(
+                    paths,
+                    vec![format!(
+                        "numbering[{second}]/level[0]/shared-definition-continuation"
+                    )]
+                );
+            } else {
+                assert!(paths.is_empty(), "{mode}: {paths:?}");
+            }
+            let reopened = Document::from_odt_bytes(&written.bytes).unwrap();
+            assert_eq!(
+                reopened.document.paragraph_count(),
+                if mode == "unused" { 2 } else { 4 }
+            );
+            let source_reopened = Document::from_bytes(&source).unwrap();
+            assert_eq!(
+                source_reopened.to_odt_bytes().unwrap().diagnostics,
+                written.diagnostics
+            );
+        }
     }
 }

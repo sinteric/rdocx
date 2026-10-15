@@ -26,8 +26,9 @@ References are out, categorically. Four options were weighed:
 ```rust
 pub enum PathSeg { Slide(usize), Shape(usize), Body(usize), Row(usize),
                    Cell(usize), Para(usize), Run(usize) }
-pub struct ContentPath { pub segs: SmallVec<[PathSeg; 5]>, pub revision: u64 }
-pub struct RevisionCounter { current: u64 }
+// ContentPath retains public path/revision fields and private captured authority.
+// RevisionCounter owns prepared scope generations and first retirement causes.
+// Use existing constructors or counter capture methods, not struct literals.
 
 #[pyclass(name = "Document")]
 struct PyDocument { inner: rdocx::Document, revision: RevisionCounter }
@@ -56,25 +57,24 @@ An index path addresses a **position**, not an object. After
 to be paragraph 4. python-docx does not have this problem because it holds an
 lxml element pointer that follows the element.
 
-v0.1 therefore carries a **document revision counter**, bumped after every
-successful structural mutation and captured by every handle at construction.
-Failed and value-only mutations do not bump it. The shared crate reports a
-concrete Rust `StaleElementError` on mismatch. The package binding maps that
-domain error to its Python exception with the same revisions and message:
+Captured paths carry owner authority and the first causal retirement, not
+only a numeric revision. Word captures a finite prepared inventory of physical
+paragraph, table, cell, section and hyperlink owners. Regular runs retain
+conservative document-wide structural invalidation, and frozen Story and
+StoryItem captures retain snapshot-inventory authority. Presentation scopes
+bind physical slides, shapes, grids and text
+owners. Unrelated edits and supported owner relocation retain handles, while a
+removed and later reused numeric shape id cannot resurrect an old handle.
+Stale errors name the actual public operation and recovery path. Foreign
+presentation identity is checked before stale lookup or mutation.
 
-```
-rdocx.StaleElementError: paragraph handle was created at document revision 4,
-but the document is now at revision 5 (a structural change invalidated it).
-Re-fetch it with doc.paragraphs[i].
-```
-
-**Loud failure beats silently wrong data.** There are no snapshot accessors that
-keep working after invalidation.
-
-v0.2 upgrades to lazily-assigned stable ids backed by `w14:paraId`, which OOXML
-already defines for exactly this purpose, so they round-trip to disk and improve
-DOCX fidelity as a side effect. Then a handle survives unrelated removals and
-matches python-docx semantics, with no API change.
+Native staged edits finish validation, checked scope preparation and every
+returned Python object allocation before committing and publishing the
+candidate. `capture_prepared` binds returned handles to the successor state.
+Failures and actual no-ops publish nothing. Manual unbound native snapshots
+cannot acquire authority from a matching numeric position. Private authority
+changes pre-1.0 struct-literal source compatibility, while existing constructors
+remain available. No stable-id-on-disk or generic handle registry is implied.
 
 ### Two supporting decisions
 
@@ -135,8 +135,22 @@ The shared native `ChartData` input includes optional category-axis and
 value-axis titles plus a typed `Vec<RgbColor>` palette. `oxml-chart`, `rdocx`,
 and `rpptx` re-export the same `RgbColor`. `ChartData::default()` supplies empty
 optional styling fields for callers using update syntax. The added fields are
-an intentional pre-1.0 struct-literal break and add no Python, WASM, or CLI
-chart entrypoints.
+an intentional pre-1.0 struct-literal break. Python roots expose concrete
+`CategoryChartData`, `XyChartData` and seven-kind `XL_CHART_TYPE` values. Word
+`add_chart(chart_type, chart_data, width, height, after=None)` returns a prepared
+owned Paragraph and accepts only a checked same-document direct body owner.
+PowerPoint shapes add charts through the existing owned frame handle. Its live
+Chart reads category and series snapshots and replaces data through the native
+unique-ID graph transaction, including nested groups. Returned allocations
+precede publication. Invalid or retired owners, invalid data and exact no-op
+leave bytes and captured authority unchanged. The Python data objects do not
+add WASM or CLI chart entrypoints.
+
+A Chart view captures its frame XML-child authority. Checked Shape XML
+replacement retires old Chart views while retaining the proven Shape owner.
+Fresh chart lookup resolves the current owned graph. Data-only replacement
+retains the chart and frame, isolating shared chart/workbook targets through
+the native copy-on-write transaction.
 
 **Threading.** `Document` remains `Send` and `Sync`. Its normal and
 deterministic layouts live in separate
@@ -218,6 +232,124 @@ doc.save_pdf("out.pdf")                        # documented as an rdocx extensio
   domain error maps to `StaleElementError`. `oxml-py-support` therefore remains
   independent of any Python base class.
 
+## Python Word formatting and checked list publication
+
+`Font` exposes optional superscript, subscript, small_caps, all_caps,
+double_strike, hidden and rtl. Superscript and subscript share one direct
+`w:vertAlign` source. True selects that mode, false clears only its own active
+mode, and None removes the direct mode. An absent mode reads None, while a
+direct baseline reads false for both. Clears on absent source insert no nodes.
+Language, language_east_asia, language_bidi, name_east_asia and
+name_complex_script edit their selected slots. General font name retains its
+established four-slot assignment. `character_spacing` accepts signed integer
+EMU or None and returns Length or None, validating signed twips before
+narrowing with truncation toward zero.
+
+`ParagraphFormat.tab_stops` is a live parent-bound collection with length,
+indexing, iteration, indexed deletion, add_tab_stop and clear_all. Returned
+TabStop values are immutable position/alignment/leader snapshots. Added stops
+insert before the first greater position and after equal positions, without
+sorting imported occurrences. Alignment includes List, Start and End.
+An absent leader reads SPACES, while an unsupported owned token raises an
+explicit error and remains preserved. Collection edits keep the paragraph
+handle live. Paragraph formatting also exposes border read/set/clear, shading,
+outline_level and bidi, with checked input and retained foreign payload.
+
+`Document.default_font_name` and `default_font_size` edit docDefaults without
+restyling Normal. Size uses Length or integer EMU and returns Length or None.
+`add_style` and `set_style` accept alignment, line_spacing, underline,
+keep_with_next, keep_together, page_break_before, borders, shading and tab_stops
+in addition to their existing arguments. Omitted values retain source, and
+explicit empty border/tab collections clear active owned entries. The selected
+Word border or tab container can remain empty to suppress earlier duplicate
+owners while retaining foreign attributes and opaque payload. Border clearing
+leaves no active owned edge, and tab clearing leaves no active owned tab.
+These retained containers do not represent active formatting. Invalid input or
+style graph changes fail before source publication.
+
+`add_numbering_instance(definition_id, *, start=None, level=0)` creates an
+instance of one existing definition. Start is a checked u32, including zero,
+and level is 0 through 8. A nonzero level without start is rejected.
+`add_bullet_list_item(text, level=0)` and
+`add_numbered_list_item(text, level=0)` use checked native factories and return
+a fresh Paragraph. `ListLevel.checklist(checked=False)` creates a real bullet
+level using the unchecked or checked glyph, not an ordinary text prefix.
+Structural factories stage the native candidate, validate state, allocate the
+returned Python handle against prepared owner state, then commit and publish.
+Failure, allocation refusal or no-op leaves source and revision state intact.
+Earlier handles retire under the existing causal document owner policy, while
+ordinary formatting edits retain live parents and fonts.
+
+The low-level `CT_BorderEdge.source_xml` field retains the original physical
+edge payload used by source-aware paragraph and style merges. Full public
+struct literals must supply it or use default update syntax. This is an
+intentional pre-1.0 Rust source break. List/Start/End tab enum variants also
+require exhaustive matches to cover their exact tokens. Start and End retain
+the existing left/right rendering mapping. List retains its established
+fallback and has no additional paint-parity claim.
+
+## Python colour inputs and live font formats
+
+Both families accept `RGBColor`, legacy integer channel triples and exactly
+six ASCII hexadecimal digits with an optional single leading hash at every
+existing scalar RGB setter. Hex values normalize to uppercase. The inventory
+covers Word style creation/update, run fonts, run and cell shading, and table
+and cell borders. PowerPoint covers run and paragraph-default fonts, including
+table cells, plus supported fills, lines, cell borders and outer shadows.
+Named Word highlight values retain their separate vocabulary.
+
+One shared concrete extractor validates before mutable source access. Wrong
+types raise `TypeError` naming the full parameter, accepted forms and actual
+Python type. Malformed, non-ASCII or surrogate-bearing hex strings and channel
+range or overflow failures raise parameter-qualified `ValueError`. Arbitrary
+string coercion is not accepted. Failed assignments preserve source and
+revisions. `RGBColor.from_string` accepts the same optional hash syntax, and
+`str(RGBColor(...))` remains uppercase hexadecimal.
+
+`Font.color` always returns a live `ColorFormat`, including when no direct
+colour exists. It re-resolves the concrete run owner and follows structural
+and cell-text invalidation. Getter reads create no properties or revisions.
+Direct scalar reads use `font.color.rgb`. The getter deliberately replaces
+the earlier Word `RGBColor | None` and PowerPoint `str | None` return types.
+Direct `font.color = value` remains a shortcut, and `None` removes its direct
+colour. The shared signatures and handwritten stubs are:
+
+```python
+Font.color -> ColorFormat
+Font.color = RGBColor | tuple[int, int, int] | str | None
+ColorFormat.rgb -> RGBColor | None
+ColorFormat.rgb = RGBColor | tuple[int, int, int] | str | None
+ColorFormat.type -> str | None
+ColorFormat.theme_color -> str | None
+ColorFormat.theme_color = str | MSO_THEME_COLOR | None
+```
+
+`None` in these colour-format setter signatures clears only font sources.
+Existing fill, line and shadow colour setters reject it. Word `type` reports
+`rgb`, `theme` or `auto`, while PowerPoint additionally models `preset` and
+`system`. Unset or unmodeled direct colours report `None`. Scheme references
+are not flattened to guessed RGB. Word `rgb` can expose an existing cached
+literal beside its theme reference, and reads `None` for `auto`. Editing a
+Word theme reference keeps that cached literal, tint, shade and opaque source.
+Clearing the reference removes tint and shade but keeps the cached literal.
+An explicit literal assignment retains the existing native clearing policy.
+The native Word tint/shade calculation remains unchanged.
+
+Both top-level packages export `MSO_THEME_COLOR` from their existing enum
+files. Supported values 1 through 16 cover dark/light, six accents, hyperlink,
+followed hyperlink, text and background slots. Word tokens use `dark1`,
+`light1`, `dark2`, `light2`, `hyperlink`, `followedHyperlink`, `text1`,
+`background1`, `text2` and `background2`. PowerPoint uses `dk1`, `lt1`, `dk2`,
+`lt2`, `hlink`, `folHlink`, `tx1`, `bg1`, `tx2` and `bg2`, and also accepts
+`phClr`. Both use `accent1` through `accent6`. `NOT_THEME_COLOR` and `MIXED`
+are exported sentinels that cannot author a theme reference.
+
+Word shading snapshots return `RGBColor | "auto" | None`, and border snapshots
+return `(style, size, RGBColor | "auto" | None)`. Their existing `auto`,
+omission and clearing behavior remains surface-specific. Python examples,
+runtime assertions and typing smoke use the live getter and these scalar
+snapshot types.
+
 The S33 formatting inventory is intentionally bounded to font name, size,
 colour, bold, italic, underline and strike, plus paragraph alignment, spacing,
 indentation, keep-with-next, keep-together, page-break-before and widow
@@ -225,8 +357,8 @@ control. Assigning `None` clears direct tri-state formatting. `Paragraph` also
 exposes its style ID and its list numbering as a `(num_id, level)` pair, `Run`
 its character `style_id`, and `Font` its named Word highlight and separate
 shading fill. Highlight reads and writes `ST_HighlightColor` names through
-`w:highlight`. Shading accepts six hexadecimal digits or `auto` through
-`w:shd`. These setters also clear with `None`. The S33 table
+`w:highlight`. Shading accepts the shared RGB forms or `auto` through
+`w:shd`, and reads `RGBColor`, `auto` or `None`. These setters also clear with `None`. The S33 table
 inventory is lazy table, row, cell and nested paragraph lookup, table style,
 alignment and width, plus cell text, width and vertical alignment. These
 handles use `Body`, `Row`, `Cell`, `Para` and `Run` path segments and reach the
@@ -240,6 +372,15 @@ revision once, stales every earlier structural handle, and publishes only the
 native staged result. Python index errors are rejected before mutation, while
 native topology and serialization failures use the existing `RdocxError`
 mapping. Removing the only direct row is rejected.
+
+Word `Table.indent` is an optional Length with a setter accepting the existing
+integer EMU/Length convention or None. Positive, zero and negative values are
+explicit. The checked native set_indent_value validates signed-i32 twip bounds
+before creating properties and truncates EMU toward zero at635 EMU per twip.
+set_indent_checked delegates to that signed optional setter. None removes only
+direct tblInd and clearing an absent value creates no tblPr. Overflow and wrong
+Python types preserve source and handles. Existing alignment, cell margins,
+compatibility compensation and floating-table placement remain unchanged.
 
 `Table`, `Row` and `Cell` also bind the checked native formatting setters.
 `Table.set_borders(style, *, size, color)` sets every table edge and
@@ -454,9 +595,10 @@ opens in-memory package bytes, as the rdocx `Document` does. Lazy layouts,
 slides, shapes, placeholders, text frames, paragraphs, runs, columns and cells
 store only a presentation reference and `ContentPath`. The bounded
 source-compatibility surface is the seven python-pptx 1.0.2 Getting Started
-workflows. They change the import namespace and re-fetch through the public
-path after each structural write, because strict global revision invalidation
-intentionally stales every pre-write handle and collection. Pure-Python
+workflows. They change the import namespace. Captured collections and items
+resolve current owners after supported insertion or relocation. Retirement
+occurs at the affected structural or text owner, with an explicit stale error
+when that owner is no longer valid. Pure-Python
 `Length`, `Inches`, `Pt`, `RGBColor`, and the `MSO_SHAPE`, `MSO_SHAPE_TYPE`,
 `MSO_CONNECTOR_TYPE`, and `MSO_FILL_TYPE` enumerations keep native inheritance
 outside the limited ABI. `MSO_SHAPE` carries the 181 python-pptx
@@ -484,11 +626,46 @@ live `FillFormat` over the direct background fill that never changes the slide
 when read, and `follow_master_background` reports and sets whether the slide
 has no `p:bg`. `SlideCollection.remove` and `SlideCollection.move(from_, to)`
 use the native staged slide operations and advance the revision once.
-`SlideCollection.import_slide(slide, layout=None, index=None)` wraps the native
-import. `layout` must be a layout of the destination. `index` is an insertion
-position counted from the end when negative, and one outside the collection is
-an `IndexError`. A slide of the same presentation is imported from a snapshot
-and keeps its own layout unless `layout` is given.
+`SlideCollection.import_slide(slide, layout=None, index=None, *,
+keep_source_formatting=False)` returns one live imported Slide. Existing
+positional arguments and the destination-formatting default remain supported.
+`layout` must belong to the destination. Python insertion positions are
+zero-based, count from the end when negative, and refuse out-of-range positions
+with `IndexError`. In destination-formatting mode, a same-presentation import
+reads a source snapshot and keeps its own layout unless an explicit layout is
+given. Source-formatting mode uses
+the checked source layout, master, theme and required resource closure.
+Combining source formatting with an explicit destination layout is refused
+before publication.
+`import_slide_with_diagnostics` accepts the same arguments and returns
+`(Slide, tuple[str, ...])`, exposing import diagnostics without changing the
+ordinary single-slide return type.
+
+`SlideCollection.import_slides(source, indexes=None, *, layout=None,
+index=None, keep_source_formatting=False, keep_sections=False, slide_map=None)`
+returns `(tuple[Slide, ...], tuple[str, ...])`. Omitted indexes select every
+source slide in source order. Explicit zero-based indexes retain caller order
+and reject duplicates and out-of-range selections before publication. Valid
+negative source indexes count from the end, without modulo wrapping. An empty
+selection changes nothing. Duplicate selection is a native operation refusal
+reported as `RpptxError`. Out-of-range source indexes raise `IndexError` before
+the native transfer. `keep_sections` preserves selected source section
+blocks without reordering the selection. Explicit `slide_map` pairs identify
+source-to-destination jump targets through checked existing slide indexes.
+Both map endpoints accept valid negative indexes counted from their respective
+source or pre-insertion destination collection ends, without modulo wrapping.
+The destination layout and insertion rules match the single-slide method.
+All returned Slide objects and diagnostics are allocated before the one
+success-only publication. Foreign owners, bad mappings and refused native
+transfers leave the destination and held-owner state unchanged.
+
+The CLI command is `rpptx slide import DEST SOURCE [--slides 1,3-5] [--at N]
+[--keep-source-formatting] -o OUT`. CLI source ranges and insertion positions
+are one-based. Omitted selection imports all slides, omitted insertion appends,
+and `--at 1` inserts before the first destination slide. Selection retains
+caller order and rejects duplicates and out-of-range values. Structured or
+human diagnostics use the existing CLI channel. Atomic output publication
+never overwrites either input.
 `SlideCollection.duplicate(slide)` copies a slide of the same presentation,
 with its speaker notes, to the position right after it through the native
 staged `duplicate_slide`, advances the revision once, and returns the new slide
@@ -508,8 +685,12 @@ normalized below 360 and writes them with round-half-even into the
 return live `FillFormat` and `LineFormat` views for ordinary shapes, pictures,
 and connectors, and raise `ValueError` for other kinds. `FillFormat` offers
 `type`, `solid()`, `background()`, and `fore_color`. `ColorFormat.rgb` reads an
-sRGB colour as `RGBColor`, or `None` for any other colour, and writing it keeps
-the transforms of an existing sRGB colour. Reading `LineFormat.color` changes
+sRGB colour as `RGBColor`, or `None` for any other colour. RGB replacement
+keeps transforms and opaque children of an existing sRGB colour. Theme
+replacement keeps those of an existing scheme colour. Replacing another
+colour kind discards that kind's transforms and raw children, except that an
+outer shadow keeps its modeled alpha. Brightness edits keep all non-luminance
+transforms and exact opaque children, including foreign metadata. Reading `LineFormat.color` changes
 nothing, and assigning its `rgb` makes the line fill solid. `LineFormat.width`
 reads zero without a width, writes `None` as zero, and rejects values above
 the `ST_LineWidth` maximum. `LineFormat.dash_style` reads the `a:prstDash`
@@ -601,10 +782,13 @@ A group's `shapes` collection has the same `add_textbox`, `add_shape`,
 native `ShapesMut`, so groups nest to any depth. A member takes a `p:cNvPr` id
 unused across the slide, and the group, then every group enclosing it, is refit
 to the union of its members as python-pptx does, so members of a new group keep
-their slide coordinates. An addition to a group advances the revision once,
-like any addition, so the group handle and its collection go stale and the
-returned member is captured at the new revision. The next addition re-fetches
-the group, for example through `prs.slides[0].shapes[0].shapes`.
+their slide coordinates. An addition stages a cloned presentation and advances
+the revision once after native validation, checked owner preparation and
+allocation of the returned Python shape. Existing physical owners retain their
+authority, including the group, its collection and its existing members. The
+returned member is captured against the prepared successor before publication.
+The same group collection can make the next addition without being re-fetched.
+An error leaves native state and owner generations unchanged.
 A group added inside a group has the zero `a:xfrm` python-pptx writes, so its
 `left`, `top`, `width`, and `height` read zero until its first member arrives,
 while a group added to a slide's own shapes reads `None`. `add_group_shape` has
@@ -616,8 +800,9 @@ nested collection raise `ValueError` too.
 
 A table `Cell` follows python-pptx for `merge(other_cell)`, `split()`,
 `is_merge_origin`, `is_spanned`, `span_height`, and `span_width`. Merge and
-split run the native staged table operations, which keep the rectangular grid,
-so they do not advance the revision. A cell of another table raises
+split run the native staged table operations, which keep the rectangular grid.
+They advance only the cell-text generation, leaving Table, Row, Column and
+Cell grid handles live while retiring previously captured nested text handles. A cell of another table raises
 `ValueError`, and a merge range that overlaps a merge or a split of a cell that
 is not a merge origin raises `RpptxError` and leaves the table unchanged.
 `Cell.fill` is a live `FillFormat` over the direct cell fill. `margin_left`,
@@ -632,6 +817,26 @@ of `Row` handles, like `columns`. `Row.height` reads the stored height as
 `Length`, and assigning it keeps the frame height equal to the sum of the rows,
 as a column width keeps the frame width. A height that is not positive raises
 `RpptxError`. None of these writes advances the revision.
+
+`Cell.text_frame` returns the same TextFrame surface used by shapes, including
+paragraphs, runs, fonts, spacing, alignment, bodyPr anchor and wrapping. The
+getter validates the complete explicit Row/Cell path and never creates missing
+text bodies. A merge continuation retains its own grid-cell address. The
+native immutable accessor returns TextFrameRef for the cell borrow lifetime,
+and TableCellMut::into_text_frame consumes its handle for safe mutable access.
+Missing-body reads remain explicit, while successful text authoring may create
+the body. Counted replacement preflights a missing body so zero matches, count
+mismatch and invalid empty placeholders preserve source and generations.
+
+Cell frames and descendants capture the owning table-grid and cell-text
+scopes. Text replacement, merge/split and paragraph/run topology edits retire
+affected descendants while retaining the cell/table and unrelated owners where
+the operation preserves them. Formatting and run-value edits preserve text
+identity. Failed or no-match edits do not retire scopes. `Cell.vertical_anchor`
+reads and writes the direct `a:tcPr` anchor, independently of
+`Cell.text_frame.vertical_anchor` on `a:bodyPr`. Both retain physical text
+handles. Cell hyperlink reads use the owning body, while assigning an internal
+slide target refuses before relationship mutation.
 
 python-pptx has no public API to add or remove table rows and columns, and its
 users call `table._tbl.add_tr(height)`, which appends a row without cell
@@ -662,7 +867,8 @@ edit. A style GUID supplied this way is a package-level edit, not a Python
 
 `TextFrame.autofit`
 reports `none`, `normal`, or `shape` when the body carries an explicit choice.
-`Run.font` reads the run's direct Latin name, size, and sRGB colour, while the
+`Run.font` reads the run's direct Latin name and size and exposes its live
+colour format, while the
 `Run.text` setter replaces only that run's text and preserves its typed and
 unmodelled properties. `Run.hyperlink` returns a live `Hyperlink` whose
 `address` reads the target of the run's `a:hlinkClick`, or `None`. Assigning
@@ -704,11 +910,14 @@ place and do not advance the revision. `rpptx` and `rpptx.enum.text` export
   for `a:buNone`, `True` for an automatic number or picture bullet, or `None`.
   Assigning a character keeps the bullet colour, size, and font and replaces
   a preserved picture bullet. `False` writes `a:buNone`, `None` removes the
-  direct bullet, and `True` raises because automatic numbering is not
-  writable yet.
-- `Paragraph.add_run(text="")` appends a run, advances the revision once, and
-  returns the new run captured at that revision. The paragraph handle it was
-  called on becomes stale, like the text frame after `add_paragraph`.
+  direct bullet, and `True` raises because a scheme is required.
+  `auto_number` selects the concrete scheme and optional start instead.
+  `bullet_char` is a checked alias with the same str, bool or None contract,
+  including clear/no-op behavior and atomic invalid-value refusal.
+- `Paragraph.add_run(text="")` stages an append and allocates the new returned
+  run against prepared successor scopes before publication. The owning
+  paragraph and text frame remain live, while prior affected run descendants
+  retire with the exact public operation label.
 - `Font` reads and writes the same properties for a run and for a
   paragraph's default run properties: `name` (`a:latin` typeface, keeping its
   other attributes), `size` (1 to 4000 points, as python-pptx validates),
@@ -717,11 +926,24 @@ place and do not advance the revision. `rpptx` and `rpptx.enum.text` export
   `MSO_UNDERLINE` member otherwise. `strike` reads `True` for a single or
   double strike, and assigning `True` keeps a double strike. `all_caps` does
   not name `cap="small"`, which is preserved until `all_caps` is assigned.
-  `color` still reads the direct sRGB solid fill as an `RRGGBB` string for
-  compatibility, and the setter takes an `RGBColor`, any triple of 0 to 255
-  integers, or a six-digit hexadecimal string. It changes an existing sRGB
-  value in place, keeping transforms such as `a:alpha`, replaces any other
-  colour, and `None` removes the direct fill.
+  `color` is the shared live `ColorFormat`, whose `rgb` reads `RGBColor`
+  rather than an `RRGGBB` string. Direct assignment accepts the shared RGB
+  forms, and `None` removes the direct fill. Run and paragraph-default font
+  sources reuse the existing font property update path, including cell fonts.
+  Clearing an absent direct value remains a byte-stable no-op.
+
+PowerPoint `ColorFormat.brightness -> float | None` reports `None` without a
+modeled explicit colour, the first luminance offset when present, otherwise
+the first luminance modulation minus one, or zero without either transform.
+Its setter takes a finite number from -1 to 1 and requires an explicit modeled
+colour. Booleans and nonnumbers raise `TypeError`, while nonfinite or
+out-of-range values raise `ValueError`, before mutation. Positive brightness
+writes `lumMod = 1 - b` and `lumOff = b`, negative brightness writes only
+`lumMod = 1 - abs(b)`, and zero removes both. Values use round-half-even at
+100000 units. Other transforms and raw children remain intact. This finite
+policy deliberately refuses boolean and NaN inputs accepted by the pinned
+python-pptx oracle. Existing fill foreground prerequisites, line
+solidification and shadow opacity behavior remain unchanged.
 
 `Presentation.try_replace_text(placeholder, replacement, *, expect=None)`
 runs the native staged literal replacement over slides and speaker notes with
@@ -748,14 +970,22 @@ and `TextFrame.try_replace_text(placeholder, replacement, *, expect=None)`
 keep that contract over a narrower scope. The slide form covers the slide's
 shapes, groups and table cells, plus its speaker notes unless `notes` is
 false, and leaves every other slide untouched. The text frame form covers that
-frame only. The count, the error and its message, the unchanged presentation
-and revision after a mismatch, and the single revision advance are those of
-the presentation form, so a replacement that changes something invalidates
-every held handle, including the slide or frame it was called on. Neither
-form clones the presentation. The slide form works on a copy of that slide
-and its notes and checks that they serialize. The frame form works on a copy
-of the text body when `expect` is given, in place otherwise, and serializes
-nothing, because replacing run text cannot make a body fail to serialize.
+frame only. Both binding routes stage a cloned presentation before native
+replacement and finish checked owner preparation before publishing it. The
+count, error and message, unchanged presentation and revision after an
+`expect` mismatch, and single revision advance for a nonzero count retain the
+presentation form's contract. Zero matches publish nothing.
+
+The slide route uses `Slide.try_replace_text` as the retirement cause. Only
+physical owners whose accepted native text changed receive a new descendant
+text generation. The frame route uses `TextFrame.try_replace_text` and retires
+the selected owner's descendant text generation when its count is nonzero.
+Affected paragraph, run, font and hyperlink descendants must be re-fetched.
+The owning slide, shape, cell and frame handles remain valid, as do unrelated
+physical owners and their descendants. Neither route performs global
+presentation invalidation or publishes an in-place edit before validation.
+A cell with no text body returns zero, or raises the same count-mismatch error
+for a nonzero `expect`, without creating a body or retiring an owner.
 
 `Presentation.validate()` runs the native `validate` with the GIL released and
 returns a tuple of frozen `ValidationIssue` snapshots in native order. Each
@@ -781,8 +1011,8 @@ A `Slide` exposes optional speaker-note text as a readable and writable
 property. Assigning it on a slide without notes creates the notes slide, and
 the notes master when the deck has none, through
 `Presentation::set_notes_text`. A successful notes assignment publishes the
-native staged mutation, advances the global revision once, and makes pre-write
-handles stale. A rejected assignment leaves package bytes and revisions
+native staged mutation through its checked owner publication. Affected notes
+owners retire while unrelated slide and shape owners remain live. A rejected assignment leaves package bytes and revisions
 unchanged. A `Slide` also exposes an ordered tuple of frozen `Comment`
 snapshots. Each comment contains an ordered tuple of frozen `CommentReply`
 snapshots, and the presentation exposes an ordered tuple of frozen
@@ -793,11 +1023,84 @@ Comment and reply moves retain native final-position semantics.
 id as unknown. `Slide.remove_comment(comment_id)` removes a thread with its
 replies, or one reply. Both use the native staged operations of
 `rpptx comment resolve` and `remove`. A successful
-collaboration operation advances the global revision once. Constructor or
-native validation failure publishes no candidate and leaves existing handles
-valid.
+collaboration operation publishes its affected owner scopes once. Constructor
+or native validation failure publishes no candidate and leaves existing
+handles valid.
+
+### Checked presentation surfaces
+
+`Row.cells` returns a tuple of checked live cell views.
+
+Held `Table.rows` and `Table.columns` collections survive supported row and
+column additions and removals under the same physical table. Earlier indexed
+rows, columns and cells retire with the first topology-edit cause. Newly
+returned indexed members bind the prepared successor. Invalid edits and
+no-ops leave both collection and member authority unchanged. Parent removal
+retires the table collections. `Theme.name` reads and
+updates the owned theme root. An absent `CoreProperties.author` reads as None,
+while an explicitly empty creator remains an empty string. `Paragraph.text`
+retains its paragraph and properties, replacing its run children and retiring
+the affected captured runs.
+
+`Shape` exposes title, alternative text, decorative state and direct flips.
+`alt_title`, `alt_text` and `decorative` use the actual shape's cNvPr owner.
+`ShapeCollection.group`, `Shape.ungroup`, `align` and `distribute` stage selected
+physical owners and preallocate returned handles before publication.
+The `relative_to` compatibility argument uses the existing arrangement
+reference provider. Conflicting explicit reference arguments refuse before
+publication. Cardinality refusal states the actual required minimum, selected
+count and reference context while retaining the public exception class and
+existing operation cause. Connector
+endpoint methods validate actual connection sites and current target owners.
+`Shape.insert_picture(image_file)` fills a picture placeholder under its
+existing identity with checked crop-to-fill. Invalid image or unrepresentable
+source metadata leaves bytes and every handle valid. Generated placeholder
+names follow native type/orientation/collision rules, without renaming imports.
+
+`Run.hyperlink.target_slide` gets, sets and clears same-presentation slide
+jumps under checked relationship ownership. External addresses and action-only
+clicks retain their distinct semantics. A live `Font.highlight` colour view
+shares the RGB/theme/brightness contract and refuses destructive unknown
+transform edits. `Font.highlight_color` names that same checked colour view.
+`Font.small_caps` and `Font.all_caps` select mutually exclusive
+direct modes. These getter reads create no owner nodes or scope generations.
 
 ## Native Word facade stability
+
+Native Rust exposes `Document::paragraph_visibility(&self) -> Result<Vec<bool>>`.
+Each flag matches one `Document::paragraphs()` item in encounter order. The
+inventory includes direct body paragraphs and admitted block-control
+paragraphs, entering control-owned tables. Direct body tables and direct
+nested cell tables remain excluded. Qualified physical owner paths and typed
+content slots must match before any flags are returned.
+
+The query clones one unpublished candidate, flushes its current model to the
+resolved main part once, and classifies that source without changing the live
+document or package. It uses retained namespace bindings, including aliases,
+defaults and shadows. Unsupported or ambiguous source construction, malformed
+XML and owner mismatches return Error. It does not save, reopen or serialize
+each paragraph separately.
+
+Accepted non-whitespace text, drawings, pictures, objects, equations, symbols,
+tabs, breaks, note references and supported special characters are visible.
+A soft hyphen alone, deleted text, comment references, properties, range
+markers and producer hints are not. Complete simple and complex fields use
+consistent accepted typed results, including nested nontext caches, before
+their current effective text cache. Loose markers and instructions alone do
+not count. Current empty PAGE/NUMPAGES serialization supplies its existing
+visible placeholder. Parser-owned results retain qualified source identity
+and one authoritative nested child graph. Public cache reads retain their
+consistency filter, while child edits and refresh use that graph even when a
+parent's effective cache is temporarily stale. Unsupported replacement of a
+retained child owner is refused.
+
+`Document::audit_accessibility` uses the same classifier with only direct
+body paragraphs. Every nonparagraph body item resets its empty streak.
+Pictures and other displayed content interrupt the streak. If visibility
+cannot be determined, the infallible audit retains metadata, image-alt and
+heading findings, adds one Warning with the actual error detail, and omits
+consecutive-empty findings. It does not invent empty flags on failure.
+
 Native Rust exposes `BibliographySourceKind`, `BibliographyContributorRole`,
 `BibliographySourceField`, `BibliographyStyle`, source/person/contributor/property
 records, source/style inspection records, `CitationOptions`,
@@ -995,7 +1298,8 @@ Native Rust re-exports `CT_OfficeStyleSheet` and adds the concrete
 `remove_embedded_font` form the additive pre-1.0 authoring surface. Embedding
 requires caller bytes, an explicit authorization value, a nonempty exact
 license identity without XML-normalized whitespace, and a valid OOXML font
-key. Python, WASM, and CLI gain no new binding in this story.
+key. Python and CLI expose checked licensed font operations through these
+native providers. WASM gains no new font-authoring entrypoint.
 
 Native Rust re-exports `CoreProperties`, `AppProperties`, `CustomProperty`,
 `CustomPropertyValue`, `Twips`, and the bounded settings value types. `Document`
@@ -1063,7 +1367,11 @@ Python exposes story and story item snapshots, including each item's `xml` as
 bytes. Cached complex-field text agrees between owned bulk snapshots and direct
 native reads when the field spans sibling runs or nests inside another field.
 Snapshot reads preserve source locations, XML, direct-body coordinates and the
-document revision, leaving held live handles valid. Nested instruction caches
+document revision, leaving held live handles valid. Valid empty comment owners
+remain visible as empty comments without an anchor. Reading them, listing story
+items and performing no-op field or TOC updates preserve package bytes and live
+paragraph handles. The native operation-local source inventory changes no
+public snapshot identity or binding signature. Nested instruction caches
 remain distinct from their enclosing field's visible result. Story links retain
 physical source ordering and relationship scope through the same bounded excerpt
 projection. `Document.set_story_text` takes a `StoryItem` snapshot and resolves its
@@ -1157,19 +1465,21 @@ a hyperlink relationship that nothing references any more. Only links that
 `w:fldSimple`, a link in a text box inside `mc:AlternateContent`, and a
 HYPERLINK field are not. Python exposes
 `Document.set_hyperlink_url` and `Document.remove_hyperlink` for a `Hyperlink`
-record. A snapshot from `Document.hyperlinks` resolves at its recorded position
-only while its story keeps the same link paths and texts and the link keeps
-its fields, and a record built from the public fields resolves only when
-exactly one link matches. Neither call moves content, so live handles stay
-valid.
+record. A captured snapshot from `Document.hyperlinks` resolves its surviving
+physical owner and current ordinal. Removal retires that authority even when
+another link has identical public fields. A record built from public fields
+resolves only when exactly one link matches. These operations preserve proven
+surviving content owners and retain conservative regular-run invalidation.
 `Document::set_picture_size` resizes every main-document `pic:pic` drawing
 whose blip names one image relationship. It writes `wp:extent` and the `a:ext`
 of `pic:spPr/a:xfrm`, scales `wp:effectExtent` with the extent on each axis,
 and leaves anchor positions alone. It rejects a zero size. A VML `w:pict`
 picture on the relationship is not resized, the relationship of an SVG blip
 extension is not matched, and a picture inside a group is not resized. Python
-exposes `Document.set_picture_size` with EMU sizes, and it keeps live handles
-valid too.
+exposes this compatibility operation as `Document.set_picture_sizes_for_relationship`
+with EMU sizes. The distinct `Document.set_picture_size` takes a frozen physical
+Picture snapshot and changes one occurrence, invalidating affected handles after
+publication.
 
 Native Rust also exposes concrete borrowed `SectionRef` and `Section` handles.
 Each handle reports its zero-based document ordinal, schema-final ownership,
@@ -1393,8 +1703,23 @@ failures return `Error::Html` without publishing a partial document. The path
 constructor caps reads at 64 MiB even if the file changes after its metadata is
 read. The importer supports source-ordered paragraphs, runs, nested lists, and
 spanned tables plus the bounded inline and embedded CSS subset. It does not
-fetch external resources. Python, WASM, and CLI surfaces gain no HTML import
-entry point and retain their existing methods and error contracts.
+fetch external resources. Python `Document.from_html` and `open_html` return
+`(Document, tuple[HtmlDiagnostic, ...])` with immutable location, property and
+message records. `from_markdown` and `open_markdown` additionally accept an
+optional loaded Document or template path. Their explicit image map contains
+source, bytes and filename triples. Inputs are bounded UTF-8. WASM gains no
+import entry point.
+
+Python `Document.insert_html(html, *, after, images=())` accepts a required
+live paragraph of this document and returns detached diagnostics. It inserts
+after the checked physical direct child in a supported body, cell, header or
+footer. Refusal preserves the document and handles, while changed publication
+invalidates previous handles. CLI `rdocx convert` admits HTML and Markdown
+input with `--to docx` or a DOCX output path, and optional `--template`. It
+rejects rendering options, protects input and template paths and stages output
+atomically. Local image paths resolve only inside the input directory with
+bounded reads. Traversal, escaping symlinks and unsupported schemes refuse,
+while missing images retain the importer diagnostic policy.
 
 Native Rust callers can also insert rich HTML into an existing Word story with
 `Document::insert_html_fragment(&ContentLocation, &str,
@@ -1405,8 +1730,8 @@ body, cell, header, and footer destinations supported by the story API. Its
 child range, and ordered `HtmlDiagnostic` values. Links and images are scoped
 to the physical destination part. Unsupported or unresolved markup is
 diagnosed, while invalid locations, malformed resources, bound failures, and
-package failures leave the document unchanged. This surface remains native
-Rust only.
+package failures leave the document unchanged. Python exposes this transaction through its checked paragraph-relative
+`insert_html` method.
 
 Native Rust callers can import and export bounded MHTML through
 `Document::from_mhtml_bytes`, `Document::open_mhtml`,
@@ -1451,8 +1776,8 @@ through `Presentation::from_html` and `Presentation::open_html`. The additive
 pre-1.0 surface exposes concrete `HtmlReadResult`, `HtmlDiagnostic`, and
 `HtmlImageResource` values plus `Error::Html`. Conversion returns a fresh
 editable presentation only after save, reopen, and validation. Python, WASM,
-and CLI surfaces gain no presentation HTML entry point and retain their
-existing methods and errors.
+and CLI surfaces gain no presentation HTML import entry point and retain their
+existing import methods and errors.
 
 Native Rust callers can import PDF pages through
 `Presentation::from_pdf_bytes`, `from_pdf_bytes_with_limits`, and `open_pdf`.
@@ -1545,7 +1870,7 @@ insertion or move destination is replaced inside it, and deleted text is never
 matched. The Rust facade, Python `try_replace_text` and `replace_all_regex`,
 the WASM replacement method, and `rdocx replace --expect` share these counts.
 
-Every Word replacement, literal, regular
+Every document-wide Word replacement, literal, regular
 expression, or template, edits every copy of a text box that Word writes in
 `mc:AlternateContent`. The count is that of the first `mc:Choice` that holds a
 text box, the DrawingML copy that layout draws and the story walkers read. The
@@ -1558,6 +1883,16 @@ another text box, while the story walkers read it only as a child of a run.
 A story edit of such a text box changes the Choice only, see
 `03-architecture.md`. `redact_text` removes the literal from every copy and
 still counts each copy.
+
+A positive checked scoped replacement in a qualified alternate text box maps
+its selected paragraph or descendant cell to every admitted counterpart.
+Physical signatures, topology and independent occurrence counts must agree
+before all original source ranges are spliced. Each representation retains
+its run formatting and opaque source, and unselected owners remain exact.
+Asymmetric, ambiguous or unsupported mapping refuses the whole package.
+Expected-count mismatch and zero-match behavior precede alternate-copy
+admission. Invalid replacement text and stale locations fail without
+publication. Foreign namespace lookalikes cannot establish alternate ownership.
 
 `Document::try_replace_all_expected` takes ordered `(placeholder, replacement,
 expected)` pairs and returns the count of each pair. Each pair runs over the
@@ -1685,6 +2020,14 @@ setters. Cell handles have checked width, border, margin, and shading setters,
 typed alignment and direction, explicit or absent wrapping, conditional
 regions, and checked nested-table construction. Matching borrowed readers
 expose every stored typed value after reopen.
+
+An empty, namespace-qualified cell `w:tcMar` models the same typed margin
+container whether its source is self-closing or expanded. Namespace
+declarations alone do not make it unmodeled. Its four absent edge values
+inherit existing table margins rather than inventing explicit zeros. Genuine
+attributes on self-closing containers and foreign or rebound namespace
+lookalikes retain exact opaque XML and remain unmodeled. Typed serialization
+keeps the existing cell-property schema order and unsupported sibling slots.
 
 Operations whose validity depends on neighbouring cells live on `Table` and
 take checked row and cell indexes. Grid omissions reconcile only untouched
@@ -2239,18 +2582,58 @@ keyword-only `render_pages` arguments, keeps zero-based page indices, releases
 the GIL for rendering, returns `list[bytes]` for PNG or JPEG, and returns one
 `bytes` value for TIFF.
 
-Python `Document.to_pdf(*, fonts=None, font_dir=None, revision_view="accepted")`
-uses `Document::to_pdf_with_options` when no fonts are supplied. With `fonts`,
-a sequence of `(family, bytes)` pairs, or `font_dir`, a directory whose `.ttf`,
-`.otf`, and `.ttc` files
-`Document::load_fonts_from_dir` labels by file name, it calls
-`Document::to_pdf_with_fonts_and_options` with the given fonts first, as
-`rdocx convert --font-dir` does. That call lays out with the caller fonts only,
-so a family they do not provide, even through the automatic label aliases and
-metric-compatible names, raises `LayoutError`. The native loader reads a
-missing directory as an empty one, so the binding raises `FileNotFoundError`
-for a missing `font_dir` and `NotADirectoryError` for a file, before any
-layout. SVG and raster output take no caller fonts.
+Python Word `to_pdf`, `render_page_to_png`, `render_page_to_svg`,
+`render_all_pages`, `render_pages`, `layout` and `layout_page` accept
+keyword-only `fonts=None`, `font_dir=None` and `font_dirs=None`. Fonts are
+ordered `(family, bytes)` pairs. Singular and plural directory inputs are
+mutually exclusive. A scalar string or bytes value is not a plural sequence.
+Directories load in caller order, supported files in lexical path order,
+then explicit bytes load last. Later same-rank additional faces win. Embedded family
+identity and filename aliases remain available. Caller faces override embedded
+and fallback faces, and empty loaded inputs use the ordinary omission route.
+
+Python copies bytes and path inputs before releasing the GIL. Metadata,
+strict file loading and native layout or rendering run detached. Missing and
+non-directory paths raise their existing I/O exceptions with the path. Other
+strict loader refusals retain the public layout/domain error and exact failing
+path. Invalid inputs do not produce output or mutate source. Normal Word
+caller rendering keeps normal fallback, while deterministic entrypoints keep
+bundled fallback. Existing caller-only native layout methods remain isolated.
+
+Configured `render_pages` constructs one owned layout. Omitted page selection
+uses that bundle's actual page count. Explicit selections retain order and
+refuse duplicates, empty selections and out-of-range indices. PNG and JPEG return lists of bytes,
+TIFF returns one multi-page byte stream. DPI, quality, transparency and revision
+selection preserve the existing raster contracts. Measurement results remain
+immutable, with no binding-private renderer or public invocation counter.
+
+Diagnostic companions add `_with_diagnostics` to existing PDF, PNG and raster
+byte-render methods. Native results pair the unchanged payload with an owned
+`Vec<Diagnostic>`. Python results pair that payload with `tuple[str, ...]`.
+Python signatures retain the original parameters and the caller-font keywords
+`fonts`, `font_dir` and `font_dirs`. Native companions take the corresponding
+render options or selection and one explicit font-files slice. The facade
+prepares one configured layout and encodes or paints that same bundle once.
+Existing byte-only methods retain their signatures. No rerender or mutable
+last-render registry supplies diagnostics for earlier bytes.
+
+Native and Python Word companions cover PDF, individual PNG, all-page PNG
+and selected raster pages. Native Word also covers archival PDF. Native and
+Python PPT companions cover PDF, individual slide PNG and all-slide PNG.
+Native PPT additionally covers archival PDF, notes PDF, all-notes PNG,
+handout PDF and all-handouts PNG. Python PPT adds notes PDF and all-notes
+PNG companions. Python archival and handout companions are not exposed.
+Word omitted page selection means all actual pages. Explicit empty selection
+retains `RasterError::EmptyPageSelection` and Python `LayoutError`, with source
+unchanged. PNG/JPEG keep list payloads and TIFF keeps its byte stream.
+Existing SVG results retain their named diagnostic result.
+
+Native PPT `TextFrameLayout` owns the diagnostics from the same measured
+shape. The frozen Python frame exposes those messages as an immutable tuple.
+A subsequent shape measurement cannot replace an earlier frame's facts.
+Adding the native public field requires external pre-1.0 struct literals to
+include it. CLI render and conversion publish the successful output's ordered
+facts to stderr once. Fit reports consume those same output-owned facts.
 
 Native Word SVG adds `SvgDiagnostic`, `SvgRenderResult`, and four additive
 `Document` methods. `render_page_to_svg` and
@@ -2263,6 +2646,12 @@ layout method, releases the GIL, and returns a frozen `SvgRenderResult` with the
 SVG text and a tuple of frozen `SvgDiagnostic` values, or `None` beyond the
 last page. WASM, CLI, Presentation, and public `oxml-pdf` APIs do not gain SVG
 methods or values.
+
+`FontData` carries selected variation coordinates and synthetic style flags
+in addition to source bytes and face index. External pre-1.0 struct literals
+must include those fields. Checked PDF output refuses failed selected-font
+preparation before allocating partial output, and native Result consumers
+propagate the existing error. Valid output and legacy vector signatures remain.
 
 Native renderers obtain the complete positioned output through
 `Document::layout` and `Document::layout_with_options`. Accepted calls return a
@@ -2405,6 +2794,15 @@ surface. Python, WASM, and CLI consumers gain no advanced table surface here.
 
 ## Native PowerPoint collaboration and navigation
 
+Native parsing and supported authoring admit recognized PresentationML nesting
+through32 and reject33 before descent or publication. Group and compatibility
+owners share a counter, while timing wrappers do not increase node depth.
+Python retains the existing `XmlError` mapping for malformed producing parts,
+and CLI text, inspect and validate use the same checked native opening route.
+No Python signature or stub changes are required. The additive OXML constant
+and validator retain existing public constructors and raw/equality access.
+
+
 The native pre-1.0 `rpptx::Presentation` facade exposes ordered modern comment
 authors, comments, threaded replies, sections, and mutable notes-master and
 handout-master header-footer settings. `CommentAuthor`, `Comment`,
@@ -2478,10 +2876,18 @@ Presentation::handout_page_pngs_deterministic(
 ) -> Result<Vec<Vec<u8>>>;
 ```
 
-These additions are native Rust APIs only. Python, WASM, and CLI surfaces add
-no notes or handout methods and continue to preserve the underlying parts. No
+Python exposes notes and handout PDF through the native exporters. WASM and
+CLI add no new notes or handout methods and preserve the underlying parts. No
 new public surface is added to `rpptx-layout`, `rpptx-render`, or the OXML
 crates. The additive facade API is reviewed through the pre-1.0 release gate.
+
+PowerPoint Python `to_pdf`, `render_slide_to_png`, `render_all_slides`,
+`text_layout`, `to_notes_pdf` and `render_all_notes` accept the same three
+keyword-only caller-font inputs and ordered strict loader contract. Native
+caller-font counterparts retain existing arguments and result forms. Common
+preparation supplies selected caller instances to slide, notes, handout,
+timeline and fit measurement paths. Deterministic fallback remains bundled.
+Neither WASM wrapper adds a host-directory input.
 
 ## Native PowerPoint text layout
 
@@ -2506,6 +2912,35 @@ API shape above. WASM and CLI consumers gain no text layout method. This is an
 additive semver change for `rpptx` and `rpptx-render`. It adds no production
 dependency, feature flag, trait, dynamic dispatch, generic parameter, or
 builder.
+
+## Explicit PowerPoint text fitting
+
+The render-feature facade provides `refresh_autofit(&mut self, font_files)`,
+`fit_report(&self, font_files)` and `fit_text_at(&mut self, location,
+font_family, max_size, font_files)`. Locations come from the checked existing
+physical text owner. The input font slice follows the shared caller-font
+selection rules. Refresh and fit prepare one font manager and publish one
+staged package only after every relevant context succeeds. Reports do not
+mutate or imply refresh.
+
+Python `Presentation.refresh_autofit(*, fonts=None, font_dir=None,
+font_dirs=None)` returns a frozen `AutofitRefreshResult`. Its `updates` and
+`diagnostics` are tuples and `changed` is a boolean. Checked
+`TextFrame.fit_text(font_family=None, max_size=18, *, fonts=None,
+font_dir=None, font_dirs=None)` returns one frozen `AutofitUpdate`. The maximum
+is an integer from one through4000, with boolean and noninteger refusal.
+Caller bytes are copied before detached work and directory validation follows
+the existing shared font rules.
+
+Updates expose physical owner part/kind, optional slide index and shape id,
+optional cell coordinates, mode/status, optional saved integer scale and
+reduction, optional integer point size, old/new four-integer EMU bounds,
+changed and owned diagnostics. Empty frames leave fitting values absent.
+Native reports additionally retain typed locations and accepted Q/S versus
+current persisted-trial measurements. Snapshot values do not select a future
+mutation. Existing formatting-only operations keep live logical handles.
+These concrete additive APIs do not add a public text-segment field or a new
+layout trait.
 
 ## Native PowerPoint executable-content inventory
 
@@ -2703,14 +3138,14 @@ flag, system codec, subprocess, or binary asset.
 ## Packaging
 
 Current source prepares the exact seven-package Word Rust family, `rdocx`
-Python distribution, `rdocx-wasm` and inherited support carriers at0.16.0.
+Python distribution, `rdocx-wasm` and inherited support carriers at0.16.1.
 The exact fifteen-package shared OOXML and PowerPoint family plus `rpptx-py`
-and its Python distribution are prepared at0.14.0. The separate unpublished
+and its Python distribution are prepared at0.14.1. The separate unpublished
 `rpptx-wasm` npm carrier remains0.12.1. Word's current dependency pins require
-shared0.14.0, so the shared family precedes Word publication. Preparation is
+shared0.14.1, so the shared family precedes Word publication. Preparation is
 local metadata and artifact verification, without registry publication or tag
-authority. The previous unified v0.15.0 and rpptx-v0.13.1 releases remain
-immutable at reviewed main9d019472f7e6b95ac4ba0770c4dee35dcbc28f0e.
+authority. The previous unified v0.16.0 and rpptx-v0.14.0 releases remain
+immutable at reviewed main733ce6f7b2b816c5760692abf5c99d68b29ae897.
 
 **maturin, mixed Rust and Python layout**, so type stubs and enum shims have a
 home. `python-source = "python"`, `module-name = "rdocx._rdocx"`,
@@ -2909,9 +3344,93 @@ or tag authority.
 
 ## CLIs
 
-`rpptx-cli` extends the seven-command `rdocx-cli` surface with `inspect`,
-`text`, `convert`, `diff`, `replace`, `validate`, `render`, `thumbnail`,
-`outline`, and `comment`. It uses clap derive and `serde_json` for `--json`.
+`--font-dir` configures Word layout, conversion and image rendering, and
+PowerPoint conversion, rendering, thumbnails and read-only fit reports. The shared strict loader
+retains lexical file order and embedded identity with filename aliases.
+Deterministic CLI fallback remains bundled. PDF, PNG, JPEG and TIFF consume the
+selected layout instances. Unsupported output formats refuse a supplied font
+directory before publication. Missing or invalid inputs preserve staging and
+existing destination limits.
+
+Both CLIs use clap derive, native family providers and the shared schema-1
+JSON envelope. Word exposes inspect, text, layout, convert, diff, replace, validate,
+render, comment, revision, compare, toc, fields, images, meta and fill. PowerPoint exposes inspect, text,
+convert, diff, replace, validate, render, thumbnail, outline, comment,
+footer, slide, notes, fit and meta.
+
+Ordered `replace --map PATH` accepts a JSON array of placeholder/value/optional
+expect objects, retaining duplicate pairs and parser last-key-wins behavior.
+Unknown keys, invalid types and command-line pair/expect conflicts refuse.
+Null or absent expectations allow zero, and an empty map succeeds unchanged.
+Pairs cascade on one native candidate, with one final publication and ordered
+counts. Native presentation `try_replace_all_expected` returns the same
+family-local index/placeholder/expected/found mismatch facts as Word. Python
+Presentation.replace_all exposes pairs with optional counts and ordered tuple
+results. New counted wrappers allocate results before publication, preserve
+held handles on failure or actual unchanged bytes, and retain causal owner
+survival on changed results. Single CLI replacement retains family unmatched
+behavior. Reports contain action or operation, mode, ordered index/placeholder/
+value/count/nullable expected records, total_count and output.
+
+Word `--regex` consumes `try_replace_all_regex_expected` and Python
+replace_all_regex_expected, with the existing native dialect and $1 captures.
+Patterns and replacement text are admitted before staging. Required raw-owner,
+header/footer, note rewrite and final reopen errors propagate. Legacy regex
+methods retain their existing behavior. Logical counts and alternate physical
+copies use the established document-wide matcher rather than scoped picture
+correspondence. Chart labels remain outside regex scope.
+
+Word fields update consumes `update_all_fields(context)`, returning the
+FieldsUpdateReport through native/Python. The report retains ordinary_updated,
+layout, ordered evaluations with original instructions and cached results,
+combined diagnostics, total_updated and saved_cache_scope. Python allocates
+the complete owned report before publication. Evaluation outcome dictionaries
+are owned report data and do not mutate the document.
+One outer candidate performs ordinary and deterministic page-cache work.
+`--now YYYY-MM-DDTHH:MM:SS` is a checked Gregorian civil value, without offset,
+fraction or leap second. Omission keeps now=None and unresolved date caches.
+Existing header/footer dynamic caches and unsupported-switch diagnostics stay
+visible. The input path supplies field filename context.
+
+Word images extract uses physical picture occurrences and actual internal
+media identity, extracting each unique source part once in first-occurrence
+order. Flat generated image-000001 names derive extensions from bounded content
+types, with bin for unknown types. External links retain URL metadata and a
+null extracted file, without fetching. Missing required media refuses.
+Complete bytes and destinations are admitted before nonreplacing staged
+publication. Inspect adds pictures and public word/Unicode-scalar character/
+deterministic page counts, with accepted-main-body scope, spaces included and
+provider diagnostics. Existing inspect keys remain compatible.
+
+Word meta get/set uses typed current core/custom providers. Repeated
+`--custom NAME=TYPE:VALUE` admits str, int32, finite float64, true/false bool,
+checked provider filetime and empty without payload. Existing PID/fmtid/string
+subtype/order and opaque values survive updates. Remove-custom is explicit,
+and missing removal is unchanged. Tag fill splits NAME=VALUE once, uses tags
+only and refuses duplicates, missing tags or unsupported bound owners as one
+transaction. Native/Python fill_content_control_tags returns per-tag counts.
+Core set in either family changes only supplied fields, treating empty text
+as removal and preserving imported metadata.
+
+PowerPoint slide commands use one-based CLI positions, checked decimal layout
+indexes or exact unique names. Add-at composes native creation/placement on
+one candidate and exposes SlideCollection.add_slide_at(layout,position) with
+zero-based Python positions. Duplicate inserts after source, move uses final
+positions, and hide/show preserve no-ops. Notes set requires exactly one text
+or complete UTF-8 file source, preserving LF/CRLF/carriage returns, all spaces,
+empty text and existing notes formatting/opaque payload through native/Python.
+New editing commands require a distinct output and refuse existing files and
+input aliases, symlinks or hard links before native editing/publication.
+
+PowerPoint fit consumes the F-X207 native fit_report and exposes frozen Python
+FitReport/FitFrameReport/FitTrial snapshots, without a second solver or mutable
+owner selector. CLI JSON preserves physical owner part/child path/cell,
+identity/name, contexts, empty/status facts, current measured/stored values,
+needed total scale/reduction, quantized/persisted trials and diagnostics.
+Trial dimensions/heights are points, stored bounds EMU and integer scales or
+reductions hundred-thousandths. No fitting permitted trial reports null needed
+scale and unfit-at-floor. Unsupported mandatory owners refuse. Fit does not
+save, exiting0 without overflow,1 for overflow and2 for checked error.
 
 `inspect` reports the file, slide and layout counts, slide size, core metadata,
 and each slide's identity, hidden state, and shape count. Its JSON form uses the
@@ -3023,7 +3542,24 @@ footers, notes, and comments are defined. Both are errors. A style id inside a
 tracked property change or inside `mc:Fallback`, and an empty id, are not
 checked. Parts are scanned before the document
 opens, so a malformed styles, numbering, or settings part is named in the
-report beside the open failure it causes. `layout --json` uses
+report beside the open failure it causes. Empty-paragraph advisories count
+body paragraphs and paragraphs nested in block content controls, including
+control-owned tables. Direct body tables and direct nested cell tables remain
+excluded, while tables wrapped by a cell control remain included. `Document::paragraph_visibility` supplies the final accepted text and
+nontext classification, including visible content inside supported inline
+wrappers. Complete fields require accepted displayed results, not loose field
+markers or instructions. A consistent typed deleted-only result remains empty
+even when its public text-extraction cache is nonempty. Properties, bookmarks,
+range markers, deleted content, producer hints and soft hyphens alone do not
+count. The read-only current-source scan follows native typed content-control
+admission and only the first expanded content slot. Duplicate slots, invalid
+opaque controls and self-closing raw slots add neither visibility nor owners.
+
+A visibility failure returns Error when no structural error has already been
+collected. Otherwise validation retains those errors, adds one indeterminate
+paragraph-visibility Warning with the actual detail, and omits the empty-count
+advisory. It does not substitute plain text or all-false flags. Title, author
+and heading advisories retain their existing behavior. `layout --json` uses
 bundled deterministic fonts and reports every direct body item. Its point-space
 fragments carry one-based physical and displayed page numbers, and preserved
 unlaid items retain an empty fragment list. `diff` compares accepted-view
@@ -3069,3 +3605,262 @@ Generated-table rebuild errors include checked target mutations that would
 require unsafe canonical serialization beneath conflicting retained namespace
 bindings. The error leaves the package and existing caches unchanged. Namespace
 aliases are accepted when the source projection and mutation are safe.
+
+## PowerPoint footer, field, theme and transition authoring
+
+Presentation.set_header_footer accepts slide_number, footer, date, hide_on_title
+and date_format, with keyword-only date_cache. None disables a field, an empty
+string is an explicit cache or fixed value, and auto selects an automatic date.
+Live Slide.header_footer changes individual fields and exposes presence, mode,
+cache and legal policy provenance. Shape.placeholder_format exposes immutable
+source idx and placeholder type through the live shape owner. Paragraph.add_field
+uses the existing staged owner publication and presentation-wide field identity
+inventory. Presentation.slide_number_start preserves optional source presence.
+
+Presentation.slide_masters exposes linked per-master Theme proxies. Colors and
+major/minor Latin, East Asian and complex-script fonts are read-only.
+Slide.transition exposes the eight common effects, effect-specific direction,
+optional duration, click and after policy. Seconds are finite and nonnegative,
+with checked truncation to milliseconds. Apply-to-all stages all slides before
+publication. Removing the transition does not remove timing. Retained sound,
+extensions and compatibility branches survive supported edits.
+
+The footer CLI uses explicit date caches and safe output publication without
+overwriting its input. Inspect reports each master's theme, footer policy and
+displayed numbering separately from physical slide identity.
+
+## Live Word sections and rich related owners
+
+`Document.sections` remains a tuple of immutable snapshots. `Document.section`
+returns a checked `SectionHandle` with geometry, first-page flags, note policy
+and six `HeaderFooter` accessors. Absent story reads create no package part.
+Mutation uses the effective inherited owner or creates one explicit absent
+slot. Unlinking an absent slot creates an explicit empty owner, while linking
+removes the explicit reference. Structural publication refreshes the mutating
+owner and makes previously fetched element handles stale.
+
+`HeaderFooter.paragraphs` and `tables` return ordinary rich element handles.
+`add_paragraph` resolves explicit paragraph styles by actual ID or name. Its
+default is the actual Header or Footer paragraph style when present, otherwise
+no direct style. `add_table` and nested `Cell.add_table` use checked physical
+story boundaries. `FootnoteEndnote` exposes paragraphs, tables, rich additions
+and deletion. Note creation accepts a same-document paragraph end or accepted
+run boundary and rejects invalid note hosts before publication.
+
+Page colour and per-edge page-border setters preserve opaque source. Real text
+watermarks retain styled text in both DrawingML and VML fallback branches.
+Image watermarks retain actual image bytes with checked bounds, rotation and
+opacity. Replacement and removal affect only the unchanged API-owned header
+representation. Legacy VML setters remain separately named compatibility
+methods. Length operands reject bool, floats and overflow rather than coercing
+Python values. `Twips` converts a checked signed twip count to EMU.
+
+SectionHandle.set_text_watermark admits only opacity 0.5. Other valid-range values raise the named unsupported RdocxError before publishing any story, linkage or source change. Legacy native VML methods and image watermark opacity are unchanged.
+
+## Extended PowerPoint properties, fills and export
+
+Font.baseline reads float or None and accepts fractions from-1 to1. Font.spacing
+reads Length or None. Font.language, east_asian_name and complex_script_name
+read direct source values. Paragraph.auto_number accepts any of the41 admitted
+DrawingML schemes with start_at from1 to32767. bullet_color, bullet_size and
+bullet_font remain independently editable. Fractional bullet size accepts
+0.25 to4.0, while an imported absolute point size reads None without implying
+a follows-text policy. Table first_row, last_row, first_col, last_col,
+horz_banding, vert_banding and style_id preserve grid and cell ownership.
+
+FillFormat.gradient_stops exposes checked live stops with runtime identity
+independent of XML IDs. Equal-valued stops remain distinct, reordering retains
+identity, and deletion refuses when fewer than two would remain. Shape and
+slide picture fills use the actual owning slide's relationship allocation.
+FillFormat.transparency reads float or None without creating a fill and writes
+only a solid fill. Rejected writes are atomic.
+
+Presentation.core_properties, app_properties and custom_properties are checked
+live views. Sections and Slide.media return immutable snapshots.
+Shapes.add_movie and native media operations preserve poster and relationship
+ownership. render_slides accepts keyword-only dpi, format, quality, transparent,
+slides, fonts, font_dir and font_dirs. PNG and JPEG return lists of bytes, TIFF
+returns one multi-page byte stream. to_pdfa accepts pdfa-2b or pdfa-3b, and
+to_handout_pdf accepts1,2,3,4,6 or9 slides per page. Both accept the common
+keyword-only caller-font inputs. from_odp(file) and to_odp return the
+presentation or bytes with ordered OdpDiagnostics. save_reports exposes the
+ordered report payload.
+
+## Python Word document operations
+
+Both families' PDF diagnostic companions return the encoded payload and an
+owned diagnostic tuple from the same successful layout. Explicit Word symbols
+and numbering markers, and accepted PowerPoint character markers, preserve
+unknown source codes and name their family and original scalar. Unknown symbol
+meaning does not imply missing glyph coverage. Caller font labels alone do not
+authenticate an original symbol face. Genuine physical requested-face coverage
+and known semantic mappings retain precedence.
+
+Document exposes HTML and Markdown, CLI-equivalent text and owned TextReport, typed ODT, RTF and EPUB payloads with complete ordered diagnostic tuples, and explicit body word and character counts. Validation accepts an owned document snapshot, bytes or a path. Package decode and path errors propagate, while admitted advisory findings preserve native severity, order and validity.
+
+Template input accepts a string-keyed dict of bounded JSON values. Bool precedes integer conversion. Nonfinite values, cyclic containers, out-of-range integers and arbitrary objects refuse before publication. FragmentConflictPolicy exposes independent style, numbering and related-part reuse choices. ContentLocation and DocumentFragment retain physical source boundaries. Checked insertion uses the native fragment path and excludes final section properties by default.
+
+CustomFileTime validates explicit RFC3339 text. CustomProperties returns immutable typed snapshots and stages checked set/delete operations. AppProperties and presence-sensitive track_revisions are live document-owned handles. Equations return immutable source snapshots, ordered per-child conversion results and native loss diagnostics. Tag and alias control updates stage all selected qualified values once. Runtime constructors, explicit exports and strict stubs describe the same public classes and defaults.
+
+## Live PowerPoint masters and layouts
+
+Presentation.slide_masters and slide_master expose live physical part owners.
+SlideMaster exposes slide_layouts, shapes, placeholders, background, theme and
+text_styles. SlideLayout exposes writable name, shapes, placeholders, background,
+optional show_master_shapes, follow_master_background, slide_master and actual
+used_by_slides. Duplicate and remove operate on the live layout collection.
+Used or unsafe layout removal refuses without publishing revisions.
+
+Theme.colors is a live twelve-slot scalar RGB mapping. Named assignment edits
+the resolved theme resource, so shared theme owners see the same change. Major
+and minor font sets expose writable Latin, East Asian and complex-script faces.
+Value edits preserve owner inventories. Qualified source patches retain
+unselected opaque bytes and refuse unsafe selected rewrites.
+
+MasterTextStyles.title, body and other expose nine direct paragraph-formatting
+levels through TextStyleList. Indexing is zero-based and level(n) is one-based.
+The font property selects the first level. Levels reuse checked Paragraph/Font
+formatting, including font colour, bullet choice/colour and indents. They do not
+represent a text-bearing frame and do not synthesize content for text methods.
+
+Presentation.apply_theme accepts local path or bytes, optional source_master,
+import_masters and explicit layout_map pairs. Imported source closure is staged
+and reopened before one success-only causal publication. Property changes retain
+existing physical owners. Layout removal retires the removed owner and
+descendants while surviving owners resolve their current positions through the
+existing provider. Errors name the operation and retain source and revisions.
+
+The native CT_Picture.hidden query is an additive pre-1.0 API. It reads the
+qualified drawing owner's explicit true or 1 flag without changing retained
+source XML or public struct fields. Picture rendering honors that flag when
+Office saves master visibility into layout-owned pictures. Foreign or rebound
+lookalikes do not supply the flag. This adds no Python hidden property.
+
+## Word tables, physical pictures and internal links
+
+Table exposes signed removable indent, autofit, actual table style ID or display-name resolution, six look flags and checked empty-row, logical-column and complete-cell-split operations. Undefined, ambiguous and wrong-type styles refuse without publication. Existing nested Cell.add_table uses the checked physical owner provider. Structural edits invalidate held rows and cells, while a no-op split preserves their revision.
+
+PictureOptions exposes checked metadata, crop and the supported inline and floating placement vocabulary. Document.add_picture, Run.add_picture and Cell.add_picture import path or bytes and return frozen factory-created Picture snapshots. Document.pictures returns physical source order across admitted stories. Snapshots carry document origin, revision, physical owner and unchanged source identity. Document.set_picture_size accepts one snapshot and resizes that occurrence only. The former relationship-wide Python operation is explicitly named set_picture_sizes_for_relationship. Native relationship-wide sizing and replace_image retain their separate compatibility contracts. Foreign, stale, malformed and unsupported inputs refuse before publication.
+
+Paragraph.add_internal_hyperlink and first-character # URLs use the same checked bookmark provider. Ordinary URL fragments remain external links. Tooltips retain native hyperlink formatting. Document.add_heading_hyperlink stages a suitable existing or unique valid supported heading bookmark and its source link together. Supported related-story source paragraphs use their actual owner. Bookmark grammar, owner origin and revision are validated before mutation. No external relationship is allocated for internal links.
+
+Scoped alternate text-box replacement maps each selected logical paragraph or descendant cell to every admitted physical Choice and Fallback counterpart. Independent occurrence counts, formatting and source ranges decide publication. Unselected owners and opaque XML remain exact. Ambiguous or asymmetric mapping refuses the whole operation, while logical zero-match and count behavior retain the existing provider contract.
+
+## PowerPoint Element XML surface
+
+The exported Element exposes immutable xml:str and replace_xml(xml:str)->None.
+Paragraph, regular Run, Table, Cell, Shape, TextFrame, Slide, SlideLayout and
+SlideMaster expose element. Legacy Shape.xml remains bytes. Reads capture the
+actual source owner and close required inherited namespace bindings. Public
+replacement validates the live owner before native resolution and publication.
+
+A checked replacement preserves its proven selected logical owner and retires
+unsafe former descendants, even when counts or values match. Table XML keeps
+the selected table owner but retires its old grid, cells and text bodies.
+Shape replacement retires replaced text-body and property views. Body XML
+keeps the selected body owner and retires paragraph, run and font descendants.
+Removed and recreated bodies cannot resurrect old handles. No-op, refusal and
+allocation failure preserve document bytes and live tokens. Ordinary supported
+setters retain their established lifetime behavior, while notes edits preserve
+unrelated shape and text owners.
+
+## Licensed embedded fonts in Python and CLI
+
+Both Python packages expose FontEmbeddingLicense with required keyword-only
+authorized and identity inputs. Embedding requires true authorization and a
+nonempty exact identity. Font inputs accept bounded bytes, paths and binary
+readers. Binary readers are read in bounded chunks through actual empty-bytes
+EOF, with cumulative bounds checked before copying. Invalid chunk types, later
+read exceptions and excess input refuse before native publication.
+
+Word exposes immutable FontDefinition/EmbeddedFont snapshots through fonts,
+set_font, remove_font, remove_embedded_font and embed_font. The four kind names
+are regular, bold, italic and bold_italic. Omitted font_key derives a valid
+uppercase OOXML GUID, while explicit keys retain checked native semantics.
+subsetted is explicit face metadata. embed_true_type_fonts, embed_system_fonts
+and save_subset_fonts are bool-or-None properties, where None removes only the
+owned setting. PowerPoint exposes immutable EmbeddedTypeface/EmbeddedFontFace
+snapshots through embedded_fonts, equivalent embedding/removal and tri-state
+embed_true_type_fonts/save_subset_fonts. Authored PowerPoint EmbeddedFont values
+retain explicit kind and license. Snapshot bytes and Python result allocations
+precede native publication, and exact no-ops preserve existing owner handles.
+
+Both CLIs use font list, font embed, font remove and font settings. Embedding
+requires --license-authorized and --license-identity, accepts --name, --font
+and --kind regular/bold/italic/bold-italic, and writes a new --output. Word also
+accepts --font-key and --subsetted. Removal without --kind removes a record,
+while an explicit kind removes only that face. Settings read without mutation
+options, and explicit true/false/none values require a new output. JSON uses
+the existing schema1 envelope and stable native record/face order, with actual
+part/format/length facts. Input/font aliases and existing output collisions
+refuse. Complete native serialization precedes staged output publication.
+
+The four face kinds describe authored package entries and the native-backed
+API. They are not a promise that every external application selects every
+embedded face. PowerPoint has independently qualified actual regular and bold
+use. Native Word's documented one-font-per-name behavior remains explicit,
+including synthetic bold and changed or empty saved parts, with multi-face
+interoperability owned by F-X223. API inputs, exact license authorization,
+immutable snapshots and own-renderer face selection retain their contracts.
+
+## Presentation semantic text export
+
+Python `Presentation.to_html` and `to_markdown` return strings with keyword
+options `include_notes=False`, `skip_hidden=False` and `inline_images=True`.
+Detached image mode refuses with directions to an export result or save method.
+`export_html` and `export_markdown` return a frozen `PresentationTextExport`
+with `text: str`, `assets: tuple[tuple[str, bytes], ...]` and
+`diagnostics: tuple[str, ...]`. Detached results own their data and remain
+independent of subsequent presentation edits.
+
+`save_html` and `save_markdown` accept a path and the same keyword options,
+with `inline_images=False`, and return a tuple of diagnostics after staged
+publication. Invalid option types refuse before output. All exports preserve
+current owner handles and presentation revisions, including on complete-body
+image validation failure. Package exports and stubs
+include the result type and every method.
+
+`rpptx convert --to html` and `--to md` use semantic source order. `--notes`
+includes notes, `--skip-hidden` omits hidden slides and
+`--embed-images=false` writes adjacent resources. Images embed by default.
+These formats reject all rendering options before any font discovery or
+rendering. Semantic flags refuse on PDF and image formats. The existing
+`--force` policy applies to the whole document/asset set and never permits
+replacing the input. Diagnostics are separate from exported text. WASM gains
+no semantic export entry point.
+
+## Word checked XML owner authority
+
+Word retains a finite current physical-owner inventory prepared before handle
+capture and candidate publication. Paragraph, table, cell and section handles
+bind actual owner and ancestor scopes. Supported append and owner-local
+replacement preserve only source-proven surviving owners. Unproven structural
+publishers retire current owners conservatively. Regular runs retain the
+document epoch, so Document.add_paragraph retires an older run with that first
+cause. Frozen Story and StoryItem captures also carry snapshot-inventory
+authority. Paragraph XML retires content and property children, Run XML
+retires Font and ColorFormat views, table XML retires grid descendants, cell
+XML retires content descendants, and section XML retires furniture-derived
+handles without retiring independent aliases of a shared physical header.
+Ordinary Paragraph.text preserves paragraph properties. Ordinary Run.text
+preserves the same run and rPr while retiring removed drawing and text-box
+descendants. No-op and refusal publish nothing. Candidate inventory, revision
+successors and returned Python allocations all complete before the single
+prepared publication. The five Word element objects return namespace-complete
+str and replace_xml(str) returns None through the concrete checked native
+operation.
+
+Section margin aliases use the canonical EMU length interface and truncating
+Twips conversion. Header/footer paragraph append preserves the selected held
+Section and independent physical header aliases, while retiring unsafe
+furniture descendants. Note and equation append preserve a surviving held
+Paragraph and retire affected content descendants. These operations do not
+relax the conservative regular-Run document epoch.
+
+Cell.merge admits both checked owners in the same physical table and prepares
+the surviving returned cell before publication. A no-op preserves revisions.
+Removing another cell with opaque cell children, cell-property children or
+border children refuses atomically rather than losing those bytes.
+The style ID `LightShading-Accent1` and name `Light Shading Accent 1` resolve
+to the same actual canonical style definition. Lazy admission preserves
+custom definitions and leaves the default document factory unchanged.

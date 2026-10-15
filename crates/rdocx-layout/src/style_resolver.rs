@@ -187,8 +187,12 @@ impl ResolvedNumbering {
 /// its list numbers once rather than once per width.
 #[derive(Clone)]
 pub struct NumberingState {
-    /// (numId, ilvl) → current count
+    /// (abstractNumId, ilvl) owns the visible sequence after native resolution.
     counters: HashMap<(u32, u32), u32>,
+    /// Concrete IDs remain public source identities, not sequence identities.
+    definition_by_instance: HashMap<u32, u32>,
+    consumed_overrides: HashSet<(u32, u32)>,
+    pending_sections: HashSet<u32>,
     resolved_by_source: HashMap<SourceNodeId, ResolvedNumbering>,
     bookmark_sources: HashMap<String, SourceNodeId>,
     resolved_by_bookmark: HashMap<String, (SourceNodeId, ResolvedNumbering)>,
@@ -206,6 +210,9 @@ impl NumberingState {
     pub fn new() -> Self {
         NumberingState {
             counters: HashMap::new(),
+            definition_by_instance: HashMap::new(),
+            consumed_overrides: HashSet::new(),
+            pending_sections: HashSet::new(),
             resolved_by_source: HashMap::new(),
             bookmark_sources: HashMap::new(),
             resolved_by_bookmark: HashMap::new(),
@@ -216,7 +223,12 @@ impl NumberingState {
 
     /// Advance the counter for the given numId/ilvl and return the new value.
     pub fn advance(&mut self, num_id: u32, ilvl: u32, start: u32) -> u32 {
-        let key = (num_id, ilvl);
+        let owner = self
+            .definition_by_instance
+            .get(&num_id)
+            .copied()
+            .unwrap_or(num_id);
+        let key = (owner, ilvl);
         match self.counters.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(start);
@@ -232,10 +244,22 @@ impl NumberingState {
 
     /// Get the current count for a level (without advancing).
     pub fn current(&self, num_id: u32, ilvl: u32) -> u32 {
-        self.counters.get(&(num_id, ilvl)).copied().unwrap_or(0)
+        let owner = self
+            .definition_by_instance
+            .get(&num_id)
+            .copied()
+            .unwrap_or(num_id);
+        self.counters.get(&(owner, ilvl)).copied().unwrap_or(0)
     }
 
-    fn restart_deeper_levels(&mut self, num_id: u32, current_level: u32, numbering: &CT_Numbering) {
+    fn restart_deeper_levels(
+        &mut self,
+        num_id: u32,
+        definition_id: u32,
+        current_level: u32,
+        numbering: &CT_Numbering,
+        rearm_current_instance: bool,
+    ) {
         for deeper in (current_level + 1)..=8 {
             let restart = resolved_numbering_level(num_id, deeper, numbering)
                 .and_then(|(base, _, _)| base.restart);
@@ -245,16 +269,66 @@ impl NumberingState {
                 Some(owner) => current_level < owner,
             };
             if should_restart {
-                self.counters.remove(&(num_id, deeper));
+                self.counters.remove(&(definition_id, deeper));
+                if rearm_current_instance {
+                    self.consumed_overrides.remove(&(num_id, deeper));
+                }
             }
         }
     }
 
-    /// Restart only concrete instances whose abstract definition opts in at a
-    /// section boundary.
+    /// Defer opted-in definition resets until their next actual numbered item.
     pub fn restart_after_section_break(&mut self, numbering: &CT_Numbering) {
-        self.counters
-            .retain(|(num_id, _), _| !numbering.restarts_after_section_break(*num_id));
+        for instance in &numbering.nums {
+            if numbering.restarts_after_section_break(instance.num_id)
+                && self
+                    .counters
+                    .keys()
+                    .any(|(owner, _)| *owner == instance.abstract_num_id)
+            {
+                self.pending_sections.insert(instance.abstract_num_id);
+            }
+        }
+    }
+
+    fn advance_numbering(
+        &mut self,
+        num_id: u32,
+        definition_id: u32,
+        level: u32,
+        base_start: u32,
+        override_start: Option<u32>,
+        numbering: &CT_Numbering,
+    ) -> u32 {
+        self.definition_by_instance.insert(num_id, definition_id);
+        let first_after_section = self.pending_sections.remove(&definition_id);
+        if first_after_section {
+            let root_start = resolved_numbering_level(num_id, 0, numbering)
+                .and_then(|(base, _, _)| base.start)
+                .unwrap_or(1);
+            self.counters.insert((definition_id, 0), root_start);
+            // A section event preserves concrete override-use state. A child
+            // with lvlRestart=0 also retains its carried shared count.
+            self.restart_deeper_levels(num_id, definition_id, 0, numbering, false);
+            if level == 0 {
+                return root_start;
+            }
+        }
+        self.restart_deeper_levels(
+            num_id,
+            definition_id,
+            level,
+            numbering,
+            !first_after_section,
+        );
+        if !first_after_section
+            && let Some(start) = override_start
+            && self.consumed_overrides.insert((num_id, level))
+        {
+            self.counters.insert((definition_id, level), start);
+            return start;
+        }
+        self.advance(num_id, level, base_start)
     }
 
     pub(crate) fn record(&mut self, source: SourceNodeId, numbering: &ResolvedNumbering) {
@@ -300,6 +374,9 @@ impl NumberingState {
     pub(crate) fn references_only(&self) -> Self {
         Self {
             counters: HashMap::new(),
+            definition_by_instance: HashMap::new(),
+            consumed_overrides: HashSet::new(),
+            pending_sections: HashSet::new(),
             resolved_by_source: HashMap::new(),
             bookmark_sources: self.bookmark_sources.clone(),
             resolved_by_bookmark: self.resolved_by_bookmark.clone(),
@@ -545,12 +622,23 @@ pub fn generate_marker(
 ) -> Option<ResolvedNumbering> {
     let (base_lvl, lvl, start_override) = resolved_numbering_level(num_id, ilvl, numbering)?;
     let num_fmt = lvl.num_fmt.clone().unwrap_or(ST_NumberFormat::Decimal);
-    let start = start_override.or(base_lvl.start).unwrap_or(1);
+    let definition_id = numbering
+        .nums
+        .iter()
+        .find(|instance| instance.num_id == num_id)?
+        .abstract_num_id;
+    let start = base_lvl.start.unwrap_or(1);
     let lvl_text = lvl.lvl_text.as_deref().unwrap_or("%1.");
     let legal = lvl.legal == Some(true);
 
-    state.restart_deeper_levels(num_id, ilvl, numbering);
-    let count = state.advance(num_id, ilvl, start);
+    let count = state.advance_numbering(
+        num_id,
+        definition_id,
+        ilvl,
+        start,
+        start_override,
+        numbering,
+    );
     if matches!(num_fmt, ST_NumberFormat::None | ST_NumberFormat::Other(_)) {
         return None;
     }
@@ -596,14 +684,13 @@ pub fn generate_marker(
                 count
             } else {
                 let configured_start = resolved_numbering_level(num_id, level, numbering)
-                    .map(|(base, _, start_override)| start_override.or(base.start).unwrap_or(1))
+                    .map(|(base, _, _)| base.start.unwrap_or(1))
                     .unwrap_or(0);
-                let current = state.current(num_id, level);
-                if current == 0 {
-                    configured_start
-                } else {
-                    current
-                }
+                state
+                    .counters
+                    .get(&(definition_id, level))
+                    .copied()
+                    .unwrap_or(configured_start)
             };
             let format = if legal && level <= ilvl {
                 ST_NumberFormat::Decimal
@@ -786,14 +873,18 @@ fn format_lvl_text(
                 current_count
             } else {
                 let configured_start = resolved_numbering_level(num_id, lvl_idx, numbering)
-                    .map(|(base, _, start_override)| start_override.or(base.start).unwrap_or(1))
+                    .map(|(base, _, _)| base.start.unwrap_or(1))
                     .unwrap_or(0);
-                let current = state.current(num_id, lvl_idx);
-                if current == 0 {
-                    configured_start
-                } else {
-                    current
-                }
+                let owner = state
+                    .definition_by_instance
+                    .get(&num_id)
+                    .copied()
+                    .unwrap_or(num_id);
+                state
+                    .counters
+                    .get(&(owner, lvl_idx))
+                    .copied()
+                    .unwrap_or(configured_start)
             };
             let fmt = if legal && lvl_idx <= current_ilvl {
                 ST_NumberFormat::Decimal
@@ -896,6 +987,1138 @@ fn collect_style_chain<'a>(style_id: &str, styles: &'a CT_Styles) -> Vec<&'a CT_
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx200_native_word_plain_markers_match_saved_and_reopened_print_oracle() {
+        let numbering = CT_Numbering::from_xml(br###"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<w:numbering xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mo="http://schemas.microsoft.com/office/mac/office/2008/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:mv="urn:schemas-microsoft-com:mac:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14"><w:abstractNum w:abstractNumId="10"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="101"><w:abstractNumId w:val="10"/></w:num><w:num w:numId="102"><w:abstractNumId w:val="10"/></w:num><w:abstractNum w:abstractNumId="11"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="201"><w:abstractNumId w:val="11"/></w:num><w:num w:numId="202"><w:abstractNumId w:val="11"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num><w:abstractNum w:abstractNumId="12"><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="301"><w:abstractNumId w:val="12"/></w:num><w:abstractNum w:abstractNumId="13"><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="401"><w:abstractNumId w:val="13"/></w:num><w:num w:numId="402"><w:abstractNumId w:val="13"/></w:num><w:num w:numId="403"><w:abstractNumId w:val="13"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num></w:numbering>"###).unwrap();
+        let mut state = NumberingState::new();
+        assert_eq!(
+            generate_marker(101, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "A_FIRST_1"
+        );
+        assert_eq!(
+            generate_marker(101, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "A_FIRST_2"
+        );
+        assert_eq!(
+            generate_marker(102, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "A_SECOND_1"
+        );
+        assert_eq!(
+            generate_marker(102, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "A_SECOND_2"
+        );
+        assert_eq!(
+            generate_marker(201, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "B_FIRST_1"
+        );
+        assert_eq!(
+            generate_marker(201, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "B_FIRST_2"
+        );
+        assert_eq!(
+            generate_marker(202, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "B_RESTART_1"
+        );
+        assert_eq!(
+            generate_marker(202, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "B_RESTART_2"
+        );
+        assert_eq!(
+            generate_marker(301, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "C_FIRST_1"
+        );
+        assert_eq!(
+            generate_marker(301, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "C_FIRST_2"
+        );
+        assert_eq!(
+            generate_marker(301, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "C_CONTINUE_1"
+        );
+        assert_eq!(
+            generate_marker(301, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "C_CONTINUE_2"
+        );
+        assert_eq!(
+            generate_marker(401, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "D_ROOT_1"
+        );
+        assert_eq!(
+            generate_marker(401, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.",
+            "D_CHILD_1"
+        );
+        assert_eq!(
+            generate_marker(401, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.2.",
+            "D_CHILD_2"
+        );
+        assert_eq!(
+            generate_marker(401, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "D_ROOT_2"
+        );
+        assert_eq!(
+            generate_marker(401, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.1.",
+            "D_CHILD_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(402, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "D_FRESH_ROOT"
+        );
+        assert_eq!(
+            generate_marker(402, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.1.",
+            "D_FRESH_CHILD"
+        );
+        assert_eq!(
+            generate_marker(403, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "D_RESTART_ROOT"
+        );
+        assert_eq!(
+            generate_marker(403, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.",
+            "D_RESTART_CHILD"
+        );
+    }
+
+    #[test]
+    fn fx200_native_word_extended_markers_match_saved_and_reopened_print_oracle() {
+        let numbering = CT_Numbering::from_xml(br###"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<w:numbering xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mo="http://schemas.microsoft.com/office/mac/office/2008/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:mv="urn:schemas-microsoft-com:mac:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14"><w:abstractNum w:abstractNumId="20"><w:nsid w:val="B0912014"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="21"><w:nsid w:val="B0912015"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="22"><w:nsid w:val="B0912016"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="23"><w:nsid w:val="B0912017"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="24"><w:nsid w:val="B0912018"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="25"><w:nsid w:val="B0912019"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="1"/><w:lvlText w:val="%1.%2.%3."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1080" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="26"><w:nsid w:val="B091201A"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="27" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B091201B"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="28"><w:nsid w:val="B091201C"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="501"><w:abstractNumId w:val="20"/></w:num><w:num w:numId="502"><w:abstractNumId w:val="20"/></w:num><w:num w:numId="503"><w:abstractNumId w:val="20"/></w:num><w:num w:numId="601"><w:abstractNumId w:val="21"/></w:num><w:num w:numId="603"><w:abstractNumId w:val="21"/></w:num><w:num w:numId="604"><w:abstractNumId w:val="21"/></w:num><w:num w:numId="602"><w:abstractNumId w:val="21"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num><w:num w:numId="701"><w:abstractNumId w:val="22"/></w:num><w:num w:numId="702"><w:abstractNumId w:val="22"/><w:lvlOverride w:ilvl="1"><w:startOverride w:val="5"/></w:lvlOverride></w:num><w:num w:numId="703"><w:abstractNumId w:val="22"/></w:num><w:num w:numId="711"><w:abstractNumId w:val="23"/></w:num><w:num w:numId="712"><w:abstractNumId w:val="23"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:start w:val="7"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:lvlOverride></w:num><w:num w:numId="713"><w:abstractNumId w:val="23"/></w:num><w:num w:numId="721"><w:abstractNumId w:val="24"/></w:num><w:num w:numId="722"><w:abstractNumId w:val="24"/></w:num><w:num w:numId="731"><w:abstractNumId w:val="25"/></w:num><w:num w:numId="732"><w:abstractNumId w:val="25"/></w:num><w:num w:numId="741"><w:abstractNumId w:val="26"/></w:num><w:num w:numId="742"><w:abstractNumId w:val="26"/><w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="1"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:lvlOverride></w:num><w:num w:numId="801"><w:abstractNumId w:val="27"/></w:num><w:num w:numId="802"><w:abstractNumId w:val="27"/></w:num><w:num w:numId="804"><w:abstractNumId w:val="27"/></w:num><w:num w:numId="803"><w:abstractNumId w:val="27"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num><w:num w:numId="901"><w:abstractNumId w:val="28"/></w:num><w:num w:numId="902"><w:abstractNumId w:val="28"/></w:num><w:num w:numId="904"><w:abstractNumId w:val="28"/></w:num><w:num w:numId="903"><w:abstractNumId w:val="28"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num></w:numbering>"###).unwrap();
+        let mut state = NumberingState::new();
+        assert_eq!(
+            generate_marker(501, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "E_OLD_1"
+        );
+        assert_eq!(
+            generate_marker(501, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "E_OLD_2"
+        );
+        assert_eq!(
+            generate_marker(502, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "E_NEW_1"
+        );
+        assert_eq!(
+            generate_marker(502, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "E_NEW_2"
+        );
+        assert_eq!(
+            generate_marker(501, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "E_RETURN_1"
+        );
+        assert_eq!(
+            generate_marker(501, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "6.",
+            "E_RETURN_2"
+        );
+        assert_eq!(
+            generate_marker(503, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "7.",
+            "E_FRESH_1"
+        );
+        assert_eq!(
+            generate_marker(502, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.",
+            "E_SECOND_RETURN"
+        );
+        assert_eq!(
+            generate_marker(601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "F_BASE_1"
+        );
+        assert_eq!(
+            generate_marker(601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "F_BASE_2"
+        );
+        assert_eq!(
+            generate_marker(602, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "F_OVERRIDE_1"
+        );
+        assert_eq!(
+            generate_marker(602, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "6.",
+            "F_OVERRIDE_2"
+        );
+        assert_eq!(
+            generate_marker(603, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "7.",
+            "F_PLAIN_AFTER"
+        );
+        assert_eq!(
+            generate_marker(601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.",
+            "F_OLD_AFTER"
+        );
+        assert_eq!(
+            generate_marker(602, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "9.",
+            "F_OVERRIDE_RETURN"
+        );
+        assert_eq!(
+            generate_marker(604, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "10.",
+            "F_NEW_AFTER_RETURN"
+        );
+        assert_eq!(
+            generate_marker(602, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "11.",
+            "F_OVERRIDE_AGAIN"
+        );
+        assert_eq!(
+            generate_marker(601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "12.",
+            "F_OLD_FINAL"
+        );
+        assert_eq!(
+            generate_marker(701, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "G_ROOT"
+        );
+        assert_eq!(
+            generate_marker(701, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.",
+            "G_CHILD_1"
+        );
+        assert_eq!(
+            generate_marker(701, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.2.",
+            "G_CHILD_2"
+        );
+        assert_eq!(
+            generate_marker(702, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.5.",
+            "G_OVERRIDE_CHILD_1"
+        );
+        assert_eq!(
+            generate_marker(702, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.6.",
+            "G_OVERRIDE_CHILD_2"
+        );
+        assert_eq!(
+            generate_marker(701, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.7.",
+            "G_OLD_CHILD"
+        );
+        assert_eq!(
+            generate_marker(703, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.8.",
+            "G_PLAIN_CHILD"
+        );
+        assert_eq!(
+            generate_marker(702, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "G_ROOT_NEXT"
+        );
+        assert_eq!(
+            generate_marker(702, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.5.",
+            "G_OVERRIDE_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(701, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.6.",
+            "G_OLD_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(702, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.7.",
+            "G_OVERRIDE_REENTER"
+        );
+        assert_eq!(
+            generate_marker(711, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "H_BASE_1"
+        );
+        assert_eq!(
+            generate_marker(711, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "H_BASE_2"
+        );
+        assert_eq!(
+            generate_marker(712, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "III.",
+            "H_REPLACEMENT_1"
+        );
+        assert_eq!(
+            generate_marker(712, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "IV.",
+            "H_REPLACEMENT_2"
+        );
+        assert_eq!(
+            generate_marker(711, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "H_OLD_AFTER"
+        );
+        assert_eq!(
+            generate_marker(713, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "6.",
+            "H_PLAIN_AFTER"
+        );
+        assert_eq!(
+            generate_marker(712, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "VII.",
+            "H_REPLACEMENT_RETURN"
+        );
+        assert_eq!(
+            generate_marker(721, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "I_ROOT_1"
+        );
+        assert_eq!(
+            generate_marker(721, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.",
+            "I_CHILD_1"
+        );
+        assert_eq!(
+            generate_marker(721, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.2.",
+            "I_CHILD_2"
+        );
+        assert_eq!(
+            generate_marker(722, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "I_ROOT_2"
+        );
+        assert_eq!(
+            generate_marker(722, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.3.",
+            "I_CHILD_NEW"
+        );
+        assert_eq!(
+            generate_marker(721, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "I_ROOT_3"
+        );
+        assert_eq!(
+            generate_marker(721, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.4.",
+            "I_CHILD_RETURN"
+        );
+        assert_eq!(
+            generate_marker(731, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "J_ROOT_1"
+        );
+        assert_eq!(
+            generate_marker(731, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.",
+            "J_MIDDLE_1"
+        );
+        assert_eq!(
+            generate_marker(731, 2, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.1.",
+            "J_LOW_1"
+        );
+        assert_eq!(
+            generate_marker(732, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.2.",
+            "J_MIDDLE_NEW"
+        );
+        assert_eq!(
+            generate_marker(732, 2, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.2.2.",
+            "J_LOW_AFTER_MIDDLE"
+        );
+        assert_eq!(
+            generate_marker(732, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "J_ROOT_NEW"
+        );
+        assert_eq!(
+            generate_marker(731, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.1.",
+            "J_MIDDLE_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(731, 2, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.1.1.",
+            "J_LOW_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(741, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "K_ROOT_1"
+        );
+        assert_eq!(
+            generate_marker(741, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.1.",
+            "K_CHILD_BASE"
+        );
+        assert_eq!(
+            generate_marker(742, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.2.",
+            "K_CHILD_REPLACEMENT"
+        );
+        assert_eq!(
+            generate_marker(742, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "K_ROOT_NEW"
+        );
+        assert_eq!(
+            generate_marker(742, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.3.",
+            "K_CHILD_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(741, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.4.",
+            "K_BASE_RETURN"
+        );
+        assert_eq!(
+            generate_marker(801, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "L_BEFORE_OLD"
+        );
+        assert_eq!(
+            generate_marker(802, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "L_BEFORE_FRESH"
+        );
+        assert_eq!(
+            generate_marker(803, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "L_BEFORE_OVERRIDE"
+        );
+        assert_eq!(
+            generate_marker(901, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "M_BEFORE_OLD"
+        );
+        assert_eq!(
+            generate_marker(902, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "M_BEFORE_FRESH"
+        );
+        assert_eq!(
+            generate_marker(903, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "M_BEFORE_OVERRIDE"
+        );
+        state.restart_after_section_break(&numbering);
+        assert_eq!(
+            generate_marker(802, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "L_AFTER_FRESH"
+        );
+        assert_eq!(
+            generate_marker(801, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "L_AFTER_OLD"
+        );
+        assert_eq!(
+            generate_marker(803, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "L_AFTER_OVERRIDE"
+        );
+        assert_eq!(
+            generate_marker(804, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "L_AFTER_NEW"
+        );
+        assert_eq!(
+            generate_marker(803, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "L_AFTER_OVERRIDE_RETURN"
+        );
+        assert_eq!(
+            generate_marker(902, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "6.",
+            "M_AFTER_FRESH"
+        );
+        assert_eq!(
+            generate_marker(901, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "7.",
+            "M_AFTER_OLD"
+        );
+        assert_eq!(
+            generate_marker(903, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.",
+            "M_AFTER_OVERRIDE"
+        );
+        assert_eq!(
+            generate_marker(904, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "9.",
+            "M_AFTER_NEW"
+        );
+        assert_eq!(
+            generate_marker(903, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "10.",
+            "M_AFTER_OVERRIDE_RETURN"
+        );
+        state.restart_after_section_break(&numbering);
+        assert_eq!(
+            generate_marker(804, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "L_SECOND_PLAIN"
+        );
+        assert_eq!(
+            generate_marker(803, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "L_SECOND_OVERRIDE"
+        );
+        assert_eq!(
+            generate_marker(801, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "L_SECOND_OLD"
+        );
+        assert_eq!(
+            generate_marker(904, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "11.",
+            "M_SECOND_PLAIN"
+        );
+        assert_eq!(
+            generate_marker(903, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "12.",
+            "M_SECOND_OVERRIDE"
+        );
+        assert_eq!(
+            generate_marker(901, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "13.",
+            "M_SECOND_OLD"
+        );
+    }
+
+    #[test]
+    fn fx200_native_word_section_markers_match_saved_and_reopened_print_oracle() {
+        let numbering = CT_Numbering::from_xml(br###"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<w:numbering xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mo="http://schemas.microsoft.com/office/mac/office/2008/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:mv="urn:schemas-microsoft-com:mac:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14"><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="40" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B0912028"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="41" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B0912029"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1001"><w:abstractNumId w:val="40"/></w:num><w:num w:numId="1002"><w:abstractNumId w:val="40"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num><w:num w:numId="1003"><w:abstractNumId w:val="40"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="9"/></w:lvlOverride></w:num><w:num w:numId="1101"><w:abstractNumId w:val="41"/></w:num><w:num w:numId="1102"><w:abstractNumId w:val="41"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride></w:num></w:numbering>"###).unwrap();
+        let mut state = NumberingState::new();
+        assert_eq!(
+            generate_marker(1001, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "N_BEFORE_PLAIN"
+        );
+        assert_eq!(
+            generate_marker(1002, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "N_BEFORE_OVERRIDE"
+        );
+        assert_eq!(
+            generate_marker(1101, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "O_BEFORE_PLAIN"
+        );
+        state.restart_after_section_break(&numbering);
+        assert_eq!(
+            generate_marker(1002, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "N_USED_OVERRIDE_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1002, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "N_USED_OVERRIDE_SECOND"
+        );
+        assert_eq!(
+            generate_marker(1001, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "N_PLAIN_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1003, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "9.",
+            "N_UNUSED_OVERRIDE_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1102, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "O_UNUSED_OVERRIDE_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1102, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "O_UNUSED_OVERRIDE_SECOND"
+        );
+        assert_eq!(
+            generate_marker(1101, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "6.",
+            "O_PLAIN_AFTER"
+        );
+        state.restart_after_section_break(&numbering);
+        assert_eq!(
+            generate_marker(1003, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "N_PREVIOUSLY_UNUSED_OVERRIDE_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1002, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "N_ORIGINAL_OVERRIDE_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1102, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "O_NOW_USED_OVERRIDE_FIRST"
+        );
+    }
+
+    #[test]
+    fn fx200_native_word_level_section_markers_match_saved_and_reopened_print_oracle() {
+        let numbering = CT_Numbering::from_xml(br###"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<w:numbering xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mo="http://schemas.microsoft.com/office/mac/office/2008/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:mv="urn:schemas-microsoft-com:mac:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14"><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="50" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B0912032"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="4"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="51" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B0912033"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="4"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="52" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B0912034"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="4"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId="53"><w:nsid w:val="B0912035"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="4"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:abstractNum xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" w:abstractNumId="54" w15:restartNumberingAfterBreak="1"><w:nsid w:val="B0912036"/><w:multiLevelType w:val="singleLevel"/><w:lvl w:ilvl="0"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1201"><w:abstractNumId w:val="50"/></w:num><w:num w:numId="1202"><w:abstractNumId w:val="50"/><w:lvlOverride w:ilvl="1"><w:startOverride w:val="7"/></w:lvlOverride></w:num><w:num w:numId="1211"><w:abstractNumId w:val="51"/></w:num><w:num w:numId="1212"><w:abstractNumId w:val="51"/><w:lvlOverride w:ilvl="1"><w:startOverride w:val="9"/></w:lvlOverride></w:num><w:num w:numId="1301"><w:abstractNumId w:val="52"/></w:num><w:num w:numId="1302"><w:abstractNumId w:val="52"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="8"/></w:lvlOverride></w:num><w:num w:numId="1401"><w:abstractNumId w:val="53"/></w:num><w:num w:numId="1402"><w:abstractNumId w:val="53"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="8"/></w:lvlOverride></w:num><w:num w:numId="1501"><w:abstractNumId w:val="54"/></w:num><w:num w:numId="1502"><w:abstractNumId w:val="54"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="8"/></w:lvlOverride></w:num></w:numbering>"###).unwrap();
+        let mut state = NumberingState::new();
+        assert_eq!(
+            generate_marker(1201, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "P_ROOT_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1202, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.7.",
+            "P_OVERRIDE_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1211, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "Q_ROOT_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1211, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.4.",
+            "Q_CHILD_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1301, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "R_ROOT_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1301, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.4.",
+            "R_CHILD_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1302, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.",
+            "R_ROOT_OVERRIDE_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1302, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.5.",
+            "R_CHILD_CARRY_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1401, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "S_ROOT_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1401, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.4.",
+            "S_CHILD_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1402, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.",
+            "S_ROOT_OVERRIDE_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1402, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.5.",
+            "S_CHILD_CARRY_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1501, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "T_BASE_BEFORE"
+        );
+        assert_eq!(
+            generate_marker(1502, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "8.",
+            "T_OVERRIDE_BEFORE"
+        );
+        state.restart_after_section_break(&numbering);
+        assert_eq!(
+            generate_marker(1202, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.4.",
+            "P_USED_CHILD_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1202, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.5.",
+            "P_USED_CHILD_SECOND"
+        );
+        assert_eq!(
+            generate_marker(1201, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.6.",
+            "P_PLAIN_CHILD_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1201, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "P_ROOT_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1202, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.4.",
+            "P_OVERRIDE_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(1212, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.4.",
+            "Q_UNUSED_CHILD_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1212, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.9.",
+            "Q_UNUSED_CHILD_SECOND"
+        );
+        assert_eq!(
+            generate_marker(1211, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.10.",
+            "Q_PLAIN_CHILD_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1211, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "Q_ROOT_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1212, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.4.",
+            "Q_OVERRIDE_AFTER_ROOT"
+        );
+        assert_eq!(
+            generate_marker(1302, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "R_USED_ROOT_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1302, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.6.",
+            "R_CHILD_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1301, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "R_PLAIN_ROOT_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1301, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.7.",
+            "R_CHILD_CARRY_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1402, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "9.",
+            "S_USED_ROOT_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1402, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "9.6.",
+            "S_CHILD_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1401, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "10.",
+            "S_PLAIN_ROOT_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1401, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "10.7.",
+            "S_CHILD_CARRY_AFTER"
+        );
+        assert_eq!(
+            generate_marker(1502, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "T_USED_OVERRIDE_FIRST"
+        );
+        assert_eq!(
+            generate_marker(1502, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "T_USED_OVERRIDE_SECOND"
+        );
+        assert_eq!(
+            generate_marker(1501, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "5.",
+            "T_PLAIN_AFTER"
+        );
+    }
+
+    #[test]
+    fn fx200_native_word_ancestor_markers_match_saved_and_reopened_print_oracle() {
+        let numbering = CT_Numbering::from_xml(br###"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<w:numbering xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mo="http://schemas.microsoft.com/office/mac/office/2008/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:mv="urn:schemas-microsoft-com:mac:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14"><w:abstractNum w:abstractNumId="60"><w:nsid w:val="B091203C"/><w:multiLevelType w:val="multilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="240"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="240"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1601"><w:abstractNumId w:val="60"/></w:num><w:num w:numId="1602"><w:abstractNumId w:val="60"/><w:lvlOverride w:ilvl="1"><w:startOverride w:val="7"/></w:lvlOverride></w:num></w:numbering>"###).unwrap();
+        let mut state = NumberingState::new();
+        assert_eq!(
+            generate_marker(1601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.",
+            "U_PLAIN_ROOT_1"
+        );
+        assert_eq!(
+            generate_marker(1602, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "1.7.",
+            "U_OVERRIDE_CHILD_1"
+        );
+        assert_eq!(
+            generate_marker(1601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.",
+            "U_PLAIN_ROOT_2"
+        );
+        assert_eq!(
+            generate_marker(1602, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "2.1.",
+            "U_OVERRIDE_CHILD_AFTER_PLAIN_ROOT"
+        );
+        assert_eq!(
+            generate_marker(1602, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.",
+            "U_OVERRIDE_ROOT_3"
+        );
+        assert_eq!(
+            generate_marker(1602, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "3.7.",
+            "U_OVERRIDE_CHILD_AFTER_SAME_ROOT"
+        );
+        assert_eq!(
+            generate_marker(1601, 0, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.",
+            "U_PLAIN_ROOT_4"
+        );
+        assert_eq!(
+            generate_marker(1602, 1, &numbering, &mut state)
+                .unwrap()
+                .marker_text,
+            "4.1.",
+            "U_OVERRIDE_CHILD_AFTER_OTHER_ROOT_AGAIN"
+        );
+    }
+
     use super::*;
     use rdocx_oxml::units::{HalfPoint, Twips};
 
@@ -1196,10 +2419,10 @@ mod tests {
         assert_eq!(target.relative_to(None, true), "4.5.2");
     }
 
-    /// Two numbering instances that share one abstract definition still own
-    /// independent counters.
+    /// Plain instances of one abstract definition continue its authenticated
+    /// sequence unless an explicit override or section reset selects a restart.
     #[test]
-    fn shared_abstract_definition_starts_concrete_instances_independently() {
+    fn shared_abstract_definition_plain_instances_continue_definition_sequence() {
         let mut numbering = CT_Numbering::new();
         let first = numbering.add_numbered_list();
         let abstract_id = numbering
@@ -1224,7 +2447,22 @@ mod tests {
         let a = generate_marker(first, 0, &numbering, &mut state).unwrap();
         let b = generate_marker(second, 0, &numbering, &mut state).unwrap();
         assert_eq!(a.marker_text, "1.");
-        assert_eq!(b.marker_text, "1.");
+        assert_eq!(b.marker_text, "2.");
+        let c = generate_marker(first, 0, &numbering, &mut state).unwrap();
+        assert_eq!(c.marker_text, "3.");
+        let mut repeated = NumberingState::new();
+        assert_eq!(
+            generate_marker(first, 0, &numbering, &mut repeated)
+                .unwrap()
+                .marker_text,
+            "1."
+        );
+        assert_eq!(
+            generate_marker(second, 0, &numbering, &mut repeated)
+                .unwrap()
+                .marker_text,
+            "2."
+        );
     }
 
     #[test]
@@ -1265,8 +2503,8 @@ mod tests {
             generate_marker(second, 0, &numbering, &mut state)
                 .unwrap()
                 .marker_text,
-            "1.",
-            "suppression must not merge independent concrete instances"
+            "3.",
+            "suppression must not advance or reset the shared definition sequence"
         );
     }
 

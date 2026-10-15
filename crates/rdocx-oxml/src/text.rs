@@ -21,6 +21,340 @@ use crate::revision::{CT_Revision, RevisionKind};
 use crate::ruby::CT_Ruby;
 use crate::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
 
+struct CheckedTextOwner {
+    name: Option<Vec<u8>>,
+    content_seen: bool,
+    properties_seen: bool,
+    last_property_slot: Option<u8>,
+    property_names: HashSet<Vec<u8>>,
+    property_leaf: bool,
+    sdt_owner: Option<SdtOwner>,
+}
+
+/// Admit a complete fragment before any typed recursive construction.
+/// The preservation reader may retain unmodelled children. Checked owner
+/// replacement additionally requires qualified roots and modeled p/r order.
+pub(crate) fn validate_word_owner_fragment(xml: &[u8], root: &[u8], checked: bool) -> Result<()> {
+    if checked {
+        oxml_core::xml::validate_strict_xml_1_0(xml)
+            .map_err(|error| OxmlError::InvalidValue(format!("element XML: {error:?}")))?;
+    }
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<CheckedTextOwner>::new();
+    let mut root_seen = false;
+    let mut buffer = Vec::new();
+    loop {
+        let (namespace, event) = reader.read_resolved_event_into(&mut buffer)?;
+        let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == crate::namespace::W_NS.as_bytes()
+            || std::str::from_utf8(uri).ok().and_then(|uri| quick_xml::escape::unescape(uri).ok()).is_some_and(|uri| uri == crate::namespace::W_NS));
+        let mut modeled = word && stack.last().is_none_or(|frame| frame.name.is_some());
+        let mut property_leaf = false;
+        let mut sdt_owner = stack.last().and_then(|frame| frame.sdt_owner);
+        match event {
+            Event::DocType(_) => {
+                return Err(OxmlError::InvalidValue(
+                    "element XML cannot contain a DTD or entity declaration".into(),
+                ));
+            }
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let name = element.local_name();
+                let local = name.as_ref();
+                if checked && stack.last().is_some_and(|frame| frame.property_leaf) {
+                    return Err(OxmlError::InvalidValue(
+                        "element XML known property leaf cannot contain child elements".into(),
+                    ));
+                }
+                if stack.is_empty() {
+                    if root_seen || local != root || (checked && !word) {
+                        return Err(OxmlError::InvalidValue(format!(
+                            "element XML requires exactly one qualified Word {} root",
+                            String::from_utf8_lossy(root)
+                        )));
+                    }
+                    root_seen = true;
+                }
+                if checked && modeled {
+                    if let Some(frame) = stack.last_mut()
+                        && let Some(parent) = frame.name.as_deref()
+                    {
+                        let content_seen = &mut frame.content_seen;
+                        let properties_seen = &mut frame.properties_seen;
+                        if let Some((slot, repeatable)) =
+                            crate::table::checked_owner_child_slot(parent, local)?
+                        {
+                            if frame.last_property_slot.is_some_and(|last| last > slot)
+                                || (!repeatable && !frame.property_names.insert(local.to_vec()))
+                            {
+                                return Err(OxmlError::InvalidValue("element XML table owner has duplicate or out-of-order known children".into()));
+                            }
+                            frame.last_property_slot = Some(slot);
+                        }
+                        if parent == b"sectPr"
+                            && let Some((slot, repeatable)) =
+                                crate::document::checked_section_child_slot(local)
+                        {
+                            if frame.last_property_slot.is_some_and(|last| last > slot)
+                                || (!repeatable && !frame.property_names.insert(local.to_vec()))
+                            {
+                                return Err(OxmlError::InvalidValue("element XML section has duplicate or out-of-order known children".into()));
+                            }
+                            frame.last_property_slot = Some(slot);
+                        }
+                        let properties = match parent {
+                            b"p" => Some(b"pPr".as_slice()),
+                            b"r" => Some(b"rPr".as_slice()),
+                            _ => None,
+                        };
+                        if let Some(properties) = properties {
+                            if local == properties {
+                                if *content_seen || *properties_seen {
+                                    return Err(OxmlError::InvalidValue(format!(
+                                        "element XML {} must occur once before content",
+                                        String::from_utf8_lossy(properties)
+                                    )));
+                                }
+                                *properties_seen = true;
+                            } else {
+                                *content_seen = true;
+                                if matches!(
+                                    local,
+                                    b"p" | b"tbl" | b"tr" | b"tc" | b"sectPr" | b"pPr" | b"rPr"
+                                ) || (parent == b"r"
+                                    && matches!(local, b"r" | b"hyperlink" | b"fldSimple" | b"sdt"))
+                                {
+                                    return Err(OxmlError::InvalidValue(format!(
+                                        "element XML {} is not a valid direct child of {}",
+                                        String::from_utf8_lossy(local),
+                                        String::from_utf8_lossy(parent)
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                } else if checked
+                    && let Some(frame) = stack.last_mut()
+                    && matches!(frame.name.as_deref(), Some(b"p" | b"r"))
+                {
+                    frame.content_seen = true;
+                }
+                if checked && modeled {
+                    let mut prefixes = Vec::new();
+                    for (prefix, namespace) in reader.resolver().bindings() {
+                        if namespace.as_ref() == crate::namespace::W_NS.as_bytes()
+                            || std::str::from_utf8(namespace.as_ref())
+                                .ok()
+                                .and_then(|uri| quick_xml::escape::unescape(uri).ok())
+                                .is_some_and(|uri| uri == crate::namespace::W_NS)
+                        {
+                            let prefix = match prefix {
+                                quick_xml::name::PrefixDeclaration::Default => "",
+                                quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                                    std::str::from_utf8(prefix)?
+                                }
+                            };
+                            prefixes.push(prefix.to_owned());
+                        }
+                    }
+                    if stack
+                        .last()
+                        .is_some_and(|frame| frame.name.as_deref() == Some(b"sectPr"))
+                    {
+                        for (prefix, namespace) in reader.resolver().bindings() {
+                            let prefix = match prefix {
+                                quick_xml::name::PrefixDeclaration::Default => "",
+                                quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                                    std::str::from_utf8(prefix)?
+                                }
+                            };
+                            prefixes.push(format!(
+                                "\0{prefix}\0{}",
+                                std::str::from_utf8(namespace.as_ref())?
+                            ));
+                        }
+                        property_leaf =
+                            crate::document::validate_checked_section_child(element, &prefixes)?;
+                    }
+                    if let Some(frame) = stack.last_mut() {
+                        if frame.name.as_deref() == Some(b"numPr")
+                            && matches!(local, b"ilvl" | b"numId")
+                        {
+                            let slot = u8::from(local == b"numId");
+                            if !frame.property_names.insert(local.to_vec())
+                                || frame.last_property_slot.is_some_and(|last| last > slot)
+                            {
+                                return Err(OxmlError::InvalidValue("element XML numbering has duplicate or out-of-order properties".into()));
+                            }
+                            frame.last_property_slot = Some(slot);
+                            crate::paragraph_properties::validate_checked_property_child(
+                                element, &prefixes,
+                            )?;
+                            property_leaf = true;
+                        }
+                        if let Some(parent) = frame.name.as_deref()
+                            && matches!(parent, b"tblPr" | b"tblPrEx" | b"tcPr" | b"trPr")
+                        {
+                            property_leaf = crate::table::validate_checked_property_child(
+                                element, &prefixes, parent,
+                            )?;
+                        }
+                        let slot = match frame.name.as_deref() {
+                            Some(b"pPr") => crate::paragraph_properties::ppr_schema_slot(
+                                element.name().as_ref(),
+                                &prefixes,
+                            ),
+                            Some(b"rPr") => crate::run_properties::rpr_schema_slot(
+                                element.name().as_ref(),
+                                &prefixes,
+                            ),
+                            _ => None,
+                        };
+                        if matches!(frame.name.as_deref(), Some(b"pPr" | b"rPr")) {
+                            if let Some(slot) = slot {
+                                let paragraph_properties = frame.name.as_deref() == Some(b"pPr");
+                                if (paragraph_properties
+                                    && (!frame.property_names.insert(local.to_vec())
+                                        || frame
+                                            .last_property_slot
+                                            .is_some_and(|last| last > slot)))
+                                    || (!paragraph_properties
+                                        && frame.property_names.contains(b"rPrChange".as_slice()))
+                                {
+                                    return Err(OxmlError::InvalidValue(format!(
+                                        "element XML {} has duplicate or out-of-order known properties",
+                                        String::from_utf8_lossy(
+                                            frame.name.as_deref().unwrap_or_default()
+                                        )
+                                    )));
+                                }
+                                frame.last_property_slot = Some(slot);
+                                frame.property_names.insert(local.to_vec());
+                                property_leaf = if paragraph_properties {
+                                    !matches!(
+                                        local,
+                                        b"numPr"
+                                            | b"pBdr"
+                                            | b"tabs"
+                                            | b"rPr"
+                                            | b"sectPr"
+                                            | b"pPrChange"
+                                    )
+                                } else {
+                                    local != b"rPrChange"
+                                };
+                                if frame.name.as_deref() == Some(b"pPr") {
+                                    crate::paragraph_properties::validate_checked_property_child(
+                                        element, &prefixes,
+                                    )?;
+                                } else {
+                                    crate::run_properties::validate_checked_property_child(
+                                        element, &prefixes,
+                                    )?;
+                                }
+                            } else {
+                                modeled = false;
+                            }
+                        }
+                    }
+                }
+                if checked
+                    && modeled
+                    && let Some(parent) = stack.last().and_then(|frame| frame.name.as_deref())
+                {
+                    if local == b"sdt" {
+                        sdt_owner = match parent {
+                            b"p" => Some(SdtOwner::Inline),
+                            b"tbl" => Some(SdtOwner::Table),
+                            b"tr" => Some(SdtOwner::Row),
+                            b"tc" => Some(SdtOwner::Cell),
+                            _ => sdt_owner,
+                        };
+                    }
+                    modeled = match parent {
+                        b"p" => {
+                            local == b"pPr" || crate::document::admitted_word_child(parent, local)
+                        }
+                        b"r" => {
+                            local == b"rPr" || crate::document::admitted_word_child(parent, local)
+                        }
+                        b"tbl" | b"tr" | b"tc" => {
+                            crate::table::checked_owner_child_slot(parent, local)?.is_some()
+                        }
+                        b"sectPr" => crate::document::checked_section_child_slot(local).is_some(),
+                        b"sdt" => local == b"sdtContent",
+                        b"sdtContent" => {
+                            local == b"sdt" || sdt_owner.is_some_and(|owner| owner.owns(local))
+                        }
+                        b"hyperlink" | b"fldSimple" | b"ruby" | b"rt" | b"rubyBase" | b"ins"
+                        | b"del" | b"moveFrom" | b"moveTo" => {
+                            crate::document::admitted_word_child(parent, local)
+                        }
+                        _ => modeled,
+                    };
+                }
+                if matches!(event, Event::Start(_)) {
+                    stack.push(CheckedTextOwner {
+                        name: modeled.then(|| local.to_vec()),
+                        content_seen: false,
+                        properties_seen: false,
+                        last_property_slot: None,
+                        property_names: HashSet::new(),
+                        property_leaf,
+                        sdt_owner,
+                    });
+                }
+            }
+            Event::End(_) => {
+                stack.pop().ok_or_else(|| {
+                    OxmlError::InvalidValue("element XML has an unmatched end".into())
+                })?;
+            }
+            Event::Text(ref text)
+                if stack.is_empty()
+                    || (checked
+                        && stack.last().is_some_and(|frame| {
+                            frame.property_leaf
+                                || frame
+                                    .name
+                                    .as_deref()
+                                    .is_some_and(|name| matches!(name, b"p" | b"r"))
+                        })) =>
+            {
+                if text.as_ref().iter().any(|byte| !byte.is_ascii_whitespace()) {
+                    return Err(OxmlError::InvalidValue(
+                        "element XML has text outside an allowed text owner".into(),
+                    ));
+                }
+            }
+            Event::CData(_) | Event::GeneralRef(_)
+                if stack.is_empty()
+                    || (checked
+                        && stack.last().is_some_and(|frame| {
+                            frame.property_leaf
+                                || frame
+                                    .name
+                                    .as_deref()
+                                    .is_some_and(|name| matches!(name, b"p" | b"r"))
+                        })) =>
+            {
+                return Err(OxmlError::InvalidValue(
+                    "element XML has content outside an allowed text owner".into(),
+                ));
+            }
+            Event::Eof => {
+                if !root_seen || !stack.is_empty() {
+                    return Err(OxmlError::InvalidValue(
+                        "element XML requires one complete root".into(),
+                    ));
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
 static NEXT_FIELD_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
 
 const ROOT_ATTRIBUTES_ELEMENT: &[u8] = b"rdocxRootAttributes";
@@ -34,6 +368,8 @@ pub(crate) const ROOT_WP_BINDING: u8 = 4;
 
 thread_local! {
     static ROOT_BINDINGS: Cell<u8> = const { Cell::new(0) };
+    #[cfg(test)]
+    static RUN_METADATA_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Keep part-root guarantees in scope only while that part is serialized.
@@ -74,6 +410,33 @@ fn root_attribute_namespace(name: &[u8], bindings: &[(String, String)]) -> Resul
         })
 }
 
+/// Prefix dependencies of the known namespace-valued root attributes.
+/// Attribute names and opaque literal values use their normal preservation path.
+fn root_attribute_value_prefixes<'a>(
+    namespace: Option<&str>,
+    local: &[u8],
+    value: &'a str,
+) -> Vec<&'a str> {
+    if namespace == Some(crate::namespace::MC_NS) {
+        match local {
+            b"Ignorable" | b"MustUnderstand" => return value.split_ascii_whitespace().collect(),
+            b"ProcessContent" | b"PreserveAttributes" | b"PreserveElements" => {
+                return value
+                    .split_ascii_whitespace()
+                    .filter_map(|token| token.split_once(':').map(|(prefix, _)| prefix))
+                    .collect();
+            }
+            _ => {}
+        }
+    } else if namespace == Some("http://www.w3.org/2001/XMLSchema-instance") && local == b"type" {
+        return value
+            .split_ascii_whitespace()
+            .map(|token| token.split_once(':').map_or("", |(prefix, _)| prefix))
+            .collect();
+    }
+    Vec::new()
+}
+
 pub(crate) fn capture_root_attribute_record(
     start: &BytesStart<'_>,
     prefixes: &[String],
@@ -109,6 +472,17 @@ pub(crate) fn capture_root_attribute_record(
         }
         let namespace = root_attribute_namespace(name, &bindings)?;
         let local = name.rsplit(|byte| *byte == b':').next().unwrap_or(name);
+        for prefix in root_attribute_value_prefixes(namespace.as_deref(), local, &value) {
+            if prefix == "xml" || !bindings.iter().any(|(bound, _)| bound == prefix) {
+                continue;
+            }
+            if !used_prefixes
+                .iter()
+                .any(|candidate| candidate == prefix.as_bytes())
+            {
+                used_prefixes.push(prefix.as_bytes().to_vec());
+            }
+        }
         if !expanded.insert((namespace, local.to_vec())) {
             return Err(OxmlError::InvalidValue(format!(
                 "duplicate expanded root attribute `{}`",
@@ -133,7 +507,11 @@ pub(crate) fn capture_root_attribute_record(
         record.push_attribute((name.as_str(), value.as_str()));
     }
     for prefix in used_prefixes {
-        let declaration = format!("xmlns:{}", String::from_utf8_lossy(&prefix));
+        let declaration = if prefix.is_empty() {
+            "xmlns".to_owned()
+        } else {
+            format!("xmlns:{}", String::from_utf8_lossy(&prefix))
+        };
         let namespace = bindings
             .iter()
             .find(|(candidate, _)| candidate.as_bytes() == prefix)
@@ -182,10 +560,125 @@ pub(crate) fn push_root_attribute_record(
         .filter_map(|attribute| attribute.ok())
         .map(|attribute| attribute.key.as_ref().to_vec())
         .collect::<HashSet<_>>();
+    // The generated owner and its modeled descendants use canonical w.
+    // A retained producer binding must keep its expanded attribute names
+    // without rebinding that generated owner.
+    let is_run = target.name().as_ref() == b"w:r";
+    let mut foreign_bindings = Vec::new();
+    let mut occupied_prefixes = HashSet::<String>::new();
+    for attribute in target.attributes().chain(element.attributes()) {
+        let attribute = attribute?;
+        let name = std::str::from_utf8(attribute.key.as_ref())?;
+        if let Some(prefix) = name.strip_prefix("xmlns:") {
+            occupied_prefixes.insert(prefix.to_owned());
+        } else if let Some((prefix, _)) = name.split_once(':') {
+            occupied_prefixes.insert(prefix.to_owned());
+        }
+        let generated_uri = match name {
+            "xmlns:w" => Some(crate::namespace::W_NS),
+            "xmlns:wp"
+                if is_run
+                    && target.attributes().any(|attribute| {
+                        attribute.is_ok_and(|attribute| {
+                            attribute.key.as_ref() == b"xmlns:wp"
+                                && attribute.value.as_ref() == WP_NS.as_bytes()
+                        })
+                    }) =>
+            {
+                Some(WP_NS)
+            }
+            "xmlns:r"
+                if is_run
+                    && target.attributes().any(|attribute| {
+                        attribute.is_ok_and(|attribute| {
+                            attribute.key.as_ref() == b"xmlns:r"
+                                && attribute.value.as_ref() == R_NS.as_bytes()
+                        })
+                    }) =>
+            {
+                Some(R_NS)
+            }
+            _ => None,
+        };
+        if let Some(generated) = generated_uri {
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+            if value != generated {
+                let prefix = name.strip_prefix("xmlns:").unwrap_or_default();
+                if !foreign_bindings
+                    .iter()
+                    .any(|(existing, _)| existing == prefix)
+                {
+                    foreign_bindings.push((prefix.to_owned(), value.into_owned()));
+                }
+            }
+        }
+    }
+
+    let mut value_prefixes = HashSet::<String>::new();
+    {
+        for attribute in element.attributes() {
+            let attribute = attribute?;
+            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+            let namespace = match namespace {
+                ResolveResult::Bound(Namespace(uri)) => Some(std::str::from_utf8(uri)?),
+                _ => None,
+            };
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+            for prefix in root_attribute_value_prefixes(namespace, local.as_ref(), &value) {
+                value_prefixes.insert(prefix.to_owned());
+                if foreign_bindings
+                    .iter()
+                    .any(|(foreign, _)| foreign == prefix)
+                {
+                    return Err(OxmlError::InvalidValue(format!(
+                        "element XML namespace-valued root attribute referencing foreign {prefix} is unsupported"
+                    )));
+                }
+                if !prefix.is_empty() && prefix != "xml" && !reader.resolver().bindings().any(|(binding, _)| matches!(binding, quick_xml::name::PrefixDeclaration::Named(bound) if bound == prefix.as_bytes())) {
+                    return Err(OxmlError::InvalidValue("element XML namespace-valued root attribute has an unbound prefix".into()));
+                }
+            }
+        }
+    }
+    let mut producer_prefixes = Vec::new();
+    for (foreign, namespace) in foreign_bindings {
+        let mut suffix = 0usize;
+        let prefix = loop {
+            let prefix = if suffix == 0 {
+                "rdocxProducer".to_owned()
+            } else {
+                format!("rdocxProducer{suffix}")
+            };
+            if occupied_prefixes.insert(prefix.clone()) {
+                break prefix;
+            }
+            suffix = suffix.checked_add(1).ok_or_else(|| {
+                OxmlError::InvalidValue("retained producer namespace prefix space exhausted".into())
+            })?;
+        };
+        target.push_attribute((format!("xmlns:{prefix}").as_str(), namespace.as_str()));
+        producer_prefixes.push((foreign, prefix));
+    }
     for attribute in element.attributes() {
         let attribute = attribute?;
         let name = attribute.key.as_ref();
-        if existing.contains(name) {
+        let lexical_name = std::str::from_utf8(name)?;
+        if lexical_name.strip_prefix("xmlns:").is_some_and(|prefix| {
+            producer_prefixes
+                .iter()
+                .any(|(foreign, _)| foreign == prefix)
+        }) {
+            continue;
+        }
+        let producer = lexical_name.split_once(':').and_then(|(prefix, local)| {
+            producer_prefixes
+                .iter()
+                .find(|(foreign, _)| foreign == prefix)
+                .map(|(_, alias)| (alias, local))
+        });
+        if existing.contains(name) && producer.is_none() {
             continue;
         }
         // `w14` is bound by the part root that owns the element, the same
@@ -196,7 +689,9 @@ pub(crate) fn push_root_attribute_record(
         // that shadows it declares it on the element first. Word writes
         // `w:rsid*` on nearly every paragraph and run, so repeating `w` here
         // repeated it hundreds of times in an edited part.
-        if (name == b"xmlns:w14" && attribute.value.as_ref() == W14_NS.as_bytes())
+        if (name == b"xmlns:w14"
+            && attribute.value.as_ref() == W14_NS.as_bytes()
+            && !value_prefixes.contains("w14"))
             || (name == b"xmlns:w" && attribute.value.as_ref() == crate::namespace::W_NS.as_bytes())
         {
             continue;
@@ -227,7 +722,11 @@ pub(crate) fn push_root_attribute_record(
         let name = std::str::from_utf8(name)?;
         let value =
             attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
-        target.push_attribute((name, value.as_ref()));
+        if let Some((prefix, local)) = producer {
+            target.push_attribute((format!("{prefix}:{local}").as_str(), value.as_ref()));
+        } else {
+            target.push_attribute((name, value.as_ref()));
+        }
     }
     Ok(())
 }
@@ -780,6 +1279,48 @@ impl Field {
         }
     }
 
+    /// Inspect stored owners without invoking recursive display selection.
+    pub(crate) fn resource_owner_children(&self) -> Vec<crate::document::WordOwner<'_>> {
+        use crate::document::WordOwner;
+        let mut children = Vec::new();
+        for runs in [
+            &self.simple_cached_runs,
+            &self.typed_cached_runs,
+            &self.parsed_cached_runs,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            children.extend(runs.iter().map(WordOwner::Run));
+        }
+        for (_, field) in &self.cached_fields {
+            children.push(WordOwner::Field(field));
+        }
+        for instruction in [&self.instruction, self.original_instruction()] {
+            for argument in instruction.arguments.iter().chain(
+                instruction
+                    .switches
+                    .iter()
+                    .filter_map(|s| s.argument.as_ref()),
+            ) {
+                if let FieldArgument::Nested(field) = argument {
+                    children.push(WordOwner::Field(field));
+                }
+            }
+        }
+        if let FieldSource::New {
+            cached_runs: Some(runs),
+            ..
+        } = &self.source
+        {
+            children.extend(runs.iter().map(WordOwner::Run));
+        }
+        if let Some(span) = &self.span {
+            children.extend(span.runs.iter().flatten().map(WordOwner::Run));
+        }
+        children
+    }
+
     /// Return nested fields in their original instruction order.
     #[doc(hidden)]
     pub fn nested_fields_in_source_order(&self) -> Vec<&Field> {
@@ -791,10 +1332,24 @@ impl Field {
         self.nested_fields_from_instruction(&self.instruction, structured_unchanged)
     }
 
+    fn parsed_cached_child_runs(&self) -> Option<&[CT_R]> {
+        self.parsed_cached_runs.as_deref().filter(|runs| {
+            self.cached_fields.is_empty()
+                && runs
+                    .iter()
+                    .flat_map(|run| &run.content)
+                    .any(|content| matches!(content, RunContent::Field(_)))
+        })
+    }
+
     /// Direct nested fields in the ordered cached result, without flattening it.
     #[doc(hidden)]
     pub fn cached_fields_in_source_order(&self) -> Vec<&Field> {
-        if let Some(runs) = self.typed_cache().or(self.simple_cached_runs.as_deref()) {
+        if let Some(runs) = self
+            .typed_cache()
+            .or(self.simple_cached_runs.as_deref())
+            .or(self.parsed_cached_child_runs())
+        {
             return runs
                 .iter()
                 .flat_map(|run| &run.content)
@@ -833,34 +1388,34 @@ impl Field {
     /// replacement without the original simple-cache source span.
     #[doc(hidden)]
     pub fn cached_field_mut(&mut self, index: usize) -> Option<&mut Field> {
-        if let Some(runs) = self
+        let parsed_children = self.parsed_cached_child_runs().is_some();
+        let runs = self
             .typed_cached_runs
             .as_mut()
             .or(self.simple_cached_runs.as_mut())
-        {
+            .or(if parsed_children {
+                self.parsed_cached_runs.as_mut()
+            } else {
+                None
+            })
+            .or(match &mut self.source {
+                FieldSource::New { cached_runs, .. } => cached_runs.as_mut(),
+                _ => None,
+            });
+        if let Some(runs) = runs {
             return runs
                 .iter_mut()
                 .flat_map(|run| &mut run.content)
-                .filter_map(|content| match content {
-                    RunContent::Field(field) => Some(field),
-                    _ => None,
+                .filter_map(|content| {
+                    if let RunContent::Field(field) = content {
+                        Some(field)
+                    } else {
+                        None
+                    }
                 })
                 .nth(index);
         }
-        match &mut self.source {
-            FieldSource::New {
-                cached_runs: Some(runs),
-                ..
-            } => runs
-                .iter_mut()
-                .flat_map(|run| &mut run.content)
-                .filter_map(|content| match content {
-                    RunContent::Field(field) => Some(field),
-                    _ => None,
-                })
-                .nth(index),
-            _ => self.cached_fields.get_mut(index).map(|(_, field)| field),
-        }
+        self.cached_fields.get_mut(index).map(|(_, field)| field)
     }
 
     /// Refresh the display projection after nested cached fields were edited.
@@ -872,7 +1427,11 @@ impl Field {
     }
 
     fn nested_cached_projection(&self) -> Option<String> {
-        if let Some(runs) = self.typed_cache().or(self.simple_cached_runs.as_deref()) {
+        if let Some(runs) = self
+            .typed_cache()
+            .or(self.simple_cached_runs.as_deref())
+            .or(self.parsed_cached_child_runs())
+        {
             return Some(runs.iter().map(cached_run_display).collect());
         }
         match &self.source {
@@ -1162,6 +1721,7 @@ impl Field {
             let runs = self
                 .typed_cache()
                 .or(self.simple_cached_runs.as_deref())
+                .or(self.parsed_cached_child_runs())
                 .or(match &self.source {
                     FieldSource::New {
                         cached_runs: Some(runs),
@@ -1517,6 +2077,8 @@ fn validate_cached_field_runs(runs: &[CT_R]) -> Result<()> {
                 _ => {}
             }
         }
+        let mut localized = Vec::new();
+        let (raw_root, raw_bindings) = run_xml_root(run, None, &mut localized)?;
         for (index, raw) in run.extra_xml.iter().enumerate() {
             if run
                 .extra_xml_positions
@@ -1525,7 +2087,7 @@ fn validate_cached_field_runs(runs: &[CT_R]) -> Result<()> {
             {
                 continue;
             }
-            validate_raw_cached_field_content(run, raw)?;
+            validate_raw_cached_field_content(&raw_root, &raw_bindings, &localized, raw)?;
         }
         let mut writer = Writer::new(Vec::new());
         writer
@@ -1539,16 +2101,15 @@ fn validate_cached_field_runs(runs: &[CT_R]) -> Result<()> {
     Ok(())
 }
 
-fn validate_raw_cached_field_content(run: &CT_R, raw: &[u8]) -> Result<()> {
+fn validate_raw_cached_field_content(
+    root: &BytesStart<'_>,
+    raw_bindings: &[(String, String)],
+    localized: &[(String, String)],
+    raw: &[u8],
+) -> Result<()> {
     let mut writer = Writer::new(FIELD_CACHE_VALIDATION_SCOPE.to_vec());
-    let mut parent = BytesStart::new("w:r");
-    for (position, attributes) in run.extra_xml_positions.iter().zip(&run.extra_xml) {
-        if CT_R::raw_child_is_root_attributes(*position) {
-            push_root_attribute_record(&mut parent, attributes, None)?;
-        }
-    }
-    writer.write_event(Event::Start(parent))?;
-    writer.get_mut().extend_from_slice(raw);
+    writer.write_event(Event::Start(root.clone()))?;
+    write_run_raw_source(&mut writer, raw, None, raw_bindings, localized)?;
     writer.get_mut().extend_from_slice(b"</w:r></w:p>");
     let scoped = writer.into_inner();
     oxml_core::xml::validate_strict_xml_1_0(&scoped)
@@ -2061,10 +2622,12 @@ const RAW_LEGACY_HORIZONTAL_RULE_FLAG: usize = 1usize << (usize::BITS - 1);
 const RAW_ALTERNATE_CONTENT_DRAWING_FLAG: usize = 1usize << (usize::BITS - 2);
 const RAW_ROOT_ATTRIBUTES_FLAG: usize = 1usize << (usize::BITS - 3);
 const RAW_COMMENT_REFERENCE_FLAG: usize = 1usize << (usize::BITS - 4);
+const RAW_RUN_LOCAL_BINDINGS_FLAG: usize = 1usize << (usize::BITS - 5);
 const RAW_CHILD_FLAGS: usize = RAW_LEGACY_HORIZONTAL_RULE_FLAG
     | RAW_ALTERNATE_CONTENT_DRAWING_FLAG
     | RAW_ROOT_ATTRIBUTES_FLAG
-    | RAW_COMMENT_REFERENCE_FLAG;
+    | RAW_COMMENT_REFERENCE_FLAG
+    | RAW_RUN_LOCAL_BINDINGS_FLAG;
 const RAW_CHILD_POSITION_MASK: usize = !RAW_CHILD_FLAGS;
 const VML_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:vml";
 const OFFICE_NAMESPACE: &[u8] = b"urn:schemas-microsoft-com:office:office";
@@ -2426,6 +2989,20 @@ impl CT_R {
                 let alternate_drawing = Self::raw_child_has_alternate_content_drawing(encoded)
                     .then(|| alternate_drawings.next())
                     .flatten();
+                if encoded & RAW_RUN_LOCAL_BINDINGS_FLAG != 0
+                    || (Self::raw_child_is_root_attributes(encoded)
+                        && (raw.starts_with(b"<rdocxRootAttributes xmlns:")
+                            || raw.starts_with(b"<rdocxRootAttributes xmlns=")))
+                {
+                    // Namespace-only records are constructed with declarations
+                    // first. Real root-attribute records put their payload first.
+                    // Scope follows both pieces without duplicating owner attrs.
+                    self.extra_xml.push(raw.clone());
+                    self.extra_xml_positions.push(encoded);
+                    tail.extra_xml.push(raw);
+                    tail.extra_xml_positions.push(encoded);
+                    continue;
+                }
                 if position <= head_boundary {
                     self.extra_xml.push(raw);
                     self.extra_xml_positions.push(encoded);
@@ -2559,10 +3136,38 @@ impl CT_R {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
+        crate::document::admit_word_reader(reader, &["w".to_owned()], b"r", None)?;
         Self::from_xml_with_prefixes(
             reader,
             &["w".to_owned(), format!("\0mc\0{}", crate::namespace::MC_NS)],
         )
+    }
+
+    /// Parse one namespace-complete regular run for checked owner replacement.
+    #[doc(hidden)]
+    pub fn from_xml_fragment_checked(xml: &[u8]) -> Result<Self> {
+        crate::document::admit_word_xml(xml, &[], None)?;
+        validate_word_owner_fragment(xml, b"r", true)?;
+        let mut reader = Reader::from_reader(xml);
+        reader.config_mut().trim_text(false);
+        loop {
+            match reader.read_event()? {
+                Event::Start(root) => {
+                    let prefixes = word_prefixes_at(&root, &[])?;
+                    return Self::from_xml_with_prefixes_and_root(
+                        &mut reader,
+                        &prefixes,
+                        Some(&root),
+                    );
+                }
+                Event::Empty(root) => {
+                    let prefixes = word_prefixes_at(&root, &[])?;
+                    return Self::from_empty_root(&root, &prefixes);
+                }
+                Event::Eof => return Err(OxmlError::MissingElement("w:r root".into())),
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn from_xml_with_prefixes(
@@ -2634,7 +3239,9 @@ impl CT_R {
                         modeled_children += 1;
                     } else if is_word_element(name.as_ref(), b"drawing", &prefixes) {
                         content.push(RunContent::Drawing(CT_Drawing::from_xml_with_prefixes(
-                            reader, &prefixes,
+                            reader,
+                            &prefixes,
+                            word_prefixes,
                         )?));
                         modeled_children += 1;
                     } else if is_word_element(name.as_ref(), b"commentReference", &prefixes) {
@@ -2663,7 +3270,8 @@ impl CT_R {
                         // so layout can see the shape. alt_drawings is never
                         // serialised, the raw copy below is what gets written.
                         let raw = capture_element(reader, e)?;
-                        let drawing = crate::drawing::parse_alternate_content(&raw, &prefixes);
+                        let drawing =
+                            crate::drawing::parse_alternate_content_admitted(&raw, &prefixes);
                         let has_drawing = drawing.is_some();
                         if let Some(drawing) = drawing {
                             alt_drawings.push(drawing);
@@ -2752,7 +3360,8 @@ impl CT_R {
                         // capturing it here would move it past <w:t> and
                         // produce schema-invalid output. An empty rPr carries
                         // no formatting, so dropping it loses nothing.
-                        extra_xml.push(capture_empty_element(e)?);
+                        let raw = capture_empty_element(e)?;
+                        extra_xml.push(raw);
                         extra_xml_positions.push(modeled_children);
                     }
                 }
@@ -2770,13 +3379,102 @@ impl CT_R {
             buf.clear();
         }
 
-        if let Some(record) = root
+        let retained_attributes = root
             .map(|root| capture_root_attribute_record(root, word_prefixes))
             .transpose()?
-            .flatten()
-        {
+            .flatten();
+        let mut retained_bindings = Vec::new();
+        // Canonical w is supplied by the generated run itself. Recording it
+        // would introduce a synthetic raw slot and break source fixed points.
+        let external_bindings = namespace_bindings(word_prefixes)
+            .into_iter()
+            .filter(|(prefix, uri)| prefix != "w" || uri != crate::namespace::W_NS)
+            .collect::<Vec<_>>();
+        for raw in &extra_xml {
+            for binding in external_bindings_used_by_raw(raw, &external_bindings)? {
+                if !retained_bindings.contains(&binding) {
+                    retained_bindings.push(binding);
+                }
+            }
+        }
+        let mut local_bindings = Vec::new();
+        if let Some(root) = root {
+            let declarations = raw_namespace_declarations(root)?;
+            for drawing in content.iter().filter_map(|item| match item {
+                RunContent::Drawing(drawing) => Some(drawing),
+                _ => None,
+            }) {
+                for raw in drawing
+                    .inline
+                    .as_ref()
+                    .and_then(|inline| inline.raw_xml.as_deref())
+                    .into_iter()
+                    .chain(
+                        drawing
+                            .anchor
+                            .as_ref()
+                            .and_then(|anchor| anchor.raw_xml.as_deref()),
+                    )
+                {
+                    for (prefix, _) in external_bindings_used_by_raw(raw, &declarations)? {
+                        if prefix == "w"
+                            && declarations.iter().any(|(bound, uri)| {
+                                bound == &prefix && uri == crate::namespace::W_NS
+                            })
+                        {
+                            continue;
+                        }
+                        if !local_bindings.contains(&prefix) {
+                            local_bindings.push(prefix);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(record) = retained_attributes {
             extra_xml.push(record);
             extra_xml_positions.push(RAW_ROOT_ATTRIBUTES_FLAG);
+        }
+        if !retained_bindings.is_empty() {
+            let mut record = BytesStart::new(std::str::from_utf8(ROOT_ATTRIBUTES_ELEMENT)?);
+            for (prefix, uri) in retained_bindings {
+                let name = if prefix.is_empty() {
+                    "xmlns".to_owned()
+                } else {
+                    format!("xmlns:{prefix}")
+                };
+                record.push_attribute((name.as_str(), uri.as_str()));
+            }
+            let mut writer = Writer::new(Vec::new());
+            writer.write_event(Event::Empty(record))?;
+            extra_xml.push(writer.into_inner());
+            extra_xml_positions.push(RAW_ROOT_ATTRIBUTES_FLAG);
+        }
+        if !local_bindings.is_empty() {
+            let mut record = BytesStart::new(std::str::from_utf8(ROOT_ATTRIBUTES_ELEMENT)?);
+            if let Some(root) = root {
+                for attribute in root.attributes() {
+                    let attribute = attribute?;
+                    let name = attribute.key.as_ref();
+                    let prefix = if name == b"xmlns" {
+                        Some("")
+                    } else {
+                        name.strip_prefix(b"xmlns:")
+                            .map(std::str::from_utf8)
+                            .transpose()?
+                    };
+                    if prefix
+                        .is_some_and(|prefix| local_bindings.iter().any(|local| local == prefix))
+                    {
+                        // Preserve the actual declaration's lexical value, including references.
+                        record.push_attribute(attribute);
+                    }
+                }
+            }
+            let mut writer = Writer::new(Vec::new());
+            writer.write_event(Event::Empty(record))?;
+            extra_xml.push(writer.into_inner());
+            extra_xml_positions.push(RAW_ROOT_ATTRIBUTES_FLAG | RAW_RUN_LOCAL_BINDINGS_FLAG);
         }
 
         Ok(CT_R {
@@ -2797,27 +3495,35 @@ impl CT_R {
         writer: &mut Writer<W>,
         foreign_word_namespace: Option<&str>,
     ) -> Result<()> {
-        let mut run = BytesStart::new("w:r");
-        if foreign_word_namespace.is_some() {
-            run.push_attribute(("xmlns:w", crate::namespace::W_NS));
-        }
-        for (position, raw) in self.extra_xml_positions.iter().zip(&self.extra_xml) {
-            if Self::raw_child_is_root_attributes(*position) {
-                push_root_attribute_record(&mut run, raw, None)?;
-            }
-        }
+        crate::document::admit_word_model(crate::document::WordOwner::Run(self))?;
+        let mut localized = Vec::new();
+        let (run, raw_bindings) = run_xml_root(self, foreign_word_namespace, &mut localized)?;
         writer.write_event(Event::Start(run))?;
 
         let ordered_raw = self.extra_xml_positions.len() == self.extra_xml.len();
         let mut typed_boundary = 0usize;
         if ordered_raw {
-            write_run_raw_boundary(writer, self, typed_boundary, foreign_word_namespace)?;
+            write_run_raw_boundary(
+                writer,
+                self,
+                typed_boundary,
+                foreign_word_namespace,
+                &raw_bindings,
+                &localized,
+            )?;
         }
         if let Some(ref props) = self.properties {
             props.to_xml_with_word_override(writer, foreign_word_namespace)?;
             typed_boundary += 1;
             if ordered_raw {
-                write_run_raw_boundary(writer, self, typed_boundary, foreign_word_namespace)?;
+                write_run_raw_boundary(
+                    writer,
+                    self,
+                    typed_boundary,
+                    foreign_word_namespace,
+                    &raw_bindings,
+                    &localized,
+                )?;
             }
         }
 
@@ -2915,7 +3621,13 @@ impl CT_R {
                                 .get(index)
                                 .is_none_or(|position| *position & RAW_COMMENT_REFERENCE_FLAG == 0)
                             {
-                                write_raw_with_word_override(writer, raw, foreign_word_namespace)?;
+                                write_run_raw_source(
+                                    writer,
+                                    raw,
+                                    foreign_word_namespace,
+                                    &raw_bindings,
+                                    &localized,
+                                )?;
                             }
                             raw_written += 1;
                         }
@@ -2931,7 +3643,13 @@ impl CT_R {
                             .then_some(raw)
                         })
                     {
-                        write_raw_with_word_override(writer, raw, foreign_word_namespace)?;
+                        write_run_raw_source(
+                            writer,
+                            raw,
+                            foreign_word_namespace,
+                            &raw_bindings,
+                            &localized,
+                        )?;
                         typed_boundary += 1;
                         if ordered_raw {
                             write_run_raw_boundary(
@@ -2939,6 +3657,8 @@ impl CT_R {
                                 self,
                                 typed_boundary,
                                 foreign_word_namespace,
+                                &raw_bindings,
+                                &localized,
                             )?;
                         }
                         continue;
@@ -2951,7 +3671,14 @@ impl CT_R {
             }
             typed_boundary += 1;
             if ordered_raw {
-                write_run_raw_boundary(writer, self, typed_boundary, foreign_word_namespace)?;
+                write_run_raw_boundary(
+                    writer,
+                    self,
+                    typed_boundary,
+                    foreign_word_namespace,
+                    &raw_bindings,
+                    &localized,
+                )?;
             }
         }
 
@@ -2966,7 +3693,13 @@ impl CT_R {
                 {
                     continue;
                 }
-                write_raw_with_word_override(writer, raw, foreign_word_namespace)?;
+                write_run_raw_source(
+                    writer,
+                    raw,
+                    foreign_word_namespace,
+                    &raw_bindings,
+                    &localized,
+                )?;
             }
         }
 
@@ -3039,18 +3772,190 @@ fn retained_comment_reference_id(raw: &[u8]) -> Option<i32> {
     })
 }
 
+fn run_xml_root(
+    run: &CT_R,
+    foreign_word_namespace: Option<&str>,
+    localized: &mut Vec<(String, String)>,
+) -> Result<(BytesStart<'static>, Vec<(String, String)>)> {
+    localized.clear();
+    let mut root = BytesStart::new("w:r");
+    if foreign_word_namespace.is_some() {
+        root.push_attribute(("xmlns:w", crate::namespace::W_NS));
+    }
+    let mut bindings = Vec::new();
+    let mut lexical = Vec::new();
+    let mut local = HashSet::new();
+    let mut attributes = Vec::new();
+    for (position, raw) in run.extra_xml_positions.iter().zip(&run.extra_xml) {
+        #[cfg(test)]
+        RUN_METADATA_VISITS.with(|count| count.set(count.get() + 1));
+        if CT_R::raw_child_is_root_attributes(*position) {
+            let mut reader = Reader::from_reader(raw.as_slice());
+            let Event::Empty(record) = reader.read_event()? else {
+                return Err(OxmlError::InvalidValue(
+                    "invalid run root attributes".into(),
+                ));
+            };
+            let declarations = raw_namespace_declarations(&record)?;
+            let source_local = *position & RAW_RUN_LOCAL_BINDINGS_FLAG != 0;
+            for binding in declarations {
+                if source_local
+                    && bindings
+                        .iter()
+                        .any(|(prefix, uri)| prefix == &binding.0 && uri != &binding.1)
+                {
+                    return Err(OxmlError::InvalidValue(
+                        "inconsistent source-local run namespace binding".into(),
+                    ));
+                }
+                if !bindings.contains(&binding) {
+                    bindings.push(binding);
+                }
+            }
+            for attribute in record.attributes() {
+                let attribute = attribute?;
+                let name = attribute.key.as_ref();
+                let prefix = if name == b"xmlns" {
+                    Some("")
+                } else {
+                    name.strip_prefix(b"xmlns:")
+                        .map(std::str::from_utf8)
+                        .transpose()?
+                };
+                if let Some(prefix) = prefix {
+                    let value = std::str::from_utf8(&attribute.value)?.to_owned();
+                    if let Some((_, spelling)) =
+                        lexical.iter_mut().find(|(existing, _)| existing == prefix)
+                    {
+                        if source_local {
+                            *spelling = value;
+                        }
+                    } else {
+                        lexical.push((prefix.to_owned(), value));
+                    }
+                    if source_local {
+                        local.insert(prefix.to_owned());
+                    }
+                }
+            }
+            let prefixes = word_prefixes_at(&record, &[])?;
+            if let Some(record) = capture_root_attribute_record(&record, &prefixes)? {
+                attributes.push(record);
+            }
+        }
+    }
+    let mut wp_writer = false;
+    let mut r_writer = false;
+    for drawing in run.content.iter().filter_map(|item| match item {
+        RunContent::Drawing(drawing) => Some(drawing),
+        _ => None,
+    }) {
+        if let Some(inline) = &drawing.inline
+            && inline.raw_xml.is_none()
+        {
+            wp_writer = true;
+            r_writer |= inline.chart_rel_id.is_none();
+        }
+        if let Some(anchor) = &drawing.anchor
+            && anchor.raw_xml.is_none()
+        {
+            wp_writer = true;
+            r_writer |= anchor.chart_rel_id.is_none();
+        }
+    }
+    for (prefix, value) in &lexical {
+        let generated = match prefix.as_str() {
+            "w" => Some(crate::namespace::W_NS),
+            "wp" if wp_writer => Some(WP_NS),
+            "r" if r_writer => Some(R_NS),
+            _ => None,
+        };
+        if let Some(uri) = generated
+            && bindings
+                .iter()
+                .any(|(bound, actual)| bound == prefix && actual != uri)
+        {
+            localized.push((prefix.clone(), value.clone()));
+            if prefix != "w" {
+                root.push_attribute((format!("xmlns:{prefix}").as_str(), uri));
+            }
+        }
+    }
+    // Root aliases protect only the actual proven canonical target scopes above.
+    for record in attributes {
+        push_root_attribute_record(&mut root, &record, None)?;
+    }
+    let guarantees = ROOT_BINDINGS.with(Cell::get);
+    for (prefix, value) in &lexical {
+        if prefix == "w" || localized.iter().any(|(bound, _)| bound == prefix) {
+            continue;
+        }
+        let guaranteed = !local.contains(prefix)
+            && match prefix.as_str() {
+                "r" => guarantees & ROOT_R_BINDING != 0 && value == R_NS,
+                "mc" => guarantees & ROOT_MC_BINDING != 0 && value == MC_NS,
+                "wp" => guarantees & ROOT_WP_BINDING != 0 && value == WP_NS,
+                _ => false,
+            };
+        if guaranteed {
+            continue;
+        }
+        let name = if prefix.is_empty() {
+            "xmlns".to_owned()
+        } else {
+            format!("xmlns:{prefix}")
+        };
+        if !root.attributes().any(|attribute| {
+            attribute.is_ok_and(|attribute| attribute.key.as_ref() == name.as_bytes())
+        }) {
+            root.push_attribute(quick_xml::events::attributes::Attribute {
+                key: quick_xml::name::QName(name.as_bytes()),
+                value: Cow::Borrowed(value.as_bytes()),
+            });
+        }
+    }
+    Ok((root, bindings))
+}
+
+fn write_run_raw_source<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    raw: &[u8],
+    foreign_word_namespace: Option<&str>,
+    bindings: &[(String, String)],
+    localized: &[(String, String)],
+) -> Result<()> {
+    // QName values need every actual source fact during discovery, including
+    // the attribute namespace itself. Only conflicting generated prefixes
+    // need a declaration on the opaque subtree.
+    let used = external_bindings_used_by_raw(raw, bindings)?;
+    let needed = localized
+        .iter()
+        .filter(|(prefix, _)| used.iter().any(|(used, _)| used == prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    // These are lexical source values, not newly authored namespace URIs.
+    let closed = if needed.is_empty() {
+        raw.to_vec()
+    } else {
+        raw_with_root_bindings(raw, &needed, true)?
+    };
+    write_raw_with_word_override(writer, &closed, foreign_word_namespace)
+}
+
 fn write_run_raw_boundary<W: std::io::Write>(
     writer: &mut Writer<W>,
     run: &CT_R,
     boundary: usize,
     foreign_word_namespace: Option<&str>,
+    raw_bindings: &[(String, String)],
+    localized: &[(String, String)],
 ) -> Result<()> {
     for (position, raw) in run.extra_xml_positions.iter().zip(&run.extra_xml) {
         if !CT_R::raw_child_is_root_attributes(*position)
             && *position & RAW_COMMENT_REFERENCE_FLAG == 0
             && CT_R::raw_child_position(*position) == boundary
         {
-            write_raw_with_word_override(writer, raw, foreign_word_namespace)?;
+            write_run_raw_source(writer, raw, foreign_word_namespace, raw_bindings, localized)?;
         }
     }
     Ok(())
@@ -3184,6 +4089,7 @@ fn parse_simple_field(raw: &[u8], word_prefixes: &[String]) -> Result<Option<Fie
     let mut cached_result = String::new();
     let mut cached_segments = Vec::new();
     let mut result_run_index = 0usize;
+    let mut result_runs = Vec::new();
     loop {
         buffer.clear();
         let before = reader.buffer_position() as usize;
@@ -3198,9 +4104,10 @@ fn parse_simple_field(raw: &[u8], word_prefixes: &[String]) -> Result<Option<Fie
                         cached_segments.push(CachedDisplaySegment {
                             run_index: result_run_index,
                             text,
-                            properties: run.properties,
+                            properties: run.properties.clone(),
                         });
                     }
+                    result_runs.push(run);
                     result_run_index += 1;
                 } else {
                     reader.read_to_end_into(start.name(), &mut Vec::new())?;
@@ -3228,6 +4135,15 @@ fn parse_simple_field(raw: &[u8], word_prefixes: &[String]) -> Result<Option<Fie
         raw.to_vec(),
         prefixes.clone(),
     );
+    if cached_runs_need_typed_projection(&result_runs)
+        && result_runs
+            .iter()
+            .map(cached_run_display)
+            .collect::<String>()
+            == field.cached_result
+    {
+        field.simple_cached_runs = Some(result_runs);
+    }
     let result_xml = &raw[result_start..result_end];
     // The typed pass still decides namespace and structure. This cheap absence
     // test avoids reparsing ordinary text-only caches.
@@ -3261,15 +4177,17 @@ fn parse_simple_field(raw: &[u8], word_prefixes: &[String]) -> Result<Option<Fie
             Some(&cache_root),
         )?;
         let runs = paragraph.runs().into_iter().cloned().collect::<Vec<_>>();
-        if runs.iter().flat_map(|run| &run.content).any(|content| {
-            matches!(
-                content,
-                RunContent::Field(_)
-                    | RunContent::FootnoteRef { .. }
-                    | RunContent::EndnoteRef { .. }
-                    | RunContent::CommentReference { .. }
-            )
-        }) {
+        if cached_runs_need_typed_projection(&runs)
+            || runs.iter().flat_map(|run| &run.content).any(|content| {
+                matches!(
+                    content,
+                    RunContent::Field(_)
+                        | RunContent::FootnoteRef { .. }
+                        | RunContent::EndnoteRef { .. }
+                        | RunContent::CommentReference { .. }
+                )
+            })
+        {
             field.cached_result = runs.iter().map(cached_run_display).collect();
             if let FieldSource::Parsed {
                 original_cached_result,
@@ -3353,6 +4271,13 @@ fn simple_result_run_display(raw: &[u8], word_prefixes: &[String]) -> Result<Opt
                         BreakType::Column => '\u{000b}',
                     };
                     display.get_or_insert_default().push(marker);
+                } else if matches!(
+                    parse_typed_special_run_child(&element, &prefixes)?,
+                    Some(RunContent::SpecialCharacter(
+                        SpecialCharacter::CarriageReturn
+                    ))
+                ) {
+                    display.get_or_insert_default().push('\n');
                 }
             }
             Event::End(end) if matches_local_name(end.name().as_ref(), b"r") => {
@@ -4166,12 +5091,14 @@ enum ComplexFieldEvent {
     Separate(Option<bool>),
     End(Option<bool>),
     Instruction(String),
-    Result(String),
-    Tab,
-    Break(BreakType),
+    Result(RunContent),
 }
 
-fn complex_field_events(raw: &[u8], word_prefixes: &[String]) -> Result<Vec<ComplexFieldEvent>> {
+fn complex_field_events(
+    raw: &[u8],
+    word_prefixes: &[String],
+    mut field_depth: usize,
+) -> Result<Vec<ComplexFieldEvent>> {
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(false);
     let mut events = Vec::new();
@@ -4192,24 +5119,53 @@ fn complex_field_events(raw: &[u8], word_prefixes: &[String]) -> Result<Vec<Comp
             Event::Start(start) => {
                 let prefixes = word_prefixes_at(&start, &run_prefixes)?;
                 if is_word_element(start.name().as_ref(), b"fldChar", &prefixes) {
+                    let before = events.len();
                     push_field_char_event(&mut events, &start, &prefixes);
+                    match events.get(before) {
+                        Some(ComplexFieldEvent::Begin(_)) => field_depth += 1,
+                        Some(ComplexFieldEvent::End(_)) => {
+                            field_depth = field_depth.saturating_sub(1)
+                        }
+                        _ => {}
+                    }
                     reader.read_to_end_into(start.name(), &mut Vec::new())?;
                 } else if is_word_element(start.name().as_ref(), b"instrText", &prefixes) {
                     events.push(ComplexFieldEvent::Instruction(
                         crate::xml_text::read_element_text(&mut reader, start.name()),
                     ));
                 } else if is_word_element(start.name().as_ref(), b"t", &prefixes) {
-                    events.push(ComplexFieldEvent::Result(
-                        crate::xml_text::read_element_text(&mut reader, start.name()),
-                    ));
+                    events.push(ComplexFieldEvent::Result(RunContent::Text(CT_Text {
+                        preserve_space: start.attributes().any(|attribute| {
+                            attribute.ok().is_some_and(|attribute| {
+                                attribute.key.as_ref() == b"xml:space"
+                                    && attribute.value.as_ref() == b"preserve"
+                            })
+                        }),
+                        text: crate::xml_text::read_element_text(&mut reader, start.name()),
+                    })));
                 } else if is_word_element(start.name().as_ref(), b"tab", &prefixes) {
-                    events.push(ComplexFieldEvent::Tab);
+                    events.push(ComplexFieldEvent::Result(RunContent::Tab));
                     reader.read_to_end_into(start.name(), &mut Vec::new())?;
                 } else if is_word_element(start.name().as_ref(), b"br", &prefixes) {
-                    events.push(ComplexFieldEvent::Break(field_break_type(
-                        &start, &prefixes,
+                    events.push(ComplexFieldEvent::Result(RunContent::Break(
+                        field_break_type(&start, &prefixes),
                     )));
                     reader.read_to_end_into(start.name(), &mut Vec::new())?;
+                } else if is_word_element(start.name().as_ref(), b"drawing", &prefixes) {
+                    if field_depth == 0 {
+                        // The typed run already owns this drawing. Without an
+                        // active field, result events are discarded. Rebuilding
+                        // a nested text body here doubles recursive parse work.
+                        reader.read_to_end_into(start.name(), &mut Vec::new())?;
+                    } else {
+                        events.push(ComplexFieldEvent::Result(RunContent::Drawing(
+                            CT_Drawing::from_xml_with_prefixes(
+                                &mut reader,
+                                &prefixes,
+                                &run_prefixes,
+                            )?,
+                        )));
+                    }
                 } else {
                     reader.read_to_end_into(start.name(), &mut Vec::new())?;
                 }
@@ -4217,13 +5173,23 @@ fn complex_field_events(raw: &[u8], word_prefixes: &[String]) -> Result<Vec<Comp
             Event::Empty(start) => {
                 let prefixes = word_prefixes_at(&start, &run_prefixes)?;
                 if is_word_element(start.name().as_ref(), b"fldChar", &prefixes) {
+                    let before = events.len();
                     push_field_char_event(&mut events, &start, &prefixes);
+                    match events.get(before) {
+                        Some(ComplexFieldEvent::Begin(_)) => field_depth += 1,
+                        Some(ComplexFieldEvent::End(_)) => {
+                            field_depth = field_depth.saturating_sub(1)
+                        }
+                        _ => {}
+                    }
                 } else if is_word_element(start.name().as_ref(), b"tab", &prefixes) {
-                    events.push(ComplexFieldEvent::Tab);
+                    events.push(ComplexFieldEvent::Result(RunContent::Tab));
                 } else if is_word_element(start.name().as_ref(), b"br", &prefixes) {
-                    events.push(ComplexFieldEvent::Break(field_break_type(
-                        &start, &prefixes,
+                    events.push(ComplexFieldEvent::Result(RunContent::Break(
+                        field_break_type(&start, &prefixes),
                     )));
+                } else if let Some(content) = parse_typed_special_run_child(&start, &prefixes)? {
+                    events.push(ComplexFieldEvent::Result(content));
                 }
             }
             Event::End(end) if matches_local_name(end.name().as_ref(), b"r") => break,
@@ -4273,7 +5239,8 @@ struct ComplexFieldBuilder {
     instruction: Vec<InstructionPart>,
     cached_result: String,
     cached_segments: Vec<CachedDisplaySegment>,
-    cached_fields: Vec<(std::ops::Range<usize>, Field)>,
+    cached_child_ranges: Vec<std::ops::Range<usize>>,
+    cached_runs: Vec<CT_R>,
     valid: bool,
 }
 
@@ -4340,13 +5307,16 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
             {
                 let end = parent.cached_result.len();
                 parent
-                    .cached_fields
-                    .push((end - child.cached_result.len()..end, child.clone()));
+                    .cached_child_ranges
+                    .push(end - child.cached_result.len()..end);
+                parent
+                    .cached_runs
+                    .push(field_run(child.clone(), runs[run_index].properties.clone()));
             }
             continue;
         }
 
-        for event in complex_field_events(raw, word_prefixes)? {
+        for event in complex_field_events(raw, word_prefixes, stack.len())? {
             match event {
                 ComplexFieldEvent::Begin(dirty) => stack.push(ComplexFieldBuilder {
                     start_run: run_index,
@@ -4355,7 +5325,8 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
                     instruction: Vec::new(),
                     cached_result: String::new(),
                     cached_segments: Vec::new(),
-                    cached_fields: Vec::new(),
+                    cached_child_ranges: Vec::new(),
+                    cached_runs: Vec::new(),
                     valid: true,
                 }),
                 ComplexFieldEvent::Instruction(text) => {
@@ -4365,50 +5336,33 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
                         field.instruction.push(InstructionPart::Text(text));
                     }
                 }
-                ComplexFieldEvent::Result(text) => {
-                    for field in &mut stack {
-                        if field.separate_run.is_some() {
-                            field.cached_result.push_str(&text);
-                            push_cached_display_segment(
-                                &mut field.cached_segments,
-                                run_index,
-                                &text,
-                                runs[run_index].properties.as_ref(),
-                            );
-                        }
-                    }
-                }
-                ComplexFieldEvent::Tab => {
-                    for field in &mut stack {
-                        if field.separate_run.is_some() {
-                            field.cached_result.push('\t');
-                            push_cached_display_segment(
-                                &mut field.cached_segments,
-                                run_index,
-                                "\t",
-                                runs[run_index].properties.as_ref(),
-                            );
-                        }
-                    }
-                }
-                ComplexFieldEvent::Break(break_type) => {
-                    let marker = match break_type {
-                        BreakType::Line => '\n',
-                        BreakType::Page => '\u{000c}',
-                        BreakType::Column => '\u{000b}',
+                ComplexFieldEvent::Result(content) => {
+                    let display = match &content {
+                        RunContent::Break(BreakType::Page) => "\u{000c}",
+                        RunContent::Break(BreakType::Column) => "\u{000b}",
+                        _ => CT_R::content_text(&content),
                     };
                     for field in &mut stack {
                         if field.separate_run.is_some() {
-                            field.cached_result.push(marker);
-                            let mut text = String::new();
-                            text.push(marker);
+                            field.cached_result.push_str(display);
                             push_cached_display_segment(
                                 &mut field.cached_segments,
                                 run_index,
-                                &text,
+                                display,
                                 runs[run_index].properties.as_ref(),
                             );
                         }
+                    }
+                    if let Some(field) = stack.last_mut()
+                        && field.separate_run.is_some()
+                    {
+                        field.cached_runs.push(CT_R {
+                            properties: runs[run_index].properties.clone(),
+                            content: vec![content],
+                            extra_xml: Vec::new(),
+                            extra_xml_positions: Vec::new(),
+                            alt_drawings: Vec::new(),
+                        });
                     }
                 }
                 ComplexFieldEvent::Separate(dirty) => {
@@ -4444,7 +5398,6 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
                         word_prefixes.to_vec(),
                     );
                     parsed.nested_order = nested_order;
-                    parsed.cached_fields = field.cached_fields;
                     if field.separate_run.is_some()
                         && let FieldSource::Parsed { raw_xml, .. } = &parsed.source
                         && source_has_note_reference_name(raw_xml)
@@ -4465,6 +5418,35 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
                         parsed.parsed_cached_runs = Some(cache_runs);
                         parsed.parsed_cached_comment_ranges = cache_ranges;
                     }
+                    if parsed.parsed_cached_runs.is_none()
+                        && cached_runs_need_typed_projection(&field.cached_runs)
+                        && field
+                            .cached_runs
+                            .iter()
+                            .map(cached_run_display)
+                            .collect::<String>()
+                            == parsed.cached_result
+                    {
+                        parsed.parsed_cached_runs = Some(field.cached_runs);
+                    } else {
+                        parsed.cached_fields = field
+                            .cached_child_ranges
+                            .into_iter()
+                            .zip(
+                                field
+                                    .cached_runs
+                                    .into_iter()
+                                    .flat_map(|run| run.content)
+                                    .filter_map(|content| {
+                                        if let RunContent::Field(child) = content {
+                                            Some(child)
+                                        } else {
+                                            None
+                                        }
+                                    }),
+                            )
+                            .collect();
+                    }
                     let valid = field.valid
                         && !parsed.instruction.name.is_empty()
                         && run_sources[field.start_run..=run_index]
@@ -4478,7 +5460,8 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
                         } else {
                             let end = parent.cached_result.len();
                             let start = end.saturating_sub(parsed.cached_result.len());
-                            parent.cached_fields.push((start..end, parsed));
+                            parent.cached_child_ranges.push(start..end);
+                            parent.cached_runs.push(field_run(parsed, None));
                         }
                     } else if valid {
                         completed.push((field.start_run, run_index, parsed, None));
@@ -5598,7 +6581,8 @@ fn project_comment_text(xml: &[u8], id: i32, incoming: bool) -> Result<CommentTe
     loop {
         let before = reader.buffer_position() as usize;
         let (namespace, event) = reader.read_resolved_event_into(&mut buffer)?;
-        let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == crate::namespace::W_NS.as_bytes());
+        let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == crate::namespace::W_NS.as_bytes()
+            || std::str::from_utf8(uri).ok().and_then(|uri| quick_xml::escape::unescape(uri).ok()).is_some_and(|uri| uri == crate::namespace::W_NS));
         drop(namespace);
         let after = reader.buffer_position() as usize;
         match event {
@@ -5979,6 +6963,94 @@ fn append_tracked_cell_runs<'a>(cell: &'a CT_Tc, output: &mut Vec<&'a CT_R>) {
     }
 }
 
+// Markdown's accepted projection carries physical scope boundaries separately
+// from the typed runs. Default accepted-view readers keep their existing walk.
+fn append_accepted_inline_paragraph(
+    paragraph: &CT_P,
+    runs: &mut Vec<CT_R>,
+    boundaries: &mut Vec<usize>,
+) {
+    let (view, inner) = paragraph.accepted_view_projection(true);
+    let offset = runs.len();
+    let view = view.into_owned();
+    if !view.runs.is_empty() {
+        boundaries.push(offset);
+        boundaries.extend(inner.into_iter().map(|at| offset + at));
+        boundaries.push(offset + view.runs.len());
+        runs.extend(view.runs);
+    }
+}
+
+fn append_accepted_inline_revision(
+    revision: &CT_Revision,
+    runs: &mut Vec<CT_R>,
+    boundaries: &mut Vec<usize>,
+) {
+    if matches!(
+        revision.kind(),
+        RevisionKind::Insertion | RevisionKind::MoveTo
+    ) && let Some(paragraph) = revision.content_paragraph()
+    {
+        append_accepted_inline_paragraph(paragraph, runs, boundaries);
+    }
+}
+
+fn append_accepted_inline_control(
+    control: &CT_Sdt,
+    runs: &mut Vec<CT_R>,
+    boundaries: &mut Vec<usize>,
+) {
+    let start = runs.len();
+    let boundary_start = boundaries.len();
+    boundaries.push(start);
+    for boundary in 0..=control.content.len() {
+        for (_, revision) in control.revisions().iter().filter(|(at, _)| *at == boundary) {
+            append_accepted_inline_revision(revision, runs, boundaries);
+        }
+        let Some(content) = control.content.get(boundary) else {
+            continue;
+        };
+        match content {
+            SdtContent::Run(run) => runs.push(run.clone()),
+            SdtContent::ContentControl(nested) => {
+                append_accepted_inline_control(nested, runs, boundaries)
+            }
+            SdtContent::Paragraph(paragraph) => {
+                append_accepted_inline_paragraph(paragraph, runs, boundaries)
+            }
+            // Block carriers are emitted separately by Markdown. Retain the
+            // accepted typed projection if encountered in a synthetic inline model.
+            SdtContent::Table(table) => {
+                let mut owned = Vec::new();
+                append_accepted_table_runs(table, &mut owned);
+                boundaries.push(runs.len());
+                runs.extend(owned.into_iter().cloned());
+                boundaries.push(runs.len());
+            }
+            SdtContent::Row(row) => {
+                let mut owned = Vec::new();
+                append_accepted_row_runs(row, &mut owned);
+                boundaries.push(runs.len());
+                runs.extend(owned.into_iter().cloned());
+                boundaries.push(runs.len());
+            }
+            SdtContent::Cell(cell) => {
+                let mut owned = Vec::new();
+                append_accepted_cell_runs(cell, &mut owned);
+                boundaries.push(runs.len());
+                runs.extend(owned.into_iter().cloned());
+                boundaries.push(runs.len());
+            }
+            SdtContent::RawXml(_) => {}
+        }
+    }
+    if runs.len() == start {
+        boundaries.truncate(boundary_start);
+    } else {
+        boundaries.push(runs.len());
+    }
+}
+
 fn append_accepted_revision_runs<'a>(revision: &'a CT_Revision, output: &mut Vec<&'a CT_R>) {
     if !matches!(
         revision.kind(),
@@ -6183,6 +7255,17 @@ impl CT_P {
     /// the paragraph holds none of them, since its runs are then the view.
     #[doc(hidden)]
     pub fn accepted_view(&self) -> Cow<'_, CT_P> {
+        self.accepted_view_projection(false).0
+    }
+
+    /// Read accepted content while retaining physical simple-field boundaries.
+    /// Markdown uses these boundaries to keep independent formatting spans.
+    #[doc(hidden)]
+    pub fn accepted_view_with_field_owners(&self) -> (Cow<'_, CT_P>, Vec<usize>) {
+        self.accepted_view_projection(true)
+    }
+
+    fn accepted_view_projection(&self, preserve_field_owners: bool) -> (Cow<'_, CT_P>, Vec<usize>) {
         if self.content_controls.is_empty()
             && self.revisions.is_empty()
             && !self.extra_xml.iter().any(|(_, raw)| is_run_wrapper(raw))
@@ -6191,9 +7274,10 @@ impl CT_P {
                 .iter()
                 .any(|run| simple_field_source(run).is_some())
         {
-            return Cow::Borrowed(self);
+            return (Cow::Borrowed(self), Vec::new());
         }
         let mut runs = Vec::new();
+        let mut inline_boundaries = Vec::new();
         // The index into `self.hyperlinks` of the hyperlink each run is in.
         let mut links = Vec::new();
         for boundary in 0..=self.runs.len() {
@@ -6201,11 +7285,34 @@ impl CT_P {
                 let mut owned = Vec::new();
                 let link = match owner {
                     BoundaryOwner::ContentControl(index) => {
+                        if preserve_field_owners {
+                            let offset = runs.len();
+                            append_accepted_inline_control(
+                                &self.content_controls[index].3,
+                                &mut runs,
+                                &mut inline_boundaries,
+                            );
+                            links.extend(std::iter::repeat_n(None, runs.len() - offset));
+                            continue;
+                        }
                         append_accepted_control_runs(&self.content_controls[index].3, &mut owned);
                         None
                     }
                     BoundaryOwner::Revision(index) => {
                         let (_, slot, revision) = &self.revisions[index];
+                        if preserve_field_owners {
+                            let offset = runs.len();
+                            append_accepted_inline_revision(
+                                revision,
+                                &mut runs,
+                                &mut inline_boundaries,
+                            );
+                            links.extend(std::iter::repeat_n(
+                                hyperlink_revision_index(*slot),
+                                runs.len() - offset,
+                            ));
+                            continue;
+                        }
                         append_accepted_revision_runs(revision, &mut owned);
                         hyperlink_revision_index(*slot)
                     }
@@ -6213,13 +7320,26 @@ impl CT_P {
                         if let Some(content) =
                             run_wrapper_paragraph(&self.extra_xml[index].1, &["w".to_owned()])
                         {
-                            let view = content.accepted_view().into_owned();
+                            let (view, boundaries) =
+                                content.accepted_view_projection(preserve_field_owners);
+                            let offset = runs.len();
+                            let view = view.into_owned();
+                            if preserve_field_owners && !view.runs.is_empty() {
+                                inline_boundaries.push(offset);
+                                inline_boundaries
+                                    .extend(boundaries.into_iter().map(|at| offset + at));
+                                inline_boundaries.push(offset + view.runs.len());
+                            }
                             links.extend(std::iter::repeat_n(None, view.runs.len()));
                             runs.extend(view.runs);
                         }
                         continue;
                     }
                 };
+                if preserve_field_owners && !owned.is_empty() {
+                    inline_boundaries.push(runs.len());
+                    inline_boundaries.push(runs.len() + owned.len());
+                }
                 links.extend(std::iter::repeat_n(link, owned.len()));
                 runs.extend(owned.into_iter().cloned());
             }
@@ -6233,7 +7353,15 @@ impl CT_P {
                     .and_then(|(raw, prefixes)| run_wrapper_paragraph(raw, prefixes));
                 match field {
                     Some(content) => {
-                        let view = content.accepted_view().into_owned();
+                        let (view, boundaries) =
+                            content.accepted_view_projection(preserve_field_owners);
+                        let offset = runs.len();
+                        let view = view.into_owned();
+                        if preserve_field_owners && !view.runs.is_empty() {
+                            inline_boundaries.push(offset);
+                            inline_boundaries.extend(boundaries.into_iter().map(|at| offset + at));
+                            inline_boundaries.push(offset + view.runs.len());
+                        }
                         links.extend(std::iter::repeat_n(link, view.runs.len()));
                         runs.extend(view.runs);
                     }
@@ -6260,12 +7388,15 @@ impl CT_P {
             }
             start = end;
         }
-        Cow::Owned(CT_P {
-            properties: self.properties.clone(),
-            runs,
-            hyperlinks,
-            ..CT_P::new()
-        })
+        (
+            Cow::Owned(CT_P {
+                properties: self.properties.clone(),
+                runs,
+                hyperlinks,
+                ..CT_P::new()
+            }),
+            inline_boundaries,
+        )
     }
 
     /// Return the content of a preserved smart tag or inline custom XML
@@ -6491,7 +7622,8 @@ impl CT_P {
         let mut text = None::<String>;
         loop {
             let (namespace, event) = reader.read_resolved_event()?;
-            let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == crate::namespace::W_NS.as_bytes());
+            let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == crate::namespace::W_NS.as_bytes()
+            || std::str::from_utf8(uri).ok().and_then(|uri| quick_xml::escape::unescape(uri).ok()).is_some_and(|uri| uri == crate::namespace::W_NS));
             drop(namespace);
             match event {
                 Event::Start(element) | Event::Empty(element)
@@ -7988,6 +9120,7 @@ impl CT_P {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
+        crate::document::admit_word_reader(reader, &["w".to_owned()], b"p", None)?;
         Self::from_xml_with_prefixes(
             reader,
             &[
@@ -8001,6 +9134,12 @@ impl CT_P {
     /// Parse a standalone paragraph fragment with declarations on its root.
     #[doc(hidden)]
     pub fn from_xml_fragment(xml: &[u8]) -> Result<Self> {
+        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
+        Self::from_xml_fragment_admitted(xml)
+    }
+
+    fn from_xml_fragment_admitted(xml: &[u8]) -> Result<Self> {
+        validate_word_owner_fragment(xml, b"p", false)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(false);
         let mut buffer = Vec::new();
@@ -8029,6 +9168,14 @@ impl CT_P {
             }
             buffer.clear();
         }
+    }
+
+    /// Parse one namespace-complete paragraph for checked owner replacement.
+    #[doc(hidden)]
+    pub fn from_xml_fragment_checked(xml: &[u8]) -> Result<Self> {
+        crate::document::admit_word_xml(xml, &[], None)?;
+        validate_word_owner_fragment(xml, b"p", true)?;
+        Self::from_xml_fragment_admitted(xml)
     }
 
     /// Return exact source bytes for complex fields admitted by the typed paragraph parser.
@@ -8097,6 +9244,12 @@ impl CT_P {
         let mut projected_run_count = 0usize;
         let mut tracked_run_count = 0usize;
         let mut buf = Vec::new();
+        // Only the legacy consumed paragraph API lacks an actual Word scope.
+        // Actual starts and source-backed scopes must not promote unbound XML.
+        let legacy_consumed_owner = root.is_none()
+            && !namespace_bindings(word_prefixes)
+                .iter()
+                .any(|(_, namespace)| namespace == crate::namespace::W_NS);
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -8112,7 +9265,8 @@ impl CT_P {
                         run_sources.push(Some(raw));
                         projected_run_count += 1;
                         tracked_run_count += 1;
-                    } else if matches_local_name(name.as_ref(), b"r")
+                    } else if legacy_consumed_owner
+                        && matches_local_name(name.as_ref(), b"r")
                         && !element_prefix_has_binding(name.as_ref(), &prefixes)
                     {
                         let prefixes = prefixes_with_assumed_word_owner(name.as_ref(), &prefixes)?;
@@ -8471,6 +9625,12 @@ impl CT_P {
         })
     }
 
+    /// Validate borrowed owners before cloning or serializing this paragraph.
+    #[doc(hidden)]
+    pub fn validate_resource_limits(&self) -> Result<()> {
+        crate::document::admit_word_model(crate::document::WordOwner::Paragraph(self))
+    }
+
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         self.to_xml_with_para_id(writer, None)
     }
@@ -8480,6 +9640,7 @@ impl CT_P {
         writer: &mut Writer<W>,
         para_id: Option<&str>,
     ) -> Result<()> {
+        crate::document::admit_word_model(crate::document::WordOwner::Paragraph(self))?;
         if para_id.is_none()
             && self.properties.is_none()
             && self.runs.is_empty()
@@ -9557,15 +10718,16 @@ fn update_nested_field_sources(
         edits.push((span.start, span.end, replacement));
     }
 
-    let complex_children = field
-        .cached_fields
+    let children = field.cached_fields_in_source_order();
+    let complex_children = children
         .iter()
-        .filter(|(_, child)| child.form() == FieldForm::Complex)
+        .copied()
+        .filter(|child| child.form() == FieldForm::Complex)
         .collect::<Vec<_>>();
-    let simple_children = field
-        .cached_fields
+    let simple_children = children
         .iter()
-        .filter(|(_, child)| child.form() == FieldForm::Simple)
+        .copied()
+        .filter(|child| child.form() == FieldForm::Simple)
         .collect::<Vec<_>>();
     if field.typed_cache().is_none()
         && (scan.result_nested.len() != complex_children.len()
@@ -9575,7 +10737,17 @@ fn update_nested_field_sources(
             "nested cached field spans in owning complex field".to_owned(),
         ));
     }
-    for ((_, nested), span) in complex_children.into_iter().zip(scan.result_nested) {
+    for (nested, span) in complex_children.into_iter().zip(scan.result_nested) {
+        if field.parsed_cached_child_runs().is_some() {
+            let expected = &raw[scan.runs[span.start_run].start..scan.runs[span.end_run].end];
+            if !matches!(&nested.source, FieldSource::Parsed { raw_xml, .. } if raw_xml.as_slice() == expected)
+            {
+                return Err(OxmlError::InvalidValue(
+                    "replacement cached field has no original complex-cache source identity"
+                        .to_owned(),
+                ));
+            }
+        }
         if nested.is_unchanged() {
             continue;
         }
@@ -9583,7 +10755,14 @@ fn update_nested_field_sources(
             rewrite_isolated_nested_field(nested, raw, &span, &scan.runs, word_prefixes)?;
         edits.push((span.start, span.end, replacement));
     }
-    for ((_, child), (start, end)) in simple_children.into_iter().zip(scan.result_simple) {
+    for (child, (start, end)) in simple_children.into_iter().zip(scan.result_simple) {
+        if field.parsed_cached_child_runs().is_some()
+            && !matches!(&child.source, FieldSource::Parsed { raw_xml, .. } if raw_xml.as_slice() == &raw[start..end])
+        {
+            return Err(OxmlError::InvalidValue(
+                "replacement cached field has no original simple-cache source identity".to_owned(),
+            ));
+        }
         if child.is_unchanged() {
             continue;
         }
@@ -10690,6 +11869,33 @@ fn replace_typed_field_cache(
     Ok(output)
 }
 
+fn cached_runs_need_typed_projection(runs: &[CT_R]) -> bool {
+    let mut pending = vec![runs];
+    while let Some(runs) = pending.pop() {
+        for content in runs.iter().flat_map(|run| &run.content) {
+            match content {
+                RunContent::Tab
+                | RunContent::Break(_)
+                | RunContent::Symbol { .. }
+                | RunContent::Drawing(_)
+                | RunContent::DeletedText(_) => return true,
+                RunContent::SpecialCharacter(character)
+                    if !matches!(character, SpecialCharacter::SoftHyphen) =>
+                {
+                    return true;
+                }
+                RunContent::Field(child) => {
+                    if let Some(runs) = child.cached_result_runs() {
+                        pending.push(runs);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn source_has_note_reference_name(raw: &[u8]) -> bool {
     [
         b"footnoteReference".as_slice(),
@@ -10713,20 +11919,26 @@ fn parsed_complex_cache_runs(
     else {
         unreachable!("complex field cache");
     };
-    let mut cache = b"<w:p>".to_vec();
+    let prefix = word_prefixes
+        .iter()
+        .find(|prefix| !prefix.starts_with('\0'))
+        .ok_or_else(|| OxmlError::InvalidValue("complex field has no Word prefix".to_owned()))?;
+    let name = if prefix.is_empty() {
+        "p".to_owned()
+    } else {
+        format!("{prefix}:p")
+    };
+    let mut cache = format!("<{name}>").into_bytes();
     cache.extend_from_slice(&raw[first_open]);
     cache.extend_from_slice(&raw[result]);
     cache.extend_from_slice(&raw[last_close]);
-    cache.extend_from_slice(b"</w:p>");
+    cache.extend_from_slice(format!("</{name}>").as_bytes());
     let mut reader = Reader::from_reader(cache.as_slice());
     let mut buffer = Vec::new();
     let Event::Start(root) = reader.read_event_into(&mut buffer)? else {
         unreachable!("cache root");
     };
-    let mut prefixes = word_prefixes.to_vec();
-    if !prefixes.iter().any(|prefix| prefix == "w") {
-        prefixes.push("w".into());
-    }
+    let prefixes = word_prefixes_at(&root, word_prefixes)?;
     let paragraph = CT_P::from_xml_with_prefixes_and_root(&mut reader, &prefixes, Some(&root))?;
     Ok((
         paragraph.runs().into_iter().cloned().collect(),
@@ -12585,14 +13797,58 @@ pub(crate) fn write_raw_with_word_override<W: std::io::Write>(
     Ok(())
 }
 
+// Only declarations the writer actually retains on this physical root can
+// replace a synthetic child binding. Namespace-only roots retain no record.
+pub(crate) fn bindings_outside_retained_root(
+    bindings: &[(String, String)],
+    root: Option<&BytesStart<'_>>,
+    word_prefixes: &[String],
+) -> Result<Vec<(String, String)>> {
+    let record = root
+        .map(|root| capture_root_attribute_record(root, word_prefixes))
+        .transpose()?
+        .flatten();
+    let declared = match record {
+        Some(record) => {
+            let mut reader = Reader::from_reader(record.as_slice());
+            match reader.read_event()? {
+                Event::Empty(root) => raw_namespace_declarations(&root)?,
+                _ => {
+                    return Err(OxmlError::InvalidValue(
+                        "retained root binding record is malformed".into(),
+                    ));
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+    Ok(bindings
+        .iter()
+        .filter(|binding| {
+            !declared.contains(binding) || (binding.0 == "w" && binding.1 != crate::namespace::W_NS)
+        })
+        .cloned()
+        .collect())
+}
+
 pub(crate) fn raw_with_external_bindings(
     raw: &[u8],
     external_bindings: &[(String, String)],
 ) -> Result<Vec<u8>> {
-    if external_bindings.is_empty() {
+    let bindings = external_bindings_used_by_raw(raw, external_bindings)?;
+    if bindings.is_empty() {
         return Ok(raw.to_vec());
     }
+    raw_with_root_bindings(raw, &bindings, false)
+}
 
+fn external_bindings_used_by_raw(
+    raw: &[u8],
+    external_bindings: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    if external_bindings.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(false);
     let mut scopes = Vec::<Vec<(String, String)>>::new();
@@ -12608,7 +13864,7 @@ pub(crate) fn raw_with_external_bindings(
                     &declarations,
                     external_bindings,
                     &mut required,
-                );
+                )?;
                 scopes.push(declarations);
             }
             Event::Empty(element) => {
@@ -12619,7 +13875,7 @@ pub(crate) fn raw_with_external_bindings(
                     &declarations,
                     external_bindings,
                     &mut required,
-                );
+                )?;
             }
             Event::End(_) => {
                 scopes.pop();
@@ -12630,16 +13886,11 @@ pub(crate) fn raw_with_external_bindings(
         buffer.clear();
     }
 
-    if required.is_empty() {
-        return Ok(raw.to_vec());
-    }
-
-    let bindings = external_bindings
+    Ok(external_bindings
         .iter()
         .filter(|(prefix, _)| required.contains(prefix))
         .cloned()
-        .collect::<Vec<_>>();
-    raw_with_root_bindings(raw, &bindings)
+        .collect())
 }
 
 fn raw_namespace_declarations(element: &BytesStart<'_>) -> Result<Vec<(String, String)>> {
@@ -12668,7 +13919,7 @@ fn record_external_bindings_used(
     declarations: &[(String, String)],
     external_bindings: &[(String, String)],
     required: &mut Vec<String>,
-) {
+) -> Result<()> {
     let element_name = element.name();
     let element_prefix = qualified_name_prefix(element_name.as_ref()).unwrap_or("");
     record_external_prefix_used(
@@ -12685,8 +13936,42 @@ fn record_external_bindings_used(
         }
         if let Some(prefix) = qualified_name_prefix(name) {
             record_external_prefix_used(prefix, scopes, declarations, external_bindings, required);
+            let namespace = declarations
+                .iter()
+                .rev()
+                .chain(scopes.iter().rev().flat_map(|scope| scope.iter().rev()))
+                .chain(external_bindings.iter())
+                .find(|(candidate, _)| candidate == prefix)
+                .map(|(_, namespace)| namespace.as_str());
+            let local = name.rsplit(|byte| *byte == b':').next().unwrap_or(name);
+            let namespace_value = namespace == Some(crate::namespace::MC_NS)
+                && matches!(
+                    local,
+                    b"Ignorable"
+                        | b"MustUnderstand"
+                        | b"ProcessContent"
+                        | b"PreserveAttributes"
+                        | b"PreserveElements"
+                )
+                || namespace == Some("http://www.w3.org/2001/XMLSchema-instance")
+                    && local == b"type";
+            if !namespace_value {
+                continue;
+            }
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+            for prefix in root_attribute_value_prefixes(namespace, local, &value) {
+                record_external_prefix_used(
+                    prefix,
+                    scopes,
+                    declarations,
+                    external_bindings,
+                    required,
+                );
+            }
         }
     }
+    Ok(())
 }
 
 fn record_external_prefix_used(
@@ -12719,7 +14004,11 @@ fn qualified_name_prefix(name: &[u8]) -> Option<&str> {
     std::str::from_utf8(&name[..separator]).ok()
 }
 
-fn raw_with_root_bindings(raw: &[u8], bindings: &[(String, String)]) -> Result<Vec<u8>> {
+fn raw_with_root_bindings(
+    raw: &[u8],
+    bindings: &[(String, String)],
+    source_values: bool,
+) -> Result<Vec<u8>> {
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -12740,7 +14029,14 @@ fn raw_with_root_bindings(raw: &[u8], bindings: &[(String, String)]) -> Result<V
                     })
                     .collect::<Vec<_>>();
                 for ((_, namespace), name) in bindings.iter().zip(&names) {
-                    element.push_attribute((name.as_str(), namespace.as_str()));
+                    if source_values {
+                        element.push_attribute(quick_xml::events::attributes::Attribute {
+                            key: quick_xml::name::QName(name.as_bytes()),
+                            value: Cow::Borrowed(namespace.as_bytes()),
+                        });
+                    } else {
+                        element.push_attribute((name.as_str(), namespace.as_str()));
+                    }
                 }
                 let mut output = raw[..start].to_vec();
                 Writer::new(&mut output).write_event(Event::Start(element))?;
@@ -12761,7 +14057,14 @@ fn raw_with_root_bindings(raw: &[u8], bindings: &[(String, String)]) -> Result<V
                     })
                     .collect::<Vec<_>>();
                 for ((_, namespace), name) in bindings.iter().zip(&names) {
-                    element.push_attribute((name.as_str(), namespace.as_str()));
+                    if source_values {
+                        element.push_attribute(quick_xml::events::attributes::Attribute {
+                            key: quick_xml::name::QName(name.as_bytes()),
+                            value: Cow::Borrowed(namespace.as_bytes()),
+                        });
+                    } else {
+                        element.push_attribute((name.as_str(), namespace.as_str()));
+                    }
                 }
                 let mut output = raw[..start].to_vec();
                 Writer::new(&mut output).write_event(Event::Empty(element))?;
@@ -13287,6 +14590,985 @@ impl Default for CT_P {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx211_local_drawing_scope_survives_foreign_header_reopen_and_split() {
+        let word = crate::namespace::W_NS;
+        let raw = r#"<wp:opaque r:tag="producer"/>"#;
+        let source = format!(
+            r#"<w:hdr xmlns:w="{word}" xmlns:wp="urn:wp-producer"><w:p><w:r xmlns:r="urn:r-producer" r:keep="root-producer"><w:t>AB</w:t>{raw}</w:r></w:p></w:hdr>"#
+        );
+        let mut header = crate::header_footer::CT_HdrFtr::from_xml(source.as_bytes()).unwrap();
+        header.paragraphs[0].runs[0]
+            .content
+            .push(RunContent::Drawing(CT_Drawing::inline(
+                crate::drawing::CT_Inline::new("rId1", 914_400, 914_400),
+            )));
+        let mut bytes = header.to_xml_header().unwrap();
+        for iteration in 0..3 {
+            let mut reader = NsReader::from_reader(bytes.as_slice());
+            let mut pictures = 0;
+            let mut opaque = 0;
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                if let Event::Start(element) | Event::Empty(element) = &event {
+                    if element.local_name().as_ref() == b"inline" {
+                        assert_eq!(namespace, ResolveResult::Bound(Namespace(WP_NS.as_bytes())));
+                        pictures += 1;
+                    }
+                    if element.local_name().as_ref() == b"opaque" {
+                        assert_eq!(
+                            namespace,
+                            ResolveResult::Bound(Namespace(b"urn:wp-producer"))
+                        );
+                        opaque += 1;
+                        let attribute = element
+                            .attributes()
+                            .find_map(|attribute| {
+                                attribute
+                                    .ok()
+                                    .filter(|attribute| attribute.key.as_ref() == b"r:tag")
+                            })
+                            .unwrap();
+                        let (binding, _) = reader.resolver().resolve_attribute(attribute.key);
+                        assert_eq!(binding, ResolveResult::Bound(Namespace(b"urn:r-producer")));
+                    }
+                    if element.local_name().as_ref() == b"blip" {
+                        let attribute = element
+                            .attributes()
+                            .find_map(|attribute| {
+                                attribute
+                                    .ok()
+                                    .filter(|attribute| attribute.key.as_ref() == b"r:embed")
+                            })
+                            .unwrap();
+                        let (binding, _) = reader.resolver().resolve_attribute(attribute.key);
+                        assert_eq!(binding, ResolveResult::Bound(Namespace(R_NS.as_bytes())));
+                        assert_eq!(attribute.value.as_ref(), b"rId1");
+                    }
+                }
+                if matches!(event, Event::Eof) {
+                    break;
+                }
+            }
+            assert_eq!((pictures, opaque), (1, 1));
+            let mut reopened = crate::header_footer::CT_HdrFtr::from_xml(&bytes).unwrap();
+            let run = &reopened.paragraphs[0].runs[0];
+            assert!(
+                run.extra_xml_positions
+                    .iter()
+                    .any(|position| *position & RAW_RUN_LOCAL_BINDINGS_FLAG != 0)
+            );
+            let next = reopened.to_xml_header().unwrap();
+            if iteration > 0 {
+                assert_eq!(next, bytes);
+            }
+            if iteration == 2 {
+                let mut head = run.clone();
+                let tail = head.split_off_at(1).unwrap();
+                for part in [&head, &tail] {
+                    assert!(
+                        part.extra_xml_positions
+                            .iter()
+                            .any(|position| *position & RAW_RUN_LOCAL_BINDINGS_FLAG != 0)
+                    );
+                }
+                reopened.paragraphs[0].runs = vec![head, tail];
+                let split = reopened.to_xml_header().unwrap();
+                let split = crate::header_footer::CT_HdrFtr::from_xml(&split).unwrap();
+                assert_eq!(split.paragraphs[0].text(), "AB");
+                let drawing = split.paragraphs[0].runs[1]
+                    .content
+                    .iter()
+                    .find_map(|item| match item {
+                        RunContent::Drawing(drawing) => Some(drawing),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(drawing.inline.as_ref().unwrap().embed_id, "rId1");
+                assert_eq!(
+                    split.paragraphs[0].runs[1]
+                        .extra_xml
+                        .iter()
+                        .filter(|raw| String::from_utf8_lossy(raw).contains("root-producer"))
+                        .count(),
+                    0
+                );
+            }
+            bytes = next;
+        }
+    }
+
+    #[test]
+    fn fx211_local_vs_inherited_namespace_records_preserve_positions_and_lexical_scope() {
+        let word = crate::namespace::W_NS;
+        let raw = r#"<wp:inline><wp:docPr id="1"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="urn:producer"><x:opaque/></a:graphicData></a:graphic></wp:inline>"#;
+        for (local, mixed) in [(false, false), (true, false), (true, true)] {
+            let declarations = format!(r#"xmlns:wp="{WP_NS}" xmlns:x="urn:lexical&#x2F;producer""#);
+            let source = if local {
+                format!(
+                    r#"<w:r xmlns:w="{word}" {declarations}>{}<w:drawing>{raw}</w:drawing></w:r>"#,
+                    if mixed { "<x:opaque/>" } else { "" }
+                )
+            } else {
+                format!(
+                    r#"<w:r xmlns:w="{word}"><w:drawing {declarations}>{raw}</w:drawing></w:r>"#
+                )
+            };
+            let run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+            assert_eq!(
+                run.extra_xml_positions
+                    .iter()
+                    .any(|position| *position & RAW_RUN_LOCAL_BINDINGS_FLAG != 0),
+                local
+            );
+            let retained = run
+                .content
+                .iter()
+                .find_map(|item| match item {
+                    RunContent::Drawing(drawing) => drawing.inline.as_ref()?.raw_xml.as_deref(),
+                    _ => None,
+                })
+                .unwrap();
+            let original_payload = raw.split_once('>').unwrap().1.as_bytes();
+            let retained_payload = retained.splitn(2, |byte| *byte == b'>').nth(1).unwrap();
+            assert_eq!(retained_payload, original_payload);
+            if local {
+                assert_eq!(retained, raw.as_bytes());
+            } else {
+                let retained_root = retained.split(|byte| *byte == b'>').next().unwrap();
+                assert!(
+                    String::from_utf8_lossy(retained_root)
+                        .contains("xmlns:x=\"urn:lexical/producer\"")
+                );
+            }
+            let mut output = Vec::new();
+            {
+                let _scope = root_binding_scope(ROOT_WP_BINDING);
+                run.to_xml(&mut Writer::new(&mut output)).unwrap();
+            }
+            if local {
+                assert!(
+                    String::from_utf8_lossy(&output)
+                        .contains("xmlns:x=\"urn:lexical&#x2F;producer\"")
+                );
+            }
+            assert!(
+                output
+                    .windows(original_payload.len())
+                    .any(|bytes| bytes == original_payload)
+            );
+            let paragraph = format!(
+                r#"<w:p xmlns:w="{word}" xmlns:wp="{WP_NS}">{}</w:p>"#,
+                String::from_utf8_lossy(&output)
+            );
+            let reopened = CT_P::from_xml_fragment_checked(paragraph.as_bytes()).unwrap();
+            let mut fixed = Vec::new();
+            {
+                let _scope = root_binding_scope(ROOT_WP_BINDING);
+                reopened.runs[0]
+                    .to_xml(&mut Writer::new(&mut fixed))
+                    .unwrap();
+            }
+            assert_eq!(fixed, output);
+            let wrapper = format!(
+                r#"<root xmlns:w="{word}" xmlns:wp="{WP_NS}">{}</root>"#,
+                String::from_utf8(output).unwrap()
+            );
+            let mut reader = NsReader::from_str(&wrapper);
+            let mut observed = 0;
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                if let Event::Empty(element) = &event
+                    && element.local_name().as_ref() == b"opaque"
+                {
+                    assert_eq!(
+                        namespace,
+                        ResolveResult::Bound(Namespace(if local {
+                            b"urn:lexical&#x2F;producer"
+                        } else {
+                            // Existing lost-wrapper closure normalizes URI values.
+                            b"urn:lexical/producer"
+                        }))
+                    );
+                    observed += 1;
+                }
+                if matches!(event, Event::Eof) {
+                    break;
+                }
+            }
+            assert_eq!(observed, if mixed { 2 } else { 1 });
+        }
+        // Vec allocation bounds leave room for every reserved position bit on
+        // both native usize and WASM32. Real modeled positions cannot truncate.
+        assert!(
+            (isize::MAX as usize / std::mem::size_of::<RunContent>()) + 1
+                < RAW_RUN_LOCAL_BINDINGS_FLAG
+        );
+        for position in [0, 1, 1_000_000] {
+            let mut encoded = RAW_ROOT_ATTRIBUTES_FLAG | RAW_RUN_LOCAL_BINDINGS_FLAG;
+            CT_R::set_raw_child_position(&mut encoded, position);
+            assert_eq!(CT_R::raw_child_position(encoded), position);
+            assert!(CT_R::raw_child_is_root_attributes(encoded));
+            assert_ne!(encoded & RAW_RUN_LOCAL_BINDINGS_FLAG, 0);
+        }
+    }
+
+    #[test]
+    fn fx211_local_canonical_uri_spelling_uses_decoded_writer_authority() {
+        let word = crate::namespace::W_NS;
+        let wp = WP_NS.replace("wordprocessingDrawing", "wordprocessing&#x44;rawing");
+        let relationship = R_NS.replace("relationships", "relationship&#x73;");
+        let source = format!(
+            r#"<w:r xmlns:w="{word}" xmlns:wp="{wp}" xmlns:r="{relationship}"><w:drawing><wp:inline><wp:docPr id="1"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="urn:producer"><a:blip r:embed="rIdOld"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+        );
+        let mut run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+        run.content.push(RunContent::Drawing(CT_Drawing::inline(
+            crate::drawing::CT_Inline::new("rIdTyped", 914_400, 914_400),
+        )));
+        let mut localized = Vec::new();
+        let (root, proof) = run_xml_root(&run, None, &mut localized).unwrap();
+        assert!(localized.is_empty());
+        assert!(proof.contains(&("wp".into(), WP_NS.into())));
+        assert!(proof.contains(&("r".into(), R_NS.into())));
+        let declarations = raw_namespace_declarations(&root).unwrap();
+        assert!(declarations.contains(&("wp".into(), WP_NS.into())));
+        assert!(declarations.contains(&("r".into(), R_NS.into())));
+        let mut output = Vec::new();
+        run.to_xml(&mut Writer::new(&mut output)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(&format!("xmlns:wp=\"{wp}\"")));
+        assert!(output.contains(&format!("xmlns:r=\"{relationship}\"")));
+        assert!(output.contains("r:embed=\"rIdTyped\""));
+        assert!(output.contains("r:embed=\"rIdOld\""));
+    }
+
+    #[test]
+    fn fx211_run_raw_wp_relationship_collisions_preserve_typed_picture_authority() {
+        let word = crate::namespace::W_NS;
+        let raw = r#"<wp:opaque r:link="producer"/><r:opaque wp:flag="producer"/>"#;
+        for attributes in [
+            "",
+            " wp:keep=\"drawing-owner\"",
+            " r:keep=\"relationship-owner\"",
+            " wp:keep=\"drawing-owner\" r:keep=\"relationship-owner\" xmlns:rdocxProducer=\"urn:occupied\"",
+        ] {
+            let source = format!(
+                r#"<w:r xmlns:w="{word}" xmlns:wp="urn:wp-producer" xmlns:r="urn:r-producer"{attributes}>{raw}</w:r>"#
+            );
+            let mut run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+            assert_eq!(run.extra_xml[0], b"<wp:opaque r:link=\"producer\"/>");
+            assert_eq!(run.extra_xml[1], b"<r:opaque wp:flag=\"producer\"/>");
+            run.content.push(RunContent::Drawing(CT_Drawing::inline(
+                crate::drawing::CT_Inline::new("rId1", 914_400, 914_400),
+            )));
+            let original_raw = run.extra_xml[..2].to_vec();
+            let mut output = Vec::new();
+            run.to_xml(&mut Writer::new(&mut output)).unwrap();
+            assert_eq!(run.extra_xml[..2], original_raw);
+            let closed = raw_with_external_bindings(
+                &output,
+                &[
+                    ("w".into(), word.into()),
+                    ("wp".into(), WP_NS.into()),
+                    ("r".into(), R_NS.into()),
+                ],
+            )
+            .unwrap();
+            let reopened = CT_R::from_xml_fragment_checked(&closed).unwrap();
+            assert_eq!(reopened.content.len(), 1);
+            let RunContent::Drawing(drawing) = &reopened.content[0] else {
+                panic!("actual generated picture missing");
+            };
+            assert_eq!(drawing.inline.as_ref().unwrap().embed_id, "rId1");
+            let mut reader = NsReader::from_reader(closed.as_slice());
+            let mut opaque = 0;
+            let mut inline = 0;
+            let mut relationship = 0;
+            let mut root_attributes = 0;
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                if let Event::Start(element) | Event::Empty(element) = &event {
+                    match element.local_name().as_ref() {
+                        b"r" => {
+                            assert_eq!(namespace, ResolveResult::Bound(Namespace(word.as_bytes())));
+                            for attribute in element.attributes() {
+                                let attribute = attribute.unwrap();
+                                let (binding, local) =
+                                    reader.resolver().resolve_attribute(attribute.key);
+                                if local.as_ref() == b"keep" {
+                                    let uri = if attribute.value.as_ref() == b"drawing-owner" {
+                                        b"urn:wp-producer".as_slice()
+                                    } else {
+                                        b"urn:r-producer".as_slice()
+                                    };
+                                    assert_eq!(binding, ResolveResult::Bound(Namespace(uri)));
+                                    root_attributes += 1;
+                                }
+                            }
+                        }
+                        b"opaque" => {
+                            let expected = if element.name().as_ref().starts_with(b"wp:") {
+                                b"urn:wp-producer".as_slice()
+                            } else {
+                                b"urn:r-producer".as_slice()
+                            };
+                            assert_eq!(namespace, ResolveResult::Bound(Namespace(expected)));
+                            opaque += 1;
+                        }
+                        b"inline" | b"extent" | b"docPr" => {
+                            assert_eq!(
+                                namespace,
+                                ResolveResult::Bound(Namespace(WP_NS.as_bytes()))
+                            );
+                            if element.local_name().as_ref() == b"inline" {
+                                inline += 1;
+                            }
+                        }
+                        b"blip" => {
+                            for attribute in element.attributes() {
+                                let attribute = attribute.unwrap();
+                                let (binding, local) =
+                                    reader.resolver().resolve_attribute(attribute.key);
+                                if local.as_ref() == b"embed" {
+                                    assert_eq!(
+                                        binding,
+                                        ResolveResult::Bound(Namespace(R_NS.as_bytes()))
+                                    );
+                                    assert_eq!(attribute.value.as_ref(), b"rId1");
+                                    relationship += 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if matches!(event, Event::Eof) {
+                    break;
+                }
+            }
+            assert_eq!((opaque, inline, relationship), (2, 1, 1));
+            assert_eq!(root_attributes, attributes.matches(":keep=").count());
+            let mut second = Vec::new();
+            reopened.to_xml(&mut Writer::new(&mut second)).unwrap();
+            let closed_second = raw_with_external_bindings(
+                &second,
+                &[
+                    ("w".into(), word.into()),
+                    ("wp".into(), WP_NS.into()),
+                    ("r".into(), R_NS.into()),
+                ],
+            )
+            .unwrap();
+            let again = CT_R::from_xml_fragment_checked(&closed_second).unwrap();
+            let RunContent::Drawing(drawing) = &again.content[0] else {
+                panic!("reopened picture missing");
+            };
+            assert_eq!(drawing.inline.as_ref().unwrap().embed_id, "rId1");
+            assert_eq!(reopened.extra_xml, again.extra_xml);
+        }
+        for (prefix, uri) in [("wp", "urn:wp-producer"), ("r", "urn:r-producer")] {
+            let source = format!(
+                r#"<w:r xmlns:w="{word}" xmlns:{prefix}="{uri}" xmlns:mc="{MC_NS}" {prefix}:keep="source" mc:Ignorable="{prefix}"/>"#
+            );
+            let mut run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+            let mut raw_only = Vec::new();
+            run.to_xml(&mut Writer::new(&mut raw_only)).unwrap();
+            assert!(
+                String::from_utf8_lossy(&raw_only).contains(&format!("mc:Ignorable=\"{prefix}\""))
+            );
+            run.content.push(RunContent::Drawing(CT_Drawing::inline(
+                crate::drawing::CT_Inline::new("rId1", 914_400, 914_400),
+            )));
+            let mut output = Vec::new();
+            assert!(
+                run.to_xml(&mut Writer::new(&mut output))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("namespace-valued")
+            );
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn fx211_run_raw_bindings_keep_fixed_points_and_single_metadata_scan() {
+        let word = crate::namespace::W_NS;
+        let xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        let raw = r#"<x:payload xsi:type="y:Future"><child/></x:payload>"#;
+        let source = format!(
+            r#"<w:r xmlns:w="{word}" xmlns:x="urn:payload" xmlns:y="urn:qname" xmlns:xsi="{xsi}" xmlns="urn:default" xmlns:unused="urn:unused">{raw}</w:r>"#
+        );
+        let run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+        assert_eq!(run.extra_xml[0], raw.as_bytes());
+        let mut output = Vec::new();
+        run.to_xml(&mut Writer::new(&mut output)).unwrap();
+        assert!(String::from_utf8_lossy(&output).contains(raw));
+        assert!(!String::from_utf8_lossy(&output).contains("urn:unused"));
+        let closed = raw_with_external_bindings(&output, &[("w".into(), word.into())]).unwrap();
+        let reopened = CT_R::from_xml_fragment_checked(&closed).unwrap();
+        assert_eq!(run, reopened);
+        let mut second = Vec::new();
+        reopened.to_xml(&mut Writer::new(&mut second)).unwrap();
+        assert_eq!(output, second);
+        let mut reader = NsReader::from_reader(closed.as_slice());
+        loop {
+            let (namespace, event) = reader.read_resolved_event().unwrap();
+            if let Event::Start(element) | Event::Empty(element) = &event {
+                if element.local_name().as_ref() == b"child" {
+                    assert_eq!(namespace, ResolveResult::Bound(Namespace(b"urn:default")));
+                }
+                if element.local_name().as_ref() == b"payload" {
+                    assert_eq!(namespace, ResolveResult::Bound(Namespace(b"urn:payload")));
+                    let (binding, _) = reader
+                        .resolver()
+                        .resolve_element(quick_xml::name::QName(b"y:Future"));
+                    assert_eq!(binding, ResolveResult::Bound(Namespace(b"urn:qname")));
+                }
+            }
+            if matches!(event, Event::Eof) {
+                break;
+            }
+        }
+        for count in [512, 1024] {
+            let raw = "<x:opaque x:literal='keep'/>";
+            let source = format!(
+                r#"<w:r xmlns:w="{word}" xmlns:x="urn:producer">{}</w:r>"#,
+                raw.repeat(count)
+            );
+            let run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+            RUN_METADATA_VISITS.with(|visits| visits.set(0));
+            let mut output = Vec::new();
+            run.to_xml(&mut Writer::new(&mut output)).unwrap();
+            assert_eq!(RUN_METADATA_VISITS.with(Cell::get), count + 1);
+            assert_eq!(String::from_utf8_lossy(&output).matches(raw).count(), count);
+            assert_eq!(
+                run.extra_xml
+                    .iter()
+                    .filter(|raw| !is_root_attribute_record(raw))
+                    .count(),
+                count
+            );
+        }
+        let raw = b"<w:separator/>";
+        let source = format!(
+            r#"<w:r xmlns:w="{word}">{}</w:r>"#,
+            std::str::from_utf8(raw).unwrap()
+        );
+        let run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+        assert_eq!(run.extra_xml, [raw.to_vec()]);
+        let mut output = Vec::new();
+        run.to_xml(&mut Writer::new(&mut output)).unwrap();
+        assert!(String::from_utf8_lossy(&output).contains(std::str::from_utf8(raw).unwrap()));
+        let closed = raw_with_external_bindings(&output, &[("w".into(), word.into())]).unwrap();
+        assert_eq!(run, CT_R::from_xml_fragment_checked(&closed).unwrap());
+    }
+
+    #[test]
+    fn fx211_run_raw_foreign_graphic_binding_does_not_rebind_typed_drawing() {
+        let word = crate::namespace::W_NS;
+        let raw = r#"<a:opaque a:flag="producer"/>"#;
+        let source = format!(r#"<w:r xmlns:w="{word}" xmlns:a="urn:producer">{raw}</w:r>"#);
+        let mut run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+        run.content.push(RunContent::Drawing(CT_Drawing::inline(
+            crate::drawing::CT_Inline::new("rId1", 914_400, 914_400),
+        )));
+        let mut output = Vec::new();
+        run.to_xml(&mut Writer::new(&mut output)).unwrap();
+        assert!(String::from_utf8_lossy(&output).contains(raw));
+        let wrapper = format!(
+            r#"<root xmlns:w="{word}" xmlns:wp="{WP_NS}" xmlns:r="{R_NS}">{}</root>"#,
+            String::from_utf8(output).unwrap()
+        );
+        let mut reader = NsReader::from_str(&wrapper);
+        let mut opaque = 0;
+        let mut graphic = 0;
+        loop {
+            let (namespace, event) = reader.read_resolved_event().unwrap();
+            if let Event::Start(element) | Event::Empty(element) = &event {
+                if element.local_name().as_ref() == b"opaque" {
+                    assert_eq!(namespace, ResolveResult::Bound(Namespace(b"urn:producer")));
+                    opaque += 1;
+                }
+                if element.local_name().as_ref() == b"graphic" {
+                    assert_eq!(
+                        namespace,
+                        ResolveResult::Bound(Namespace(
+                            b"http://schemas.openxmlformats.org/drawingml/2006/main"
+                        ))
+                    );
+                    graphic += 1;
+                }
+            }
+            if matches!(event, Event::Eof) {
+                break;
+            }
+        }
+        assert_eq!((opaque, graphic), (1, 1));
+    }
+
+    #[test]
+    fn fx211_run_raw_bindings_preserve_storage_emission_and_cached_field_authority() {
+        let word = crate::namespace::W_NS;
+        let xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        for attribute in ["", " q:rsidR=\"ABCDEF12\""] {
+            let raw =
+                r#"<w:fldChar w:fldCharType="begin"><x:payload xsi:type="w:Future"/></w:fldChar>"#;
+            let source = format!(
+                r#"<q:r xmlns:q="{word}" xmlns:w="urn:producer" xmlns:x="urn:payload" xmlns:xsi="{xsi}" xmlns:unused="urn:unused"{attribute}>{raw}</q:r>"#
+            );
+            let run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+            assert_eq!(run.extra_xml[0], raw.as_bytes());
+            let mut localized = Vec::new();
+            let (root, bindings) = run_xml_root(&run, None, &mut localized).unwrap();
+            validate_raw_cached_field_content(&root, &bindings, &localized, &run.extra_xml[0])
+                .unwrap();
+            let mut output = Vec::new();
+            run.to_xml(&mut Writer::new(&mut output)).unwrap();
+            assert_eq!(run.extra_xml[0], raw.as_bytes());
+            let wrapped = format!(
+                "<root xmlns:w=\"{word}\">{}</root>",
+                String::from_utf8(output).unwrap()
+            );
+            assert!(!wrapped.contains("urn:unused"));
+            assert!(!wrapped.contains("rdocxProducer"));
+            let mut reader = NsReader::from_str(&wrapped);
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                if let Event::Start(element) | Event::Empty(element) = &event {
+                    if element.local_name().as_ref() == b"r" {
+                        assert_eq!(namespace, ResolveResult::Bound(Namespace(word.as_bytes())));
+                    }
+                    if element.local_name().as_ref() == b"fldChar" {
+                        assert_eq!(namespace, ResolveResult::Bound(Namespace(b"urn:producer")));
+                    }
+                    if element.local_name().as_ref() == b"payload" {
+                        let (binding, _) = reader
+                            .resolver()
+                            .resolve_element(quick_xml::name::QName(b"w:Future"));
+                        assert_eq!(binding, ResolveResult::Bound(Namespace(b"urn:producer")));
+                        let attr = element.attributes().next().unwrap().unwrap();
+                        let (binding, _) = reader.resolver().resolve_attribute(attr.key);
+                        assert_eq!(binding, ResolveResult::Bound(Namespace(xsi.as_bytes())));
+                    }
+                }
+                if matches!(event, Event::Eof) {
+                    break;
+                }
+            }
+        }
+        let raw = r#"<w:opaque xmlns:w="urn:inner"><child xmlns="urn:default" xsi:type="w:Future"/></w:opaque>"#;
+        let source = format!(
+            r#"<q:r xmlns:q="{word}" xmlns:w="urn:outer" xmlns:xsi="{xsi}" xmlns:unused="urn:unused">{raw}</q:r>"#
+        );
+        let run = CT_R::from_xml_fragment_checked(source.as_bytes()).unwrap();
+        assert_eq!(run.extra_xml[0], raw.as_bytes());
+        let mut output = Vec::new();
+        run.to_xml(&mut Writer::new(&mut output)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("xmlns:w=\"urn:inner\""));
+        assert!(output.contains("xmlns=\"urn:default\""));
+        assert!(!output.contains("urn:outer"));
+        assert!(!output.contains("urn:unused"));
+        assert!(output.contains(&format!("xmlns:xsi=\"{xsi}\"")));
+    }
+
+    #[test]
+    fn fx211_consumed_reader_owner_preserves_sibling_cursor_and_refuses_atomically() {
+        let first = r#"<w:p><w:r><w:t>FIRST</w:t></w:r></w:p>"#;
+        let deep = format!(
+            "{}<w:r><w:t>LAST</w:t></w:r>{}",
+            "<w:sdt><w:sdtContent>".repeat(257),
+            "</w:sdtContent></w:sdt>".repeat(257)
+        );
+        let input = format!("{first}<w:p>{deep}</w:p>");
+        let mut reader = Reader::from_str(&input);
+        assert!(matches!(reader.read_event().unwrap(), Event::Start(_)));
+        assert_eq!(CT_P::from_xml(&mut reader).unwrap().text(), "FIRST");
+        assert_eq!(reader.buffer_position() as usize, first.len());
+        assert!(matches!(reader.read_event().unwrap(), Event::Start(_)));
+        let position = reader.buffer_position();
+        let remaining = reader.get_ref().to_vec();
+        assert!(
+            CT_P::from_xml(&mut reader)
+                .unwrap_err()
+                .to_string()
+                .contains("256")
+        );
+        assert_eq!(reader.buffer_position(), position);
+        assert_eq!(*reader.get_ref(), remaining.as_slice());
+        let mut malformed = Reader::from_str("<w:p><w:r><w:t>bad</w:t></w:r></w:r>");
+        malformed.read_event().unwrap();
+        let position = malformed.buffer_position();
+        assert!(CT_P::from_xml(&mut malformed).is_err());
+        assert_eq!(malformed.buffer_position(), position);
+    }
+
+    #[test]
+    fn fx211_nested_cached_field_drawing_spanning_runs_preserves_owner_source() {
+        const W_NS: &str = crate::namespace::W_NS;
+        let drawing = concat!(
+            r#"<w:drawing><wp:anchor><wp:extent cx="10" cy="20"/><wp:docPr id="7"/>"#,
+            r#"<a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent>"#,
+            r#"<w:p><x:keep xmlns:x="urn:producer" token="exact"/><w:r><w:t>shape leaf</w:t></w:r></w:p>"#,
+            r#"</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#,
+        );
+        let source = format!(
+            r#"<w:p xmlns:w="{W_NS}" xmlns:wp="{WP_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>UNKNOWN outer</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>prefix </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>UNKNOWN child</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r>{drawing}</w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t> suffix</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="unknown"/></w:r></w:p>"#
+        );
+        let paragraph = CT_P::from_xml_fragment_checked(source.as_bytes()).unwrap();
+        let outer = parsed_field(&paragraph, 0);
+        assert_eq!(outer.cached_result, "prefix  suffix");
+        let children = outer.cached_fields_in_source_order();
+        assert_eq!(children.len(), 1);
+        let drawing_model = children[0]
+            .cached_result_runs()
+            .unwrap()
+            .iter()
+            .flat_map(|run| &run.content)
+            .find_map(|content| match content {
+                RunContent::Drawing(drawing) => Some(drawing),
+                _ => None,
+            })
+            .expect("active nested cached drawing remains typed");
+        let body = drawing_model
+            .anchor
+            .as_ref()
+            .unwrap()
+            .shape
+            .as_ref()
+            .unwrap()
+            .text_body
+            .as_ref()
+            .unwrap();
+        assert_eq!(body.paragraphs().next().unwrap().text(), "shape leaf");
+        let saved = serialized_paragraph(&paragraph);
+        assert_eq!(
+            saved.matches(drawing).count(),
+            1,
+            "exact owned drawing source appears once"
+        );
+        let closed = raw_with_external_bindings(
+            saved.as_bytes(),
+            &[
+                ("w".into(), W_NS.into()),
+                ("wp".into(), WP_NS.into()),
+                (
+                    "a".into(),
+                    "http://schemas.openxmlformats.org/drawingml/2006/main".into(),
+                ),
+                (
+                    "wps".into(),
+                    "http://schemas.microsoft.com/office/word/2010/wordprocessingShape".into(),
+                ),
+            ],
+        )
+        .unwrap();
+        let reopened = CT_P::from_xml_fragment_checked(&closed).unwrap();
+        assert_eq!(serialized_paragraph(&reopened), saved);
+        assert_eq!(parsed_field(&reopened, 0).cached_result, "prefix  suffix");
+        assert_eq!(
+            parsed_field(&reopened, 0)
+                .cached_fields_in_source_order()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn fx211_checked_property_invariants_refuse_lossy_admission() {
+        let uri = crate::namespace::W_NS;
+        let cases = [
+            (
+                "p",
+                "<w:pPr><w:jc w:val=\"center\"/><w:pStyle w:val=\"Normal\"/></w:pPr>",
+            ),
+            (
+                "p",
+                "<w:pPr><w:jc w:val=\"left\"/><w:jc w:val=\"right\"/></w:pPr>",
+            ),
+            ("p", "<w:pPr><w:keepNext w:val=\"sometimes\"/></w:pPr>"),
+            ("r", "<w:rPr><w:u w:val=\"invented\"/></w:rPr>"),
+            ("r", "<w:rPr><w:sz/></w:rPr>"),
+            ("r", "<w:rPr><w:b w:val=\"sometimes\"/></w:rPr>"),
+            ("r", "<w:rPr><w:b><w:sz w:val=\"24\"/></w:b></w:rPr>"),
+            ("p", "<w:pPr><w:keepNext>unexpected</w:keepNext></w:pPr>"),
+            ("r", "<w:rPr><w:color w:val=\"GGGGGG\"/></w:rPr>"),
+        ];
+        let mut accepted = Vec::new();
+        for (root, inner) in cases {
+            let xml = format!("<w:{root} xmlns:w=\"{uri}\">{inner}</w:{root}>");
+            let refused = if root == "p" {
+                CT_P::from_xml_fragment_checked(xml.as_bytes()).is_err()
+            } else {
+                CT_R::from_xml_fragment_checked(xml.as_bytes()).is_err()
+            };
+            if !refused {
+                accepted.push(inner);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "lossy checked property acceptance: {accepted:?}"
+        );
+        for inner in [
+            "<w:rPr><w:b/><w:b w:val=\"false\"/></w:rPr>",
+            "<w:rPr><w:sz w:val=\"24\"/></w:rPr>",
+        ] {
+            let xml = format!("<w:r xmlns:w=\"{uri}\">{inner}</w:r>");
+            CT_R::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+        }
+        let xml = format!(
+            "<w:p xmlns:w=\"{uri}\"><w:pPr><w:ind w:firstLine=\"120\" w:hanging=\"120\"/><w:outlineLvl w:val=\"10\"/></w:pPr></w:p>"
+        );
+        CT_P::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+        let opaque = "<x:payload xmlns:x=\"urn:producer\"><w:b w:val=\"sometimes\"/></x:payload>";
+        let xml =
+            format!("<w:r xmlns:w=\"{uri}\"><w:rPr>{opaque}</w:rPr><w:t>retained</w:t></w:r>");
+        let run = CT_R::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+        let mut saved = Vec::new();
+        run.to_xml(&mut Writer::new(&mut saved)).unwrap();
+        assert!(String::from_utf8(saved).unwrap().contains(opaque));
+    }
+
+    #[test]
+    fn fx211_checked_namespace_and_opaque_word_routes_match_native_owners() {
+        let uri = crate::namespace::W_NS;
+        let mut failures = Vec::new();
+        let encoded_uri = uri.replace("wordprocessingml", "wordprocessingm&#108;");
+        let encoded = format!(
+            r#"<a:p xmlns:a="{encoded_uri}"><a:r><a:t>decoded namespace</a:t></a:r></a:p>"#
+        );
+        if CT_P::from_xml_fragment_checked(encoded.as_bytes()).is_err() {
+            failures.push("encoded qualified root");
+        }
+        let opaque = r#"<w:producer><w:r><w:t>opaque</w:t><w:rPr/></w:r></w:producer>"#;
+        let xml = format!(r#"<w:p xmlns:w="{uri}"><w:r><w:t>visible</w:t></w:r>{opaque}</w:p>"#);
+        match CT_P::from_xml_fragment_checked(xml.as_bytes()) {
+            Ok(paragraph) => {
+                assert_eq!(paragraph.text(), "visible");
+                let mut saved = Vec::new();
+                paragraph.to_xml(&mut Writer::new(&mut saved)).unwrap();
+                assert!(String::from_utf8(saved).unwrap().contains(opaque));
+            }
+            Err(_) => failures.push("unknown Word wrapper is opaque"),
+        }
+        assert!(failures.is_empty(), "qualified owner gaps: {failures:?}");
+    }
+
+    #[test]
+    fn fx211_checked_text_owners_admit_aliases_and_default_namespaces() {
+        let uri = crate::namespace::W_NS;
+        for prefix in ["w", "alias", ""] {
+            let tag = |name: &str| {
+                if prefix.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{prefix}:{name}")
+                }
+            };
+            let declaration = if prefix.is_empty() {
+                format!("xmlns=\"{uri}\"")
+            } else {
+                format!("xmlns:{prefix}=\"{uri}\"")
+            };
+            let p = tag("p");
+            let r = tag("r");
+            let t = tag("t");
+            let xml = format!("<{p} {declaration}><{r}><{t}>A &amp; Ω</{t}></{r}></{p}>");
+            assert_eq!(
+                CT_P::from_xml_fragment_checked(xml.as_bytes())
+                    .unwrap()
+                    .text(),
+                "A & Ω"
+            );
+            let xml = format!("<{r} {declaration}><{t}>A &amp; Ω</{t}></{r}>");
+            assert_eq!(
+                CT_R::from_xml_fragment_checked(xml.as_bytes())
+                    .unwrap()
+                    .text(),
+                "A & Ω"
+            );
+        }
+    }
+
+    #[test]
+    fn fx211_checked_composite_profiles_preserve_valid_models_and_opaque_values() {
+        let uri = crate::namespace::W_NS;
+        let opaque = r#"<x:spacing xmlns:x="urn:producer" x:lineRule="invalid"/>"#;
+        let xml = format!(
+            r#"<w:p xmlns:w="{uri}"><w:pPr><w:numPr><w:ilvl w:val="2"/><w:numId w:val="7"/></w:numPr><w:spacing w:line="240" w:lineRule="exact" w:beforeAutospacing="true" w:afterAutospacing="off"/>{opaque}</w:pPr><w:r><w:t>value</w:t></w:r></w:p>"#
+        );
+        let paragraph = CT_P::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+        let properties = paragraph.properties.as_ref().unwrap();
+        assert_eq!(properties.line_rule.as_deref(), Some("exact"));
+        assert_eq!(properties.before_autospacing, Some(true));
+        assert_eq!(properties.after_autospacing, Some(false));
+        let mut bytes = Vec::new();
+        paragraph.to_xml(&mut Writer::new(&mut bytes)).unwrap();
+        assert!(
+            bytes
+                .windows(opaque.len())
+                .any(|window| window == opaque.as_bytes())
+        );
+        let standalone = String::from_utf8(bytes).unwrap().replacen(
+            "<w:p",
+            &format!(r#"<w:p xmlns:w="{uri}""#),
+            1,
+        );
+        assert_eq!(
+            CT_P::from_xml_fragment_checked(standalone.as_bytes())
+                .unwrap()
+                .text(),
+            "value"
+        );
+        let xml = format!(
+            r#"<w:tbl xmlns:w="{uri}"><w:tblPr><w:tblW w:w="1440" w:type="dxa"/><w:jc w:val="center"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1440" w:type="dxa"/><w:gridSpan w:val="1"/><w:vAlign w:val="center"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#
+        );
+        let table = CT_Tbl::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+        assert_eq!(
+            table.properties.as_ref().unwrap().layout.as_deref(),
+            Some("fixed")
+        );
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].cells.len(), 1);
+        let mut bytes = Vec::new();
+        table.to_xml(&mut Writer::new(&mut bytes)).unwrap();
+        let standalone = String::from_utf8(bytes).unwrap().replacen(
+            "<w:tbl",
+            &format!(r#"<w:tbl xmlns:w="{uri}""#),
+            1,
+        );
+        let reopened = CT_Tbl::from_xml_fragment_checked(standalone.as_bytes()).unwrap();
+        assert_eq!(reopened.properties, table.properties);
+        assert_eq!(reopened.rows.len(), table.rows.len());
+    }
+
+    #[test]
+    fn fx211_checked_composite_profiles_refuse_silent_native_defaults() {
+        let uri = crate::namespace::W_NS;
+        let mut failures = Vec::new();
+        for properties in [
+            r#"<w:spacing w:lineRule="invalid"/>"#,
+            r#"<w:spacing w:beforeAutospacing="invalid"/>"#,
+            r#"<w:numPr><w:ilvl w:val="invalid"/><w:numId w:val="1"/></w:numPr>"#,
+            r#"<w:numPr><w:ilvl/><w:numId w:val="1"/></w:numPr>"#,
+            r#"<w:numPr><w:ilvl w:val="0"/><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr>"#,
+            r#"<w:numPr><w:numId w:val="1"/><w:ilvl w:val="0"/></w:numPr>"#,
+        ] {
+            let xml = format!(
+                r#"<w:p xmlns:w="{uri}"><w:pPr>{properties}</w:pPr><w:r><w:t>value</w:t></w:r></w:p>"#
+            );
+            if CT_P::from_xml_fragment_checked(xml.as_bytes()).is_ok() {
+                failures.push(format!("paragraph silent default accepted: {properties}"));
+            }
+        }
+        for (parent, properties) in [
+            ("tblPr", r#"<w:jc w:val="invalid"/>"#),
+            ("tblPr", r#"<w:tblW w:w="1440" w:type="invalid"/>"#),
+            ("tblPr", r#"<w:tblLayout w:type="invalid"/>"#),
+            ("tcPr", r#"<w:gridSpan/>"#),
+            ("tcPr", r#"<w:hMerge w:val="invalid"/>"#),
+            ("tcPr", r#"<w:vAlign w:val="invalid"/>"#),
+        ] {
+            let xml = if parent == "tblPr" {
+                format!(
+                    r#"<w:tbl xmlns:w="{uri}"><w:tblPr>{properties}</w:tblPr><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#
+                )
+            } else {
+                format!(
+                    r#"<w:tbl xmlns:w="{uri}"><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc><w:tcPr>{properties}</w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#
+                )
+            };
+            if CT_Tbl::from_xml_fragment_checked(xml.as_bytes()).is_ok() {
+                failures.push(format!("table silent default accepted: {properties}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn fx211_checked_text_owners_refuse_types_lexical_and_child_order_errors() {
+        let uri = crate::namespace::W_NS;
+        let invalid = [
+            "<w:p xmlns:w=\"urn:foreign\"/>".to_owned(),
+            "<p/>".to_owned(),
+            format!("<w:r xmlns:w=\"{uri}\"/>"),
+            format!("<w:p xmlns:w=\"{uri}\"><w:r/><w:pPr/></w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\"><w:pPr/><w:pPr/></w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\"><w:r><w:t>T</w:t><w:rPr/></w:r></w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\"><w:tbl/></w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\">unexpected text</w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\"><w:r><w:t>&unknown;</w:t></w:r></w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\"><w:r><w:t>\u{1}</w:t></w:r></w:p>"),
+            format!("<w:p xmlns:w=\"{uri}\"/>trailing"),
+        ];
+        for xml in invalid {
+            assert!(
+                CT_P::from_xml_fragment_checked(xml.as_bytes()).is_err(),
+                "{xml}"
+            );
+        }
+        for name in ["fld", "br", "p", "tbl"] {
+            let xml = format!("<w:{name} xmlns:w=\"{uri}\"/>");
+            assert!(
+                CT_R::from_xml_fragment_checked(xml.as_bytes()).is_err(),
+                "{xml}"
+            );
+        }
+        assert!(
+            CT_R::from_xml_fragment_checked(
+                format!("<w:r xmlns:w=\"{uri}\"><w:r/></w:r>").as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            CT_R::from_xml_fragment_checked(
+                format!("<w:r xmlns:w=\"{uri}\"><w:rPr/><w:rPr/></w:r>").as_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fx211_checked_text_owners_preserve_unmodelled_payload() {
+        let raw = r#"<x:payload xmlns:x="urn:producer" x:flag='keep'><x:item value="Ω"/><w:r><w:t>opaque</w:t><w:rPr/></w:r></x:payload>"#;
+        let xml = format!(
+            r#"<w:p xmlns:w="{}"><w:r><w:t>before</w:t>{raw}</w:r>{raw}</w:p>"#,
+            crate::namespace::W_NS
+        );
+        let paragraph = CT_P::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+        let mut output = Vec::new();
+        paragraph.to_xml(&mut Writer::new(&mut output)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches(raw).count(), 2);
+        let closed = raw_with_external_bindings(
+            output.as_bytes(),
+            &[("w".to_owned(), crate::namespace::W_NS.to_owned())],
+        )
+        .unwrap();
+        assert_eq!(
+            CT_P::from_xml_fragment_checked(&closed).unwrap().text(),
+            "before"
+        );
+    }
+
+    #[test]
+    fn fx211_paragraph_fragment_refuses_second_root_before_publication() {
+        let xml = br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>first</w:t></w:r></w:p><w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#;
+        assert!(
+            CT_P::from_xml_fragment(xml).is_err(),
+            "a standalone paragraph must not silently discard the second root"
+        );
+    }
+
+    #[test]
+    fn fx211_paragraph_fragment_refuses_document_type() {
+        let xml = br#"<!DOCTYPE p><w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>kept</w:t></w:r></w:p>"#;
+        assert!(
+            CT_P::from_xml_fragment(xml).is_err(),
+            "replacement must refuse DTD before typed construction"
+        );
+    }
 
     #[test]
     fn comment_literal_source_validates_namespaces_outside_selected_range() {
@@ -13890,6 +16172,213 @@ mod tests {
     }
 
     #[test]
+    fn consumed_reader_admission_preserves_qname_cursor_and_siblings() {
+        let xml = format!(
+            r#"<outer><q:p xmlns:q="{0}" xmlns:w="{0}"><w:r><w:t>first</w:t></w:r></q:p><p xmlns="{0}" xmlns:w="{0}"><r><t>second</t></r></p></outer>"#,
+            crate::namespace::W_NS
+        );
+        let mut reader = Reader::from_str(&xml);
+        assert!(matches!(reader.read_event().unwrap(), Event::Start(_)));
+        assert!(matches!(reader.read_event().unwrap(), Event::Start(_)));
+        let position = reader.buffer_position();
+        crate::document::admit_word_reader(&reader, &["w".into()], b"p", None).unwrap();
+        assert_eq!(reader.buffer_position(), position);
+        assert_eq!(CT_P::from_xml(&mut reader).unwrap().text(), "first");
+        let Event::Start(start) = reader.read_event().unwrap() else {
+            panic!("second owner")
+        };
+        assert_eq!(start.name().as_ref(), b"p");
+        assert_eq!(CT_P::from_xml(&mut reader).unwrap().text(), "second");
+        assert!(matches!(reader.read_event().unwrap(), Event::End(_)));
+
+        let mut malformed = Reader::from_str("<q:p><w:r/></w:p>");
+        malformed.read_event().unwrap();
+        let position = malformed.buffer_position();
+        assert!(CT_P::from_xml(&mut malformed).is_err());
+        assert_eq!(malformed.buffer_position(), position);
+
+        let mut run = Reader::from_str("<q:r><w:t>run</w:t></q:r><tail/>");
+        run.read_event().unwrap();
+        assert_eq!(CT_R::from_xml(&mut run).unwrap().text(), "run");
+        let Event::Empty(tail) = run.read_event().unwrap() else {
+            panic!("run sibling")
+        };
+        assert_eq!(tail.name().as_ref(), b"tail");
+    }
+
+    #[test]
+    fn consumed_paragraph_unbound_run_fallback_has_resource_admission() {
+        let drawing = |depth: usize| {
+            let mut body = "<w:p><w:r><w:t>leaf</w:t></w:r></w:p>".to_owned();
+            for _ in 0..depth {
+                body = format!(
+                    "<w:p><w:r><w:drawing xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:x=\"urn:producer\"><wp:anchor><wp:extent cx=\"10\" cy=\"20\"/><wp:docPr id=\"1\" name=\"bounded\"/><x:wrapper><w:txbxContent>{body}</w:txbxContent></x:wrapper></wp:anchor></w:drawing></w:r></w:p>"
+                );
+            }
+            body.strip_prefix("<w:p><w:r>")
+                .unwrap()
+                .strip_suffix("</w:r></w:p>")
+                .unwrap()
+                .to_owned()
+        };
+        let shallow = format!("<q:p><q:r>{}</q:r></q:p><tail/>", drawing(1));
+        let mut reader = Reader::from_str(&shallow);
+        reader.read_event().unwrap();
+        let paragraph = CT_P::from_xml(&mut reader).unwrap();
+        let RunContent::Drawing(actual_drawing) = &paragraph.runs[0].content[0] else {
+            panic!("actual legacy fallback drawing")
+        };
+        let shape = actual_drawing
+            .anchor
+            .as_ref()
+            .unwrap()
+            .shape
+            .as_ref()
+            .unwrap();
+        let body = shape.text_body.as_ref().unwrap();
+        let crate::document::BodyContent::Paragraph(p) = &body.content[0] else {
+            panic!("actual typed text body")
+        };
+        assert_eq!(p.text(), "leaf");
+        assert!(matches!(reader.read_event().unwrap(), Event::Empty(_)));
+        for prefix in ["q:", ""] {
+            let source = format!(
+                "<p><{prefix}r>{}</{prefix}r></p>",
+                drawing(1).replace("w:drawing", &format!("{prefix}drawing"))
+            );
+            let mut reader = Reader::from_str(&source);
+            reader.read_event().unwrap();
+            let paragraph = CT_P::from_xml(&mut reader).unwrap();
+            assert!(
+                matches!(paragraph.runs[0].content[0], RunContent::Drawing(_)),
+                "actual {prefix} fallback"
+            );
+        }
+        // Deep input is checked by admission only, never constructed in the
+        // prechange baseline. The native shallow case proves this real route.
+        for (depth, accepted) in [(16, true), (17, false)] {
+            let xml = format!("<q:p><q:r>{}</q:r></q:p>", drawing(depth));
+            let mut reader = Reader::from_str(&xml);
+            reader.read_event().unwrap();
+            let before = reader.buffer_position();
+            let admitted = crate::document::admit_word_reader(&reader, &["w".into()], b"p", None);
+            assert_eq!(
+                admitted.is_ok(),
+                accepted,
+                "legacy depth {depth}: {admitted:?}"
+            );
+            assert_eq!(reader.buffer_position(), before);
+        }
+        let opaque = format!(
+            "<q:p><q:r xmlns:q=\"urn:foreign\">{}</q:r></q:p>",
+            drawing(17)
+        );
+        let mut reader = Reader::from_str(&opaque);
+        reader.read_event().unwrap();
+        crate::document::admit_word_reader(&reader, &["w".into()], b"p", None).unwrap();
+    }
+
+    #[test]
+    fn full_document_admission_accounts_for_native_unbound_run_fallback() {
+        let wrap = |depth: usize| {
+            let mut body = "<w:p><w:r><w:t>leaf</w:t></w:r></w:p>".to_owned();
+            for _ in 0..depth {
+                body = format!(
+                    "<w:p><w:r><w:drawing xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:x=\"urn:producer\"><wp:anchor><wp:extent cx=\"10\" cy=\"20\"/><wp:docPr id=\"1\" name=\"bounded\"/><x:wrapper><w:txbxContent>{body}</w:txbxContent></x:wrapper></wp:anchor></w:drawing></w:r></w:p>"
+                );
+            }
+            let content = body
+                .strip_prefix("<w:p><w:r>")
+                .unwrap()
+                .strip_suffix("</w:r></w:p>")
+                .unwrap();
+            format!(
+                "<w:document xmlns:w=\"{}\"><w:body><w:p><q:r>{content}</q:r></w:p></w:body></w:document>",
+                crate::namespace::W_NS
+            )
+        };
+        for depth in [1, 17] {
+            let xml = wrap(depth);
+            let document = crate::document::CT_Document::from_xml(xml.as_bytes()).unwrap();
+            let crate::document::BodyContent::Paragraph(paragraph) = &document.body.content[0]
+            else {
+                panic!("typed paragraph")
+            };
+            assert!(
+                paragraph.runs.is_empty(),
+                "unbound run is opaque at full depth {depth}"
+            );
+            let raw =
+                &xml[xml.find("<q:r>").unwrap()..xml.find("</q:r>").unwrap() + "</q:r>".len()];
+            assert!(
+                paragraph
+                    .extra_xml
+                    .iter()
+                    .any(|(_, bytes)| bytes == raw.as_bytes())
+            );
+            let saved = document.to_xml().unwrap();
+            assert!(
+                saved
+                    .windows(raw.len())
+                    .any(|bytes| bytes == raw.as_bytes())
+            );
+            let reopened = crate::document::CT_Document::from_xml(&saved).unwrap();
+            let crate::document::BodyContent::Paragraph(p) = &reopened.body.content[0] else {
+                panic!("reopened paragraph")
+            };
+            assert!(p.runs.is_empty());
+            assert!(p.extra_xml.iter().any(|(_, bytes)| bytes == raw.as_bytes()));
+            crate::document::admit_word_xml(xml.as_bytes(), &["w".into()], None).unwrap();
+        }
+        for declaration in [
+            format!("xmlns:q=\"{}\"", crate::namespace::W_NS),
+            "xmlns:q=\"urn:foreign\"".into(),
+        ] {
+            let xml = wrap(1).replace("<w:document ", &format!("<w:document {declaration} "));
+            let document = crate::document::CT_Document::from_xml(xml.as_bytes()).unwrap();
+            let crate::document::BodyContent::Paragraph(p) = &document.body.content[0] else {
+                panic!("namespace paragraph")
+            };
+            if declaration.contains(crate::namespace::W_NS) {
+                assert!(matches!(p.runs[0].content[0], RunContent::Drawing(_)));
+                let deep = wrap(17).replace("<w:document ", &format!("<w:document {declaration} "));
+                assert!(
+                    crate::document::admit_word_xml(deep.as_bytes(), &["w".into()], None).is_err()
+                );
+            } else {
+                assert!(p.runs.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn consumed_reader_admission_retains_resource_refusal_and_opaque_scope() {
+        for (depth, accepted) in [(256, true), (257, false)] {
+            let xml = format!(
+                "<q:p>{}<w:r><w:t>text</w:t></w:r>{}</q:p>",
+                "<w:sdt><w:sdtContent>".repeat(depth),
+                "</w:sdtContent></w:sdt>".repeat(depth)
+            );
+            let mut reader = Reader::from_str(&xml);
+            reader.read_event().unwrap();
+            let position = reader.buffer_position();
+            assert_eq!(
+                crate::document::admit_word_reader(&reader, &["w".into()], b"p", None).is_ok(),
+                accepted
+            );
+            assert_eq!(reader.buffer_position(), position);
+        }
+        let xml = format!(
+            "<foreign:p><foreign:payload>{}{}</foreign:payload></foreign:p>",
+            "<w:sdt><w:sdtContent>".repeat(257),
+            "</w:sdtContent></w:sdt>".repeat(257)
+        );
+        let mut reader = Reader::from_str(&xml);
+        reader.read_event().unwrap();
+        crate::document::admit_word_reader(&reader, &["w".into()], b"p", None).unwrap();
+    }
+
+    #[test]
     fn direct_paragraph_parser_accepts_explicit_property_binding() {
         let xml = format!(
             r#"<outer xmlns:ext="urn:producer"><q:p xmlns:q="{}"><ext:pPr><ext:jc ext:val="right"/></ext:pPr><q:pPr xmlns:q="{}"><ext:jc ext:val="right"/><q:jc q:val="center"/></q:pPr><q:r><q:t>Direct</q:t></q:r></q:p></outer>"#,
@@ -14252,7 +16741,7 @@ mod tests {
         // fallback. The block has to come back out verbatim, exactly once,
         // while still being visible to layout.
         let src = concat!(
-            r#"<w:r xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><mc:AlternateContent><mc:Choice Requires="wps">"#,
+            r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><mc:AlternateContent><mc:Choice Requires="wps">"#,
             r#"<w:drawing><wp:anchor behindDoc="0">"#,
             r#"<wp:positionH relativeFrom="column"><wp:posOffset>914400</wp:posOffset></wp:positionH>"#,
             r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#,
@@ -14289,8 +16778,13 @@ mod tests {
             Some("729FCF"),
             "the fill colour must win over the outline colour"
         );
-        assert_eq!(shape.text.len(), 1);
-        assert_eq!(shape.text[0].text(), "boxed");
+        assert!(shape.text.is_empty(), "parsed text body is authoritative");
+        let body = shape.text_body.as_ref().expect("typed shape text body");
+        assert_eq!(body.content.len(), 1);
+        let crate::document::BodyContent::Paragraph(paragraph) = &body.content[0] else {
+            panic!("typed shape paragraph");
+        };
+        assert_eq!(paragraph.text(), "boxed");
 
         // The fragment API supplies canonical w, but explicit foreign rebinding
         // must override that fallback at either the owner or paragraph boundary.
@@ -17527,7 +20021,7 @@ mod tests {
     #[test]
     fn split_run_partitions_zero_width_mixed_content_without_reordering() {
         let mut paragraph = parse_paragraph(concat!(
-            r#"<w:r xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:t>ab</w:t><w:tab/><w:br/><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText>"#,
+            r#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:t>ab</w:t><w:tab/><w:br/><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText>"#,
             r#"<mc:AlternateContent><mc:Choice Requires="wps">"#,
             r#"<w:drawing><wp:anchor behindDoc="0">"#,
             r#"<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
@@ -17713,6 +20207,583 @@ mod tests {
                 Field::from_raw(raw, FieldForm::Simple, vec![]).is_err(),
                 "{raw:?}"
             );
+        }
+    }
+
+    #[test]
+    fn visibility_parsed_nontext_field_results_keep_owned_order_and_current_cache() {
+        let mut failures = Vec::new();
+        for (name, result, expected_cache) in [
+            ("tab", "<w:tab/>", "\t"),
+            ("break", "<w:br/>", "\n"),
+            ("symbol", r#"<w:sym w:font="Wingdings" w:char="F0FC"/>"#, ""),
+            ("cr", "<w:cr/>", "\n"),
+            ("no-break-hyphen", "<w:noBreakHyphen/>", ""),
+            (
+                "positional-tab",
+                r#"<w:ptab w:alignment="left" w:relativeTo="margin" w:leader="none"/>"#,
+                "",
+            ),
+        ] {
+            for form in [FieldForm::Simple, FieldForm::Complex] {
+                let source = match form {
+                    FieldForm::Simple => format!(
+                        r#"<w:fldSimple w:instr=" PAGE "><w:r>{result}</w:r></w:fldSimple>"#
+                    ),
+                    FieldForm::Complex => format!(
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r>{result}</w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                    ),
+                };
+                let paragraph = parse_paragraph(&source);
+                let field = parsed_field(&paragraph, 0);
+                assert_eq!(field.cached_result, expected_cache, "{name} {form:?}");
+                let output = serialized_paragraph(&paragraph);
+                assert_eq!(output, format!("<w:p>{source}</w:p>"));
+                let reopened = parse_paragraph(&source);
+                assert_eq!(paragraph, reopened);
+                let Some(runs) = field.cached_result_runs() else {
+                    failures.push(format!("{name} {form:?}: typed result absent"));
+                    continue;
+                };
+                let content = runs.iter().flat_map(|run| &run.content).collect::<Vec<_>>();
+                assert_eq!(content.len(), 1, "{name} {form:?}: {content:?}");
+                assert!(match name {
+                    "tab" => matches!(content[0], RunContent::Tab),
+                    "break" => matches!(content[0], RunContent::Break(BreakType::Line)),
+                    "symbol" => matches!(content[0], RunContent::Symbol { .. }),
+                    "cr" => matches!(
+                        content[0],
+                        RunContent::SpecialCharacter(SpecialCharacter::CarriageReturn)
+                    ),
+                    "no-break-hyphen" => matches!(
+                        content[0],
+                        RunContent::SpecialCharacter(SpecialCharacter::NoBreakHyphen)
+                    ),
+                    "positional-tab" => matches!(
+                        content[0],
+                        RunContent::SpecialCharacter(SpecialCharacter::PositionalTab { .. })
+                    ),
+                    _ => unreachable!(),
+                });
+                let mut changed = field.clone();
+                changed.cached_result = "changed".into();
+                assert!(changed.cached_result_runs().is_none());
+                changed.cached_result = " ".into();
+                assert!(changed.cached_result_runs().is_none());
+                assert_eq!(field.cached_result, expected_cache);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn visibility_deleted_simple_and_nested_results_keep_public_cache_and_owned_graph() {
+        for sibling in ["", "<w:r><w:t>accepted</w:t></w:r>"] {
+            let child = format!(
+                r#"<w:fldSimple w:instr=" PAGE "><w:r><w:delText>gone</w:delText></w:r>{sibling}</w:fldSimple>"#
+            );
+            for form in [None, Some(FieldForm::Simple), Some(FieldForm::Complex)] {
+                let source = match form {
+                    None => child.clone(),
+                    Some(FieldForm::Simple) => {
+                        format!(r#"<w:fldSimple w:instr=" UNKNOWN ">{child}</w:fldSimple>"#)
+                    }
+                    Some(FieldForm::Complex) => format!(
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> UNKNOWN </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{child}<w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                    ),
+                };
+                let paragraph = parse_paragraph(&source);
+                let field = parsed_field(&paragraph, 0);
+                assert_eq!(
+                    field.cached_result,
+                    if sibling.is_empty() {
+                        "gone"
+                    } else {
+                        "goneaccepted"
+                    }
+                );
+                let mut pending = vec![field];
+                let mut deleted = 0;
+                let mut accepted = 0;
+                while let Some(field) = pending.pop() {
+                    assert!(
+                        field.cached_fields.is_empty(),
+                        "retained accepted graph owns each child once"
+                    );
+                    for content in field
+                        .cached_result_runs()
+                        .expect("consistent accepted result graph")
+                        .iter()
+                        .flat_map(|run| &run.content)
+                    {
+                        match content {
+                            RunContent::DeletedText(text) => {
+                                assert_eq!(text.text, "gone");
+                                deleted += 1;
+                            }
+                            RunContent::Text(text) => {
+                                assert_eq!(text.text, "accepted");
+                                accepted += 1;
+                            }
+                            RunContent::Field(child) => pending.push(child),
+                            _ => panic!("unexpected result content"),
+                        }
+                    }
+                }
+                assert_eq!(deleted, 1);
+                assert_eq!(accepted, usize::from(!sibling.is_empty()));
+                assert_eq!(
+                    serialized_paragraph(&paragraph),
+                    format!("<w:p>{source}</w:p>")
+                );
+                assert_eq!(paragraph, parse_paragraph(&source));
+                let mut changed = field.clone();
+                changed.cached_result = "current".into();
+                assert!(changed.cached_result_runs().is_none());
+                changed.cached_result = field.cached_result.clone();
+                assert!(changed.cached_result_runs().is_some());
+            }
+        }
+        for source in [
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:softHyphen/></w:r></w:fldSimple>"#,
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:softHyphen/><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ] {
+            let paragraph = parse_paragraph(source);
+            let field = parsed_field(&paragraph, 0);
+            assert_eq!(field.cached_result, "");
+            assert!(field.cached_result_runs().is_none());
+            assert_eq!(
+                serialized_paragraph(&paragraph),
+                format!("<w:p>{source}</w:p>")
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_parsed_nontext_field_drawing_results_have_actual_typed_payload() {
+        let drawing = CT_Drawing::inline(crate::drawing::CT_Inline::new("rId1", 914_400, 914_400));
+        let mut writer = Writer::new(Vec::new());
+        drawing.to_xml(&mut writer).unwrap();
+        // The writer uses the main document's inherited DrawingML declarations.
+        // Close that actual producer scope for this standalone paragraph fixture.
+        let result = String::from_utf8(writer.into_inner()).unwrap().replacen(
+            "<w:drawing>",
+            &format!(
+                r#"<w:drawing xmlns:wp="{}" xmlns:a="{}" xmlns:pic="{}" xmlns:r="{}">"#,
+                crate::drawing::drawing_ns::WP,
+                crate::drawing::drawing_ns::A,
+                crate::drawing::drawing_ns::PIC,
+                crate::drawing::drawing_ns::R,
+            ),
+            1,
+        );
+        let positive = parse_paragraph(&format!("<w:r>{result}</w:r>"));
+        assert!(
+            matches!(positive.runs[0].content[0], RunContent::Drawing(ref value) if value.inline.as_ref().is_some_and(|inline| inline.embed_id == "rId1"))
+        );
+        let mut failures = Vec::new();
+        for form in [FieldForm::Simple, FieldForm::Complex] {
+            let source = match form {
+                FieldForm::Simple => {
+                    format!(r#"<w:fldSimple w:instr=" PAGE "><w:r>{result}</w:r></w:fldSimple>"#)
+                }
+                FieldForm::Complex => format!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r>{result}</w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                ),
+            };
+            let paragraph = parse_paragraph(&source);
+            let field = parsed_field(&paragraph, 0);
+            assert_eq!(field.cached_result, "");
+            assert_eq!(
+                serialized_paragraph(&paragraph),
+                format!("<w:p>{source}</w:p>")
+            );
+            let Some(runs) = field.cached_result_runs() else {
+                failures.push(format!("{form:?}: actual drawing result absent"));
+                continue;
+            };
+            assert!(runs.iter().flat_map(|run| &run.content).any(|item| matches!(item, RunContent::Drawing(value) if value.inline.as_ref().is_some_and(|inline| inline.embed_id == "rId1"))));
+            let mut changed = field.clone();
+            changed.cached_result = " ".into();
+            assert!(changed.cached_result_runs().is_none());
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn visibility_parsed_nontext_field_results_respect_producer_namespaces() {
+        let mut failures = Vec::new();
+        for prefix in ["q:", ""] {
+            for simple in [true, false] {
+                let result = format!("<{prefix}r><w:tab/><{prefix}tab/></{prefix}r>");
+                let source = if simple {
+                    format!(r#"<{prefix}fldSimple a:instr=" PAGE ">{result}</{prefix}fldSimple>"#)
+                } else {
+                    format!(
+                        r#"<{prefix}r><{prefix}fldChar a:fldCharType="begin"/></{prefix}r><{prefix}r><{prefix}instrText> PAGE </{prefix}instrText></{prefix}r><{prefix}r><{prefix}fldChar a:fldCharType="separate"/></{prefix}r>{result}<{prefix}r><{prefix}fldChar a:fldCharType="end"/></{prefix}r>"#
+                    )
+                };
+                let binding = if prefix.is_empty() {
+                    "xmlns"
+                } else {
+                    "xmlns:q"
+                };
+                let xml = format!(
+                    r#"<{prefix}p {binding}="{}" xmlns:w="urn:foreign" xmlns:a="{}">{source}</{prefix}p>"#,
+                    crate::namespace::W_NS,
+                    crate::namespace::W_NS
+                );
+                let paragraph = CT_P::from_xml_fragment(xml.as_bytes()).unwrap();
+                let field = parsed_field(&paragraph, 0);
+                assert_eq!(field.cached_result, "\t", "{prefix:?} simple={simple}");
+                let before = serialized_paragraph(&paragraph);
+                let FieldSource::Parsed {
+                    raw_xml,
+                    word_prefixes,
+                    ..
+                } = &field.source
+                else {
+                    panic!("parsed field owner");
+                };
+                assert!(
+                    word_prefixes
+                        .iter()
+                        .any(|value| value == prefix.trim_end_matches(':'))
+                );
+                assert!(!word_prefixes.iter().any(|value| value == "w"));
+                assert!(String::from_utf8_lossy(raw_xml).contains("<w:tab/>"));
+                let (original, replacement) = field.source_replacement().unwrap().unwrap();
+                assert_eq!(original, replacement);
+                if !simple {
+                    let (projected, _) = parsed_complex_cache_runs(raw_xml, word_prefixes).unwrap();
+                    let tabs = projected
+                        .iter()
+                        .flat_map(|run| &run.content)
+                        .filter(|item| matches!(item, RunContent::Tab))
+                        .count();
+                    if tabs != 1 {
+                        failures.push(format!("{prefix:?} complex helper admitted {tabs} tabs"));
+                    }
+                }
+                let Some(runs) = field.cached_result_runs() else {
+                    failures.push(format!("{prefix:?} simple={simple}: typed result absent"));
+                    continue;
+                };
+                assert_eq!(
+                    runs.iter()
+                        .flat_map(|run| &run.content)
+                        .filter(|item| matches!(item, RunContent::Tab))
+                        .count(),
+                    1
+                );
+                assert_eq!(serialized_paragraph(&paragraph), before);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn visibility_parsed_nontext_field_results_keep_nested_and_shared_owners() {
+        let mut failures = Vec::new();
+        for (name, source, expected_cache) in [
+            (
+                "nested simple",
+                r#"<w:fldSimple w:instr=" REF Outer "><w:fldSimple w:instr=" PAGE "><w:r><w:tab/></w:r></w:fldSimple></w:fldSimple>"#,
+                "\t",
+            ),
+            (
+                "nested complex",
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF Outer </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                "\t",
+            ),
+            (
+                "shared physical run",
+                r#"<w:r><w:t>PRE</w:t><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:tab/><w:fldChar w:fldCharType="end"/><w:t>POST</w:t></w:r>"#,
+                "\t",
+            ),
+            (
+                "spanning result runs",
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:tab/></w:r><w:r><w:br/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                "\t\n",
+            ),
+        ] {
+            let paragraph = parse_paragraph(source);
+            let field = paragraph
+                .runs()
+                .into_iter()
+                .flat_map(|run| &run.content)
+                .find_map(|item| match item {
+                    RunContent::Field(field) => Some(field),
+                    _ => None,
+                })
+                .expect("complete parsed owner");
+            assert_eq!(field.cached_result, expected_cache, "{name}");
+            assert_eq!(
+                serialized_paragraph(&paragraph),
+                format!("<w:p>{source}</w:p>")
+            );
+            let mut work = vec![field];
+            let mut controls = Vec::new();
+            while let Some(current) = work.pop() {
+                if let Some(runs) = current.cached_result_runs() {
+                    for item in runs.iter().flat_map(|run| &run.content) {
+                        match item {
+                            RunContent::Field(child) => work.push(child),
+                            RunContent::Tab => controls.push("tab"),
+                            RunContent::Break(BreakType::Line) => controls.push("break"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let expected = if name == "spanning result runs" {
+                vec!["tab", "break"]
+            } else {
+                vec!["tab"]
+            };
+            if controls != expected {
+                failures.push(format!("{name}: {controls:?}"));
+            }
+        }
+        let incomplete = parse_paragraph(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:tab/></w:r>"#,
+        );
+        assert!(
+            !incomplete
+                .runs()
+                .into_iter()
+                .flat_map(|run| &run.content)
+                .any(|item| matches!(item, RunContent::Field(_)))
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn visibility_nontext_nested_cache_mutation_keeps_graph_and_source_identity() {
+        for child_form in [FieldForm::Simple, FieldForm::Complex] {
+            let child = match child_form {
+                FieldForm::Simple => {
+                    r#"<w:fldSimple w:instr=" PAGE "><w:r><w:tab/></w:r></w:fldSimple>"#
+                }
+                FieldForm::Complex => {
+                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                }
+            };
+            let source = format!(
+                r#"<w:r producer="keep"><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> UNKNOWN </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>PRE</w:t></w:r>{child}<w:r><w:t>POST</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            );
+            let mut paragraph = parse_paragraph(&source);
+            assert_eq!(
+                serialized_paragraph(&paragraph),
+                format!("<w:p>{source}</w:p>")
+            );
+            let original = paragraph.clone();
+            let RunContent::Field(outer) = &mut paragraph.runs[0].content[0] else {
+                panic!("outer")
+            };
+            assert!(outer.cached_fields.is_empty());
+            assert!(outer.parsed_cached_child_runs().is_some());
+            let child_owner = outer.cached_fields_in_source_order()[0]
+                .source_owner_id()
+                .unwrap();
+            outer.cached_field_mut(0).unwrap().cached_result = "changed".into();
+            assert_eq!(outer.cached_result, "PRE\tPOST");
+            assert!(
+                outer.cached_result_runs().is_none(),
+                "stale display must not expose stored graph"
+            );
+            assert_eq!(
+                outer.cached_fields_in_source_order()[0].cached_result,
+                "changed"
+            );
+            assert_eq!(
+                outer.cached_field_mut(0).unwrap().source_owner_id(),
+                Some(child_owner)
+            );
+            outer.refresh_cached_field_projection();
+            assert_eq!(outer.cached_result, "PREchangedPOST");
+            assert!(outer.cached_result_runs().is_some());
+            let (_, replacement) = outer.source_replacement().unwrap().unwrap();
+            assert!(
+                std::str::from_utf8(&replacement)
+                    .unwrap()
+                    .contains(r#"producer="keep""#)
+            );
+            assert_ne!(paragraph, original);
+            let edited = serialized_paragraph(&paragraph);
+            let reopened = parse_paragraph(&edited.replace("<w:p>", "").replace("</w:p>", ""));
+            let outer = parsed_field(&reopened, 0);
+            assert_eq!(outer.cached_result, "PREchangedPOST");
+            assert_eq!(
+                outer.cached_fields_in_source_order()[0].cached_result,
+                "changed"
+            );
+            assert_eq!(outer.cached_fields_in_source_order()[0].form(), child_form);
+            assert_eq!(serialized_paragraph(&reopened), edited);
+
+            let mut rejected = parse_paragraph(&source);
+            let RunContent::Field(outer) = &mut rejected.runs[0].content[0] else {
+                panic!("outer")
+            };
+            *outer.cached_field_mut(0).unwrap() =
+                Field::from_raw("PAGE", child_form, vec![CT_R::new("replacement")]).unwrap();
+            outer.refresh_cached_field_projection();
+            assert!(
+                outer
+                    .source_replacement()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("source identity")
+            );
+        }
+    }
+
+    #[test]
+    fn visibility_nontext_nested_graph_growth_and_clone_have_one_owned_child_axis() {
+        fn owned_shape(field: &Field) -> (usize, usize, usize) {
+            let mut pending = vec![field];
+            let mut fields = 0;
+            let mut source_bytes = 0;
+            let mut clone_payload_bytes = 0;
+            while let Some(field) = pending.pop() {
+                fields += 1;
+                clone_payload_bytes += std::mem::size_of::<Field>()
+                    + field.cached_result.len()
+                    + field.instruction.raw.len();
+                if let FieldSource::Parsed {
+                    raw_xml,
+                    original_cached_result,
+                    original_instruction,
+                    cached_segments,
+                    word_prefixes,
+                    ..
+                } = &field.source
+                {
+                    source_bytes += raw_xml.len();
+                    clone_payload_bytes += raw_xml.len()
+                        + original_cached_result.len()
+                        + original_instruction.raw.len()
+                        + cached_segments.len() * std::mem::size_of::<CachedDisplaySegment>()
+                        + cached_segments
+                            .iter()
+                            .map(|segment| segment.text.len())
+                            .sum::<usize>()
+                        + word_prefixes
+                            .iter()
+                            .map(|prefix| std::mem::size_of::<String>() + prefix.len())
+                            .sum::<usize>();
+                }
+                pending.extend(field.cached_fields.iter().map(|(_, child)| child));
+                for runs in [
+                    &field.parsed_cached_runs,
+                    &field.simple_cached_runs,
+                    &field.typed_cached_runs,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    clone_payload_bytes += runs.len() * std::mem::size_of::<CT_R>();
+                    for run in runs {
+                        assert!(
+                            run.properties.is_none(),
+                            "growth control isolates cache ownership"
+                        );
+                        clone_payload_bytes +=
+                            run.content.len() * std::mem::size_of::<RunContent>();
+                        clone_payload_bytes += run
+                            .content
+                            .iter()
+                            .map(|content| match content {
+                                RunContent::Text(text) | RunContent::DeletedText(text) => {
+                                    text.text.len()
+                                }
+                                _ => 0,
+                            })
+                            .sum::<usize>();
+                    }
+                    pending.extend(runs.iter().flat_map(|run| &run.content).filter_map(
+                        |content| {
+                            if let RunContent::Field(child) = content {
+                                Some(child)
+                            } else {
+                                None
+                            }
+                        },
+                    ));
+                }
+            }
+            (fields, source_bytes, clone_payload_bytes)
+        }
+        for depth in [1, 2, 4, 8, 16, 32] {
+            let begin = r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText> UNKNOWN </w:instrText><w:fldChar w:fldCharType="separate"/></w:r>"#;
+            let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+            let source = format!(
+                "{}<w:r><w:tab/></w:r>{}",
+                begin.repeat(depth),
+                end.repeat(depth)
+            );
+            let paragraph = parse_paragraph(&source);
+            let field = parsed_field(&paragraph, 0);
+            let shape = owned_shape(field);
+            assert_eq!(shape.0, depth, "each cached owner retained exactly once");
+            // Existing source fragments include every descendant's XML. The
+            // retained graph adds one child axis, never an exponential clone.
+            assert!(shape.1 <= depth * source.len());
+            assert!(shape.2 <= depth * (source.len() + 4_096));
+            let cloned = field.clone();
+            assert_eq!(owned_shape(&cloned), shape);
+            assert_eq!(&cloned, field);
+            assert_eq!(
+                serialized_paragraph(&paragraph),
+                format!("<w:p>{source}</w:p>")
+            );
+            println!(
+                "depth={depth} owned_fields={} retained_source_bytes={} clone_payload_bytes={} cloned_fields={}",
+                shape.0,
+                shape.1,
+                shape.2,
+                owned_shape(&cloned).0
+            );
+        }
+        let ordinary = parse_paragraph(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:t>ordinary</w:t><w:fldChar w:fldCharType="end"/></w:r>"#,
+        );
+        assert!(parsed_field(&ordinary, 0).cached_result_runs().is_none());
+        assert_eq!(ordinary, ordinary.clone());
+    }
+
+    #[test]
+    fn visibility_nontext_graph_preserves_mixed_annotation_owner_boundaries() {
+        for marker in ["footnoteReference", "endnoteReference", "commentReference"] {
+            let source = format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> UNKNOWN </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:{marker} w:id="7"/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            );
+            let paragraph = parse_paragraph(&source);
+            let field = parsed_field(&paragraph, 0);
+            assert_eq!(field.cached_fields_in_source_order().len(), 1);
+            assert!(
+                !field.cached_fields.is_empty(),
+                "legacy annotation range axis stays authoritative"
+            );
+            assert!(field.parsed_cached_child_runs().is_none());
+            let runs = field.cached_result_runs().unwrap();
+            assert!(runs.iter().flat_map(|run| &run.content).any(|content| {
+                matches!(
+                    (marker, content),
+                    ("footnoteReference", RunContent::FootnoteRef { id: 7, .. })
+                        | ("endnoteReference", RunContent::EndnoteRef { id: 7, .. })
+                        | (
+                            "commentReference",
+                            RunContent::CommentReference { id: 7, .. }
+                        )
+                )
+            }));
+            assert_eq!(
+                serialized_paragraph(&paragraph),
+                format!("<w:p>{source}</w:p>")
+            );
+            let reopened = parse_paragraph(&source);
+            assert_eq!(paragraph, reopened);
         }
     }
 

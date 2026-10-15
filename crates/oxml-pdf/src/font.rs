@@ -386,11 +386,63 @@ pub(crate) fn collect_glyph_usage(layout: &LayoutResult) -> HashMap<FontId, Font
     usage
 }
 
+/// Apply the exact selected face coordinates, refusing malformed metadata.
+pub(crate) fn instanced_face(font: &FontData) -> Option<ttf_parser::Face<'_>> {
+    let mut face = ttf_parser::Face::parse(&font.data, font.face_index).ok()?;
+    for (tag, value) in &font.variations {
+        if !value.is_finite() {
+            return None;
+        }
+        face.set_variation(ttf_parser::Tag::from_bytes(tag), *value)?;
+    }
+    Some(face)
+}
+
+/// Prepare every contributing font before any PDF output is allocated.
+/// Loaded but unused faces are deliberately excluded from this operation.
+pub(crate) fn prepare_fonts(
+    layout: &LayoutResult,
+) -> Result<BTreeMap<FontId, PreparedFont>, crate::PdfError> {
+    let mut usage = collect_glyph_usage(layout)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let fonts = layout
+        .fonts
+        .iter()
+        .map(|font| (font.id, font))
+        .collect::<HashMap<_, _>>();
+    let mut prepared = BTreeMap::new();
+    for (id, usage) in &mut usage {
+        let source = fonts
+            .get(id)
+            .ok_or(crate::PdfError::MissingEmbeddedFont { font_id: id.0 })?;
+        let font = prepare_font(source, usage)
+            .ok_or(crate::PdfError::MissingEmbeddedFont { font_id: id.0 })?;
+        prepared.insert(*id, font);
+    }
+    Ok(prepared)
+}
+
 /// Subset a font and prepare it for PDF embedding.
 pub(crate) fn prepare_font(font_data: &FontData, usage: &mut FontUsage) -> Option<PreparedFont> {
     // Subset the font
-    let subset_bytes =
-        subsetter::subset(&font_data.data, font_data.face_index, &usage.remapper).ok()?;
+    instanced_face(font_data)?;
+    let coordinates = font_data
+        .variations
+        .iter()
+        .map(|(tag, value)| (subsetter::Tag::new(tag), *value))
+        .collect::<Vec<_>>();
+    let subset_bytes = if coordinates.is_empty() {
+        subsetter::subset(&font_data.data, font_data.face_index, &usage.remapper).ok()?
+    } else {
+        subsetter::subset_with_variations(
+            &font_data.data,
+            font_data.face_index,
+            &coordinates,
+            &usage.remapper,
+        )
+        .ok()?
+    };
 
     // Build ToUnicode CMap
     let mut cmap = UnicodeCmap::new(
@@ -425,9 +477,8 @@ pub(crate) fn prepare_font(font_data: &FontData, usage: &mut FontUsage) -> Optio
 fn compute_glyph_widths(font_data: &FontData, usage: &FontUsage) -> Vec<(u16, f64)> {
     let mut widths = Vec::new();
 
-    let face = match ttf_parser::Face::parse(&font_data.data, font_data.face_index) {
-        Ok(f) => f,
-        Err(_) => return widths,
+    let Some(face) = instanced_face(font_data) else {
+        return widths;
     };
 
     let units_per_em = face.units_per_em() as f64;
@@ -460,7 +511,7 @@ pub(crate) struct FontMetricsInfo {
 }
 
 pub(crate) fn get_font_metrics(font_data: &FontData) -> Option<FontMetricsInfo> {
-    let face = ttf_parser::Face::parse(&font_data.data, font_data.face_index).ok()?;
+    let face = instanced_face(font_data)?;
     let units_per_em = face.units_per_em() as f64;
     let scale = 1000.0 / units_per_em;
 
@@ -500,6 +551,327 @@ mod tests {
         Color, FontManager, GlyphRun, MultilingualGlyphRun, PageFrame, Point, TextDirection,
         TextSegment,
     };
+
+    #[test]
+    fn fx195_variable_bold_subset_embeds_independent_static_outline_and_width() {
+        let mut fonts = FontManager::new_with_fonts(vec![(
+            "FX195 Thai".into(),
+            include_bytes!("../../oxml-layout/fonts/NotoSansThai.ttf").to_vec(),
+        )]);
+        let id = fonts.resolve_font(Some("FX195 Thai"), true, false).unwrap();
+        let data = fonts.font_data(id).unwrap();
+        let mut usage = FontUsage {
+            glyph_to_unicode: BTreeMap::new(),
+            drawn_glyphs: BTreeSet::new(),
+            remapper: GlyphRemapper::new(),
+        };
+        // The independent static700 oracle has advance637 and bounds
+        // [22,-10,567,561]. Its subset glyph IDs differ from the source.
+        let source_face = ttf_parser::Face::parse(&data.data, data.face_index).unwrap();
+        let source_gid = source_face.glyph_index('ภ').unwrap().0;
+        usage.draw(source_gid, Some((Pairing::Nominal, "ภ".into())));
+        let prepared = prepare_font(&data, &mut usage).unwrap();
+        let subset = ttf_parser::Face::parse(&prepared.subset_bytes, 0).unwrap();
+        let gid = ttf_parser::GlyphId(prepared.remapper.get(source_gid).unwrap());
+        assert!(
+            !subset.is_variable(),
+            "PDF must embed a static selected instance"
+        );
+        assert!(subset.glyph_hor_advance(gid).unwrap().abs_diff(637) <= 1);
+        let bounds = subset.glyph_bounding_box(gid).unwrap();
+        // Static instancing rounds coordinates. One design unit covers the
+        // independently observed sub-unit variation/static outline delta.
+        for (actual, expected) in [bounds.x_min, bounds.y_min, bounds.x_max, bounds.y_max]
+            .into_iter()
+            .zip([22, -10, 567, 561])
+        {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "outline bound {actual}, expected {expected}"
+            );
+        }
+        let width = prepared
+            .widths
+            .iter()
+            .find(|(glyph, _)| *glyph == gid.0)
+            .unwrap()
+            .1;
+        assert!((width - 637.0).abs() <= 1.0, "declared PDF width {width}");
+        assert_eq!(
+            to_unicode_entries(&prepared.cmap_bytes)
+                .get(&gid.0)
+                .map(String::as_str),
+            Some("ภ")
+        );
+    }
+
+    // Immutable agent-owned axis fixtures and independent HB14.4 static
+    // controls. The external preparation receipt binds every embedded byte.
+    fn fx195_assert_causal_axis_subset(
+        variable: &[u8],
+        independent: &[u8],
+        tag: [u8; 4],
+        value: f32,
+    ) {
+        #[derive(Default)]
+        struct Points(Vec<(f32, f32)>);
+        impl ttf_parser::OutlineBuilder for Points {
+            fn move_to(&mut self, x: f32, y: f32) {
+                self.0.push((x, y));
+            }
+            fn line_to(&mut self, x: f32, y: f32) {
+                self.0.push((x, y));
+            }
+            fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
+                panic!("fixture has no quadratic curves");
+            }
+            fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
+                panic!("fixture has no cubic curves");
+            }
+            fn close(&mut self) {
+                if self.0.len() > 1 && self.0.first() == self.0.last() {
+                    self.0.pop();
+                }
+            }
+        }
+        fn points(face: &ttf_parser::Face<'_>, id: ttf_parser::GlyphId) -> Vec<(f32, f32)> {
+            let mut result = Points::default();
+            face.outline_glyph(id, &mut result)
+                .expect("actual fixture outline");
+            result.0
+        }
+        let mut fonts =
+            FontManager::new_with_fonts(vec![("FX195 causal axis".into(), variable.to_vec())]);
+        let default_id = fonts
+            .resolve_font(Some("FX195 causal axis"), false, false)
+            .unwrap();
+        let default_data = fonts.font_data(default_id).unwrap();
+        assert!(
+            default_data.variations.is_empty(),
+            "default instance must retain omitted coordinates"
+        );
+        let default_face = instanced_face(&default_data).unwrap();
+        let default_gid = default_face.glyph_index('A').unwrap();
+        assert_eq!(
+            points(&default_face, default_gid),
+            vec![(50., 0.), (450., 0.), (450., 700.), (50., 700.)]
+        );
+        let selected_id = fonts
+            .resolve_font(Some("FX195 causal axis"), false, true)
+            .unwrap();
+        let data = fonts.font_data(selected_id).unwrap();
+        assert_eq!(
+            data.variations,
+            vec![(tag, value)],
+            "actual FontManager selected coordinates"
+        );
+        assert!(
+            !data.synthetic_italic,
+            "authentic selected axis must not become synthetic italic"
+        );
+        let expected = ttf_parser::Face::parse(independent, 0).unwrap();
+        assert!(!expected.is_variable(), "independent HB control is static");
+        let expected_gid = expected.glyph_index('A').unwrap();
+        let expected_points = points(&expected, expected_gid);
+        assert_eq!(
+            expected_points,
+            vec![(50., 0.), (450., 0.), (590., 700.), (190., 700.)],
+            "independent physical control precondition"
+        );
+        let selected = instanced_face(&data).unwrap();
+        let source_gid = selected.glyph_index('A').unwrap();
+        assert_eq!(
+            points(&selected, source_gid),
+            expected_points,
+            "selected source outline must already match independent axis"
+        );
+        assert_eq!(
+            selected.glyph_hor_advance(source_gid),
+            expected.glyph_hor_advance(expected_gid)
+        );
+        let mut usage = FontUsage {
+            glyph_to_unicode: BTreeMap::new(),
+            drawn_glyphs: BTreeSet::new(),
+            remapper: GlyphRemapper::new(),
+        };
+        usage.draw(source_gid.0, Some((Pairing::Nominal, "A".into())));
+        let prepared =
+            prepare_font(&data, &mut usage).expect("checked selected instance preparation");
+        let embedded = ttf_parser::Face::parse(&prepared.subset_bytes, 0).unwrap();
+        assert!(!embedded.is_variable(), "embedded face must be static");
+        let gid = ttf_parser::GlyphId(prepared.remapper.get(source_gid.0).unwrap());
+        assert_eq!(
+            points(&embedded, gid),
+            expected_points,
+            "embedded subset must retain selected outline"
+        );
+        assert_eq!(
+            embedded.glyph_hor_advance(gid),
+            expected.glyph_hor_advance(expected_gid)
+        );
+        let width = prepared
+            .widths
+            .iter()
+            .find(|(glyph, _)| *glyph == gid.0)
+            .unwrap()
+            .1;
+        assert_eq!(width, 600., "declared selected instance PDF width");
+        assert_eq!(
+            to_unicode_entries(&prepared.cmap_bytes)
+                .get(&gid.0)
+                .map(String::as_str),
+            Some("A")
+        );
+    }
+
+    #[test]
+    fn fx195_ital_axis_causal_selected_source_and_embedded_outline() {
+        fx195_assert_causal_axis_subset(
+            &[
+                0, 1, 0, 0, 0, 12, 0, 128, 0, 3, 0, 64, 79, 83, 47, 50, 5, 186, 5, 54, 0, 0, 0,
+                204, 0, 0, 0, 78, 99, 109, 97, 112, 0, 12, 0, 116, 0, 0, 1, 28, 0, 0, 0, 44, 102,
+                118, 97, 114, 105, 135, 98, 138, 0, 0, 1, 72, 0, 0, 0, 36, 103, 108, 121, 102, 3,
+                190, 5, 230, 0, 0, 1, 108, 0, 0, 0, 36, 103, 118, 97, 114, 199, 164, 161, 59, 0, 0,
+                1, 144, 0, 0, 0, 61, 104, 101, 97, 100, 97, 149, 67, 154, 0, 0, 1, 208, 0, 0, 0,
+                54, 104, 104, 101, 97, 5, 22, 2, 41, 0, 0, 2, 8, 0, 0, 0, 36, 104, 109, 116, 120,
+                4, 176, 0, 50, 0, 0, 2, 44, 0, 0, 0, 8, 108, 111, 99, 97, 0, 0, 0, 36, 0, 0, 2, 52,
+                0, 0, 0, 12, 109, 97, 120, 112, 0, 4, 0, 5, 0, 0, 2, 64, 0, 0, 0, 32, 110, 97, 109,
+                101, 11, 173, 29, 250, 0, 0, 2, 96, 0, 0, 0, 174, 112, 111, 115, 116, 0, 3, 0, 0,
+                0, 0, 3, 16, 0, 0, 0, 32, 0, 0, 2, 88, 1, 144, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 65, 0, 65, 3, 32, 255,
+                56, 0, 0, 3, 32, 0, 200, 0, 0, 0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12, 0, 4, 0, 32, 0,
+                0, 0, 4, 0, 4, 0, 1, 0, 0, 0, 65, 255, 255, 0, 0, 0, 65, 255, 255, 255, 192, 0, 1,
+                0, 0, 0, 0, 0, 1, 0, 0, 0, 16, 0, 2, 0, 1, 0, 20, 0, 0, 0, 8, 105, 116, 97, 108, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 50, 0, 0, 1, 194, 2, 188, 0,
+                3, 0, 0, 1, 1, 1, 1, 0, 50, 1, 144, 0, 0, 254, 112, 0, 0, 0, 0, 2, 188, 0, 0, 0, 0,
+                0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 32, 0, 2, 0, 1, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 29, 0, 1, 0, 10, 0, 19, 160, 0, 64, 0, 0, 71, 0, 0, 0, 0, 0, 140, 0,
+                140, 0, 0, 0, 0, 0, 0, 0, 0, 135, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 116, 42, 234,
+                222, 95, 15, 60, 245, 0, 2, 3, 232, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 50, 0, 0, 2, 78, 2, 188, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 3, 32,
+                255, 56, 0, 0, 2, 88, 0, 50, 0, 150, 1, 194, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 2, 2, 88, 0, 0, 2, 88, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 36, 0,
+                1, 0, 0, 0, 2, 0, 4, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 5, 0, 66, 0, 3, 0, 1, 4, 9, 0, 1, 0, 18, 0, 0, 0, 3, 0, 1, 4, 9,
+                0, 2, 0, 14, 0, 18, 0, 3, 0, 1, 4, 9, 0, 4, 0, 34, 0, 32, 0, 3, 0, 1, 4, 9, 0, 6,
+                0, 34, 0, 66, 0, 3, 0, 1, 4, 9, 1, 0, 0, 8, 0, 100, 0, 70, 0, 88, 0, 49, 0, 57, 0,
+                53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108, 0, 97, 0,
+                114, 0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 32, 0,
+                82, 0, 101, 0, 103, 0, 117, 0, 108, 0, 97, 0, 114, 0, 70, 0, 88, 0, 49, 0, 57, 0,
+                53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 45, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108, 0,
+                97, 0, 114, 0, 65, 0, 120, 0, 105, 0, 115, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            &[
+                0, 1, 0, 0, 0, 10, 0, 128, 0, 3, 0, 32, 79, 83, 47, 50, 5, 186, 5, 54, 0, 0, 1,
+                160, 0, 0, 0, 78, 99, 109, 97, 112, 0, 12, 0, 116, 0, 0, 1, 60, 0, 0, 0, 44, 103,
+                108, 121, 102, 169, 39, 102, 21, 0, 0, 0, 188, 0, 0, 0, 26, 104, 101, 97, 100, 97,
+                149, 67, 153, 0, 0, 1, 104, 0, 0, 0, 54, 104, 104, 101, 97, 5, 162, 1, 156, 0, 0,
+                1, 24, 0, 0, 0, 36, 104, 109, 116, 120, 2, 138, 0, 0, 0, 0, 0, 172, 0, 0, 0, 6,
+                108, 111, 99, 97, 0, 13, 0, 0, 0, 0, 0, 180, 0, 0, 0, 6, 109, 97, 120, 112, 0, 4,
+                0, 5, 0, 0, 0, 216, 0, 0, 0, 32, 110, 97, 109, 101, 11, 186, 29, 237, 0, 0, 1, 240,
+                0, 0, 0, 174, 112, 111, 115, 116, 0, 3, 0, 0, 0, 0, 0, 248, 0, 0, 0, 32, 2, 88, 0,
+                0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 1, 0, 50, 0, 0, 2, 78, 2, 188, 0, 3, 0,
+                0, 51, 33, 19, 33, 50, 1, 144, 140, 254, 112, 2, 188, 0, 0, 0, 1, 0, 0, 0, 2, 0, 4,
+                0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 1, 0, 0, 3, 32, 255, 56, 0, 0, 2, 88, 0, 50, 0, 10, 2, 78, 0, 1, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12, 0, 4, 0, 32,
+                0, 0, 0, 4, 0, 4, 0, 1, 0, 0, 0, 65, 255, 255, 0, 0, 0, 65, 255, 255, 255, 192, 0,
+                1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 92, 159, 2, 63, 95, 15, 60, 245, 0, 2, 3,
+                232, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 2, 78, 2, 188, 0,
+                0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 88, 1, 144, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 65, 0, 65, 3, 32,
+                255, 56, 0, 0, 3, 32, 0, 200, 0, 0, 0, 0, 0, 5, 0, 66, 0, 3, 0, 1, 4, 9, 0, 1, 0,
+                18, 0, 90, 0, 3, 0, 1, 4, 9, 0, 2, 0, 14, 0, 76, 0, 3, 0, 1, 4, 9, 0, 4, 0, 34, 0,
+                42, 0, 3, 0, 1, 4, 9, 0, 6, 0, 34, 0, 8, 0, 3, 0, 1, 4, 9, 1, 0, 0, 8, 0, 0, 0, 65,
+                0, 120, 0, 105, 0, 115, 0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105,
+                0, 115, 0, 45, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108, 0, 97, 0, 114, 0, 70, 0, 88,
+                0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 32, 0, 82, 0, 101, 0, 103,
+                0, 117, 0, 108, 0, 97, 0, 114, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108, 0, 97, 0,
+                114, 0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 0,
+            ],
+            *b"ital",
+            1.0,
+        );
+    }
+
+    #[test]
+    fn fx195_slnt_axis_causal_selected_source_and_embedded_outline() {
+        fx195_assert_causal_axis_subset(
+            &[
+                0, 1, 0, 0, 0, 12, 0, 128, 0, 3, 0, 64, 79, 83, 47, 50, 5, 186, 5, 54, 0, 0, 0,
+                204, 0, 0, 0, 78, 99, 109, 97, 112, 0, 12, 0, 116, 0, 0, 1, 28, 0, 0, 0, 44, 102,
+                118, 97, 114, 115, 114, 111, 146, 0, 0, 1, 72, 0, 0, 0, 36, 103, 108, 121, 102, 3,
+                190, 5, 230, 0, 0, 1, 108, 0, 0, 0, 36, 103, 118, 97, 114, 71, 164, 161, 59, 0, 0,
+                1, 144, 0, 0, 0, 61, 104, 101, 97, 100, 97, 149, 67, 154, 0, 0, 1, 208, 0, 0, 0,
+                54, 104, 104, 101, 97, 5, 22, 2, 41, 0, 0, 2, 8, 0, 0, 0, 36, 104, 109, 116, 120,
+                4, 176, 0, 50, 0, 0, 2, 44, 0, 0, 0, 8, 108, 111, 99, 97, 0, 0, 0, 36, 0, 0, 2, 52,
+                0, 0, 0, 12, 109, 97, 120, 112, 0, 4, 0, 5, 0, 0, 2, 64, 0, 0, 0, 32, 110, 97, 109,
+                101, 11, 173, 29, 250, 0, 0, 2, 96, 0, 0, 0, 174, 112, 111, 115, 116, 0, 3, 0, 0,
+                0, 0, 3, 16, 0, 0, 0, 32, 0, 0, 2, 88, 1, 144, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 65, 0, 65, 3, 32, 255,
+                56, 0, 0, 3, 32, 0, 200, 0, 0, 0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12, 0, 4, 0, 32, 0,
+                0, 0, 4, 0, 4, 0, 1, 0, 0, 0, 65, 255, 255, 0, 0, 0, 65, 255, 255, 255, 192, 0, 1,
+                0, 0, 0, 0, 0, 1, 0, 0, 0, 16, 0, 2, 0, 1, 0, 20, 0, 0, 0, 8, 115, 108, 110, 116,
+                255, 244, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 50, 0, 0, 1, 194, 2,
+                188, 0, 3, 0, 0, 1, 1, 1, 1, 0, 50, 1, 144, 0, 0, 254, 112, 0, 0, 0, 0, 2, 188, 0,
+                0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 32, 0, 2, 0, 1, 0, 0, 0, 32, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 29, 0, 1, 0, 10, 0, 19, 160, 0, 192, 0, 0, 71, 0, 0, 0, 0, 0,
+                140, 0, 140, 0, 0, 0, 0, 0, 0, 0, 0, 135, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 96, 84,
+                208, 206, 95, 15, 60, 245, 0, 2, 3, 232, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 50, 0, 0, 2, 78, 2, 188, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0,
+                3, 32, 255, 56, 0, 0, 2, 88, 0, 50, 0, 150, 1, 194, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 2, 2, 88, 0, 0, 2, 88, 0, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                36, 0, 1, 0, 0, 0, 2, 0, 4, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 66, 0, 3, 0, 1, 4, 9, 0, 1, 0, 18, 0, 0, 0, 3, 0,
+                1, 4, 9, 0, 2, 0, 14, 0, 18, 0, 3, 0, 1, 4, 9, 0, 4, 0, 34, 0, 32, 0, 3, 0, 1, 4,
+                9, 0, 6, 0, 34, 0, 66, 0, 3, 0, 1, 4, 9, 1, 0, 0, 8, 0, 100, 0, 70, 0, 88, 0, 49,
+                0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108,
+                0, 97, 0, 114, 0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0,
+                32, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108, 0, 97, 0, 114, 0, 70, 0, 88, 0, 49, 0,
+                57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 45, 0, 82, 0, 101, 0, 103, 0, 117, 0,
+                108, 0, 97, 0, 114, 0, 65, 0, 120, 0, 105, 0, 115, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            &[
+                0, 1, 0, 0, 0, 10, 0, 128, 0, 3, 0, 32, 79, 83, 47, 50, 5, 186, 5, 54, 0, 0, 1,
+                160, 0, 0, 0, 78, 99, 109, 97, 112, 0, 12, 0, 116, 0, 0, 1, 60, 0, 0, 0, 44, 103,
+                108, 121, 102, 169, 39, 102, 21, 0, 0, 0, 188, 0, 0, 0, 26, 104, 101, 97, 100, 97,
+                149, 67, 153, 0, 0, 1, 104, 0, 0, 0, 54, 104, 104, 101, 97, 5, 162, 1, 156, 0, 0,
+                1, 24, 0, 0, 0, 36, 104, 109, 116, 120, 2, 138, 0, 0, 0, 0, 0, 172, 0, 0, 0, 6,
+                108, 111, 99, 97, 0, 13, 0, 0, 0, 0, 0, 180, 0, 0, 0, 6, 109, 97, 120, 112, 0, 4,
+                0, 5, 0, 0, 0, 216, 0, 0, 0, 32, 110, 97, 109, 101, 11, 186, 29, 237, 0, 0, 1, 240,
+                0, 0, 0, 174, 112, 111, 115, 116, 255, 247, 0, 0, 0, 0, 0, 248, 0, 0, 0, 32, 2, 88,
+                0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 1, 0, 50, 0, 0, 2, 78, 2, 188, 0, 3,
+                0, 0, 51, 33, 19, 33, 50, 1, 144, 140, 254, 112, 2, 188, 0, 0, 0, 1, 0, 0, 0, 2, 0,
+                4, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0,
+                0, 255, 244, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 1, 0, 0, 3, 32, 255, 56, 0, 0, 2, 88, 0, 50, 0, 10, 2, 78, 0, 1, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0, 1, 0, 0, 0, 12, 0,
+                4, 0, 32, 0, 0, 0, 4, 0, 4, 0, 1, 0, 0, 0, 65, 255, 255, 0, 0, 0, 65, 255, 255,
+                255, 192, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 92, 183, 2, 63, 95, 15, 60,
+                245, 0, 2, 3, 232, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50, 0, 0, 2,
+                78, 2, 188, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 88, 1, 144, 0, 5, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 65,
+                0, 65, 3, 32, 255, 56, 0, 0, 3, 32, 0, 200, 0, 0, 0, 0, 0, 5, 0, 66, 0, 3, 0, 1, 4,
+                9, 0, 1, 0, 18, 0, 90, 0, 3, 0, 1, 4, 9, 0, 2, 0, 14, 0, 76, 0, 3, 0, 1, 4, 9, 0,
+                4, 0, 34, 0, 42, 0, 3, 0, 1, 4, 9, 0, 6, 0, 34, 0, 8, 0, 3, 0, 1, 4, 9, 1, 0, 0, 8,
+                0, 0, 0, 65, 0, 120, 0, 105, 0, 115, 0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0,
+                120, 0, 105, 0, 115, 0, 45, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108, 0, 97, 0, 114,
+                0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0, 32, 0, 82, 0,
+                101, 0, 103, 0, 117, 0, 108, 0, 97, 0, 114, 0, 82, 0, 101, 0, 103, 0, 117, 0, 108,
+                0, 97, 0, 114, 0, 70, 0, 88, 0, 49, 0, 57, 0, 53, 0, 65, 0, 120, 0, 105, 0, 115, 0,
+                0,
+            ],
+            *b"slnt",
+            -12.0,
+        );
+    }
 
     /// The bfchar entries of a ToUnicode CMap, by subset glyph id.
     fn to_unicode_entries(cmap: &[u8]) -> HashMap<u16, String> {

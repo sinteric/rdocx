@@ -14,12 +14,13 @@ use oxml_py_support::StaleElementError;
 
 use document::{
     PyBookmark, PyBoundingBox, PyComment, PyComparisonDiagnostic, PyContentFragment,
-    PyCoreProperties, PyDocument, PyHeaderFooterVariant, PyHyperlink,
-    PyLayoutBackedFieldUpdateReport, PyLayoutFragment, PyLayoutPage, PyListLevel, PyRevision,
-    PyRunPosition, PyRunRange, PySection, PyStory, PyStoryItem, PyStoryRunPosition,
-    PyStoryRunRange, PyStyle, PySvgDiagnostic, PySvgRenderResult, PyTocRebuildReport,
+    PyCoreProperties, PyDocument, PyFieldEvaluation, PyFieldsUpdateReport, PyHeaderFooter,
+    PyHeaderFooterVariant, PyHyperlink, PyLayoutBackedFieldUpdateReport, PyLayoutFragment,
+    PyLayoutPage, PyListLevel, PyNote, PyRevision, PyRunPosition, PyRunRange, PySection,
+    PySectionHandle, PySettings, PyStory, PyStoryItem, PyStoryRunPosition, PyStoryRunRange,
+    PyStyle, PySvgDiagnostic, PySvgRenderResult, PyTocRebuildReport,
 };
-use formatting::{PyFont, PyParagraphFormat};
+use formatting::{PyColorFormat, PyFont, PyParagraphFormat};
 use paragraph::{PyParagraph, PyParagraphCollection};
 use run::{PyRun, PyRunCollection};
 use table::{
@@ -50,6 +51,23 @@ pub(crate) fn enum_object(py: Python<'_>, name: &str, value: i32) -> PyResult<Py
     py.import("rdocx")?
         .getattr(name)?
         .call1((value,))
+        .map(Bound::unbind)
+}
+
+/// Normalize a validated scalar RGB input for existing native Word setters.
+pub(crate) fn color_hex(value: &Bound<'_, PyAny>, parameter: &str) -> PyResult<String> {
+    let (red, green, blue) = oxml_py_support::rgb_channels(value, parameter)?;
+    Ok(format!("{red:02X}{green:02X}{blue:02X}"))
+}
+
+/// Return the stored scalar colour, preserving Word's automatic sentinel.
+pub(crate) fn color_object(py: Python<'_>, value: &str) -> PyResult<Py<PyAny>> {
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(pyo3::types::PyString::new(py, "auto").into_any().unbind());
+    }
+    py.import("rdocx")?
+        .getattr("RGBColor")?
+        .call_method1("from_string", (value,))
         .map(Bound::unbind)
 }
 
@@ -117,6 +135,39 @@ pub(crate) fn rdocx_to_pyerr(py: Python<'_>, error: rdocx::Error) -> PyErr {
 #[pymodule]
 fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDocument>()?;
+    module.add_class::<document::PyFontEmbeddingLicense>()?;
+    module.add_class::<document::PyEmbeddedFont>()?;
+    module.add_class::<document::PyFontDefinition>()?;
+
+    module.add_class::<document::PyPicture>()?;
+    module.add_class::<document::PyPictureOptions>()?;
+    module.add_class::<document::PyHtmlDiagnostic>()?;
+    module.add_class::<document::PyOdtDiagnostic>()?;
+    module.add_class::<document::PyRtfDiagnostic>()?;
+    module.add_class::<document::PyEpubDiagnostic>()?;
+    module.add_class::<document::PyTextDiagnostic>()?;
+    module.add_class::<document::PyValidationFinding>()?;
+    module.add_class::<document::PyOdtExportResult>()?;
+    module.add_class::<document::PyRtfExportResult>()?;
+    module.add_class::<document::PyEpubExportResult>()?;
+    module.add_class::<document::PyTextReport>()?;
+    module.add_class::<paragraph::PyMathConversionDiagnostic>()?;
+    module.add_class::<paragraph::PyMathConversionResult>()?;
+    module.add_class::<paragraph::PyEquationConversionResult>()?;
+    module.add_class::<paragraph::PyEquation>()?;
+    module.add_class::<paragraph::PyEquationInsertResult>()?;
+    module.add_class::<document::PyFragmentConflictPolicy>()?;
+    module.add_class::<document::PyContentLocation>()?;
+    module.add_class::<document::PyDocumentFragment>()?;
+    module.add_class::<document::PyContentControl>()?;
+    module.add_class::<document::PyCustomFileTime>()?;
+    module.add_class::<document::PyCustomProperty>()?;
+    module.add_class::<document::PyCustomProperties>()?;
+    module.add_class::<document::PyAppProperties>()?;
+    module.add_class::<document::PyValidationReport>()?;
+    module.add_function(wrap_pyfunction!(document::validate_bytes, module)?)?;
+    module.add_function(wrap_pyfunction!(document::validate_file, module)?)?;
+
     module.add_class::<PyRunPosition>()?;
     module.add_class::<PyRunRange>()?;
     module.add_class::<PyBookmark>()?;
@@ -130,6 +181,8 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLayoutFragment>()?;
     module.add_class::<PyLayoutPage>()?;
     module.add_class::<PyLayoutBackedFieldUpdateReport>()?;
+    module.add_class::<PyFieldEvaluation>()?;
+    module.add_class::<PyFieldsUpdateReport>()?;
     module.add_class::<PyTocRebuildReport>()?;
     module.add_class::<PyRevision>()?;
     module.add_class::<PyStory>()?;
@@ -139,6 +192,10 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHyperlink>()?;
     module.add_class::<PyHeaderFooterVariant>()?;
     module.add_class::<PySection>()?;
+    module.add_class::<PySectionHandle>()?;
+    module.add_class::<PyHeaderFooter>()?;
+    module.add_class::<PySettings>()?;
+    module.add_class::<PyNote>()?;
     module.add_class::<PyStyle>()?;
     module.add_class::<PyListLevel>()?;
     module.add_class::<PyParagraph>()?;
@@ -146,7 +203,10 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRun>()?;
     module.add_class::<PyRunCollection>()?;
     module.add_class::<PyFont>()?;
+    module.add_class::<PyColorFormat>()?;
     module.add_class::<PyParagraphFormat>()?;
+    module.add_class::<formatting::PyTabStops>()?;
+    module.add_class::<formatting::PyTabStop>()?;
     module.add_class::<PyTable>()?;
     module.add_class::<PyTableCollection>()?;
     module.add_class::<PyRow>()?;

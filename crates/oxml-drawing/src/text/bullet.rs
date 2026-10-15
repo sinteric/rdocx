@@ -483,7 +483,8 @@ pub enum TextAutoNumberScheme {
 }
 
 impl TextAutoNumberScheme {
-    fn parse(value: &str) -> Option<Self> {
+    /// Parses one schema-defined DrawingML numbering token for readers and authoring.
+    pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "alphaLcParenBoth" => Self::AlphaLowerParenBoth,
             "alphaUcParenBoth" => Self::AlphaUpperParenBoth,

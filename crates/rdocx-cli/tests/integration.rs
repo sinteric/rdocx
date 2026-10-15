@@ -314,6 +314,14 @@ fn inspect_json_uses_the_shared_schema() {
                 "keywords": "cli,test",
             },
             "styles_used": [],
+            "word_count": 4,
+            "character_count": 20,
+            "page_count": 1,
+            "count_scope": "accepted-main-body",
+            "character_include_spaces": true,
+            "page_count_source": "deterministic-layout",
+            "diagnostics": [],
+            "pictures": [],
         })
     );
 }
@@ -803,6 +811,80 @@ fn text_views_never_read_the_fallback_copy_of_a_word_text_box() {
     for view in views {
         assert!(!view.contains("Fallback NEEDLE"), "{view}");
         assert!(view.matches("Box NEEDLE").count() <= 1, "{view}");
+    }
+}
+
+/// #339: a tab or a line break run between "left" and "right" reads as a tab
+/// or a line feed in the body, the header, and the footer of both text views.
+#[test]
+fn text_views_keep_run_tabs_and_breaks_in_every_story() {
+    let temp = TempWorkspace::new("text-tabs");
+    for (index, (between, expected)) in [
+        ("<w:r><w:tab/></w:r>", "left\tright"),
+        ("<w:r><w:br/></w:r>", "left\nright"),
+        ("<w:r><w:cr/></w:r>", "left\nright"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = temp.path.join(format!("runs-{index}.docx"));
+        let mut document = fixture_document(&["left"]);
+        document.set_header("left");
+        document.set_footer("left");
+        document.save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let parts = package
+            .parts
+            .keys()
+            .filter(|name| {
+                name.as_str() == "/word/document.xml"
+                    || name.starts_with("/word/header")
+                    || name.starts_with("/word/footer")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        for part in parts {
+            let xml = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+            assert_eq!(xml.matches(">left</w:t></w:r>").count(), 1, "{part}");
+            let xml = xml.replace(
+                ">left</w:t></w:r>",
+                &format!(">left</w:t></w:r>{between}<w:r><w:t>right</w:t></w:r>"),
+            );
+            package.set_part(&part, xml.into_bytes());
+        }
+        package.save(&input).unwrap();
+
+        let plain = cli(&["text", path_text(&input)]);
+        assert_success(&plain, "plain text");
+        assert_eq!(
+            String::from_utf8(plain.stdout).unwrap(),
+            format!(
+                "{expected}\n--- header (/word/header1.xml) ---\n{expected}\n\
+                 --- footer (/word/footer1.xml) ---\n{expected}\n"
+            ),
+            "{between}"
+        );
+
+        let structured = cli(&["text", path_text(&input), "--json"]);
+        assert_success(&structured, "structured text");
+        let value: Value = serde_json::from_slice(&structured.stdout).unwrap();
+        assert_eq!(value["paragraphs"][0]["text"], expected, "{between}");
+        let stories = value["stories"].as_array().unwrap();
+        assert_eq!(
+            stories
+                .iter()
+                .map(|story| story["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["header", "footer"]
+        );
+        for story in stories {
+            assert_eq!(
+                story["items"],
+                json!([{ "index_path": [0], "kind": "paragraph", "text": expected }]),
+                "{story}"
+            );
+        }
     }
 }
 
@@ -1845,6 +1927,606 @@ fn text_and_replace_read_simple_fields_smart_tags_and_custom_xml() {
             body.contains(&format!("{start}<w:r><w:t>X</w:t></w:r>{end}")),
             "{body}"
         );
+    }
+}
+
+#[test]
+fn picture_paragraphs_do_not_trigger_empty_paragraph_warnings() {
+    let temp = TempWorkspace::new("validate-picture-content");
+    let input = temp.path.join("three-pictures.docx");
+    let mut document = Document::new();
+    let png = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    for index in 0..3 {
+        document.add_picture(
+            &png,
+            &format!("picture{index}.png"),
+            rdocx::Length::inches(1.0),
+            rdocx::Length::inches(1.0),
+        );
+    }
+    document.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let output = cli(&["validate", path_text(&input)]);
+    assert_success(&output, "validate picture paragraphs");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(!report.contains("empty paragraph"), "{report}");
+    assert!(report.contains("Missing document title"), "{report}");
+    assert!(report.contains("Missing document author"), "{report}");
+    assert_eq!(fs::read(&input).unwrap(), before);
+
+    // A separate structural error must not reintroduce the picture advisory.
+    document
+        .paragraph_mut(0)
+        .unwrap()
+        .set_style("MissingPictureStyle");
+    document.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let output = cli(&["validate", path_text(&input)]);
+    assert!(!output.status.success());
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("MissingPictureStyle"), "{report}");
+    assert!(report.contains("is not defined"), "{report}");
+    assert!(!report.contains("empty paragraph"), "{report}");
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn visible_nontext_content_and_empty_controls_keep_distinct_validation_warnings() {
+    let temp = TempWorkspace::new("validate-visible-content");
+    let cases = [
+        ("drawing", "<w:r><w:drawing/></w:r>", false),
+        ("pict", "<w:r><w:pict/></w:r>", false),
+        ("object", "<w:r><w:object/></w:r>", false),
+        (
+            "symbol",
+            r#"<w:r><w:sym w:font="Symbol" w:char="F041"/></w:r>"#,
+            false,
+        ),
+        ("tab", "<w:r><w:tab/></w:r>", false),
+        ("break", "<w:r><w:br/></w:r>", false),
+        ("return", "<w:r><w:cr/></w:r>", false),
+        (
+            "footnote",
+            r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#,
+            false,
+        ),
+        (
+            "endnote",
+            r#"<w:r><w:endnoteReference w:id="1"/></w:r>"#,
+            false,
+        ),
+        (
+            "empty-simple-field",
+            r#"<w:fldSimple w:instr="DATE"/>"#,
+            true,
+        ),
+        (
+            "loose-complex-begin",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            true,
+        ),
+        (
+            "math",
+            r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#,
+            false,
+        ),
+        (
+            "control-drawing",
+            "<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt>",
+            false,
+        ),
+        (
+            "alias",
+            r#"<q:r xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:drawing/></q:r>"#,
+            false,
+        ),
+        (
+            "compatibility",
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w"><w:r><w:drawing/></w:r></mc:Choice><mc:Fallback><w:r><w:pict/></w:r></mc:Fallback></mc:AlternateContent>"#,
+            false,
+        ),
+        (
+            "compatibility-empty",
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w"/><mc:Fallback/></mc:AlternateContent>"#,
+            true,
+        ),
+        (
+            "inserted-drawing",
+            "<w:ins><w:r><w:drawing/></w:r></w:ins>",
+            false,
+        ),
+        (
+            "moved-away-drawing",
+            "<w:moveFrom><w:r><w:drawing/></w:r></w:moveFrom>",
+            true,
+        ),
+        (
+            "run-property",
+            "<w:r><w:rPr><w:drawing/></w:rPr></w:r>",
+            true,
+        ),
+        ("empty", "", true),
+        ("whitespace", "<w:r><w:t>  </w:t></w:r>", true),
+        (
+            "bookmark",
+            r#"<w:bookmarkStart w:id="1" w:name="here"/><w:bookmarkEnd w:id="1"/>"#,
+            true,
+        ),
+        ("property", "<w:pPr><w:tabs><w:tab/></w:tabs></w:pPr>", true),
+        (
+            "rendered-hint",
+            "<w:r><w:lastRenderedPageBreak/></w:r>",
+            true,
+        ),
+        (
+            "deleted",
+            "<w:del><w:r><w:delText>deleted</w:delText><w:drawing/></w:r></w:del>",
+            true,
+        ),
+        (
+            "empty-control",
+            "<w:sdt><w:sdtPr/><w:sdtContent/></w:sdt>",
+            true,
+        ),
+        (
+            "control-property",
+            "<w:sdt><w:sdtPr><w:drawing/></w:sdtPr><w:sdtContent/></w:sdt>",
+            true,
+        ),
+        ("foreign", r#"<x:drawing xmlns:x="urn:producer"/>"#, true),
+        (
+            "foreign-wrapper",
+            r#"<x:wrapper xmlns:x="urn:producer"><w:drawing/></x:wrapper>"#,
+            true,
+        ),
+    ];
+    for (label, fragment, empty) in cases {
+        let input = temp.path.join(format!("{label}.docx"));
+        write_document(&input, &["CONTENT"]);
+        rewrite_run(&input, "CONTENT", |_| fragment.to_owned());
+        let before = fs::read(&input).unwrap();
+        let output = cli(&["validate", path_text(&input)]);
+        assert_success(&output, label);
+        let report = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            report.contains("1 empty paragraph(s) found"),
+            empty,
+            "{label}: {report}"
+        );
+        assert_eq!(fs::read(&input).unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn validation_qualified_display_content_and_field_controls_preserve_source() {
+    let temp = TempWorkspace::new("validate-field-display");
+    let cases = [
+        (
+            "simple-cr",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:cr/></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "complex-cr",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:cr/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "simple-no-break-hyphen",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:noBreakHyphen/></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "complex-no-break-hyphen",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:noBreakHyphen/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "simple-positional-tab",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:ptab w:alignment="left" w:relativeTo="margin" w:leader="none"/></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "complex-positional-tab",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:ptab w:alignment="left" w:relativeTo="margin" w:leader="none"/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "simple-soft-hyphen",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:softHyphen/></w:r></w:fldSimple>"#,
+            false,
+        ),
+        (
+            "complex-soft-hyphen",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:softHyphen/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            false,
+        ),
+        (
+            "simple-leaf-deleted-only",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:delText>gone</w:delText></w:r></w:fldSimple>"#,
+            false,
+        ),
+        (
+            "simple-outer-deleted-only",
+            r#"<w:fldSimple w:instr="UNKNOWN"><w:fldSimple w:instr="PAGE"><w:r><w:delText>gone</w:delText></w:r></w:fldSimple></w:fldSimple>"#,
+            false,
+        ),
+        (
+            "complex-outer-deleted-only",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>UNKNOWN</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="PAGE"><w:r><w:delText>gone</w:delText></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            false,
+        ),
+        (
+            "simple-leaf-deleted-accepted",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:delText>gone</w:delText></w:r><w:r><w:t>accepted</w:t></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "simple-outer-deleted-accepted",
+            r#"<w:fldSimple w:instr="UNKNOWN"><w:fldSimple w:instr="PAGE"><w:r><w:delText>gone</w:delText></w:r><w:r><w:t>accepted</w:t></w:r></w:fldSimple></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "complex-outer-deleted-accepted",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>UNKNOWN</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="PAGE"><w:r><w:delText>gone</w:delText></w:r><w:r><w:t>accepted</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "alias-pict",
+            r#"<q:r xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:pict/></q:r>"#,
+            true,
+        ),
+        (
+            "default-object",
+            r#"<r xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><object/></r>"#,
+            true,
+        ),
+        (
+            "foreign-pict",
+            r#"<w:r><x:pict xmlns:x="urn:producer"/></w:r>"#,
+            false,
+        ),
+        (
+            "rebound-object",
+            r#"<w:r><w:object xmlns:w="urn:producer"/></w:r>"#,
+            false,
+        ),
+        ("soft-hyphen", "<w:r><w:softHyphen/></w:r>", false),
+        (
+            "producer-hint",
+            "<w:r><w:lastRenderedPageBreak/></w:r>",
+            false,
+        ),
+        (
+            "deleted-text",
+            "<w:r><w:delText>deleted</w:delText></w:r>",
+            false,
+        ),
+        (
+            "deleted-drawing",
+            "<w:del><w:r><w:drawing/></w:r></w:del>",
+            false,
+        ),
+        (
+            "moved-away",
+            "<w:moveFrom><w:r><w:drawing/></w:r></w:moveFrom>",
+            false,
+        ),
+        (
+            "inserted-drawing",
+            "<w:ins><w:r><w:drawing/></w:r></w:ins>",
+            true,
+        ),
+        (
+            "equation",
+            r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#,
+            true,
+        ),
+        (
+            "loose-begin",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            false,
+        ),
+        (
+            "loose-separate",
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            false,
+        ),
+        (
+            "loose-end",
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            false,
+        ),
+        (
+            "instruction",
+            "<w:r><w:instrText>PAGE</w:instrText></w:r>",
+            false,
+        ),
+        (
+            "deleted-instruction",
+            "<w:r><w:delInstrText>PAGE</w:delInstrText></w:r>",
+            false,
+        ),
+        ("simple-empty", r#"<w:fldSimple w:instr="PAGE"/>"#, false),
+        (
+            "simple-text",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>4</w:t></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "simple-whitespace",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:t xml:space="preserve"> </w:t></w:r></w:fldSimple>"#,
+            false,
+        ),
+        (
+            "simple-tab",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:tab/></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "complex-text",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:t>4</w:t><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "complex-break",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:br/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "complex-whitespace",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:t xml:space="preserve"> </w:t><w:fldChar w:fldCharType="end"/></w:r>"#,
+            false,
+        ),
+        (
+            "incomplete-complex",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText></w:r>"#,
+            false,
+        ),
+        (
+            "simple-symbol",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:sym w:font="Symbol" w:char="F041"/></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "simple-drawing",
+            r#"<w:fldSimple w:instr="PAGE"><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Actual"/><a:graphic><a:graphicData uri="urn:producer"/></a:graphic></wp:inline></w:drawing></w:r></w:fldSimple>"#,
+            true,
+        ),
+        (
+            "complex-symbol",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:sym w:font="Symbol" w:char="F041"/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "complex-drawing",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Actual"/><a:graphic><a:graphicData uri="urn:producer"/></a:graphic></wp:inline></w:drawing><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "spanning-complex",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>NUMPAGES</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>4</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "nested-complex",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF</w:instrText><w:fldChar w:fldCharType="separate"/><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/><w:t>4</w:t><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            true,
+        ),
+        (
+            "unmatched-delimiters",
+            r#"<w:r><w:fldChar w:fldCharType="separate"/><w:fldChar w:fldCharType="end"/></w:r>"#,
+            false,
+        ),
+        (
+            "default-loose-marker",
+            r#"<r xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><fldChar fldCharType="begin"/></r>"#,
+            false,
+        ),
+        (
+            "alias-loose-marker",
+            r#"<q:r xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:fldChar q:fldCharType="begin"/></q:r>"#,
+            false,
+        ),
+        (
+            "foreign-marker",
+            r#"<w:r><x:fldChar xmlns:x="urn:producer" x:fldCharType="begin"/></w:r>"#,
+            false,
+        ),
+        (
+            "inserted-loose-marker",
+            r#"<w:ins><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:ins>"#,
+            false,
+        ),
+        (
+            "deleted-loose-marker",
+            r#"<w:del><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:del>"#,
+            false,
+        ),
+        (
+            "duplicate-inline-slot",
+            "<w:sdt><w:sdtContent><w:r/></w:sdtContent><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt>",
+            false,
+        ),
+        (
+            "invalid-opaque-control",
+            r#"<w:sdt><w:sdtPr><w:id w:val="invalid"/></w:sdtPr><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt>"#,
+            false,
+        ),
+        (
+            "admitted-inline-control",
+            "<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt>",
+            true,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (label, fragment, visible) in cases {
+        let input = temp.path.join(format!("{label}.docx"));
+        let mut document = Document::new();
+        document.add_paragraph("CONTENT");
+        document.save(&input).unwrap();
+        rewrite_run(&input, "CONTENT", |_| fragment.to_owned());
+        let before = fs::read(&input).unwrap();
+        let output = cli(&["validate", path_text(&input)]);
+        assert_success(&output, label);
+        let report = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(fs::read(&input).unwrap(), before, "{label}");
+        assert!(
+            report.contains("Missing document title"),
+            "{label}: {report}"
+        );
+        assert!(
+            report.contains("Missing document author"),
+            "{label}: {report}"
+        );
+        if report.contains("1 empty paragraph(s) found") == visible {
+            failures.push(format!("{label}: visible={visible}, report={report}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn validation_preserves_recursive_block_control_and_table_paragraph_scope() {
+    let temp = TempWorkspace::new("validate-control-scope");
+    let input = temp.path.join("controls.docx");
+    write_document(&input, &["Body text"]);
+    let mut package = OpcPackage::open(&input).unwrap();
+    let part = package.main_document_part().unwrap();
+    let xml = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+    let controls = concat!(
+        "<w:sdt><w:sdtPr/><w:sdtContent>",
+        "<w:p><w:r><w:drawing/></w:r></w:p>",
+        "<w:sdt><w:sdtPr/><w:sdtContent><w:p/></w:sdtContent></w:sdt>",
+        "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p/>",
+        "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p/></w:tc></w:tr></w:tbl>",
+        "<w:sdt><w:sdtContent><w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p><w:r><w:drawing/></w:r></w:p></w:tc></w:tr></w:tbl></w:sdtContent></w:sdt>",
+        "</w:tc><w:sdt><w:sdtContent><w:tc><w:tcPr/><w:p/></w:tc></w:sdtContent></w:sdt></w:tr>",
+        "<w:sdt><w:sdtContent><w:tr><w:tc><w:tcPr/><w:p><w:r><w:drawing/></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt></w:tbl>",
+        "</w:sdtContent></w:sdt>",
+        "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p/></w:tc></w:tr></w:tbl>",
+    );
+    package.set_part(
+        &part,
+        xml.replace("</w:body>", &format!("{controls}</w:body>"))
+            .into_bytes(),
+    );
+    package.save(&input).unwrap();
+    assert_eq!(Document::open(&input).unwrap().paragraph_count(), 7);
+    let before = fs::read(&input).unwrap();
+    let output = cli(&["validate", path_text(&input)]);
+    assert_success(&output, "validate nested block controls");
+    let report = String::from_utf8(output.stdout).unwrap();
+    assert!(report.contains("3 empty paragraph(s) found"), "{report}");
+    assert!(!report.contains("4 empty paragraph"), "{report}");
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn validation_ignores_opaque_content_control_slots() {
+    let temp = TempWorkspace::new("validate-opaque-control-slots");
+    let cases = [
+        (
+            "duplicate-block",
+            "<w:sdt><w:sdtContent><w:p/></w:sdtContent><w:sdtContent><w:p/></w:sdtContent></w:sdt>",
+            1,
+            1,
+        ),
+        (
+            "expanded-empty-first",
+            "<w:sdt><w:sdtContent></w:sdtContent><w:sdtContent><w:p/></w:sdtContent></w:sdt>",
+            0,
+            0,
+        ),
+        (
+            "self-closing-first",
+            "<w:sdt><w:sdtContent/><w:sdtContent><w:p><w:r><w:drawing/></w:r></w:p></w:sdtContent></w:sdt>",
+            1,
+            0,
+        ),
+        (
+            "opaque-block",
+            "<w:sdt><w:sdtPr><w:id w:val=\"invalid\"/></w:sdtPr><w:sdtContent><w:p><w:r><w:drawing/></w:r></w:p></w:sdtContent></w:sdt>",
+            0,
+            0,
+        ),
+        (
+            "duplicate-inline",
+            "<w:p><w:sdt><w:sdtContent><w:r/></w:sdtContent><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt></w:p>",
+            1,
+            1,
+        ),
+        (
+            "opaque-inline",
+            "<w:p><w:sdt><w:sdtPr><w:id w:val=\"invalid\"/></w:sdtPr><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt></w:p>",
+            1,
+            1,
+        ),
+        (
+            "inline-self-closing-first",
+            "<w:p><w:sdt><w:sdtContent/><w:sdtContent><w:r><w:drawing/></w:r></w:sdtContent></w:sdt></w:p>",
+            1,
+            0,
+        ),
+        (
+            "alias-duplicate",
+            "<q:sdt xmlns:q=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><q:sdtContent><q:p/></q:sdtContent><q:sdtContent><q:p/></q:sdtContent></q:sdt>",
+            1,
+            1,
+        ),
+        (
+            "nested-opaque",
+            "<w:sdt><w:sdtContent><w:sdt><w:sdtPr><w:id w:val=\"invalid\"/></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:sdtContent></w:sdt>",
+            0,
+            0,
+        ),
+    ];
+    for (name, control, paragraphs, empty) in cases {
+        let input = temp.path.join(format!("{name}.docx"));
+        let mut document = Document::new();
+        document.add_paragraph("Body text");
+        document.save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let part = package.main_document_part().unwrap();
+        let xml = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+        package.set_part(
+            &part,
+            xml.replace("</w:body>", &format!("{control}</w:body>"))
+                .into_bytes(),
+        );
+        package.save(&input).unwrap();
+        assert_eq!(
+            Document::open(&input).unwrap().paragraph_count(),
+            1 + paragraphs,
+            "{name}"
+        );
+        let before = fs::read(&input).unwrap();
+        let output = cli(&["validate", path_text(&input)]);
+        assert_success(&output, name);
+        let report = String::from_utf8(output.stdout).unwrap();
+        if empty == 0 {
+            assert!(!report.contains("empty paragraph"), "{name}: {report}");
+        } else {
+            assert!(
+                report.contains(&format!("{empty} empty paragraph(s) found")),
+                "{name}: {report}"
+            );
+        }
+        assert!(
+            report.contains("Missing document title"),
+            "{name}: {report}"
+        );
+        assert!(
+            report.contains("Missing document author"),
+            "{name}: {report}"
+        );
+        assert_eq!(fs::read(&input).unwrap(), before, "{name}");
     }
 }
 
@@ -4265,4 +4947,1525 @@ fn whole_story_outputs_validate_without_comment_orphans() {
     document.save(&refused).unwrap();
     let result = cli(&["validate", path_text(&refused)]);
     assert!(!result.status.success());
+}
+
+#[test]
+fn fx195_font_directory_validation_precedes_publication() {
+    let workspace = TempWorkspace::new("fx195-font-dir");
+    let input = workspace.path.join("input.docx");
+    let mut document = Document::new();
+    document.add_paragraph("caller directory atomicity");
+    document.save(&input).unwrap();
+    let original = fs::read(&input).unwrap();
+    let fonts = workspace.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    fs::write(fonts.join("bad.ttf"), b"not a font").unwrap();
+    let output = workspace.path.join("out.png");
+    for bad in [fonts.clone(), workspace.path.join("missing"), input.clone()] {
+        for mode in ["convert", "render"] {
+            fs::write(&output, b"sentinel").unwrap();
+            let result = cli(&[
+                mode,
+                input.to_str().unwrap(),
+                "--font-dir",
+                bad.to_str().unwrap(),
+                if mode == "convert" {
+                    "--to"
+                } else {
+                    "--format"
+                },
+                "png",
+                if mode == "render" {
+                    "--output-dir"
+                } else {
+                    "--output"
+                },
+                output.to_str().unwrap(),
+                "--force",
+            ]);
+            assert!(
+                !result.status.success(),
+                "{mode} accepted invalid font input"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("font"),
+                "font validation, not argument parsing: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+            assert_eq!(fs::read(&input).unwrap(), original);
+        }
+    }
+    fs::remove_file(fonts.join("bad.ttf")).unwrap();
+    fs::write(
+        fonts.join("Carlito.ttf"),
+        include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf"),
+    )
+    .unwrap();
+    let result = cli(&[
+        "convert",
+        input.to_str().unwrap(),
+        "--font-dir",
+        fonts.to_str().unwrap(),
+        "--to",
+        "png",
+        "--output",
+        output.to_str().unwrap(),
+        "--force",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fs::read(&output).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(fs::read(&input).unwrap(), original);
+}
+
+fn fx195_caller_only_monospace() -> Vec<u8> {
+    let mut bytes = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf").to_vec();
+    for (from, to) in [
+        (b"Liberation Mono".to_vec(), b"FX195CallerOnly".to_vec()),
+        (
+            "Liberation Mono"
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect(),
+            "FX195CallerOnly"
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect(),
+        ),
+    ] {
+        assert_eq!(from.len(), to.len());
+        let mut count = 0;
+        let mut position = 0;
+        while let Some(relative) = bytes[position..]
+            .windows(from.len())
+            .position(|value| value == from)
+        {
+            let offset = position + relative;
+            bytes[offset..offset + from.len()].copy_from_slice(&to);
+            position = offset + from.len();
+            count += 1;
+        }
+        assert!(count > 0);
+    }
+    assert!(
+        oxml_layout::bundled_fonts::bundled_font_data()
+            .iter()
+            .all(|(name, data)| *name != "FX195CallerOnly" && *data != bytes)
+    );
+    bytes
+}
+
+#[test]
+fn fx195_every_word_cli_entrypoint_uses_caller_only_face() {
+    let workspace = TempWorkspace::new("fx195-caller-matrix");
+    let input = workspace.path.join("caller.docx");
+    let fonts = workspace.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    let bytes = fx195_caller_only_monospace();
+    fs::write(fonts.join("FilenameAlias.ttf"), &bytes).unwrap();
+    let mut document = Document::new();
+    document
+        .add_paragraph("")
+        .add_run("iiiiWWWW caller matrix")
+        .font("FX195CallerOnly");
+    document.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let refs = [("FilenameAlias", bytes.as_slice())];
+    let layout = document
+        .layout_with_fonts_and_bundled_fallback(&refs)
+        .unwrap();
+    assert!(
+        layout
+            .layout
+            .fonts
+            .iter()
+            .any(|font| font.data.as_ref() == bytes.as_slice() && font.face_index == 0)
+    );
+    let ordinary = document.layout_deterministic().unwrap();
+    assert_ne!(
+        format!("{:?}", ordinary.layout.pages),
+        format!("{:?}", layout.layout.pages)
+    );
+    let listed = cli(&[
+        "layout",
+        input.to_str().unwrap(),
+        "--font-dir",
+        fonts.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_success(&listed, "caller layout");
+    let without = cli(&["layout", input.to_str().unwrap(), "--json"]);
+    assert_success(&without, "ordinary layout");
+    assert_ne!(
+        listed.stdout, without.stdout,
+        "layout must measure the caller face"
+    );
+    for format in ["pdf", "png", "jpeg", "tiff"] {
+        let out = workspace.path.join(format!("converted.{format}"));
+        let converted = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--font-dir",
+            fonts.to_str().unwrap(),
+            "--dpi",
+            "72",
+            "--output",
+            out.to_str().unwrap(),
+        ]);
+        assert_success(&converted, format);
+        let expected = if format == "pdf" {
+            oxml_pdf::render_to_pdf_checked(&layout.layout).unwrap()
+        } else {
+            let raster_format = match format {
+                "png" => oxml_pdf::RasterFormat::Png {
+                    transparent_background: false,
+                },
+                "jpeg" => oxml_pdf::RasterFormat::Jpeg { quality: 90 },
+                _ => oxml_pdf::RasterFormat::Tiff,
+            };
+            match oxml_pdf::render_pages(
+                &layout.layout,
+                &[0],
+                oxml_pdf::RasterOptions {
+                    dpi: 72.0,
+                    format: raster_format,
+                },
+            )
+            .unwrap()
+            {
+                oxml_pdf::RasterOutput::SeparatePages(mut pages) => pages.remove(0),
+                oxml_pdf::RasterOutput::MultiPageTiff(data) => data,
+            }
+        };
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            expected,
+            "{format} selected caller paint"
+        );
+        if format != "pdf" {
+            let directory = workspace.path.join(format!("render-{format}"));
+            let rendered = cli(&[
+                "render",
+                input.to_str().unwrap(),
+                "--format",
+                format,
+                "--font-dir",
+                fonts.to_str().unwrap(),
+                "--dpi",
+                "72",
+                "--pages",
+                "1",
+                "--output-dir",
+                directory.to_str().unwrap(),
+            ]);
+            assert_success(&rendered, "caller render");
+            let filename = match format {
+                "tiff" => "caller.tiff",
+                "jpeg" => "caller_page1.jpg",
+                _ => "caller_page1.png",
+            };
+            assert_eq!(fs::read(directory.join(filename)).unwrap(), expected);
+        }
+    }
+    let unsupported = workspace.path.join("no.html");
+    let refused = cli(&[
+        "convert",
+        input.to_str().unwrap(),
+        "--to",
+        "html",
+        "--font-dir",
+        fonts.to_str().unwrap(),
+        "--output",
+        unsupported.to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(!unsupported.exists());
+    let repeated = cli(&[
+        "layout",
+        input.to_str().unwrap(),
+        "--font-dir",
+        fonts.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_success(&repeated, "repeated layout");
+    assert_eq!(repeated.stdout, listed.stdout);
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn word_replace_map_is_ordered_counted_and_atomic() {
+    let temp = TempWorkspace::new("word-map");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let map = temp.path.join("map.json");
+    write_document(&input, &["A A"]);
+    let before = fs::read(&input).unwrap();
+    fs::write(&map, r#"[{"placeholder":"A","value":"B","expect":2},{"placeholder":"B","value":"C","expect":2}]"#).unwrap();
+    let result = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "--output",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "ordered map");
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["schema"], 1);
+    assert_eq!(report["total_count"], 4);
+    assert_eq!(
+        Document::open(&output)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text(),
+        "C C"
+    );
+    fs::remove_file(&output).unwrap();
+    fs::write(&map, r#"[{"placeholder":"A","value":"B","expect":2},{"placeholder":"B","value":"C","expect":1}]"#).unwrap();
+    let refused = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "--output",
+        path_text(&output),
+        "--json",
+    ]);
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+fn pixel_png() -> Vec<u8> {
+    vec![
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 29, 99, 96, 96, 96, 248, 15, 0,
+        1, 4, 1, 0, 30, 115, 156, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]
+}
+
+fn json_stdout(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("JSON standard output")
+}
+
+fn write_controls_document(path: &Path, controls: &[(&str, &str, &str)]) {
+    write_document(path, &["seed"]);
+    let body = controls
+        .iter()
+        .map(|(tag, properties, text)| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:tag w:val="{tag}"/>{properties}</w:sdtPr><w:sdtContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+            )
+        })
+        .collect::<String>();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(path).unwrap())).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr/></w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    package.save(path).unwrap();
+}
+
+#[test]
+fn fields_update_reports_general_and_layout_cache_results() {
+    let temp = TempWorkspace::new("fields-update");
+    let input = temp.path.join("fields.docx");
+    let mut document = fixture_document(&[]);
+    {
+        let mut paragraph = document.add_paragraph("Page ");
+        let mut run = paragraph.add_run("");
+        run.add_field("PAGE", "9").unwrap();
+        run.add_field("NUMPAGES", "9").unwrap();
+        run.add_field(r#"DATE \@ "yyyy-MM-dd""#, "1999-01-01")
+            .unwrap();
+    }
+    for _ in 0..2 {
+        document
+            .add_paragraph("Figure ")
+            .add_run("")
+            .add_field("SEQ Figure", "9")
+            .unwrap();
+    }
+    for (instruction, stored) in [
+        ("FILENAME", "old-name"),
+        (r"FILENAME \p", "old-path"),
+        ("UNSUPPORTED", "retained"),
+    ] {
+        document
+            .add_paragraph("")
+            .add_run("")
+            .add_field(instruction, stored)
+            .unwrap();
+    }
+    document.set_header("header seed");
+    document.save(&input).unwrap();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(&input).unwrap())).unwrap();
+    let header_part = package
+        .parts
+        .keys()
+        .find(|name| name.starts_with("/word/header") && name.ends_with(".xml"))
+        .unwrap()
+        .clone();
+    let header_source = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:producer"><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>77</w:t></w:r></w:fldSimple><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>88</w:t></w:r></w:fldSimple></w:p><v:keep value="opaque"/></w:hdr>"#;
+    package.set_part(&header_part, header_source.to_vec());
+    package.save(&input).unwrap();
+    let input_before = fs::read(&input).unwrap();
+
+    let output = temp.path.join("updated.docx");
+    let result = cli(&[
+        "fields",
+        "update",
+        path_text(&input),
+        "--now",
+        "2026-10-10T08:30:00",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "fields update");
+    let record = json_stdout(&result);
+    assert_eq!(record["now"], "2026-10-10T08:30:00");
+    assert_eq!(record["page_fields"], 1);
+    assert_eq!(record["num_pages_fields"], 1);
+    assert_eq!(record["ordinary_updated"], record["ordinary_fields"]);
+    assert_eq!(
+        record["total_updated"].as_u64().unwrap(),
+        record["ordinary_updated"].as_u64().unwrap() + 2
+    );
+    assert!(
+        record["saved_cache_scope"]
+            .as_str()
+            .unwrap()
+            .contains("header-footer")
+    );
+    let evaluations = record["evaluations"].as_array().unwrap();
+    assert_eq!(evaluations[0]["instruction"], "PAGE");
+    assert_eq!(evaluations[0]["cached_result"], "9");
+    assert_eq!(evaluations[0]["outcome"]["kind"], "deferred_pagination");
+    assert_eq!(
+        evaluations[2]["outcome"],
+        serde_json::json!({"kind":"resolved","text":"2026-10-10"})
+    );
+    assert_eq!(evaluations[7]["outcome"]["kind"], "keep_stored");
+    assert!(!record["diagnostics"].as_array().unwrap().is_empty());
+    assert_eq!(
+        Document::open(&output)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text(),
+        "Page 112026-10-10"
+    );
+
+    let updated = Document::open(&output).unwrap();
+    assert_eq!(updated.paragraph(1).unwrap().text(), "Figure 1");
+    assert_eq!(updated.paragraph(2).unwrap().text(), "Figure 2");
+    assert_eq!(updated.paragraph(3).unwrap().text(), "fields.docx");
+    assert_eq!(
+        updated.paragraph(4).unwrap().text(),
+        fs::canonicalize(&input).unwrap().to_str().unwrap()
+    );
+    assert_eq!(updated.paragraph(5).unwrap().text(), "retained");
+    let saved_package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(&output).unwrap())).unwrap();
+    let saved_header = std::str::from_utf8(saved_package.get_part(&header_part).unwrap()).unwrap();
+    assert!(
+        saved_header.contains(r#"w:instr="PAGE" w:dirty="1"><w:r><w:t>77</w:t>"#),
+        "{saved_header}"
+    );
+    assert!(
+        saved_header.contains(r#"w:instr="NUMPAGES" w:dirty="1"><w:r><w:t>88</w:t>"#),
+        "{saved_header}"
+    );
+    assert!(
+        saved_header.contains(r#"<v:keep value="opaque"/>"#),
+        "{saved_header}"
+    );
+    let twice = temp.path.join("twice.docx");
+    Document::open(&output).unwrap().save(&twice).unwrap();
+    assert_eq!(
+        Document::open(&twice).unwrap().paragraph(4).unwrap().text(),
+        fs::canonicalize(&input).unwrap().to_str().unwrap()
+    );
+    assert_eq!(fs::read(&input).unwrap(), input_before);
+
+    let clock = temp.path.join("clock.docx");
+    let result = cli(&[
+        "fields",
+        "update",
+        path_text(&input),
+        "-o",
+        path_text(&clock),
+        "--json",
+    ]);
+    assert_success(&result, "fields update with the clock");
+    assert!(json_stdout(&result)["now"].is_null());
+    assert!(
+        Document::open(&clock)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text()
+            .ends_with("1999-01-01")
+    );
+
+    let invalid = cli(&[
+        "fields",
+        "update",
+        path_text(&input),
+        "--now",
+        "2026-02-30T08:30:00",
+        "-o",
+        path_text(&temp.path.join("invalid.docx")),
+    ]);
+    assert_eq!(invalid.status.code(), Some(2));
+    for (index, invalid_time) in [
+        "2026-10-10",
+        "2026-10-10T08:30",
+        "2026-10-10T08:30:00.5",
+        "2026-10-10T08:30:00Z",
+        "2026-10-10T08:30:00+01:00",
+        "2026-10-10t08:30:00",
+        "2026-10-10T08:30:60",
+        "2026-10-10T24:30:00",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let destination = temp.path.join(format!("refused-{index}.docx"));
+        let result = cli(&[
+            "fields",
+            "update",
+            path_text(&input),
+            "--now",
+            invalid_time,
+            "-o",
+            path_text(&destination),
+        ]);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{invalid_time}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&input).unwrap(), input_before);
+    }
+}
+
+#[test]
+fn word_regex_map_has_native_scope_and_capture_counts() {
+    let temp = TempWorkspace::new("regex-map");
+    let input = temp.path.join("in.docx");
+    let output = temp.path.join("out.docx");
+    let map = temp.path.join("map.json");
+    write_document(&input, &["one12 two34"]);
+    let before = fs::read(&input).unwrap();
+    fs::write(
+        &map,
+        r#"[{"placeholder":"([a-z]+)([0-9]+)","value":"$2:$1","expect":2}]"#,
+    )
+    .unwrap();
+    let result = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "--regex",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "regex map");
+    assert_eq!(
+        Document::open(&output)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text(),
+        "12:one 34:two"
+    );
+    fs::remove_file(&output).unwrap();
+    fs::write(
+        &map,
+        r#"[{"placeholder":"one","value":"changed"},{"placeholder":"[","value":"x"}]"#,
+    )
+    .unwrap();
+    let refused = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "--regex",
+        "-o",
+        path_text(&output),
+    ]);
+    assert!(!refused.status.success());
+    assert!(!output.exists());
+    assert_eq!(fs::read(input).unwrap(), before);
+}
+
+#[test]
+fn fill_tag_updates_all_matching_controls_atomically() {
+    let temp = TempWorkspace::new("fill-tag");
+    let input = temp.path.join("in.docx");
+    let output = temp.path.join("out.docx");
+    write_controls_document(
+        &input,
+        &[
+            ("client", "<w:text/>", "before"),
+            ("client", "<w:text/>", "other"),
+        ],
+    );
+    let before = fs::read(&input).unwrap();
+    let result = cli(&[
+        "fill",
+        path_text(&input),
+        "--tag",
+        "client=A=B",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "fill tag");
+    assert_eq!(json_stdout(&result)["tags"][0]["count"], 2);
+    assert!(
+        Document::open(&output)
+            .unwrap()
+            .content_controls()
+            .iter()
+            .all(|c| c.text() == "A=B")
+    );
+    fs::remove_file(&output).unwrap();
+    for tags in [["client=x", "missing=y"], ["client=x", "client=y"]] {
+        let refused = cli(&[
+            "fill",
+            path_text(&input),
+            "--tag",
+            tags[0],
+            "--tag",
+            tags[1],
+            "-o",
+            path_text(&output),
+        ]);
+        assert!(!refused.status.success());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn word_meta_get_set_preserves_core_custom_types() {
+    let temp = TempWorkspace::new("meta-types");
+    let input = temp.path.join("in.docx");
+    let output = temp.path.join("out.docx");
+    write_document(&input, &["keep"]);
+    let result = cli(&[
+        "meta",
+        "set",
+        path_text(&input),
+        "--title",
+        "Changed",
+        "--custom",
+        "count=int:4",
+        "--custom",
+        "text=str:a:b=c",
+        "--custom",
+        "when=filetime:2024-02-29T12:00:00+01:00",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "meta set");
+    let doc = Document::open(&output).unwrap();
+    assert_eq!(doc.title(), Some("Changed"));
+    assert_eq!(
+        doc.custom_property("count").unwrap().value,
+        rdocx::CustomPropertyValue::I4(4)
+    );
+    assert_eq!(
+        doc.custom_property("text").unwrap().value,
+        rdocx::CustomPropertyValue::Lpwstr("a:b=c".into())
+    );
+    let report = cli(&["meta", "get", path_text(&output), "--json"]);
+    assert_success(&report, "meta get");
+    assert_eq!(json_stdout(&report)["custom"][0]["pid"], 2);
+    fs::remove_file(&output).unwrap();
+    let before = fs::read(&input).unwrap();
+    for value in [
+        "x=bool:1",
+        "x=float:NaN",
+        "x=filetime:2023-02-29T12:00:00Z",
+        "x=empty:bad",
+    ] {
+        let refused = cli(&[
+            "meta",
+            "set",
+            path_text(&input),
+            "--custom",
+            value,
+            "-o",
+            path_text(&output),
+        ]);
+        assert!(!refused.status.success());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn inspect_adds_pictures_and_public_counts_compatibly() {
+    let temp = TempWorkspace::new("inspect-counts");
+    let input = temp.path.join("in.docx");
+    write_document(&input, &["one two"]);
+    let result = cli(&["inspect", path_text(&input), "--json"]);
+    assert_success(&result, "inspect counts");
+    let json = json_stdout(&result);
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["paragraphs"], 1);
+    assert_eq!(json["word_count"], 2);
+    assert_eq!(json["character_count"], 7);
+    assert_eq!(json["page_count"], 1);
+    assert_eq!(json["count_scope"], "accepted-main-body");
+    assert_eq!(json["pictures"], json!([]));
+}
+
+#[test]
+fn images_extract_preserves_bytes_and_reports_story_owners() {
+    let temp = TempWorkspace::new("extract-owners");
+    let input = temp.path.join("in.docx");
+    let dir = temp.path.join("images");
+    let mut doc = fixture_document(&["before"]);
+    let body = doc.stories().unwrap()[0].clone();
+    doc.add_picture_with_options(
+        &body,
+        &pixel_png(),
+        "../../evil.png",
+        rdocx::PictureOptions {
+            width: rdocx::Length::emu(914400),
+            height: rdocx::Length::emu(457200),
+            crop: None,
+            anchor: None,
+            name: None,
+            description: None,
+            title: None,
+            decorative: false,
+        },
+    )
+    .unwrap();
+    doc.save(&input).unwrap();
+    let result = cli(&[
+        "images",
+        "extract",
+        path_text(&input),
+        path_text(&dir),
+        "--json",
+    ]);
+    assert_success(&result, "extract owners");
+    let json = json_stdout(&result);
+    assert_eq!(json["extracted_parts"], 1);
+    assert_eq!(json["pictures"][0]["file"], "image-000001.png");
+    assert_eq!(fs::read(dir.join("image-000001.png")).unwrap(), pixel_png());
+    let again = cli(&["images", "extract", path_text(&input), path_text(&dir)]);
+    assert!(!again.status.success());
+    assert_eq!(fs::read(dir.join("image-000001.png")).unwrap(), pixel_png());
+    let empty = temp.path.join("empty.docx");
+    write_document(&empty, &["no image"]);
+    let absent = temp.path.join("absent");
+    let result = cli(&[
+        "images",
+        "extract",
+        path_text(&empty),
+        path_text(&absent),
+        "--json",
+    ]);
+    assert_success(&result, "empty extraction");
+    assert!(!absent.exists());
+}
+
+#[test]
+fn fx204_shared_media_and_external_images_retain_physical_owner_identity() {
+    let temp = TempWorkspace::new("shared-external");
+    let input = temp.path.join("in.docx");
+    let output = temp.path.join("images");
+    let mut doc = fixture_document(&["body"]);
+    doc.try_set_header("header").unwrap();
+    for kind in [rdocx::StoryKind::Body, rdocx::StoryKind::Header] {
+        let story = doc
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.kind() == kind)
+            .unwrap();
+        doc.add_picture_with_options(
+            &story,
+            &pixel_png(),
+            "picture.png",
+            rdocx::PictureOptions {
+                width: rdocx::Length::emu(914400),
+                height: rdocx::Length::emu(457200),
+                crop: None,
+                anchor: None,
+                name: None,
+                description: None,
+                title: None,
+                decorative: false,
+            },
+        )
+        .unwrap();
+    }
+    doc.save(&input).unwrap();
+    let pictures = doc.pictures().unwrap();
+    assert_eq!(pictures.len(), 2);
+    let body = pictures
+        .iter()
+        .find(|p| p.location.story().kind() == rdocx::StoryKind::Body)
+        .unwrap();
+    let header = pictures
+        .iter()
+        .find(|p| p.location.story().kind() == rdocx::StoryKind::Header)
+        .unwrap();
+    let media = body.media_part_name.clone().unwrap();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(&input).unwrap())).unwrap();
+    package
+        .get_or_create_part_rels(header.location.story().part_name())
+        .items
+        .iter_mut()
+        .find(|r| r.id == header.relationship_id)
+        .unwrap()
+        .target = media.to_ascii_uppercase();
+    package.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let result = cli(&[
+        "images",
+        "extract",
+        path_text(&input),
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "shared image owners");
+    let report = json_stdout(&result);
+    assert_eq!(report["extracted_parts"], 1);
+    assert_eq!(report["pictures"].as_array().unwrap().len(), 2);
+    assert_eq!(report["pictures"][0]["file"], report["pictures"][1]["file"]);
+    assert_ne!(
+        report["pictures"][0]["story"]["part_name"],
+        report["pictures"][1]["story"]["part_name"]
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+    let external = temp.path.join("external.docx");
+    let xml = String::from_utf8(
+        package
+            .get_part(body.location.story().part_name())
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+    .replace(
+        &format!("r:embed=\"{}\"", body.relationship_id),
+        &format!("r:link=\"{}\"", body.relationship_id),
+    );
+    package.set_part(body.location.story().part_name(), xml.into_bytes());
+    let relationship = package
+        .get_or_create_part_rels(body.location.story().part_name())
+        .items
+        .iter_mut()
+        .find(|r| r.id == body.relationship_id)
+        .unwrap();
+    relationship.target = "https://example.invalid/never-fetched.png".into();
+    relationship.target_mode = Some("External".into());
+    package.save(&external).unwrap();
+    let external_dir = temp.path.join("external-images");
+    let result = cli(&[
+        "images",
+        "extract",
+        path_text(&external),
+        path_text(&external_dir),
+        "--json",
+    ]);
+    assert_success(&result, "external image inventory");
+    let report = json_stdout(&result);
+    assert_eq!(report["pictures"][0]["status"], "external");
+    assert!(report["pictures"][0]["file"].is_null());
+    assert_eq!(
+        report["pictures"][0]["url"],
+        "https://example.invalid/never-fetched.png"
+    );
+    assert_eq!(report["extracted_parts"], 1);
+    let mut reopened = Document::open(&external).unwrap();
+    let linked = reopened
+        .pictures()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.external_url.is_some())
+        .unwrap();
+    let before = reopened.to_bytes().unwrap();
+    assert!(
+        reopened
+            .set_picture_size_at(&linked, rdocx::Length::emu(2), rdocx::Length::emu(2))
+            .is_err()
+    );
+    assert_eq!(reopened.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn fx204_empty_maps_and_hostile_maps_preserve_input_and_outputs() {
+    let temp = TempWorkspace::new("map-refusals");
+    let input = temp.path.join("in.docx");
+    let output = temp.path.join("out.docx");
+    let map = temp.path.join("map.json");
+    write_document(&input, &["A"]);
+    let before = fs::read(&input).unwrap();
+    fs::write(&map, "[]").unwrap();
+    let result = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "empty map");
+    assert_eq!(json_stdout(&result)["pairs"], json!([]));
+    assert_eq!(
+        Document::open(&output)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text(),
+        "A"
+    );
+    fs::remove_file(&output).unwrap();
+    for value in [
+        r#"[{"placeholder":"A","value":"B","expect":true}]"#,
+        r#"[{"placeholder":"A","value":"B","unknown":0}]"#,
+        r#"[{"placeholder":"A","value":"B"},{"placeholder":"B","value":"\u0000"}]"#,
+    ] {
+        fs::write(&map, value).unwrap();
+        let result = cli(&[
+            "replace",
+            path_text(&input),
+            "--map",
+            path_text(&map),
+            "-o",
+            path_text(&output),
+            "--json",
+        ]);
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn every_new_command_has_help_and_reference_contract() {
+    for args in [
+        &["replace", "--help"][..],
+        &["fields", "update", "--help"],
+        &["images", "extract", "--help"],
+        &["meta", "set", "--help"],
+        &["fill", "--help"],
+    ] {
+        let result = cli(args);
+        assert_success(&result, "command help");
+        assert!(!result.stdout.is_empty());
+    }
+    let replace = cli(&["replace", "--help"]);
+    let help = String::from_utf8(replace.stdout).unwrap();
+    for flag in ["--map", "--regex", "--expect", "--json"] {
+        assert!(help.contains(flag));
+    }
+    let image_help = cli(&["images", "extract", "--help"]);
+    assert!(
+        !String::from_utf8(image_help.stdout)
+            .unwrap()
+            .contains("--force")
+    );
+}
+
+#[test]
+fn new_mutations_reject_input_aliases_and_output_collisions() {
+    let temp = TempWorkspace::new("new-output-refusal");
+    let input = temp.path.join("in.docx");
+    let output = temp.path.join("out.docx");
+    write_document(&input, &["A"]);
+    let before = fs::read(&input).unwrap();
+    let alias = temp.path.join("hardlink.docx");
+    fs::hard_link(&input, &alias).unwrap();
+    for path in [&input, &alias] {
+        for args in [
+            vec![
+                "replace",
+                path_text(&input),
+                "-p",
+                "A",
+                "-v",
+                "B",
+                "-o",
+                path_text(path),
+            ],
+            vec!["fields", "update", path_text(&input), "-o", path_text(path)],
+            vec![
+                "meta",
+                "set",
+                path_text(&input),
+                "--title",
+                "B",
+                "-o",
+                path_text(path),
+            ],
+        ] {
+            let result = cli(&args);
+            assert!(!result.status.success());
+            assert_eq!(fs::read(&input).unwrap(), before);
+        }
+    }
+    fs::write(&output, b"keep").unwrap();
+    let result = cli(&[
+        "meta",
+        "set",
+        path_text(&input),
+        "--title",
+        "B",
+        "-o",
+        path_text(&output),
+    ]);
+    assert!(!result.status.success());
+    assert_eq!(fs::read(output).unwrap(), b"keep");
+}
+
+#[test]
+fn fx217_cli_html_markdown_template_local_images_and_atomic_refusal() {
+    let ws = TempWorkspace::new("fx217-import");
+    let image = pixel_png();
+    fs::write(ws.path.join("face name.png"), &image).unwrap();
+    let mut template = Document::new();
+    template.add_paragraph("Discard template");
+    let template_path = ws.path.join("template.docx");
+    template.save(&template_path).unwrap();
+    for (extension, body) in [
+        (
+            "html",
+            r#"<h1>Title</h1><p><img src="face%20name.png" alt="specimen"></p>"#,
+        ),
+        ("md", "# Title\n\n![specimen](face%20name.png)\n"),
+    ] {
+        let source = ws.path.join(format!("source.{extension}"));
+        let output = ws.path.join(format!("result-{extension}.docx"));
+        fs::write(&source, body).unwrap();
+        let result = cli(&[
+            "convert",
+            source.to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--template",
+            template_path.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let document = Document::open(&output).unwrap();
+        assert_eq!(document.paragraph(0).unwrap().text(), "Title");
+        assert!(!document.text().contains("Discard template"));
+        assert_eq!(document.pictures().unwrap().len(), 1);
+        assert_eq!(document.pictures().unwrap()[0].bytes, image);
+        let before = fs::read(&output).unwrap();
+        let collision = cli(&[
+            "convert",
+            source.to_str().unwrap(),
+            "--to",
+            "docx",
+            "-o",
+            output.to_str().unwrap(),
+        ]);
+        assert!(!collision.status.success());
+        assert_eq!(fs::read(&output).unwrap(), before);
+        assert_eq!(fs::read(&source).unwrap(), body.as_bytes());
+        for flags in [
+            &["--dpi", "150"][..],
+            &["--quality", "90"],
+            &["--revision-view", "accepted"],
+            &["--transparent"],
+        ] {
+            let refused = ws.path.join("refused.docx");
+            let mut args = vec![
+                "convert",
+                source.to_str().unwrap(),
+                "-o",
+                refused.to_str().unwrap(),
+            ];
+            args.extend_from_slice(flags);
+            assert!(!cli(&args).status.success());
+            assert!(!refused.exists());
+        }
+        let aliases = cli(&[
+            "convert",
+            source.to_str().unwrap(),
+            "-o",
+            source.to_str().unwrap(),
+            "--force",
+        ]);
+        assert!(!aliases.status.success());
+        assert_eq!(fs::read(&source).unwrap(), body.as_bytes());
+        let unsafe_input = ws.path.join(format!("unsafe.{extension}"));
+        fs::write(
+            &unsafe_input,
+            if extension == "md" {
+                "![unsafe](../face.png)"
+            } else {
+                r#"<img src="../face.png">"#
+            },
+        )
+        .unwrap();
+        let refused = ws.path.join("unsafe.docx");
+        assert!(
+            !cli(&[
+                "convert",
+                unsafe_input.to_str().unwrap(),
+                "-o",
+                refused.to_str().unwrap()
+            ])
+            .status
+            .success()
+        );
+        assert!(!refused.exists());
+    }
+    assert!(
+        Document::open(&template_path)
+            .unwrap()
+            .text()
+            .contains("Discard template")
+    );
+}
+
+#[test]
+fn fx217_cli_local_resources_are_bounded_and_owned() {
+    let ws = TempWorkspace::new("fx217-resource-bounds");
+    for (name, body) in [
+        ("encoding", r#"<img src="bad%ZZ.png">"#),
+        (
+            "network",
+            r#"<img src="https://example.invalid/image.png">"#,
+        ),
+    ] {
+        let input = ws.path.join(format!("{name}.html"));
+        let output = ws.path.join(format!("{name}.docx"));
+        fs::write(&input, body).unwrap();
+        assert!(
+            !cli(&[
+                "convert",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap()
+            ])
+            .status
+            .success()
+        );
+        assert!(!output.exists());
+        assert_eq!(fs::read_to_string(&input).unwrap(), body);
+    }
+    let missing = ws.path.join("missing.html");
+    let output = ws.path.join("missing.docx");
+    fs::write(&missing, r#"<p>Kept</p><img src="missing.png">"#).unwrap();
+    let result = cli(&[
+        "convert",
+        missing.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!result.stderr.is_empty());
+    let document = Document::open(&output).unwrap();
+    assert!(document.text().contains("Kept"));
+    assert!(document.pictures().unwrap().is_empty());
+    let large = ws.path.join("large.html");
+    fs::File::create(&large)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+    let refused = ws.path.join("large.docx");
+    assert!(
+        !cli(&[
+            "convert",
+            large.to_str().unwrap(),
+            "-o",
+            refused.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    assert!(!refused.exists());
+    #[cfg(unix)]
+    {
+        let outside = TempWorkspace::new("fx217-outside-image");
+        let image = outside.path.join("outside.png");
+        fs::write(&image, pixel_png()).unwrap();
+        std::os::unix::fs::symlink(&image, ws.path.join("escape.png")).unwrap();
+        let input = ws.path.join("escape.html");
+        let output = ws.path.join("escape.docx");
+        fs::write(&input, r#"<img src="escape.png">"#).unwrap();
+        assert!(
+            !cli(&[
+                "convert",
+                input.to_str().unwrap(),
+                "-o",
+                output.to_str().unwrap()
+            ])
+            .status
+            .success()
+        );
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn fx220_cli_fonts_embed_all_faces_list_actual_parts_and_remove() {
+    let workspace = TempWorkspace::new("fx220-faces");
+    let source = workspace.path.join("source.docx");
+    Document::new().save(&source).unwrap();
+    let original = fs::read(&source).unwrap();
+    let font = workspace.path.join("font.ttf");
+    let data = include_bytes!("../../oxml-layout/fonts/Gelasio-Regular.ttf");
+    fs::write(&font, data).unwrap();
+    let mut current = source.clone();
+    for (index, kind) in ["regular", "bold", "italic", "bold-italic"]
+        .iter()
+        .enumerate()
+    {
+        let output = workspace.path.join(format!("face{index}.docx"));
+        let mut args = vec![
+            "font",
+            "embed",
+            current.to_str().unwrap(),
+            "--name",
+            "FX220 CLI",
+            "--font",
+            font.to_str().unwrap(),
+            "--kind",
+            kind,
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ];
+        if index == 0 {
+            args.extend([
+                "--font-key",
+                "{01234567-89AB-CDEF-0123-456789ABCDEF}",
+                "--subsetted",
+            ]);
+        }
+        let result = cli(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(record["schema"], 1);
+        current = output;
+    }
+    let result = cli(&["font", "list", current.to_str().unwrap(), "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(record["schema"], 1);
+    let entry = record["fonts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|font| font["name"] == "FX220 CLI")
+        .unwrap();
+    let faces = entry["faces"].as_array().unwrap();
+    assert_eq!(faces.len(), 4);
+    assert_eq!(
+        faces[0]["font_key"],
+        "{01234567-89AB-CDEF-0123-456789ABCDEF}"
+    );
+    assert_eq!(faces[0]["subsetted"], true);
+    assert_eq!(faces[1]["font_key"], rdocx::derive_font_key(data).unwrap());
+    let package = OpcPackage::open(&current).unwrap();
+    for (face, kind) in faces
+        .iter()
+        .zip(["regular", "bold", "italic", "bold-italic"])
+    {
+        assert_eq!(face["kind"], kind);
+        assert_eq!(face["format"], "odttf");
+        let body = package
+            .get_part(face["part_name"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(face["stored_len"].as_u64().unwrap() as usize, body.len());
+        assert_eq!(face["decoded_len"].as_u64().unwrap() as usize, data.len());
+    }
+    let native = Document::open(&current).unwrap();
+    let native_fonts = native.try_fonts().unwrap();
+    let index = native_fonts
+        .iter()
+        .position(|font| font.name == "FX220 CLI")
+        .unwrap();
+    assert!(
+        native_fonts[index]
+            .embedded_fonts
+            .iter()
+            .all(|face| face.data == data)
+    );
+    let (part, length) = native.font_part_metadata(index, 0).unwrap();
+    assert_eq!(part, faces[0]["part_name"].as_str().unwrap());
+    assert_eq!(length, data.len());
+    assert!(native.font_part_metadata(index, 4).is_err());
+    assert!(native.font_part_metadata(usize::MAX, 0).is_err());
+    let removed = workspace.path.join("removed.docx");
+    let result = cli(&[
+        "font",
+        "remove",
+        current.to_str().unwrap(),
+        "--name",
+        "FX220 CLI",
+        "--kind",
+        "bold",
+        "--output",
+        removed.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(record["removed"], true);
+    let result = cli(&["font", "list", removed.to_str().unwrap(), "--json"]);
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let entry = record["fonts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|font| font["name"] == "FX220 CLI")
+        .unwrap();
+    assert_eq!(entry["faces"].as_array().unwrap().len(), 3);
+    let all_removed = workspace.path.join("all-removed.docx");
+    let result = cli(&[
+        "font",
+        "remove",
+        removed.to_str().unwrap(),
+        "--name",
+        "FX220 CLI",
+        "--output",
+        all_removed.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(result.status.success());
+    let result = cli(&["font", "list", all_removed.to_str().unwrap(), "--json"]);
+    let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(
+        record["fonts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|font| font["name"] != "FX220 CLI")
+    );
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(&font).unwrap(), data);
+}
+
+#[test]
+fn fx220_cli_font_settings_keep_absence_and_false_distinct() {
+    let workspace = TempWorkspace::new("fx220-settings");
+    let source = workspace.path.join("source.docx");
+    Document::new().save(&source).unwrap();
+    let original = fs::read(&source).unwrap();
+    let mut current = source.clone();
+    for (index, setting) in ["true", "false", "none"].iter().enumerate() {
+        let output = workspace.path.join(format!("settings{index}.docx"));
+        let result = cli(&[
+            "font",
+            "settings",
+            current.to_str().unwrap(),
+            "--embed-true-type-fonts",
+            setting,
+            "--embed-system-fonts",
+            setting,
+            "--save-subset-fonts",
+            setting,
+            "--output",
+            output.to_str().unwrap(),
+            "--json",
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let record: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let expected = match *setting {
+            "true" => json!(true),
+            "false" => json!(false),
+            _ => serde_json::Value::Null,
+        };
+        assert_eq!(record["settings"]["embed_true_type_fonts"], expected);
+        assert_eq!(record["settings"]["save_subset_fonts"], expected);
+        assert_eq!(record["settings"]["embed_system_fonts"], expected);
+        let reread = cli(&["font", "settings", output.to_str().unwrap(), "--json"]);
+        assert!(reread.status.success());
+        let reread: serde_json::Value = serde_json::from_slice(&reread.stdout).unwrap();
+        assert_eq!(reread["settings"], record["settings"]);
+        current = output;
+    }
+    for args in [
+        vec!["--embed-true-type-fonts", "false"],
+        vec!["--output", current.to_str().unwrap()],
+    ] {
+        let result = cli(&[&["font", "settings", source.to_str().unwrap()][..], &args].concat());
+        assert!(!result.status.success());
+    }
+    assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn fx220_cli_font_refusals_preserve_inputs_and_existing_outputs() {
+    let workspace = TempWorkspace::new("fx220-refusals");
+    let source = workspace.path.join("source.docx");
+    Document::new().save(&source).unwrap();
+    let original = fs::read(&source).unwrap();
+    let font = workspace.path.join("font.ttf");
+    let data = include_bytes!("../../oxml-layout/fonts/Gelasio-Regular.ttf");
+    fs::write(&font, data).unwrap();
+    let output = workspace.path.join("output.docx");
+    let common = [
+        "font",
+        "embed",
+        source.to_str().unwrap(),
+        "--name",
+        "FX220 CLI",
+        "--font",
+        font.to_str().unwrap(),
+    ];
+    for extra in [
+        vec!["--license-identity", "OFL-1.1"],
+        vec!["--license-authorized", "--license-identity", " "],
+        vec![
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--kind",
+            "invalid",
+        ],
+        vec![
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--font-key",
+            "invalid",
+        ],
+    ] {
+        let result = cli(&[&common[..], &extra, &["--output", output.to_str().unwrap()]].concat());
+        assert!(!result.status.success());
+        assert!(!output.exists());
+    }
+    let license = ["--license-authorized", "--license-identity", "OFL-1.1"];
+    for collision in [&source, &font, &output] {
+        if collision == &output {
+            fs::write(collision, b"keep existing output").unwrap();
+        }
+        let before = fs::read(collision).unwrap();
+        let result = cli(&[
+            &common[..],
+            &license,
+            &["--output", collision.to_str().unwrap()],
+        ]
+        .concat());
+        assert!(!result.status.success());
+        assert_eq!(fs::read(collision).unwrap(), before);
+    }
+    let invalid = workspace.path.join("invalid.ttf");
+    fs::write(&invalid, b"not a font").unwrap();
+    let oversized = workspace.path.join("oversized.ttf");
+    fs::File::create(&oversized)
+        .unwrap()
+        .set_len(64 * 1024 * 1024 + 1)
+        .unwrap();
+    let absent_output = workspace.path.join("absent.docx");
+    for bad_font in [&invalid, &oversized, &workspace.path] {
+        let result = cli(&[
+            "font",
+            "embed",
+            source.to_str().unwrap(),
+            "--name",
+            "FX220 CLI",
+            "--font",
+            bad_font.to_str().unwrap(),
+            "--license-authorized",
+            "--license-identity",
+            "OFL-1.1",
+            "--output",
+            absent_output.to_str().unwrap(),
+        ]);
+        assert!(!result.status.success());
+        assert!(!absent_output.exists());
+    }
+    #[cfg(unix)]
+    {
+        let alias = workspace.path.join("source-alias.docx");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let hard_alias = workspace.path.join("font-hard-alias.docx");
+        fs::hard_link(&font, &hard_alias).unwrap();
+        for collision in [&alias, &hard_alias] {
+            let result = cli(&[
+                &common[..],
+                &license,
+                &["--output", collision.to_str().unwrap()],
+            ]
+            .concat());
+            assert!(!result.status.success());
+        }
+    }
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read(&font).unwrap(), data);
+    assert!(fs::read_dir(&workspace.path).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
+    let help = cli(&["font", "embed", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for flag in [
+        "--license-authorized",
+        "--license-identity",
+        "--font",
+        "--kind",
+        "--output",
+    ] {
+        assert!(help.contains(flag));
+    }
 }

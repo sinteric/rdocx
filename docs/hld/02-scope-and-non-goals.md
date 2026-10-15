@@ -24,7 +24,7 @@ its cost is recorded in `00-vision.md`.
 |---|---|
 | `Presentation::new / open / from_bytes / save / to_bytes` | `new()` uses a bundled template |
 | Slide collection, iteration, indexing, lookup by id | |
-| `add_slide(layout)` | Synthesises placeholders, does not deep-copy |
+| `add_slide(layout)`, atomic `add_slide_at(layout, position)` | Synthesises placeholders, does not deep-copy |
 | `remove_slide`, `move_slide`, `duplicate_slide` | Beyond python-pptx |
 | Slide size get and set | |
 | Slide masters and layouts, layout lookup by name | Read |
@@ -39,6 +39,7 @@ its cost is recorded in `00-vision.md`.
 | OLE, ActiveX, and VBA executable payloads | Native Rust relationship-owned inventory, byte-exact extraction and replacement, and ownership-aware removal. Payloads remain opaque and are never executed. OLE renders from its stored preview image |
 | OpenDocument Presentation interchange | Native Rust bounded read and deterministic write for slides, ordinary rectangles and text boxes, tables, embedded images, and speaker notes. Other safe content is reported through stable diagnostics |
 | HTML slide content import | Native Rust bounded import of HTML5 documents and fragments into editable slides, explicitly positioned shapes, formatted text, tables, caller-supplied images, and links. Browser layout, scripting, fetching, and unsupported CSS remain diagnostic |
+| Semantic presentation text export | Rust, Python and CLI HTML and Markdown preserve source reading order, titles, nested text, tables, picture descriptions and resources. Notes and hidden-slide filtering are explicit options. Export preserves source packages and owners and does not promise pixel layout parity |
 | PDF page content import | Native Rust bounded import into either one preserved full-slide graphic per page or an editable subset of text, raster images, paths, and URI links. Unsupported operators and font substitutions remain diagnostic |
 
 ### Shapes
@@ -50,11 +51,18 @@ its cost is recorded in `00-vision.md`.
 | Position and size, with placeholder inheritance | `Option`-returning plus an `effective_bounds` accessor |
 | Fill, line, shadow | Fill and line full. Shadow is the outer shadow, read and written, and python-pptx `inherit` |
 | Adjustment values, `a:avLst` | |
-| Click actions and hyperlinks | |
+| Click actions and hyperlinks | Shape and run internal slide targets with checked relationship ownership |
 | Placeholders by index and by type | |
-| Picture crop and intrinsic size | Via `oxml-media` |
+| Picture crop and intrinsic size | Via `oxml-media`, including same-owner picture-placeholder crop-to-fill insertion |
 | Image deduplication by content hash on insert | |
 | SmartArt inspection, bounded node-text editing, and native rendering for six pinned layouts | Data, layout, style, colour, cached drawing, and relationship ownership are typed. The exact pinned list, hierarchy, cycle, relationship, matrix, and pyramid resources lower through the shared DrawingML engines. Unsupported algorithms and unmodelled XML remain preserved |
+
+Shapes expose title, alternative text, decorative state and direct flips across
+ordinary shapes, pictures, graphic frames, groups and connectors. Checked
+selection operations group, ungroup, align and distribute existing physical
+owners, and glued connectors address actual target connection sites. Grouped
+geometry follows supported affine composition. Unsupported composition refuses
+atomically instead of dropping opaque members or changing selected owners.
 
 ### Text
 
@@ -62,7 +70,7 @@ its cost is recorded in `00-vision.md`.
 |---|---|
 | Text frame, paragraphs, runs, line breaks | |
 | Alignment, level, line spacing, space before and after | |
-| Font: bold, italic, underline, strike, size, name, colour, caps, language | |
+| Font: bold, italic, underline, strike, size, name, colour, caps, language | All and small caps, plus a live direct highlight colour format |
 | Bullets: character, auto-number, none, size percent, colour | python-pptx has no bullet API. This is beyond parity |
 | Margins, vertical anchor, word wrap, auto-size | |
 | Nine-level list style inheritance | |
@@ -71,6 +79,10 @@ its cost is recorded in `00-vision.md`.
 
 Rows, columns, cells, cell text and text frames, cell fill and margins,
 `merge` and `split`, merge-origin and span queries, and the banding flags.
+
+A cell's direct vertical anchor belongs to `a:tcPr`, independently of its
+text-frame `a:bodyPr` anchor. Layout uses the selected cell anchor when present.
+Absent direct cell anchoring retains the existing body-properties projection.
 
 ### Charts
 
@@ -90,6 +102,26 @@ autofit, tables, connectors, hyperlinks, slide-number fields and backgrounds.
 `rpptx` and `rdocx` as crates, `rpptx-cli` and `rdocx-cli`, `rpptx-wasm` and a
 rewritten `rdocx-wasm`, and `rdocx-py` and `rpptx-py` wheels on PyPI.
 
+### Bounded PresentationML nesting
+
+Recognized groups and compatibility owners share a nesting limit of32.
+Recognized timing nodes use the same limit, with their list and common-node
+wrappers excluded from the count. The first owner counts as1. Valid inputs
+at32 remain readable and renderable, with supported authoring routes checked.
+Depth33 returns a named
+checked error before descent or publication. Opaque foreign XML remains source,
+not another modeled owner or timing condition.
+
+### Checked PowerPoint XML access
+
+PowerPoint exposes checked XML reads and replacement for paragraph, regular
+run, table, cell, shape, text body, slide, layout and master owners. Shape XML
+keeps the captured sp, pic, grpSp, cxnSp or graphicFrame kind. Replacement does
+not import relationships or convert shape kinds. Regular runs do not become
+fields or breaks. Unsupported table-to-chart transitions refuse atomically.
+Opaque source survives supported edits. This bounded escape surface is not a
+full XSD validator or a generic mutable XML object model.
+
 ## Explicitly not in v1
 
 Each of these is **preserved verbatim on round-trip**. Nothing in this list
@@ -97,7 +129,7 @@ causes data loss, only reduced fidelity when rendering.
 
 | Area | v1 behaviour |
 |---|---|
-| Animations, transitions, `p:timing` | Preserved, irrelevant to static rendering |
+| Animations and unsupported transitions, `p:timing` | Preserved, irrelevant to static rendering. Common transition authoring is bounded to none, fade, push, wipe, split, cover, uncover, cut and zoom |
 | Unsupported SmartArt algorithms and unmodelled `dgm:` content | Preserved. Rendering uses the drawing fallback part, else its cached picture, else its bounding box. The six exact pinned native layouts are handled before this fallback |
 | OLE objects, ActiveX | Preserved, rendered as the stored preview image |
 | Video and audio | Preserved, rendered as the poster frame |
@@ -118,9 +150,12 @@ by the render API, so a user can tell approximation from fidelity.
 
 ## Non-goals, permanently
 
-**`oxml-sml` is not a spreadsheet library.** It writes one worksheet with the
-cells a chart needs. It is not a foundation for an `rxlsx` and should not grow
-into one without a separate decision.
+**`oxml-sml` is not a spreadsheet library.** It writes chart workbooks and
+merges explicitly formula-owned chart cells in qualified embedded worksheets.
+Unrelated sheets, entries and styles remain preserved. Unsupported formulas
+or unowned populated-cell collisions refuse replacement. This bounded chart
+operation is not a foundation for an `rxlsx` and must not grow into one without
+a separate decision.
 
 **Drop-in `python-docx` and `python-pptx` compatibility is not promised.** Those
 libraries' real-world surface is inseparable from lxml, and a large fraction of
@@ -197,7 +232,7 @@ Citation formatting has separate locale, kind and modifier boundaries.
 Recognized unfinished branches refuse the whole cache refresh atomically.
 Noncatalogue paths retain caches with diagnostics. Non-ASCII collection ordering
 refuses rather than approximates Word. The remaining full catalogue contract
-belongs to F-X192 in S91. Dedicated Python and WASM bibliography APIs are not
+belongs to F-X192 in S92. Dedicated Python and WASM bibliography APIs are not
 part of this native boundary.
 
 
@@ -216,6 +251,17 @@ An owner is required for every `partial` or `unsupported` row. A
 Public OXML types do not count as facade authoring. Save and reopen means that
 modeled state returns through the public `Document` surface, not merely that raw
 bytes remain in the ZIP package.
+
+Python Word formatting exposes direct optional font modes, caps, strike,
+hidden text, script font names, language and RTL, with checked signed character
+spacing. Paragraph formatting includes ordered tab stops, borders, shading,
+outline level and bidi. Document defaults, nine extended style arguments,
+checked list-item factories, instance start overrides and checklist levels
+have public binding surfaces. These remain narrower than the complete native
+style and numbering package models. Their capability rows retain `B` for that
+boundary, including source-preserved properties without a paint projection.
+Positioned paragraph frames and unimplemented special run effects retain their
+existing layout boundaries. Google Docs import remains best effort.
 
 | Capability ID | Family | Capability or property | Create | Read | Mutate | Remove | Save-reopen | Story | Layout | Render | Determinism | Native | Python | WASM | CLI | Classification | Evidence | Owner |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -312,6 +358,12 @@ the package relationship owners, layout and render entry points, and the native,
 Python, WASM, and CLI surfaces. The audit found no capability that requires a
 second document model or an additional story beyond F-243 through F-310.
 
+Word HTML import is available through Rust, Python and CLI. Bounded CommonMark
+import includes GitHub tables and strikethrough, explicit pictures, nested lists,
+quotes and code blocks. An optional Word template retains its style and related
+story graphs while replacing its main body. Unsupported constructs produce
+diagnostics. Browser layout, scripts and network fetching remain outside scope.
+
 Bounded MHTML import and export is part of the post-v1 native Word interchange
 surface. It carries the supported document structure, contained PNG and JPEG
 resources, safe links, and ordered loss diagnostics through the existing Word
@@ -375,7 +427,7 @@ pixel, and byte caps fail closed, and no system codec or subprocess is used.
 
 `oxml-sml` remains chart-workbook support rather than a spreadsheet library.
 M19 may supersede that position only if F-184 finds a material gap still exists
-in the Rust ecosystem at S95. A basic reader, writer, or formula evaluator is
+in the Rust ecosystem at S96. A basic reader, writer, or formula evaluator is
 not enough. The required gap is one loss-aware lifecycle covering advanced
 editing, calculation, local pivot refresh, selected Power Query execution,
 Office Scripts-compatible automation, and rendering. If a credible maintained
@@ -452,3 +504,78 @@ dimension mismatch, or a dropped bounded shape. LibreOffice is the CI oracle
 only because PowerPoint is not scriptable on runners, so SSIM regressions are
 review-required rather than automatic failures. A pinned native PowerPoint
 representative review is the hard manual fidelity gate.
+
+
+### Checked Word section and related-story authoring
+
+Word exposes immutable section snapshots alongside live section handles. Live
+handles address the six header and footer slots, rich paragraphs, runs, tables
+and cells in the actual related owner. Notes support checked main-story run
+boundaries and independent footnote and endnote policies. Section insertion
+inherits resolved geometry without copying story relationships. Page colour,
+per-edge borders and real DrawingML text or image watermarks are checked
+authoring operations. Legacy VML compatibility remains a distinct path.
+
+The authoring contract requires staged publication and preservation of unknown
+source. Unsupported opaque routes refuse atomically. Google import is optional
+evidence, with no compatibility guarantee. Native Office typeface substitution
+is reported separately from the deterministic library font policy.
+
+DrawingML text watermark authoring supports only opacity 0.5. Other text opacity requests return a named atomic unsupported error. Legacy VML text and DrawingML image opacity retain their separate contracts.
+
+## PowerPoint Python parity
+
+PowerPoint Python exposes direct run baseline, character spacing, language and
+Latin, East Asian and complex-script faces, numbered bullets and independent
+bullet attributes. Existing cell text frames and shared colour formats remain
+the same owners. Shape, cell and slide fills support solid alpha, gradients,
+patterns and owned picture relationships. Table style and banding, checked
+core/application/custom properties, sections and media lifecycle are public.
+Raster export returns per-slide PNG/JPEG or one multi-page TIFF. Notes and
+handout PDF, PDF/A2b and PDF/A3b, and ordered ODP diagnostics use existing native
+exporters. Google Slides import remains best effort.
+
+## PowerPoint reusable branding
+
+Master and layout shapes use the same concrete authoring provider as slides,
+with image and hyperlink relationships on the actual owning part. Master and
+layout backgrounds, direct master text styles and named theme colour/font slots
+are editable. Layout lifecycle checks actual inbound package relationships.
+Theme application accepts a selected PPTX or POTX master or one THMX theme,
+imports supported selected dependencies atomically and preserves direct slide
+content. Google Slides compatibility remains best effort.
+
+Selected slide import and deck merge retain destination formatting by default.
+Opt-in source formatting carries the checked source layout, master, theme and
+required resource closure. Single-slide and selected or all-slide batch Python
+operations expose checked insertion, source order, section blocks, jump maps
+and explicit diagnostics. CLI selected import uses one-based ranges and
+insertion, preserves caller order, and writes a separate atomic output while
+protecting both inputs. Unsafe or ambiguous transfers refuse before
+publication. These operations do not imply browser layout or arbitrary Office
+object support beyond the admitted native graph.
+
+## Native one-shot automation surfaces
+
+Word CLI ordered literal/regex replacement, combined field-cache updates,
+physical image inventory/extraction, core/custom metadata, tag-only fill and
+accepted-main-body counts consume the native/Python common operations.
+PowerPoint CLI slide lifecycle, exact speaker-note text/file updates, core
+metadata, ordered replacement and read-only fit consume the presentation
+facade. Fit includes admitted owner contexts and refuses mandatory unsupported
+owners. Atomic editing and input-identity refusal apply to new commands.
+External image inventory is metadata only and performs no network fetch.
+
+## Word checked XML compatibility
+
+Word paragraph, regular run, table, cell and section-property handles expose a
+namespace-complete element.xml snapshot and checked element.replace_xml. This
+is a concrete owner boundary, not a mutable lxml tree. Unsupported owner
+profiles return named atomic refusals. General lxml compatibility remains
+outside scope.
+
+Bounded Python compatibility names delegate to their existing checked native
+owners. Matching public fields do not grant a manually constructed snapshot
+captured authority. Compatibility does not imply automatic owner refetch,
+fuzzy option coercion or a mutable lxml object model. Unsupported operations
+retain named atomic refusal and actionable causal errors.

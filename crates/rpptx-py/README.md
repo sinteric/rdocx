@@ -129,3 +129,28 @@ Licensed under either the
 [MIT License](https://github.com/tensorbee/rdocx/blob/main/LICENSE) or the
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0), at your
 option.
+
+## Licensed font embedding
+
+Use caller-owned font bytes with explicit authorization under their exact
+license identity. Binary readers are bounded and consumed through actual EOF.
+
+```python
+from pathlib import Path
+from rpptx import Presentation, FontEmbeddingLicense
+
+value = Presentation()
+license = FontEmbeddingLicense(authorized=True, identity="SIL Open Font License 1.1")
+value.embed_font("My Face", Path("MyFace-Regular.ttf"), license=license)
+value.save("embedded.pptx")
+for font in value.embedded_fonts:
+    print(font)
+value.embed_true_type_fonts = False
+value.remove_embedded_font("My Face", "regular")
+```
+
+Kinds are regular, bold, italic and bold_italic. Snapshots are immutable and
+remain readable after later native edits. Flags distinguish None, False and
+True, where None removes only the owned setting. Explicit caller render fonts
+override matching embedded faces. Unsupported imported PowerPoint formats
+retain original bytes with absent decoded data.

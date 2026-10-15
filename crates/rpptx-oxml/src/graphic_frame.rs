@@ -12,9 +12,10 @@ use quick_xml::{Reader, Writer};
 
 use crate::diagram::DiagramRelationshipIds;
 use crate::namespace::{
-    FIXED_SHAPE_TREE_PREFIXES, NamespaceBindings, P_NS, all_attributes, non_visual_drawing_id,
-    non_visual_drawing_name, root_attributes, self_contained_attributes,
-    set_non_visual_drawing_name,
+    FIXED_SHAPE_TREE_PREFIXES, NamespaceBindings, P_NS, accessibility_parent_bindings,
+    all_attributes, non_visual_drawing_decorative, non_visual_drawing_id, non_visual_drawing_name,
+    non_visual_drawing_text, root_attributes, self_contained_attributes,
+    set_non_visual_drawing_decorative, set_non_visual_drawing_name, set_non_visual_drawing_text,
 };
 use crate::picture::CT_Picture;
 
@@ -256,6 +257,63 @@ impl CT_GraphicFrame {
     /// Returns the namespace-resolved `c:chart@r:id` rendering projection.
     pub fn chart_relationship_id(&self) -> Option<&str> {
         self.graphic_data.chart_relationship_id.as_deref()
+    }
+
+    fn accessibility_xml(&self) -> Option<&[u8]> {
+        self.non_visual_properties
+            .children
+            .get(self.non_visual_properties.drawing_properties_index?)
+            .map(Vec::as_slice)
+    }
+
+    fn accessibility_xml_mut(&mut self) -> Result<&mut Vec<u8>> {
+        let index = self
+            .non_visual_properties
+            .drawing_properties_index
+            .ok_or_else(|| OxmlError::MissingElement("p:cNvPr".to_owned()))?;
+        self.non_visual_properties
+            .children
+            .get_mut(index)
+            .ok_or_else(|| OxmlError::MissingElement("p:cNvPr".to_owned()))
+    }
+
+    /// Returns the direct accessibility description.
+    pub fn alt_text(&self) -> Option<String> {
+        non_visual_drawing_text(self.accessibility_xml()?, "descr")
+    }
+
+    /// Returns the direct accessibility title.
+    pub fn title(&self) -> Option<String> {
+        non_visual_drawing_text(self.accessibility_xml()?, "title")
+    }
+
+    /// Replaces or clears the direct accessibility description.
+    pub fn set_alt_text(&mut self, text: Option<&str>) -> Result<()> {
+        set_non_visual_drawing_text(self.accessibility_xml_mut()?, "descr", text)
+    }
+
+    /// Replaces or clears the direct accessibility title.
+    pub fn set_title(&mut self, text: Option<&str>) -> Result<()> {
+        set_non_visual_drawing_text(self.accessibility_xml_mut()?, "title", text)
+    }
+
+    /// Returns the qualified decorative flag without promoting defaults.
+    pub fn decorative(&self) -> bool {
+        let bindings = accessibility_parent_bindings(
+            &self.raw_attributes,
+            &self.non_visual_properties.attributes,
+        );
+        self.accessibility_xml()
+            .is_some_and(|xml| non_visual_drawing_decorative(xml, &bindings))
+    }
+
+    /// Changes only the qualified decorative flag, retaining unrelated extensions.
+    pub fn set_decorative(&mut self, decorative: bool) -> Result<()> {
+        let bindings = accessibility_parent_bindings(
+            &self.raw_attributes,
+            &self.non_visual_properties.attributes,
+        );
+        set_non_visual_drawing_decorative(self.accessibility_xml_mut()?, decorative, &bindings)
     }
 
     /// Changes the producer-facing non-visual frame name.

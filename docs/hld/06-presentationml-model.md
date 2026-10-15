@@ -300,21 +300,51 @@ the normal `MediaStore`. Notes are copied to a new part whose slide
 relationship points back to the duplicate. Custom-show membership is not
 copied.
 
-`import_slide(source, index, layout_index, insert_index)` copies one slide of
-another presentation through the same staged graph copy, like PowerPoint's
-reuse with the destination theme. The copy relates to the given destination
-layout, or else to the first destination layout named like the source slide's
-layout, and an unnamed or unmatched layout is refused. Notes relate to the
-destination notes master, which the bundled template supplies when the
-destination has none. Images, audio and video reuse equal destination media
-parts, SmartArt graphs are copied as by the bounded transfer, and external
-relationships such as hyperlinks keep their targets. A preflight refuses
-comments, charts, embedded objects, jumps to another source slide from the
-slide or its notes, and every other internal relationship type before anything
-is staged, so a refused import leaves the destination unchanged. Actions that
-name no relationship, such as `ppaction://customshow`, are carried unchanged
-and may name a custom show the destination lacks. A caller can rebuild a
-refused slide in the destination deck using supported shape operations.
+`import_slide(source, index, layout_index, insert_index)` retains the existing
+destination-formatting default. `ImportSlideOptions` carries optional layout
+and insertion indexes, `keep_source_formatting` and `keep_sections`.
+`import_slides(source, indexes, options, existing_slide_map)` returns immediate
+native destination indexes and ordered diagnostics. Explicit selection retains
+caller order, rejects repeated or invalid indexes before publication, and an
+empty selection is a true no-op. Same-deck import uses a stable source snapshot.
+A late failure rolls back the complete selected batch and leaves source intact.
+
+Destination formatting uses an explicit destination layout or supported name
+matching. Source formatting carries the source layout, master, theme and
+required source-owned resources. An explicit destination layout conflicts with
+source formatting and refuses before publication. Shared and repeated imported
+branding graphs are reused by complete supported semantic graph equality,
+including opaque metadata and remapped relationships, rather than equal names.
+Notes retain their checked slide backlink and required owner closure. The
+presentation registers one global notes master before authored or imported
+notes are published, including reuse of an existing bundled master. A proposed
+registration that would change existing unregistered destination notes refuses
+before mutation. Source-formatting notes retain actual source placeholder
+occupancy, text and fields. Matched placeholders inherit properties without
+manufacturing absent master placeholders or sample content. Non-placeholder
+master decorations are materialized with their original namespace authority. Retained qualified shape
+references to a skipped master placeholder refuse before publication, rather
+than creating a dangling target or manufacturing a placeholder.
+Source-formatting notes materialize the selected source-master surface,
+matched placeholder defaults,
+background and text appearance into each imported local notes owner, then
+suppress global master shapes for that imported owner. Unrelated destination
+notes retain their master visibility. Copied master and presentation-default
+resource references transfer from their actual original relationship scopes.
+Source theme, font and style references resolve before the local owner loses
+its source inheritance context. Foreign lookalikes and unrelated opaque
+payload remain unchanged, and ambiguous ownership refuses atomically.
+
+Charts, workbook/style/colour parts, embedded objects and previews, classic or
+modern comments and author/person graphs join the supported import closure.
+Slide jumps map to selected copied slides or explicit existing destination
+indexes. Unmapped jumps produce diagnostics and remove only their owned action
+and unused relationship scope. `keep_sections` preserves selected source
+section blocks in caller order with collision-free section IDs, retaining
+unselected destination section sidecars. Source table style and embedded font
+closure preserves destination global resources or refuses a conflict that
+cannot preserve both owners. Unsupported graph types remain named atomic
+refusals, not silent omissions.
 
 Duplication, transfer and import rewrite each copied notes or diagram part
 with one exact pass over its complete relationship map, including the
@@ -463,6 +493,31 @@ Choosing normal autofit again keeps its stored font scale and line spacing
 reduction. `TextParagraphMut::set_bullet` removes the preserved picture or
 follow-text bullet part that the new value replaces, so the paragraph keeps one
 choice per bullet group.
+
+Explicit fitting is a package-level operation, separate from these direct
+property setters. `Presentation::refresh_autofit` stages every flagged physical
+owner and publishes only after all contexts fit. `text_frame_location` returns
+a checked owner part, descendant path and optional cell coordinate with a
+source fingerprint. `fit_text_at` refuses a stale location and publishes one
+uniform-size change. Field text, breaks, hyperlinks and unrelated formatting
+remain owned by their original elements. Refresh does not run during save.
+Font sizing trials retain the loaded face cache but start a fresh usage epoch
+for final rendering diagnostics. Approximation reports describe actual
+physical font contributions, deduplicated in first-use order. A supplied
+physical face that satisfies the requested family suppresses that family's
+approximation report. Trial-only contributions do not appear as final use.
+Accepted visible character markers report unknown Symbol or Wingdings legacy
+codes with their original family and scalar. Known semantic replacements and
+genuine requested-face original-code coverage suppress that warning. Facts
+are deduplicated in first-use order within the current text-body output,
+with at most1024 distinct family/original-code pairs. Empty or discarded
+markers contribute no such facts. This local output is separate from font
+discovery history and approximation diagnostics.
+Imported autofit choices with opaque attributes or comments retain their lexical
+XML and original text-body wrapper attribute scope. Owned choice-name and scale
+edits preserve foreign payload, quoting and entities. Fully modeled choices keep
+canonical serialization. Conflicting retained canonical namespace bindings
+refuse before writer output.
 
 Whole-frame replacement creates a minimal body when needed and always retains
 one paragraph. It preserves existing body properties, list style,
@@ -918,10 +973,16 @@ Native notes-page export uses the presentation `p:notesSz` as the page size and
 emits one page for every source slide, including a slide without a notes part.
 Notes-master shapes form the page base. Notes-slide placeholders then match
 their master placeholders by explicit index first and compatible type second.
-Each match must be unique and consumed once. Missing, unmatched, or ambiguous
-ownership fails before output. Slide-image placeholders receive the source
-slide as a vector subtree. Header, footer, date, and slide-number placeholders
-obey the typed master flags and stored text.
+Each match must be unique and consumed once. With an actual notes owner,
+only its instantiated placeholders join the page. Unmatched local overlays
+receive diagnostics, while absent master placeholders do not paint sample
+content. Ambiguous ownership and a missing required slide-image placeholder
+fail before output. The matched slide-image placeholder receives the source
+slide as a vector subtree. Header, footer and date preserve actual local text.
+Only actual local slide-number fields resolve to the exported page number,
+including fields with empty caches. Empty or absent local text bodies remain
+empty. Notes without a notes owner and handouts retain their separate master
+composition behavior.
 
 Audience handouts use the same relationship-resolved handout master and expose
 the six fixed `HandoutLayout` choices: one, two, three, four, six, and nine
@@ -933,6 +994,36 @@ Each included `p:txBody` contributes run and field text in document order.
 `a:br` contributes a newline and paragraph boundaries contribute a newline.
 Empty bodies are skipped, and multiple nonempty body placeholders are joined
 with a newline.
+
+## Checked shape and relationship authoring
+
+Native shape handles retain their physical owner through group relocation.
+Grouping preserves contiguous typed selection order and interleaved opaque
+members. Identity-map ungrouping moves every retained raw child and closes the
+ancestor namespaces needed by promoted roots. Supported rotation, flips and
+scale compose before checked decomposition. Nonrepresentable shear, singular
+mapping or geometry-bearing opaque composition refuses atomically. Owner-only
+metadata is preserved where its legal source owner remains representable.
+Align and distribute use checked transformed bounds and signed gaps. Glue
+endpoints follow current target sites after move, regroup and deletion.
+
+Picture-placeholder insertion replaces the selected shape with a picture under
+the same physical identity, id, name, placeholder metadata and z-order. Its
+geometry is an explicit rectangle using the selected inherited or direct
+transform, with centred crop-to-fill from the actual image dimensions. The
+saved picture has valid schema geometry, owned image relationships and source
+metadata. Unknown properties that cannot legally move into a picture refuse
+before publication. Imported names remain unchanged, while generated names
+use placeholder type, orientation, size and collision rules.
+
+Run slide links use `ppaction://hlinksldjump` and owned slide relationships.
+Target lookup uses the current same-presentation slide owner. Clear and
+retarget preserve external-address semantics, opaque click payload and child
+order. Relationship pruning removes only unused owned references, including
+sound-only click relationships, and retains references shared elsewhere. Cell
+run assignments refuse before allocating slide relationships. Foreign owner,
+stale path, malformed action or source-namespace failure leaves the package
+and handle state unchanged.
 
 ## The shape tree
 
@@ -964,9 +1055,9 @@ choice is rejected. Clearing removes only a direct `p:bgPr` background, so theme
 references and opaque producer payloads remain untouched.
 
 An ordinary `CT_Shape` owns its required `p:spPr` as a public boxed
-`CT_ShapeProperties`. The allocation keeps recursive group parsing within the
-normal test-thread stack even when a master contains deeply nested shapes with
-large text bodies. Field access remains direct through `Box` dereferencing.
+`CT_ShapeProperties`. The allocation keeps individual shape projections small.
+Explicit bounded parser frames handle group descent. Field access remains direct
+through `Box` dereferencing.
 Modelled transform, geometry, fill, line, and effect children write with fixed
 prefixes in schema order. Unsupported attributes and children remain in the
 shape-properties ordered raw slots.
@@ -989,11 +1080,29 @@ pub enum ShapeTreeChild {
 }
 
 pub struct CT_AlternateContent {
-    raw_xml: Vec<u8>,
+    raw_source: std::sync::Arc<[u8]>,
+    raw_range: std::ops::Range<usize>,
     chart_choice: Option<Box<CT_GraphicFrame>>,
     selected_fallback: Option<Vec<ShapeTreeChild>>,
 }
 ```
+
+`MAX_PRESENTATION_NESTING` is a public additive constant set to32.
+`validate_shape_nesting` validates supported typed trees without recursive
+descent. Group and compatibility owners share one counter, starting at1.
+Timing nodes have their own counter with the same bound. Their list and
+common-node wrappers are transparent to the count. Explicit parser frames
+select only concrete schema paths with their actual namespace scope. Unknown
+subtrees are captured once, so opaque descendants cannot select timing metadata
+or grow a namespace snapshot stack. Empty condition lists retain the existing
+empty model. Errors name the cycle, limit and offending depth, and facade
+opening adds the producing part.
+
+The compatibility and unsupported timing models privately share immutable
+source buffers through byte ranges. Their public raw accessors and logical
+equality compare the selected bytes, not the complete shared buffer. These
+private storage changes and required-header comment slots do not change public
+constructors or public model fields.
 
 `CT_AlternateContent` selects ordered typed members only from its one immediate
 `mc:Fallback` child. It resolves the branch by namespace URI and uses the same
@@ -1098,9 +1207,14 @@ allocation is needed in exactly two other operations: adding a new placeholder t
 a *layout*, and copying a slide between presentations whose layouts assign
 different indices. Both are separate code paths.
 
-`dt`, `ftr` and `sldNum` are **latent** placeholders. They are drawn from the
-layout or master directly and are never cloned onto a new slide, because cloning
-them produces duplicate footers.
+`dt`, `ftr` and `sldNum` are **latent** templates. Legal master or layout
+`p:hf` flags alone do not paint them. Rendering paints these fields only when
+the slide owns a materialized placeholder. Explicit footer authoring and new
+slides with enabled legal policy clone the qualified layout template, falling
+back to the linked master. Cloning preserves geometry, metadata, group ancestry
+and unknown payload, with fresh shape and presentation-wide field identities.
+Absent policy does not invent fields. Duplicate templates, missing enabled
+templates and unsupported relationship-bearing copies refuse atomically.
 
 Notes-page composition overlays a notes-slide placeholder only when its full
 key resolves against the notes master. An unmatched notes-slide overlay is
@@ -1130,8 +1244,10 @@ behaviours, effects, motion paths, and unsupported timing nodes. Transition
 values expose speed, Office 2010 duration, advance policy, effect parameters,
 and Office 2015 morph metadata. Expanded-name readers select supported
 `mc:AlternateContent` choices or their fallback. The complete captured subtree
-remains the serialization source, and supported mutations replace only their
-own attribute value bytes. Unsupported siblings, owner attributes, namespace
+remains the serialization source. Supported transition settings edit their
+owned attributes and selected effect while retaining sound, extensions and
+inactive compatibility branches. Removing a transition leaves timing intact.
+Unsupported siblings, owner attributes, namespace
 bindings, and relationship-bearing content therefore remain byte-identical.
 
 Picture media projects only schema-owned direct children. Standard
@@ -1352,9 +1468,154 @@ verify. python-pptx ships a binary template for the same reason.
 Contents: 16:9 slide size, one master with the standard colour map and full
 `p:txStyles`, the eleven standard layouts, a full theme, `presProps`,
 `viewProps`, `tableStyles` defaulted to Medium Style 2 Accent 1, a notes master,
-and **zero slides**.
+and **zero slides**. Master and all eleven layouts use authenticated Office widescreen
+placeholder rectangles. Fresh core metadata omits template authors and
+description and uses deterministic2000-01-01 timestamps.
 
 The asset must live under the crate's own directory. A workspace-root `assets/`
 compiles locally but is not included in the published `.crate`.
 
 The PresentationML model crates remain version `0.0.0` with `publish = false`.
+
+## Footer authoring and displayed numbering
+
+Deck header/footer publication stages every affected slide and legal policy
+owner before commit. Slide-local publication changes only the selected field.
+Title suppression follows the linked qualified title layout. Applied-state
+readers distinguish materialized content from optional master or layout flags
+and report the legal policy source. Automatic and fixed date modes remain
+distinct even when their visible cached strings are equal. Repeated unchanged
+intents leave source parts and package bytes untouched.
+
+The optional firstSlideNum preserves absence and accepts zero. Displayed
+numbers use checked start-plus-slide-index arithmetic. Physical slide identity,
+page ordinal, output naming, notes and handout numbering do not change.
+
+## Checked presentation properties and media
+
+Core, application and custom property edits preserve unrelated source XML.
+Invalid inputs and unsafe opaque rewrites refuse before package publication.
+Custom properties retain order, PID and fmtid, allocate the lowest unused PID
+at least2, and distinguish an empty value from absence. Unsupported imported
+custom values remain read-only. Sections expose immutable snapshots and checked
+ordered edits preserving native IDs. Media insertion, extraction, replacement
+and removal use the producing slide's native relationships and poster ownership.
+Picture-fill replacement prunes only references released by the selected edit
+that are no longer reachable, retaining unrelated imported relationships.
+
+A missing notes or handout master supplies neutral read-only export geometry
+without creating package parts. A present malformed or wrong-scope owner is
+refused. Missing notes-slide content remains blank.
+
+## Master and layout authoring
+
+The concrete ShapeOwner selects slide, layout or master records. The existing
+shape tree, geometry and mutation types serve all three owners. Pictures and
+external shape hyperlinks resolve and edit their physical part relationships.
+Selected picture replacement keeps geometry and copy-on-write media ownership.
+Direct root shape removal checks timing targets, detaches connectors and prunes
+only released relationships. Direct root reorder retains identities.
+
+Master and layout order follows qualified presentation and master ID lists,
+independent of relationship order or duplicate names. Layout duplication uses
+fresh IDs and an owning relationship source splice. Removal validates complete
+inbound ownership and refuses a layout used by any slide. Unrelated XML and
+relationship source remain untouched.
+
+Master title, body and other paragraph defaults select existing DrawingML
+levels1 through9. Level edits write only the selected qualified source owner,
+retain opaque siblings and validate the staged package before publication.
+Follow-master-background detaches the actual effective background with namespace,
+compatibility policy and image closure. Restoring inheritance removes the local
+background and only relationships released by that change. Unsafe selected
+reference source refuses atomically.
+
+Theme application copies all three selected schemes and supported images.
+Optional master import allocates fresh part names, master/layout IDs and
+relationship scopes for the selected master and its ordered layouts. Every
+qualified retained XML relationship reference must resolve in its own scope.
+Unsupported selected dependencies refuse before publication. Empty layout
+mapping retains current slide links. Explicit mapping changes only the owning
+slide relationship target, preserving direct slide geometry, text and fields.
+
+## Checked XML owner replacement
+
+Paragraph, regular run, table, cell, shape, text body, slide, layout and master
+XML use complete namespace-qualified expected roots. Captured shape kinds
+remain fixed. Input checks reject duplicate modeled choices, invalid child
+sequence, wrong roots, trailing input, DTDs and entities before mutation.
+Foreign same-local-name shape and line properties remain exact opaque source,
+with their inherited namespace context retained. Unsupported fixed-writer
+namespace conflicts produce actionable errors instead of rebinding source.
+
+Equivalent fully modeled alias or default-namespace input can be a no-op.
+Unknown vocabulary and QName-valued opaque content require conservative source
+and binding equivalence. Arbitrary namespace normalization is not permitted.
+Shared text-body parsing admits only concrete qualified consumer tuples,
+including DiagramML t, chart txPr and modern-comment txBody containers. That
+parser compatibility does not authorize wrong-owner checked XML replacement.
+
+## Presentation embedded font list
+
+CT_Presentation models qualified embeddedFontLst entries and regular, bold,
+italic and boldItalic face relationship slots. It retains the source list shell,
+entry attributes, panose, pitchFamily, charset, unknown events and children.
+Actual namespace URIs own elements and relationship attributes, including
+aliased/default namespaces and local rebinding. Foreign lookalikes remain
+preserved source. Duplicate lists or ambiguous typefaces refuse unsafe edits.
+
+The facade exposes EmbeddedFontKind, explicit FontEmbeddingLicense, authored
+EmbeddedFont and immutable EmbeddedTypeface/EmbeddedFontFace snapshots. Face
+facts include the actual relationship id, optional resolved part name, stored
+length, format and optional decoded bytes. Supported EOT and checked raw sfnt
+inputs decode through one bounded provider, while compressed EOT and unknown
+producer forms retain stored bytes without successful decoding claims.
+embed_font, remove_embedded_font and remove_font stage all owned graph changes.
+embed_true_type_fonts and save_subset_fonts preserve None, false and true.
+
+Native PowerPoint consumption is qualified independently from decoding. The
+positive uncompressed EOT graph supplies actual regular and bold glyphs before
+Save As, after save and after normal reopen. Stored parts and decoded full
+font bodies remain exact even when native relationship IDs or font metadata
+change. Missing and raw-format controls fall back with recorded unavailable
+font warnings. The tested disabled-flag graph falls back and loses font parts
+on native save. That observation is bounded to the captured application build,
+not a general rule that a save setting always prevents loading.
+
+## Semantic HTML and Markdown projection
+
+`Presentation::to_html` and `to_markdown` return
+`PresentationTextExport { text, assets, diagnostics }`. The corresponding
+`_with_options` methods accept `PresentationTextExportOptions` with
+`include_notes`, `skip_hidden` and `inline_images`. Defaults exclude notes,
+retain hidden slides and embed images. Native save methods default only through
+the explicit options supplied by their caller. Export also works without the
+default template or rendering features.
+
+Each included source slide has one section and title heading, with a numbered
+fallback for an untitled slide. Original slide identity and source order remain
+stable when hidden slides are omitted. Groups and selected compatibility
+branches retain source order. Paragraph levels and effective list/style
+inheritance determine nested lists. Direct false formatting overrides inherited
+formatting. Run emphasis, explicit breaks, stored fields and safe hyperlinks
+retain their supported semantic content.
+
+Tables emit origin cells in row order, with HTML spans and eligible headers.
+Markdown uses pipe tables and diagnoses merge geometry it cannot express.
+Complex cell paragraphs and lists use isolated inline HTML blocks. Pictures
+retain alternative text, title and owned bytes. Included notes follow the
+slide body. Unsupported payloads and omitted semantics produce ordered
+diagnostics. Text escaping preserves literal markup, whitespace and link
+targets. The projection reads source semantics independently of native slide
+rendering and changes no source XML, revisions or owner handles.
+
+## Word retained drawing namespace authority
+
+Word retained DrawingML source keeps its original opaque child bytes and the
+actual ancestor namespace dependencies lost by wrapper capture. Source-local
+declaration spelling remains distinct from newly emitted inherited closure.
+Generated Word, drawing and relationship prefixes retain their canonical
+authority when an actual typed writer uses them. Producer collisions are
+localized to the retained raw slot or receive a named refusal for unsupported
+namespace-valued root attributes. These Word source rules do not add a second
+mutable PresentationML model.

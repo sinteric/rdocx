@@ -1,20 +1,20 @@
 # F-283, Complete numbering-aware navigation fields
 
 **Status**: approved
-**Sprint**: S91
+**Sprint**: S92
 **Size**: L
-**Depends on**: F-248, F-279 through F-282
+**Depends on**: F-248, F-279 through F-282, F-X200
 
 ## Scheduling
 
-The user explicitly carried this unfinished story from S90 to S91 so completed
-S90 work can release. No implementation is delivered by that scheduling change.
+The user first carried this unfinished story from S90 to S91, then parked it
+at S92 so S91 can focus on frozen issue and PR repairs. No implementation is delivered by that scheduling change.
 Reuse the existing approved design and saved evidence after its prerequisites
 complete, with fresh evidence for the final source.
 
 ## Problem
 
-Numbered STYLEREF is explicitly rejected at `crates/rdocx/src/field.rs:9798`, and numbering-demand detection recognizes REF only at `crates/rdocx/src/field.rs:9226`. Existing headings excludes table cells at `crates/rdocx/src/document.rs:26319`, and document_outline builds only that tree at `crates/rdocx/src/document.rs:26332`. Renderer outline titles use projected text without visible marker at `crates/rdocx-layout/src/engine.rs:2160`. Heading detection at `crates/rdocx-layout/src/engine.rs:6179` does not consume the complete effective outline-level cascade.
+Numbered STYLEREF is explicitly rejected at `crates/rdocx/src/field.rs:12981`, and numbering-demand detection recognizes REF only at `crates/rdocx/src/field.rs:12089`. Existing headings excludes table cells at `crates/rdocx/src/document.rs:28916`, and document_outline builds only that tree at `crates/rdocx/src/document.rs:28930`. Renderer outline titles use projected text without visible marker at `crates/rdocx-layout/src/engine.rs:2160`. Heading detection at `crates/rdocx-layout/src/engine.rs:6179` does not consume the complete effective outline-level cascade.
 
 Existing authoritative numbering already contains marker, level, full context and literal-free values at `crates/rdocx-layout/src/style_resolver.rs:37`. Source-qualified numbering lookup exists at `crates/rdocx-layout/src/lib.rs:79`. This story composes these contracts rather than introducing another counter.
 
@@ -27,6 +27,11 @@ Existing authoritative numbering already contains marker, level, full context an
 - `docs/hld/14-development-backlog.md`, "F-283, Complete numbering-aware navigation fields" and F-248.
 
 ## Approach
+
+Every prerequisite is a completion barrier. S91 reuses the completed revised
+F-282 foundation. F-X192 full catalogue completion is not a formal dependency
+and its full formatter expansion cannot be presumed during navigation work.
+Refresh the exact F283 saved discriminator evidence before implementation.
 
 Every prerequisite is a completion barrier. Reconcile final F-279 through F-282 contracts before claim. Reuse F-280's SequenceOptions, CaptionOptions, CaptionTarget and CrossReferenceOptions. Reuse F-279's immutable bookmark-target, page and section records and F-281's generated-result ownership.
 
@@ -170,3 +175,33 @@ their behavior, and fresh Word evidence is pinned to 16.113.2 build
 16.113.26092012. INDEX and TOA use en-US source language with the captured Word
 locale recorded explicitly. Technical ownership probes in the test plan must
 pass before completion and may not be replaced by guessed expectations.
+
+## S91 numbering prerequisite
+
+Complete F-X200 before claiming this story. Issue303 requests native Word
+plain-instance continuation, superseding the earlier intentional independent
+concrete-instance contract. F-X200 owns that explicitly reviewed counter
+change and its additional native controls. This story consumes the integrated
+authoritative results for visible markers and all navigation fields. Preserve
+actual concrete source numIds and prove numbered REF context separately.
+The fresh navigation oracle must cover shared-definition plain instances
+and explicit restarts, rather than replaying an independent Python counter.
+
+## PR336 cross-instance REF discriminator
+
+Immutable PR336 head935ac165afcd29d34454568ba3b2287a4bac52dc adds public
+doc-hidden ResolvedNumbering.abstract_num_id and changes relative_to
+context from concrete instance to abstract definition. This is a numbered
+REF proposal owned here, distinct from F-X200's visible-marker counter
+change. Source assessment is complete at
+`/private/tmp/S91-PR336-935ac16-intake/assessment.md`. It is not native
+acceptance evidence.
+
+Extend the existing fresh Word rider with cross-instance shared-definition
+REF context, same-instance controls and explicit restarts. Assert supported
+n/r/w/t results against actual updated and reopened native fields, retaining
+source paths and concrete numIds. Do not infer relative reference semantics
+from matching visible markers or the contributor unit test. Adopt a shared
+representation only when that evidence requires it. If a public field is
+selected, doc-hidden does not exempt downstream struct-literal compatibility
+from published API and actual consumer/package gates. No new F-ID is needed.

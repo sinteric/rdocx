@@ -13,7 +13,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 
 use oxml_py_support::{ContentPath, PathSeg, StaleElementError};
-use presentation::{PyComment, PyCommentAuthor, PyCommentReply, PyPresentation, PyValidationIssue};
+use presentation::{
+    PyComment, PyCommentAuthor, PyCommentReply, PyPresentation, PyPresentationTextExport,
+    PyValidationIssue,
+};
 
 pub(crate) fn normalize_index(index: isize, len: usize, kind: &str) -> PyResult<usize> {
     let normalized = if index < 0 {
@@ -65,6 +68,12 @@ pub(crate) fn recovery_hint(path: &ContentPath, suffix: &str) -> String {
     for segment in &path.segs {
         match segment {
             PathSeg::Slide(index) => public_path.push_str(&format!(".slides[{index}]")),
+            PathSeg::Layout(index) => public_path.push_str(&format!(".slide_layouts[{index}]")),
+            PathSeg::TextStyle(index) => public_path.push_str(&format!(
+                ".text_styles.{}",
+                ["title", "body", "other"].get(*index).unwrap_or(&"invalid")
+            )),
+            PathSeg::Master(index) => public_path.push_str(&format!(".slide_masters[{index}]")),
             PathSeg::Shape(index) => public_path.push_str(&format!(".shapes[{index}]")),
             PathSeg::Body(index) => public_path.push_str(&format!(".body[{index}]")),
             PathSeg::Row(index) => pending_row = Some(*index),
@@ -95,12 +104,14 @@ pub(crate) fn validate_path(
     kind: &str,
     suffix: &str,
 ) -> PyResult<()> {
-    path.validate_revision(
-        presentation.revisions.current(),
-        kind,
-        &recovery_hint(path, suffix),
-    )
-    .map_err(|error| stale_to_pyerr(py, error))
+    if !path.belongs_to(&presentation.revisions) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "handle belongs to a different presentation",
+        ));
+    }
+    path.validate_scopes(&presentation.revisions, kind, &recovery_hint(path, suffix))
+        .map_err(|error| stale_to_pyerr(py, error))?;
+    Ok(())
 }
 
 pub(crate) fn rpptx_to_pyerr(py: Python<'_>, error: rpptx::Error) -> PyErr {
@@ -126,6 +137,19 @@ pub(crate) fn rpptx_value_to_pyerr(py: Python<'_>, message: String) -> PyErr {
 #[pymodule]
 fn _rpptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPresentation>()?;
+    module.add_class::<presentation::PyPptElement>()?;
+    module.add_class::<presentation::PyFontEmbeddingLicense>()?;
+    module.add_class::<presentation::PyEmbeddedFont>()?;
+    module.add_class::<presentation::PyEmbeddedFontFace>()?;
+    module.add_class::<presentation::PyEmbeddedTypeface>()?;
+
+    module.add_class::<PyPresentationTextExport>()?;
+    module.add_class::<presentation::PyCoreProperties>()?;
+    module.add_class::<presentation::PyAppProperties>()?;
+    module.add_class::<presentation::PyCustomFileTime>()?;
+    module.add_class::<presentation::PyCustomProperty>()?;
+    module.add_class::<presentation::PyCustomProperties>()?;
+    module.add_class::<presentation::PySection>()?;
     module.add_class::<PyCommentAuthor>()?;
     module.add_class::<PyComment>()?;
     module.add_class::<PyCommentReply>()?;

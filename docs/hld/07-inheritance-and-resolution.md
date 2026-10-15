@@ -11,6 +11,33 @@ milestone for that reason.
 `merge_from` cascade shape, but the structure differs: this walks a **part
 hierarchy**, not a style graph.
 
+## Word defaults and source ownership
+
+Word formatting resolves document defaults, table context where applicable,
+paragraph styles and their basedOn chain, and direct paragraph or run values
+in precedence order. Editing `w:docDefaults` changes only its selected run
+property owner. It does not rewrite Normal or explicit named styles. Clearing
+an absent default leaves the package unchanged. Untouched owners retain exact
+source XML. A changed owner merges modeled values into its original root,
+retaining foreign attributes, quote and entity spellings, opaque children and
+schema order. Duplicate physical property owners retain an explicit empty
+final owner when clearing would otherwise revive an earlier value.
+
+Style updates stage checked values before publication. Explicit empty borders
+or tab stops clear their owned properties, while omitted arguments retain
+existing values. Border start/end aliases refer to the same semantic edges as
+left/right without changing the original QName or duplicating retained child
+payload. Unknown started wrappers remain opaque and cannot promote nested
+lookalike edges. Tabs preserve imported occurrence order and unsupported
+vocabulary. Checked public reads refuse unsupported tokens rather than
+reporting them as an absent leader or a left-aligned stop.
+
+EPUB counter traversal consumes the same selected table paragraph properties
+as native layout, including basedOn, default table style, conditional regions,
+accepted content, nested tables and direct suppression. It counts each accepted
+source paragraph once in document order. This shared semantic projection does
+not claim visual list parity inside exported tables.
+
 ## The output contract
 
 ```rust
@@ -251,8 +278,8 @@ direction, so non-square fills expose the complete stop domain. A background
 ignores `rotWithShape="0"` because it has no enclosing shape rotation. Shape
 fills with that value use the same concrete linear paint when their effective
 own and group transforms are unrotated and unflipped. A rotated or flipped
-shape continues to diagnose the independent rotation policy. Unsupported
-circle, rectangle, and shape path gradients, tile rectangles, and each
+shape continues to diagnose the independent rotation policy. Centred circle, rectangle and supported shape path gradients resolve to
+concrete sampled paint. Non-centred fill rectangles, tile rectangles and each
 non-none flip variant retain distinct diagnostic categories.
 
 Notes export resolves the notes master before the notes slide overlay. Master
@@ -265,6 +292,15 @@ equal relationship ids cannot resolve media from the wrong scope.
 
 **Freeze this contract when the resolver lands, or the resolver and renderer
 tracks diverge.** It is versioned with the crate.
+
+Resolution distinguishes recoverable member errors from fatal part or backend
+setup errors. A recoverable member keeps its source position and owner-scoped
+diagnostic, using a bounds fallback only when geometry is provable and omitting
+only an unplaceable member otherwise. Dimension-independent owned semantic
+errors are still counted when bounds are unavailable. Resolvable siblings keep
+their source order. Whole-presentation and timeline outputs retain the same
+qualified diagnostic and true-count projection from their actual render pass.
+Malformed package/XML, background setup and authoring errors remain fatal.
 
 ## Draw order
 
@@ -369,6 +405,12 @@ autofit. The master, layout, and slide shape then overlay their present
 erase unrelated inherited fields. `spcFirstLastPara` accepts either XML boolean
 spelling. An absent value means false.
 
+For table cells, an owned `a:tcPr` anchor overrides the resolved text-body
+vertical placement without replacing other body properties. Omission falls
+back to that body-properties projection. Picture-placeholder authoring obtains
+its actual effective transform through the ordinary slide/layout/master
+chain, then materializes the selected rectangle for the new picture.
+
 ### 3. The nine-level list style
 
 Eight sources, merged in this order, later winning per property and per level:
@@ -391,9 +433,10 @@ Within each list-style source, `a:defPPr` is applied to all nine levels before
 the matching `a:lvlNpPr`. Paragraph fields and nested default character fields
 overlay independently. Bullet colour, size, font and choice are independent
 properties, while each fill and typeface slot is atomic. Effective values do
-not inherit opaque XML or hyperlink actions. `cap="all"` and `cap="none"`
-overlay as character properties through the same chain. Other capitalization
-values remain unmodelled and preserved.
+not inherit opaque XML or hyperlink actions. `cap="all"`, `cap="small"` and
+`cap="none"` overlay as one character-mode choice through the same chain.
+Direct highlight colour resolves through the same colour and transform
+projection. Other capitalization values remain unmodelled and preserved.
 
 Each paragraph also resolves `a:endParaRPr` as a final character-property
 overlay on the same inherited paragraph style. This terminal style supplies

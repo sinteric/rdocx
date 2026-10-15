@@ -54,8 +54,10 @@ database through layout. The public facade exposes
 `Document::to_pdf_deterministic()`, and deterministic SVG page export. All
 three reuse the separate cached bundled-font-only layout. The PDF facade passes
 that layout directly to
-`oxml_pdf::render_to_pdf`, which gives the golden-PNG gate deterministic PDF
-input without changing the normal PDF API. Existing constructors and rendering
+`oxml_pdf::render_to_pdf_checked`, which gives the golden-PNG gate
+deterministic PDF input and refuses failed selected-font preparation before
+output. The legacy vector operation retains its signature and returns no
+partial bytes on preparation failure. Existing constructors and rendering
 methods still load system fonts for library users.
 
 The hash harness, golden-PNG gate and SSIM harness use the deterministic path.
@@ -216,6 +218,51 @@ publish dry runs, the 10 MiB archive ceiling, and the unchanged 49-entry hash
 harness. Microsoft Word 16.104 build 16.104.25121423 is an ignored no-repair
 oracle only.
 
+Independent installed style paint requires the full104 Word and PowerPoint
+method matrix and the separately executed eight-owner SVG artifact gate.
+PNG and SVG use independently decoded original/static physical contours
+painted by qualified resvg0.48.1, usvg0.48.1 and tiny-skia0.12.0 controls.
+Quadratic and equivalent cubic representations each meet the unchanged0.99
+threshold with source-derived placement, scale and ROI. Wrong-style, origin
+and geometry controls remain below0.99. A shared raster backend comparison
+cannot expose common backend defects.
+
+PDF uses original/static font-text paint under pinned Poppler26.01.0. Variable
+PDF subset glyphs reachable through actual font resources and text operators
+match source-derived first-use glyph mappings, contours, bounds and advances
+exactly. Original-font per-owner ROIs meet0.99, wrong-weight and wrong-origin
+negatives remain below0.99, and drawing commands, repeats and pixels outside
+those ROIs remain exact. Equivalent quadratic point encodings need not be
+bit-identical under the pinned PDF rasterizer. This qualification permits no
+original-font substitution, fitted tolerance or product canonicalization.
+Non-PDF exact default, instance, axes, owner and geometry controls remain.
+
+The SVG artifact gate is an explicitly selected ignored library test whose
+installed wheel and authenticated artifacts are external prerequisites. It
+requires one actual passed test, zero ignored outcomes and all eight owners
+against both quadratic and cubic controls. Ordinary library ignores earn no
+acceptance credit. Python acceptance never launches Cargo.
+
+Variable-font style controls pin `hb-subset`14.4.0 and authenticate licensed
+source bytes, tool identity and independent static400/700 outputs. Actual
+advances, outlines and painted geometry are distinct checks. Synthetic controls
+use independently specified stroke and shear geometry, without substituting
+producer metadata for painting. The existing Thin CJK13.2.1 generation contract
+remains separate. Original static no-input deterministic outputs stay exact,
+and actual intentional variable or synthesis deltas require independent
+attribution before the exclusive hash baseline moves. Font licensing and the
+packaged font inventory remain unchanged.
+
+The SVG raster oracle independently shapes each selected static script and
+weight with pinned HarfBuzz14.4.0. Only a unique textLength with
+spacingAndGlyphs whose target equals that independent natural advance within
+half a six-decimal serialization unit qualifies for identity-only removal
+from the oracle copy. The raw product SVG and raw raster comparison remain
+retained. Nonidentity, unknown, nonfinite and nonpositive adjustments refuse
+normalization. This isolates the pinned usvg cluster-width adjustment
+limitation without changing product geometry, the0.99 paint threshold or
+weight400-versus700 discrimination. It establishes no general browser result.
+
 ## Feature flags
 
 | Crate | Feature | Default | Notes |
@@ -362,6 +409,30 @@ Caladea ships with the full Apache License 2.0 text in `LICENSE-Caladea` and its
 copyright, trademark and designer attribution in `NOTICE-Caladea`. The
 `bundled_fonts.rs` module documentation identifies Caladea as Apache-2.0 and
 the Carlito and Liberation families as SIL Open Font License 1.1.
+
+The bundled inventory includes original Gelasio upright and italic variable
+faces and Selawik Regular and Bold. The9 approved added assets total444812
+bytes, including licenses, notices and the3968-byte Noto Sans Symbols2 subset.
+Gelasio retains upstream commit9228e69b160d79f33950e026293f6e13ba9780d0.
+Selawik retains official release1.01 at commit
+b65ff9ce7c4673e75ec5c622924a6b6f61f2f876. Original family names, axes and
+license texts remain unchanged. Gelasio and Selawik use their own
+`LICENSE-*` and `NOTICE-*` files. The symbols subset uses `LICENSE-Noto` and
+its exact pinned recipe and attribution in `NOTICE-Noto`. Package membership
+includes these assets without replacing existing unrelated font bytes.
+
+Licensed Georgia, Segoe UI and original symbol-font references remain local
+oracle inputs read in place, never redistributed. Independent metric controls
+pin physical font hashes, selected face/axis, HarfBuzz14.4.0, scale, language,
+direction and kern mode. Isolated advances, shaped strings, generic extents,
+Word line selection and wrapping are separate comparisons. Real ligature,
+kerning and vertical-metric differences remain explicit and asserted.
+A finite measured maximum is not a universal tolerance or a paint guarantee.
+No genuine Segoe UI Bold reference is asserted where only Regular was measured.
+Deterministic baselines require reviewed actual integrated output deltas.
+
+Caller-supplied licensed directories remain the optional-font route. There is
+no downloaded default font pack, automatic network loader or new pack crate.
 
 ## Publishing
 
@@ -531,10 +602,10 @@ that inherit `[workspace.package].version`, including the unpublished
 `rdocx-wasm`, `rdocx-py`, and `oxml-py-support` packages, use cargo-release's
 effective `workspace` shared-version group and the `v{{version}}` tag template.
 That shared-version group, the `rdocx` Python project, and rdocx WASM
-contract literals are prepared at0.16.0, together with the exact seven-package
-stable family and its `v0.16.0` release notes. The prepared stable packages
-require shared OOXML0.14.0. The previous complete unified stable release is
-immutable `v0.15.0` at9d019472f7e6b95ac4ba0770c4dee35dcbc28f0e. The historical
+contract literals are prepared at0.16.1, together with the exact seven-package
+stable family and its `v0.16.1` release notes. The prepared stable packages
+require shared OOXML0.14.1. The previous complete unified stable release is
+immutable `v0.16.0` at733ce6f7b2b816c5760692abf5c99d68b29ae897. The historical
 S73 family retains its immutable annotated `v0.14.0` tag at reviewed SHA
 `58ca5a279277f7cd8de0b8f250fb4650de14371b`. Its published archives
 require shared 0.12.1. The unpublished 0.13.2 crates.io train is superseded
@@ -552,11 +623,11 @@ immutable registry releases, including the complete 0.12.0 family, remain
 available. No binding, WASM, Python, npm, or
 incubating package gained publication authority from the stable release.
 The 15 publishable `oxml-*` and `rpptx*` package manifests and the unpublished
-`rpptx-py` binding crate use explicit version0.14.0, the named `incubating`
+`rpptx-py` binding crate use explicit version0.14.1, the named `incubating`
 group, and the `rpptx-v{{version}}` template. The unpublished `rpptx-wasm`
 crate remains at 0.12.1 with its separate npm boundary. The crates.io
 allowlist remains exactly15 packages. The previous complete unified family is
-immutable `rpptx-v0.13.1` at9d019472f7e6b95ac4ba0770c4dee35dcbc28f0e. The
+immutable `rpptx-v0.14.0` at733ce6f7b2b816c5760692abf5c99d68b29ae897. The
 historical S73 family retains the immutable `rpptx-v0.12.1` release at reviewed SHA
 `58ca5a279277f7cd8de0b8f250fb4650de14371b`, and earlier registry releases
 remain available. The stable 0.10.1 registry consumer proof remains pinned to
@@ -574,7 +645,7 @@ and source distributions for both families run clean Python3.9/3.12 runtime and
 Python3.12 typing checks. Both WASM bindings and current npm carrier contracts
 retain their existing separate authority. Final integrated full verification,
 sprint review and SHA-bound hosted build-only rehearsal remain mandatory before
-close. The shared0.14.0 family publishes before Word0.16.0 where the verified
+close. The shared0.14.1 family publishes before Word0.16.1 where the verified
 internal pins require it, each with its own approval at reviewed main.
 External release actions remain owned by `/release`.
 
@@ -620,22 +691,21 @@ main merges and sprint tags.
 The manual `wheels.yml` build-only preflight runs at the final reviewed sprint
 SHA after the sprint push and before sprint close. Its exact selected artifacts
 and metadata are validated, installed and tested in Python 3.9 and 3.12.
-Wheel smoke runs the documented presentation examples on native and musllinux
-runners. The SHA-bound Issue 158 viewer fixture requires the separately pinned
-LibreOffice oracle and is excluded from bare wheel runners. The musllinux
-container also excludes the Issue 217 complete deck chain because its CLI
-validation subprocess needs Cargo, which is absent from that wheel-only
-container. Native wheel and pinned CI runs exercise that chain. The Windows
-`rpptx` CLI runs on an eight MiB thread stack so the complete deck validation
-does not overflow the default main-thread stack. The `rdocx` CLI uses the same
-Windows stack for complete document comparison. The geometry comparison uses
-explicit equal-length checks that work on Python 3.9. Typing and stub checks
-run under Python 3.12. Word wheel smoke runs its documented core, formatting,
-shared, and python-docx parity cases on native and musllinux runners. It
-excludes the Issue 253 PDF text oracle, which requires Poppler 26.01.0 and
-remains in the separately pinned CI suite. The musllinux container also
-excludes the Issue 158 complete Word workflow because its CLI subprocess
-needs Cargo. Native wheel and pinned CI runs exercise that chain. The same
+Bare native and musllinux wheel runners execute one exact positive inventory
+of78 installed priority and compatibility cases, partitioned into37 Word and41
+PowerPoint nodes. Both paths pass the family list as structured pytest
+arguments. Missing or renamed nodes fail collection, and policy checks reject
+missing, additional or duplicate inventory entries. Metadata, native imports
+and fresh Alpine installation remain mandatory. These hosts do not prepare
+the external font, Poppler, LibreOffice or CLI acceptance environment.
+The equipped Python CI retains both full suites, including all104 font cases
+and the separate eight-owner native SVG gate. The complete Issue158 Word and
+Issue217 PowerPoint CLI chains remain in that equipped environment. The
+Windows `rpptx` CLI runs on an eight MiB thread stack so complete deck
+validation does not overflow the default main-thread stack. The `rdocx` CLI
+uses the same Windows stack for complete document comparison. Geometry
+comparisons use explicit equal-length checks that work on Python3.9. Strict
+typing and stub checks run separately under Python3.12. The same
 version carriers and source are then checked
 at the main release boundary. Earlier published `py-*` tags and PyPI versions
 remain historical records. New releases use the two unified family tags.
@@ -727,9 +797,10 @@ disposable pull requests are closed and unmerged. Their verified remote head
 refs were deleted and are absent. Their disposable worktrees and local branches
 were removed cleanly.
 
-**A dedicated `oxml-layout` package job.** It checks the exact 24-font and six
+**A dedicated `oxml-layout` package job.** It checks the exact 32-font and ten
 licence-and-notice-file inventory, builds and verifies the generated archive,
-and enforces the crates.io 10 MiB limit.
+and enforces the crates.io 10 MiB limit. Package membership retains all
+existing unrelated font and legal bytes.
 
 **`--exclude rdocx-py --exclude rpptx-py` on every `--all-features` job.**
 `pyo3/extension-module` tells the linker the Python symbols come from the host
@@ -843,18 +914,34 @@ optimized-size gates remain local.
 product of `rdocx` and `rpptx` with manylinux_2_28 x86_64 and aarch64,
 musllinux_1_2 x86_64, macOS x86_64 and arm64, and Windows x86_64. A second
 two-package job builds the source distributions. Native cells install wheels
-into fresh environments and run the compatible pytest, exact mypy, and
-stubtest gates. Each musllinux cell performs a fresh Alpine install and runs
-the applicable package parity suite.
-The Poppler-versioned binding render gate stays in its pinned environment
-rather than running on generic wheel hosts.
+into fresh environments and run the exact positive family priority and
+compatibility inventory, followed by exact mypy and stubtest gates. Each
+musllinux cell performs a fresh Alpine install and runs the same family
+inventory. Full binding suites and external-tool acceptance run in equipped
+CI, retaining their mandatory font, native and rendering controls.
 
 **A pull-request Python bindings job.** It runs on macOS 26 with one matrix row
 for each Python package. Every row creates an isolated Python 3.12.9 environment,
 installs exact maturin, pytest, and package-oracle versions, builds the current
 extension with `maturin develop --locked`, and runs the package's complete
-pytest directory. The Poppler installation supplies the reviewed 26.01.0 tools
-asserted by the rdocx rendering suite. Build and test failures propagate
+pytest directory. Before pytest, the existing Word rendering test carrier
+prepares independent inputs for either family without importing either product.
+Pillow12.3.0 and Meson1.9.1 are explicit test and build tools. A SHA-pinned
+HarfBuzz14.4.0 source build shapes and subsets the licensed bundled Thai400/700
+controls and the original synthetic ital/slnt SFNT literals. Original and static
+glyph positions, SVG topology and every coordinate retain the0.008-font-unit
+bound. Bundled static-family hashes and licenses are authenticated separately.
+Actual Cargo JSON artifacts identify the current family CLI and the existing
+rdocx development dependency used to compile the standalone path-only reference
+renderer before pytest. Compiler, artifact, source and transitive-version receipts
+bind that executable. Tests never compile a missing reference or use product
+output as its expected paint. All104 font cases and their0.99 comparisons remain
+mandatory, including the separate serial native-eight SVG acceptance.
+The Poppler installation supplies reviewed26.01.0 tools and a retained source
+archive, actual compiler/command and output-hash receipt. Font comparisons accept
+the exact historical binary or this authenticated source build, always using
+the same tool for product PDFs and independent references. Version output alone
+does not establish that provenance. Build and test failures propagate
 directly, with no failure-tolerant condition, inherited pytest override, or
 fallback. The top-level pull-request trigger is operative and the job condition
 uses only the change detector's `python_bindings` output. Workflow root
@@ -972,6 +1059,18 @@ The single advisory exception, an unmaintained transitive font dependency,
 carries its exit route in a comment. Keep that discipline: an ignore without a
 stated exit route is a permanent ignore.
 
+The private native Word SVG renderer uses the already pinned workspace
+`ttf-parser` edge for selected TTC face extraction and instance-aware ink
+bounds. Both installed Python bindings use the existing `oxml-layout` edge for
+strict caller font loading. Word selected-page raster rendering uses the
+existing `oxml-pdf` edge to paint its one configured layout. Only existing
+package dependency-list edges change. Package identities, versions and
+checksums remain unchanged, with no public reexport or host-directory WASM API.
+These source changes retain Rust1.93, no-default layout and both WASM graphs,
+including the Presentation render profile, as completion gates. Actual changed
+crate archives require source/member correspondence, the unchanged compression
+tolerance and10MiB ceiling, and verified patched publication dry runs.
+
 New dependencies are added only with a named consumer. The workspace already
 minimises feature sets deliberately, and the comments in the root manifest
 explaining why `zip` and `fontdb` are trimmed should be preserved rather than
@@ -991,6 +1090,12 @@ transitively through their ordinary `rdocx` dependency. Exact resvg 0.48.1 is
 an `rdocx` development dependency for the 150 dpi SSIM oracle only. It receives
 explicit layout fonts, never system fonts, and does not enter the runtime graph
 or generated `rdocx` archive.
+
+`pulldown-cmark` is pinned to `=0.13.4` in the existing `rdocx` facade.
+Default features are disabled and only the HTML renderer feature is enabled.
+Runtime parser options enable tables and strikethrough. Its optional pinned
+`pulldown-cmark-escape` renderer edge stays inside that facade graph. Python and
+CLI use the same native importer, with no external Markdown executable.
 
 `scraper` 0.27 has two direct named consumers, the private inbound HTML
 importers inside `rdocx` and `rpptx`. The `rdocx` edge disables default
@@ -1028,3 +1133,49 @@ The tracked test job downloads that exact release, verifies both identities,
 exports the verified JAR path, and runs the source-built EPUB oracle as a
 required CI step before the full workspace suite. The validator is not included
 in any crate archive.
+
+## Bundled PowerPoint template authority
+
+The crate-local default template uses the authenticated Office16:9 master and
+all eleven layout rectangles. Fresh core metadata has absent creator,
+lastModifiedBy and description, with fixed created/modified timestamps
+2000-01-01T00:00:00Z. Imported and user-assigned timestamps remain explicit
+source values. Constructors and ordinary save add no ambient wall-clock data.
+Template geometry and metadata are separately labelled behaviour changes with
+measured hash attribution before any exclusive baseline update. The asset
+remains packaged under rpptx/assets and every archive measurement uses actual
+current source members.
+
+## Embedded font inputs and consumer recipes
+
+Embedding reads caller-owned licensed font bytes, with no network discovery,
+automatic host font lookup or installed-font prerequisite. Single-face sfnt
+authoring and bounded EOT/ODTTF decoding reuse existing dependencies and
+existing native providers. Python and CLI inputs are bounded at64MiB before
+copying. Word checked listing also bounds aggregate projected copies, while
+PowerPoint repeated references share one decoded physical body.
+
+Consumer recipes use explicit license authorization and exact identity, and
+exercise source-built current APIs and actual CLI help. Deterministic rendering
+retains caller-first embedded-second selection and entrypoint-specific fallback.
+Fresh paired wheel qualification authenticates every archive member, RECORD
+digest/length, local Python/stub source and native binary before isolated install.
+Affected crate inventories and measured archive tuples come from actual verified
+packages, with the existing10MiB ceiling. Separate downstream skill guidance
+requires its own reviewed patch and submission boundary. Local README changes
+do not imply that an external skill repository was updated.
+
+Native font-use fixtures derive fresh names from licensed existing fonts while
+pinning all unchanged outline, metric, style and license tables. Their inputs
+are not installed on the host. Independent font parsing, bounded stored-part
+inspection and pinned PDF extraction/raster tools qualify actual glyph use
+without changing the product or the managed Python environment. Native Word
+16.113.2 build16.113.26092012 and PowerPoint16.113.4 build16.113.26100421
+qualifications retain input, output, app executable and tool identities.
+
+Office PDF comparisons are application evidence, not deterministic product
+baselines. Native font-unavailable warnings, font-part removal and synthetic
+styles remain recorded. Own-renderer baselines continue to use deterministic
+font mode and true face selection. External downstream guidance remains a
+reviewed proposal until separately submitted, and integrated sprint gates
+remain independent of isolated feature qualifications.

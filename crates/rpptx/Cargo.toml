@@ -2,7 +2,7 @@
 name = "rpptx"
 description = "Read, edit, create, and render PowerPoint-compatible presentations"
 readme = "README.md"
-version = "0.14.0"
+version = "0.14.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -23,7 +23,6 @@ agile-encryption = ["oxml-opc/agile-encryption"]
 default-template = ["dep:scraper"]
 digital-signatures = ["oxml-opc/digital-signatures"]
 render = [
-    "dep:gif",
     "dep:jpeg-encoder",
     "dep:lopdf",
     "lopdf/wasm_js",
@@ -31,7 +30,6 @@ render = [
     "dep:oxml-pdf",
     "dep:rpptx-layout",
     "dep:rpptx-render",
-    "dep:tiny-skia",
 ]
 system-fonts = ["oxml-layout/system-fonts", "rpptx-render?/system-fonts"]
 
@@ -43,7 +41,7 @@ oxml-media.workspace = true
 oxml-opc.workspace = true
 oxml-pdf = { workspace = true, optional = true }
 oxml-sml.workspace = true
-gif = { workspace = true, optional = true }
+gif.workspace = true
 jpeg-encoder = { workspace = true, optional = true, features = ["std"] }
 miniz_oxide = { workspace = true, optional = true }
 lopdf = { workspace = true, optional = true }
@@ -55,7 +53,9 @@ quick-xml.workspace = true
 scraper = { workspace = true, optional = true }
 sha2.workspace = true
 thiserror.workspace = true
-tiny-skia = { workspace = true, optional = true }
+tiny-skia.workspace = true
+zune-jpeg.workspace = true
+tiff.workspace = true
 zip.workspace = true
 
 [dev-dependencies]

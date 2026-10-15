@@ -1084,7 +1084,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "oxml-chart"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-cli-support"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-core"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-drawing"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-core",
  "oxml-opc",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-layout"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "fontdb 0.23.0",
  "harfrust",
@@ -1137,11 +1137,11 @@ dependencies = [
 
 [[package]]
 name = "oxml-media"
-version = "0.14.0"
+version = "0.14.1"
 
 [[package]]
 name = "oxml-opc"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "aes",
  "base64",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "oxml-pdf"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "jpeg-encoder",
  "miniz_oxide 0.9.1",
@@ -1176,16 +1176,17 @@ dependencies = [
 
 [[package]]
 name = "oxml-py-support"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "oxml-core",
+ "pyo3",
  "smallvec",
  "thiserror",
 ]
 
 [[package]]
 name = "oxml-sml"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-opc",
  "quick-xml",
@@ -1347,6 +1348,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
 name = "pyo3"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1464,7 +1483,7 @@ checksum = "a611d15b50743feb4c76b7d03edcb0e64f399c26961e4efe6975bc398be6aa3d"
 
 [[package]]
 name = "rdocx"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "base64",
  "encoding_rs",
@@ -1477,6 +1496,7 @@ dependencies = [
  "oxml-opc",
  "oxml-pdf",
  "oxml-sml",
+ "pulldown-cmark",
  "quick-xml",
  "rdocx-html",
  "rdocx-layout",
@@ -1488,12 +1508,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "ttf-parser",
  "zip",
 ]
 
 [[package]]
 name = "rdocx-cli"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "clap",
  "oxml-cli-support",
@@ -1508,14 +1529,14 @@ dependencies = [
 
 [[package]]
 name = "rdocx-html"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "rdocx-oxml",
 ]
 
 [[package]]
 name = "rdocx-layout"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
@@ -1525,14 +1546,14 @@ dependencies = [
 
 [[package]]
 name = "rdocx-opc"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "oxml-opc",
 ]
 
 [[package]]
 name = "rdocx-oxml"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "itoa",
  "oxml-core",
@@ -1544,26 +1565,28 @@ dependencies = [
 
 [[package]]
 name = "rdocx-pdf"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "oxml-pdf",
 ]
 
 [[package]]
 name = "rdocx-py"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "oxml-layout",
+ "oxml-pdf",
  "oxml-py-support",
  "pyo3",
  "rdocx",
  "rdocx-oxml",
+ "serde_json",
  "smallvec",
 ]
 
 [[package]]
 name = "rdocx-wasm"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "js-sys",
  "oxml-opc",
@@ -1689,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "gif",
  "jpeg-encoder",
@@ -1710,20 +1733,22 @@ dependencies = [
  "scraper",
  "sha2",
  "thiserror",
+ "tiff",
  "tiny-skia",
  "zip",
+ "zune-jpeg",
 ]
 
 [[package]]
 name = "rpptx-chart"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-chart",
 ]
 
 [[package]]
 name = "rpptx-cli"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "clap",
  "oxml-cli-support",
@@ -1736,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-layout"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-chart",
  "oxml-drawing",
@@ -1747,7 +1772,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-oxml"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-core",
  "oxml-drawing",
@@ -1757,8 +1782,9 @@ dependencies = [
 
 [[package]]
 name = "rpptx-py"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
+ "oxml-layout",
  "oxml-py-support",
  "pyo3",
  "rpptx",
@@ -1767,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "rpptx-render"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "oxml-drawing",
  "oxml-layout",
@@ -2271,6 +2297,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

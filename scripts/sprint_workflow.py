@@ -27,6 +27,7 @@ Exit codes: 0 ok, 1 refused, 2 usage.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from email.message import Message
 from email.parser import Parser
 import json
@@ -1509,6 +1510,281 @@ def cmd_close_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+COMPATIBILITY_COUNTS = {"BASE": 24, "XML": 14, "LIFE": 16, "AREA": 46}
+COMPATIBILITY_MANIFEST_SHA = "7501e001301a703988526f76c9961b35b345a1c17f8e1d383e9477d5947b22e1"
+COMPATIBILITY_BODY_SHA = "2f4348dd55dcd1b8889badd8ca407d9f790cf38327c00ec3ae31dd5b02b3f66e"
+COMPATIBILITY_DIVERGENCES = {"W-XML-02", "P-AREA-17"}
+
+
+def compatibility_artifact(reference: dict) -> bytes:
+    """Authenticate retained bytes without executing their contents."""
+    path = Path(reference["path"])
+    digest = reference["sha256"]
+    if not path.is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("compatibility evidence needs an absolute path and SHA-256")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError(f"compatibility evidence changed: {path}")
+    return raw
+
+
+def compatibility_obligations(record: dict) -> list[str]:
+    """Keep each frozen item and its explicit semicolon-separated clauses."""
+    declared = record.get("additional_native_obligations", [])
+    if isinstance(declared, str):
+        declared = [declared]
+    if not isinstance(declared, list) or any(not isinstance(text, str) for text in declared):
+        raise ValueError("frozen native obligations must be texts")
+    return [clause.strip() for text in declared for clause in text.split(";") if clause.strip()]
+
+
+def compatibility_observations(facts: list) -> None:
+    if not isinstance(facts, list) or not facts:
+        raise ValueError("qualification needs concrete typed observations")
+    for fact in facts:
+        if not isinstance(fact, dict) or type(fact.get("observation")) is not str or (
+            not fact["observation"].strip()
+            or fact.get("kind") not in ("source-model", "save-reopen", "native", "render", "lifetime", "schema")
+            or "expected" not in fact or "actual" not in fact
+            or not isinstance(fact.get("evidence"), list) or not fact["evidence"]
+        ):
+            raise ValueError("qualification needs concrete typed observations")
+        for reference in fact["evidence"]:
+            compatibility_artifact(reference)
+
+
+def compatibility_named_non_successes(packet: dict, source_sha: str, attempts_raw: bytes, by_id: dict) -> set[str]:
+    """Admit only reviewed, candidate-specific frozen assertion conflicts."""
+    if packet.get("named_non_successes") is None and packet.get("non_success_admission") is None:
+        return set()
+    raw = compatibility_artifact(packet["named_non_successes"])
+    facts = json.loads(raw)
+    admission = json.loads(compatibility_artifact(packet["non_success_admission"]))
+    attempts_sha = hashlib.sha256(attempts_raw).hexdigest()
+    if admission.get("status") != "admitted" or admission.get("disposition_sha256") != hashlib.sha256(raw).hexdigest() or any(
+        value.get("source_manifest_sha256") != source_sha or value.get("attempts_sha256") != attempts_sha
+        for value in (facts, admission)
+    ):
+        raise ValueError("named non-success admission does not bind these facts/source/attempts")
+    assertions = {
+        "W-AREA-19": (18, "assert any('Gelasio' in x for x in names)"),
+        "P-AREA-02": (40, "assert len(updates)==1"),
+        "P-AREA-14": (17, "assert nv.get('descr')=='Description' and nv.get('title')=='Title'"),
+    }
+    rows = facts["cases"]
+    if not isinstance(rows, list) or not rows or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("named non-successes require explicit reviewed case facts")
+    declared = set()
+    for row in rows:
+        case_id = row["id"]
+        if case_id not in assertions or case_id in declared:
+            raise ValueError("named non-success identity is unreviewed or duplicated")
+        attempt = by_id[case_id]
+        cleanup = attempt.get("cleanup", {})
+        if attempt["exit_code"] != 1 or attempt["timed_out"] or any(
+            cleanup.get(field) is not True for field in ("groupGone", "leaderReaped", "leaseReleaseSafe")
+        ) or cleanup.get("signals") != []:
+            raise ValueError("named non-success needs an actual safely completed assertion failure")
+        reference = row["failure_evidence"]
+        if reference not in attempt["evidence"]:
+            raise ValueError("named non-success failure log is not this original attempt's evidence")
+        text = compatibility_artifact(reference).decode()
+        frames = re.findall(r'File "([^"\n]+)", line (\d+), in <module>', text)
+        line, assertion = assertions[case_id]
+        if len(frames) != 1 or not frames[0][0].endswith(f"/scripts/{case_id}.py") or frames[0][1] != str(line) or (
+            not text.startswith("Traceback (most recent call last):\n")
+            or f"\n    {assertion}\n" not in text or not text.endswith("\nAssertionError\n")
+        ):
+            raise ValueError("named non-success did not reach its reviewed frozen assertion")
+        for field, kind in (("source_model", "source-model"), ("save_reopen", "save-reopen")):
+            compatibility_observations(row[field])
+            if any(fact["kind"] != kind for fact in row[field]):
+                raise ValueError("named non-success companion observation has the wrong scope")
+        declared.add(case_id)
+    return declared
+
+
+def compatibility_report(packet: dict) -> dict:
+    """Report first attempts. Qualification is separate from script exit status."""
+    manifest_raw = compatibility_artifact(packet["manifest"])
+    body_raw = compatibility_artifact(packet["body_manifest"])
+    if hashlib.sha256(manifest_raw).hexdigest() != COMPATIBILITY_MANIFEST_SHA:
+        raise ValueError("compatibility manifest is not the frozen S91 manifest")
+    if hashlib.sha256(body_raw).hexdigest() != COMPATIBILITY_BODY_SHA:
+        raise ValueError("compatibility bodies are not the frozen S91 bodies")
+    manifest = json.loads(manifest_raw)
+    records = manifest["records"]
+    ids = {row["id"] for row in records}
+    if len(records) != 100 or len(ids) != 100:
+        raise ValueError("compatibility denominator must be exactly 100 distinct cases")
+    for area, count in COMPATIBILITY_COUNTS.items():
+        if sum(row["area"] == area for row in records) != count:
+            raise ValueError(f"compatibility allocation changed: {area}")
+    if sum(row["family"] == "W" for row in records) != 49 or sum(
+        row["family"] == "P" for row in records
+    ) != 51:
+        raise ValueError("compatibility family allocation must remain 49 Word and 51 PPT")
+    attempts_raw = compatibility_artifact(packet["attempts"])
+    attempts = json.loads(attempts_raw)
+    if len(attempts) != 100 or {row["id"] for row in attempts} != ids:
+        raise ValueError("compatibility attempts contain duplicate or missing case identities")
+    by_id = {row["id"]: row for row in attempts}
+    for record in records:
+        attempt = by_id[record["id"]]
+        if attempt["attempt_number"] != 1 or type(attempt["attempt_number"]) is not int:
+            raise ValueError("compatibility credit is limited to each immutable first attempt")
+        if attempt["script_sha256"] != record["script_sha256"]:
+            raise ValueError(f"compatibility script changed: {record['id']}")
+        if attempt["family"] != record["family"] or attempt["area"] != record["area"]:
+            raise ValueError(f"compatibility attempt identity changed: {record['id']}")
+        if type(attempt["timed_out"]) is not bool or (
+            attempt["exit_code"] is not None and type(attempt["exit_code"]) is not int
+        ):
+            raise ValueError("compatibility exit status must be an actual integer or null")
+        for reference in attempt["evidence"]:
+            compatibility_artifact(reference)
+        if not attempt["evidence"]:
+            raise ValueError(f"compatibility attempt has no retained evidence: {record['id']}")
+    provenance = json.loads(compatibility_artifact(packet["provenance"]))
+    # The selected source is a working-byte capture, not the Base commit tree.
+    if provenance["source_kind"] != "working-copy" or not provenance["dirty"]:
+        raise ValueError("compatibility source must identify the actual dirty candidate")
+    for key, size in (("base", 40), ("head", 40), ("index_sha256", 64)):
+        if not re.fullmatch(rf"[0-9a-f]{{{size}}}", provenance[key]):
+            raise ValueError(f"compatibility source identity is invalid: {key}")
+    for reference in provenance["evidence"]:
+        compatibility_artifact(reference)
+    source_raw = compatibility_artifact(provenance["source_manifest"])
+    source_sha = hashlib.sha256(source_raw).hexdigest()
+    if not provenance["evidence"] or not json.loads(source_raw):
+        raise ValueError("compatibility source/build/install evidence is missing")
+    dependencies = packet["dependencies"]
+    required = {"F-X211a", "F-X211b", "F-X211d", "F-X215", "F-X217", "F-X218", "F-X220"}
+    required.update(f"F-X{number}" for number in range(200, 211))
+    if set(dependencies) != required:
+        raise ValueError("compatibility provider dependency identities are incomplete")
+    for reference in dependencies.values():
+        compatibility_artifact(reference)
+    divergences = COMPATIBILITY_DIVERGENCES | compatibility_named_non_successes(packet, source_sha, attempts_raw, by_id)
+
+    # Until a separate reviewed fact packet is admitted, no correct-file score
+    # follows from assertion exits, hash gates or package inventories.
+    qualified = set()
+    full_metric = None
+    declared = {row["id"]: compatibility_obligations(row) for row in records if row.get("additional_native_obligations")}
+    native_inventory = [
+        {"id": case_id, "obligation": text, "obligation_sha256": hashlib.sha256(text.encode()).hexdigest(), "status": "pending"}
+        for case_id, texts in declared.items() for text in texts
+    ]
+    if packet.get("qualification") is not None:
+        facts_raw = compatibility_artifact(packet["qualification"])
+        facts = json.loads(facts_raw)
+        admission = json.loads(compatibility_artifact(packet["qualification_admission"]))
+        if admission.get("status") != "admitted":
+            raise ValueError("compatibility qualification is not admitted")
+        if admission["qualification_sha256"] != hashlib.sha256(facts_raw).hexdigest() or (
+            admission["source_manifest_sha256"] != source_sha
+            or admission["attempts_sha256"] != hashlib.sha256(attempts_raw).hexdigest()
+        ):
+            raise ValueError("compatibility admission does not bind these facts/source/attempts")
+        if facts["source_manifest_sha256"] != source_sha or (
+            facts["attempts_sha256"] != admission["attempts_sha256"]
+        ):
+            raise ValueError("compatibility facts belong to a different candidate")
+        fact_rows = facts["cases"]
+        if len(fact_rows) != 100 or {row["id"] for row in fact_rows} != ids:
+            raise ValueError("compatibility facts must evaluate all 100 unchanged cases")
+        for row in fact_rows:
+            if row["status"] not in ("qualified", "unqualified", "pending"):
+                raise ValueError("compatibility fact status is invalid")
+            for reference in row["evidence"]:
+                compatibility_artifact(reference)
+            if row["status"] == "qualified":
+                proof_fields = ("source_model", "save_reopen")
+                if not row["evidence"]:
+                    raise ValueError("correct-file credit needs actual source/model and save/reopen facts")
+                for field in proof_fields:
+                    compatibility_observations(row[field])
+                attempt = by_id[row["id"]]
+                if attempt["exit_code"] != 0 or attempt["timed_out"] or row["id"] in divergences:
+                    raise ValueError("a failed or divergent first attempt cannot earn correct-file credit")
+                qualified.add(row["id"])
+        # Admission must enumerate the defining owner, safety and native/render
+        # authorities. Their concrete proofs remain subject to independent review.
+        hard_gates = facts["hard_gates"]
+        required_gates = {
+            row["id"] for row in records
+            if row["area"] in ("XML", "LIFE") or row.get("additional_native_obligations")
+        }
+        required_gates.add("P-AREA-10")
+        if not required_gates.issubset(hard_gates):
+            raise ValueError("all current-owner XML, lifetime and declared native/render hard gates are required")
+        for gate in hard_gates.values():
+            if gate["status"] not in ("qualified", "unqualified", "pending"):
+                raise ValueError("compatibility hard gate status is invalid")
+            for reference in gate["evidence"]:
+                compatibility_artifact(reference)
+            if gate["status"] == "qualified":
+                if not gate["evidence"]:
+                    raise ValueError("qualified hard gates require retained actual observations/evidence")
+                compatibility_observations(gate["observations"])
+        native_facts = facts["native_obligations"]
+        if set(native_facts) != set(declared):
+            raise ValueError("qualification must bind every frozen native obligation")
+        native_ready = True
+        for case_id, texts in declared.items():
+            proofs = native_facts[case_id]
+            if not isinstance(proofs, list) or len(proofs) != len(texts):
+                raise ValueError(f"native obligation proofs are missing: {case_id}")
+            for text, proof in zip(texts, proofs):
+                digest = hashlib.sha256(text.encode()).hexdigest()
+                if proof["obligation"] != text or proof["obligation_sha256"] != digest:
+                    raise ValueError(f"native obligation identity changed: {case_id}")
+                if proof["status"] not in ("qualified", "unqualified", "pending"):
+                    raise ValueError("native obligation status is invalid")
+                if proof["status"] == "qualified":
+                    compatibility_observations(proof["observations"])
+                else:
+                    native_ready = False
+        native_inventory = [dict(id=case_id, obligation=proof["obligation"],
+                                 obligation_sha256=proof["obligation_sha256"], status=proof["status"])
+                            for case_id, proofs in native_facts.items() for proof in proofs]
+        complete = all(row["status"] != "pending" for row in fact_rows)
+        gates_ready = all(gate["status"] == "qualified" for gate in hard_gates.values())
+        if complete and gates_ready and native_ready and admission["status"] == "admitted":
+            full_metric = len(qualified)
+    def counts(selected: list[dict]) -> dict:
+        selected_ids = {row["id"] for row in selected}
+        exits = {row["id"] for row in selected if row["exit_code"] == 0 and not row["timed_out"]}
+        return {"attempted": len(selected), "executed": sum(row["exit_code"] is not None for row in selected),
+                "assertions_exit_zero": len(exits), "correct_file": len(selected_ids & qualified),
+                "deliberate_divergence": len(selected_ids & divergences),
+                "unexpected_failure_ids": sorted(selected_ids - exits - divergences)}
+    documentation = {f"W-BASE-{i:02}" for i in range(1, 18)} | {f"P-BASE-{i:02}" for i in range(1, 8)}
+    return {"denominator": 100, "body_manifest_sha256": COMPATIBILITY_BODY_SHA,
+            "source_manifest_sha256": source_sha, "provenance": provenance,
+            "by_area": {area: counts([row for row in attempts if row["area"] == area]) for area in COMPATIBILITY_COUNTS},
+            "documentation_subset": counts([row for row in attempts if row["id"] in documentation]),
+            "native_obligations": native_inventory,
+            "total": counts(attempts), "full_acceptance_percent": full_metric,
+            "threshold_met": full_metric is not None and full_metric >= 90}
+
+
+def cmd_compatibility_report(args: argparse.Namespace) -> int:
+    try:
+        result = compatibility_report(json.loads(Path(args.packet).read_text()))
+    except (KeyError, TypeError, ValueError, OSError) as error:
+        print(f"compatibility-report: REFUSED: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if args.check and (
+        not result["threshold_met"] or result["total"]["unexpected_failure_ids"]
+    ):
+        print("compatibility-report: qualification incomplete or acceptance failed", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1525,6 +1801,7 @@ def main() -> int:
     p = sub.add_parser("unified-release-family"); p.add_argument("tag"); p.set_defaults(fn=cmd_unified_release_family)
     p = sub.add_parser("published-unified-release"); p.add_argument("tag"); p.add_argument("directory"); p.set_defaults(fn=cmd_published_unified_release)
     p = sub.add_parser("python-release-artifacts"); p.add_argument("tag"); p.add_argument("directory"); p.set_defaults(fn=cmd_python_release_artifacts)
+    p = sub.add_parser("compatibility-report"); p.add_argument("packet"); mode = p.add_mutually_exclusive_group(required=True); mode.add_argument("--check", action="store_true"); mode.add_argument("--render", action="store_true"); p.set_defaults(fn=cmd_compatibility_report)
 
     args = ap.parse_args()
     if getattr(args, "fid", None) and not FID_RE.match(args.fid):

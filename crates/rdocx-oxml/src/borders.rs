@@ -5,10 +5,11 @@ use std::borrow::Cow;
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::QName;
-use quick_xml::{Reader, Writer, XmlVersion};
+use quick_xml::{Reader, Writer};
 
 use crate::error::{OxmlError, Result};
 use crate::namespace::{W_NS, matches_local_name};
+use crate::numbering::word_prefixes_at;
 use crate::properties::parse_integer_measurement;
 use crate::shared::{ST_Border, ST_TabJc, ST_TabLeader};
 use crate::units::Twips;
@@ -35,6 +36,9 @@ pub struct CT_BorderEdge {
     /// verbatim, so a caller storing one itself is storing attribute-value
     /// syntax and owns the escaping.
     pub extra_attributes: Vec<(String, String)>,
+    /// Namespace-complete started edge source, including opaque child payload.
+    /// Direct field edits merge owned attributes into this physical owner.
+    pub source_xml: Option<Vec<u8>>,
 }
 
 impl CT_BorderEdge {
@@ -45,7 +49,44 @@ impl CT_BorderEdge {
             space: None,
             color: None,
             extra_attributes: Vec::new(),
+            source_xml: None,
         }
+    }
+
+    /// Select a literal color and remove only qualified competing theme selectors.
+    pub fn set_literal_color(&mut self, color: &str) -> Result<()> {
+        let generated;
+        let raw = if let Some(raw) = &self.source_xml {
+            raw.as_slice()
+        } else {
+            let mut start = BytesStart::new("w:border");
+            start.push_attribute(("xmlns:w", W_NS));
+            self.write_xml_attrs(&mut start);
+            let mut writer = Writer::new(Vec::new());
+            writer.write_event(Event::Empty(start))?;
+            generated = writer.into_inner();
+            generated.as_slice()
+        };
+        let mut reader = quick_xml::NsReader::from_reader(raw);
+        let (_, event) = reader.read_resolved_event()?;
+        let root = match event {
+            Event::Start(root) | Event::Empty(root) => root,
+            _ => return Err(OxmlError::InvalidValue("border source root missing".into())),
+        };
+        let mut remove = Vec::new();
+        for attribute in root.attributes() {
+            let attribute = attribute?;
+            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+            if matches!(namespace, quick_xml::name::ResolveResult::Bound(namespace) if namespace.as_ref() == W_NS.as_bytes())
+                && matches!(local.as_ref(), b"themeColor" | b"themeTint" | b"themeShade")
+            {
+                remove.push(std::str::from_utf8(attribute.key.as_ref())?.to_owned());
+            }
+        }
+        self.extra_attributes
+            .retain(|(key, _)| !remove.contains(key));
+        self.color = Some(color.to_owned());
+        Ok(())
     }
 
     pub fn from_xml_attrs(e: &BytesStart) -> Result<Self> {
@@ -127,7 +168,33 @@ impl CT_BorderEdge {
     ) -> crate::error::Result<()> {
         let mut e = BytesStart::new(tag);
         self.write_xml_attrs(&mut e);
-        writer.write_event(Event::Empty(e))?;
+        if let Some(raw) = &self.source_xml {
+            let mut reader = Reader::from_reader(raw.as_slice());
+            let Event::Start(start) = reader.read_event()? else {
+                return Err(OxmlError::InvalidValue(
+                    "started border source root missing".to_owned(),
+                ));
+            };
+            let scope = crate::numbering::word_prefixes_at(&start, &[])?;
+            let before = Self::from_xml_attrs_with_prefixes(&start, &scope)?;
+            let mut old = Writer::new(Vec::new());
+            let mut old_start = BytesStart::new(tag);
+            before.write_xml_attrs(&mut old_start);
+            old.write_event(Event::Empty(old_start))?;
+            let mut generated = Writer::new(Vec::new());
+            generated.write_event(Event::Empty(e))?;
+            writer
+                .get_mut()
+                .write_all(&crate::styles::merge_defaults_scalar_attributes(
+                    raw,
+                    Some(old.get_ref()),
+                    Some(generated.get_ref()),
+                    &scope,
+                    true,
+                )?)?;
+        } else {
+            writer.write_event(Event::Empty(e))?;
+        }
         Ok(())
     }
 }
@@ -181,6 +248,54 @@ impl CT_PBdr {
                         bdr.bar = Some(CT_BorderEdge::from_xml_attrs_with_prefixes(e, &prefixes)?);
                     }
                 }
+                Ok(Event::Start(ref e)) => {
+                    let prefixes = word_prefixes_at(e, word_prefixes)?;
+                    let name = e.name();
+                    let slot = if is_word_element(name.as_ref(), b"top", &prefixes) {
+                        Some(&mut bdr.top)
+                    } else if is_word_element(name.as_ref(), b"bottom", &prefixes) {
+                        Some(&mut bdr.bottom)
+                    } else if is_word_element(name.as_ref(), b"left", &prefixes)
+                        || is_word_element(name.as_ref(), b"start", &prefixes)
+                    {
+                        Some(&mut bdr.left)
+                    } else if is_word_element(name.as_ref(), b"right", &prefixes)
+                        || is_word_element(name.as_ref(), b"end", &prefixes)
+                    {
+                        Some(&mut bdr.right)
+                    } else if is_word_element(name.as_ref(), b"between", &prefixes) {
+                        Some(&mut bdr.between)
+                    } else if is_word_element(name.as_ref(), b"bar", &prefixes) {
+                        Some(&mut bdr.bar)
+                    } else {
+                        None
+                    };
+                    if let Some(slot) = slot {
+                        let mut edge = CT_BorderEdge::from_xml_attrs_with_prefixes(e, &prefixes)?;
+                        let trim_start = reader.config().trim_text_start;
+                        let trim_end = reader.config().trim_text_end;
+                        reader.config_mut().trim_text(false);
+                        let captured = crate::raw_xml::capture_element(reader, e);
+                        reader.config_mut().trim_text_start = trim_start;
+                        reader.config_mut().trim_text_end = trim_end;
+                        let mut bindings = crate::numbering::namespace_bindings(&prefixes);
+                        for prefix in prefixes.iter().filter(|prefix| !prefix.starts_with('\0')) {
+                            if !bindings.iter().any(|(name, _)| name == prefix) {
+                                bindings.push((prefix.clone(), W_NS.to_owned()));
+                            }
+                        }
+                        edge.source_xml = Some(crate::text::raw_with_external_bindings(
+                            &captured?, &bindings,
+                        )?);
+                        *slot = Some(edge);
+                    } else {
+                        // The whole unknown owner is opaque. Descendants are
+                        // never direct pBdr children, even with Word-like names
+                        // or a locally rebound prefix. The enclosing source
+                        // owner retains their bytes for style serialization.
+                        crate::raw_xml::capture_element(reader, e)?;
+                    }
+                }
                 Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"pBdr") => {
                     break;
                 }
@@ -194,38 +309,87 @@ impl CT_PBdr {
         Ok(bdr)
     }
 
+    pub(crate) fn from_source_xml(raw: &[u8]) -> Result<Self> {
+        let mut reader = Reader::from_reader(raw);
+        reader.config_mut().trim_text(false);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer)? {
+                Event::Start(root) => {
+                    let prefixes = word_prefixes_at(&root, &[])?;
+                    if !is_word_element(root.name().as_ref(), b"pBdr", &prefixes) {
+                        return Err(OxmlError::InvalidValue(
+                            "expected owned Word pBdr root".to_owned(),
+                        ));
+                    }
+                    return Self::from_xml_with_prefixes(&mut reader, &prefixes);
+                }
+                Event::Empty(root) => {
+                    let prefixes = word_prefixes_at(&root, &[])?;
+                    if is_word_element(root.name().as_ref(), b"pBdr", &prefixes) {
+                        return Ok(Self::default());
+                    }
+                    return Err(OxmlError::InvalidValue(
+                        "expected owned Word pBdr root".to_owned(),
+                    ));
+                }
+                Event::Eof => return Err(OxmlError::InvalidValue("pBdr root missing".to_owned())),
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+
+    pub(crate) fn merge_source(
+        raw: &[u8],
+        original_selected: &[u8],
+        selected: Option<&Self>,
+        selected_owner: bool,
+    ) -> Result<Vec<u8>> {
+        let before = Self::from_source_xml(if selected.is_none() {
+            raw
+        } else {
+            original_selected
+        })?;
+        if selected.is_some_and(|selected| selected == &before) {
+            return Ok(raw.to_vec());
+        }
+        let mut before_writer = Writer::new(Vec::new());
+        before.to_xml(&mut before_writer)?;
+        let mut after_writer = Writer::new(Vec::new());
+        selected
+            .cloned()
+            .unwrap_or_default()
+            .to_xml(&mut after_writer)?;
+        crate::styles::merge_style_border_source(
+            raw,
+            Some(before_writer.get_ref()),
+            after_writer.get_ref(),
+            &[],
+            selected_owner,
+        )
+    }
+
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.write_event(Event::Start(BytesStart::new("w:pBdr")))?;
 
         if let Some(ref edge) = self.top {
-            let mut e = BytesStart::new("w:top");
-            edge.write_xml_attrs(&mut e);
-            writer.write_event(Event::Empty(e))?;
+            edge.to_xml(writer, "w:top")?;
         }
         if let Some(ref edge) = self.left {
-            let mut e = BytesStart::new("w:left");
-            edge.write_xml_attrs(&mut e);
-            writer.write_event(Event::Empty(e))?;
+            edge.to_xml(writer, "w:left")?;
         }
         if let Some(ref edge) = self.bottom {
-            let mut e = BytesStart::new("w:bottom");
-            edge.write_xml_attrs(&mut e);
-            writer.write_event(Event::Empty(e))?;
+            edge.to_xml(writer, "w:bottom")?;
         }
         if let Some(ref edge) = self.right {
-            let mut e = BytesStart::new("w:right");
-            edge.write_xml_attrs(&mut e);
-            writer.write_event(Event::Empty(e))?;
+            edge.to_xml(writer, "w:right")?;
         }
         if let Some(ref edge) = self.between {
-            let mut e = BytesStart::new("w:between");
-            edge.write_xml_attrs(&mut e);
-            writer.write_event(Event::Empty(e))?;
+            edge.to_xml(writer, "w:between")?;
         }
         if let Some(ref edge) = self.bar {
-            let mut e = BytesStart::new("w:bar");
-            edge.write_xml_attrs(&mut e);
-            writer.write_event(Event::Empty(e))?;
+            edge.to_xml(writer, "w:bar")?;
         }
 
         writer.write_event(Event::End(BytesEnd::new("w:pBdr")))?;
@@ -305,29 +469,6 @@ impl CT_TabStop {
             source_occurrence: None,
         })
     }
-}
-
-fn word_prefixes_at(start: &BytesStart<'_>, inherited: &[String]) -> Result<Vec<String>> {
-    let mut prefixes = inherited.to_vec();
-    for attribute in start.attributes() {
-        let attribute = attribute?;
-        let name = attribute.key.as_ref();
-        let prefix = if name == b"xmlns" {
-            b"".as_slice()
-        } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
-            prefix
-        } else {
-            continue;
-        };
-        let prefix = std::str::from_utf8(prefix)?.to_string();
-        prefixes.retain(|candidate| candidate != &prefix);
-        let value =
-            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())?;
-        if value.as_bytes() == W_NS.as_bytes() {
-            prefixes.push(prefix);
-        }
-    }
-    Ok(prefixes)
 }
 
 fn is_word_name(name: &[u8], word_prefixes: &[String]) -> bool {
@@ -414,6 +555,47 @@ impl CT_Tabs {
         }
 
         Ok(CT_Tabs { tabs })
+    }
+
+    /// Parse a retained standalone tabs root with its actual namespace bindings.
+    pub fn from_source_xml(raw: &[u8]) -> Result<Self> {
+        let mut reader = Reader::from_reader(raw);
+        reader.config_mut().trim_text(false);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer)? {
+                Event::Start(root) => {
+                    let prefixes = word_prefixes_at(&root, &[])?;
+                    if !is_word_element(root.name().as_ref(), b"tabs", &prefixes) {
+                        return Err(OxmlError::InvalidValue(
+                            "expected owned Word tabs root".to_owned(),
+                        ));
+                    }
+                    return Self::from_xml_with_prefixes(&mut reader, &prefixes);
+                }
+                Event::Empty(root) => {
+                    let prefixes = word_prefixes_at(&root, &[])?;
+                    if is_word_element(root.name().as_ref(), b"tabs", &prefixes) {
+                        return Ok(Self::default());
+                    }
+                    return Err(OxmlError::InvalidValue(
+                        "expected owned Word tabs root".to_owned(),
+                    ));
+                }
+                Event::Eof => return Err(OxmlError::InvalidValue("tabs root missing".to_owned())),
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+
+    /// Project exact known alignment and leader tokens from one owned source occurrence.
+    pub fn source_tokens(
+        raw: &[u8],
+        occurrence: usize,
+    ) -> Result<(ST_TabJc, Option<ST_TabLeader>)> {
+        Self::from_source_xml(raw)?;
+        crate::numbering::tabs_source_tokens(raw, occurrence)
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
@@ -536,6 +718,7 @@ mod tests {
                 space: Some(1),
                 color: Some("000000".to_string()),
                 extra_attributes: Vec::new(),
+                source_xml: None,
             }),
             bottom: Some(CT_BorderEdge {
                 val: ST_Border::Double,
@@ -543,6 +726,7 @@ mod tests {
                 space: Some(2),
                 color: Some("FF0000".to_string()),
                 extra_attributes: Vec::new(),
+                source_xml: None,
             }),
             ..Default::default()
         };
@@ -745,6 +929,7 @@ mod tests {
                     space: Some(0),
                     color: Some("FF00FF".to_string()),
                     extra_attributes: Vec::new(),
+                    source_xml: None,
                 }),
                 ..Default::default()
             };
@@ -774,6 +959,34 @@ mod tests {
             );
             assert_eq!(top.sz, Some(8));
             assert_eq!(top.color.as_deref(), Some("FF00FF"));
+        }
+    }
+    #[test]
+    fn fx200_border_parser_never_promotes_opaque_wrapper_descendants_or_shadowed_prefixes() {
+        for opaque in [
+            r#"<f:opaque><q:bottom q:val='double'></q:bottom></f:opaque>"#,
+            r#"<f:opaque xmlns:q='urn:shadow'><q:bottom q:val='double'></q:bottom><w:left w:val='double'/></f:opaque>"#,
+        ] {
+            let source = format!(
+                r#"<w:pPr xmlns:w="{W_NS}" xmlns:q="{W_NS}" xmlns:f="urn:foreign"><q:pBdr>{opaque}<q:right q:val='single'></q:right></q:pBdr></w:pPr>"#
+            );
+            let parsed =
+                crate::numbering::parse_scoped_ppr(source.as_bytes(), &["w".to_owned()]).unwrap();
+            let borders = parsed.borders.as_ref().unwrap();
+            assert!(borders.bottom.is_none() && borders.left.is_none() && borders.top.is_none());
+            assert_eq!(borders.right.as_ref().unwrap().val, ST_Border::Single);
+            assert!(borders.right.as_ref().unwrap().source_xml.is_some());
+            let mut writer = Writer::new(Vec::new());
+            borders.to_xml(&mut writer).unwrap();
+            let wrapped = format!(
+                r#"<w:pPr xmlns:w="{W_NS}">{}</w:pPr>"#,
+                std::str::from_utf8(writer.get_ref()).unwrap()
+            );
+            let reopened =
+                crate::numbering::parse_scoped_ppr(wrapped.as_bytes(), &["w".to_owned()]).unwrap();
+            let actual = reopened.borders.as_ref().unwrap();
+            assert!(actual.bottom.is_none() && actual.left.is_none());
+            assert_eq!(actual.right.as_ref().unwrap().val, ST_Border::Single);
         }
     }
 }

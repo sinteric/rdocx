@@ -481,30 +481,31 @@ mod tests {
         let wasm_manifest = include_str!("../Cargo.toml");
 
         assert!(workspace_manifest.contains(
-            "rpptx = { path = \"crates/rpptx\", version = \"0.14.0\", default-features = false }"
+            "rpptx = { path = \"crates/rpptx\", version = \"0.14.1\", default-features = false }"
         ));
         assert!(
             facade_manifest
                 .contains("default = [\"default-template\", \"render\", \"system-fonts\"]")
         );
         for dependency in [
-            "dep:gif",
             "dep:jpeg-encoder",
+            "dep:lopdf",
+            "lopdf/wasm_js",
             "dep:miniz_oxide",
             "dep:oxml-pdf",
             "dep:rpptx-layout",
             "dep:rpptx-render",
-            "dep:tiny-skia",
         ] {
             assert!(facade_manifest.contains(&format!("\"{dependency}\"")));
         }
-        for dependency in [
-            "gif = { workspace = true, optional = true }",
-            "jpeg-encoder = { workspace = true, optional = true, features = [\"std\"] }",
-            "tiny-skia = { workspace = true, optional = true }",
-        ] {
-            assert!(facade_manifest.contains(dependency));
-            assert!(!wasm_manifest.contains(dependency));
+        let optional_jpeg =
+            "jpeg-encoder = { workspace = true, optional = true, features = [\"std\"] }";
+        assert!(facade_manifest.contains(optional_jpeg));
+        assert!(!wasm_manifest.contains(optional_jpeg));
+        for dependency in ["gif", "tiny-skia", "zune-jpeg", "tiff"] {
+            assert!(facade_manifest.contains(&format!("{dependency}.workspace = true")));
+            assert!(!facade_manifest.contains(&format!("\"dep:{dependency}\"")));
+            assert!(!wasm_manifest.contains(&format!("{dependency}.workspace")));
         }
         assert!(wasm_manifest.contains("default = []"));
         assert!(wasm_manifest.contains("render = [\"rpptx/render\"]"));

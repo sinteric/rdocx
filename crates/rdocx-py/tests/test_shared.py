@@ -169,7 +169,96 @@ def test_stale_handles_raise_the_public_stale_element_error_class():
     live = Document()
     live.add_paragraph("zero")
     held = live.paragraphs[0]
+    retired_run = held.runs[0]
     live.add_paragraph("one")
+    assert held.text == "zero"
     with pytest.raises(StaleElementError) as raised:
-        _ = held.text
+        _ = retired_run.text
     assert isinstance(raised.value, RdocxError)
+
+
+def test_fx206_word_first_cause_survives_later_unrelated_edits():
+    from rdocx import Document, StaleElementError
+
+    document = Document()
+    document.add_paragraph("original")
+    paragraph = document.paragraphs[0]
+    retired_run = paragraph.runs[0]
+    document.add_table(1, 1)
+    document.add_paragraph("later")
+    assert paragraph.text == "original"
+    with pytest.raises(StaleElementError) as raised:
+        _ = retired_run.text
+    assert "First invalidated by Document.add_table at committed revision 2." in str(raised.value)
+    assert "Document.add_paragraph" not in str(raised.value)
+
+
+def test_fx206_word_failed_and_zero_replacements_preserve_live_handles():
+    from rdocx import Document, ReplacementCountError
+
+    document = Document()
+    document.add_paragraph("needle")
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+    with pytest.raises(ReplacementCountError):
+        document.try_replace_text("needle", "replacement", expect=2)
+    assert document.to_bytes() == before
+    assert held.text == "needle"
+    assert document.try_replace_text("missing", "replacement", expect=0) == 0
+    assert document.to_bytes() == before
+    assert held.text == "needle"
+
+
+def test_fx206_word_paragraph_and_cell_labels_remain_distinct():
+    from rdocx import Document, StaleElementError
+
+    for cell_route in (False, True):
+        document = Document()
+        if cell_route:
+            document.add_table(1, 1)
+            current = document.tables[0].rows[0].cells[0]
+        else:
+            document.add_paragraph("before")
+            current = document.paragraphs[0]
+        current.text = "needle"
+        current = document.tables[0].rows[0].cells[0] if cell_route else document.paragraphs[0]
+        assert current.replace_text("needle", "changed", expect=1) == 1
+        with pytest.raises(StaleElementError) as raised:
+            _ = current.text
+        label = "Cell.replace_text" if cell_route else "Paragraph.replace_text"
+        assert f"First invalidated by {label} " in str(raised.value)
+
+
+def test_fx206_word_manual_item_inherits_only_bound_story_authority_and_foreign_precedes_lookup():
+    from rdocx import Document, Story, StoryItem, StaleElementError
+
+    document = Document()
+    document.add_paragraph("owned")
+    owned = document.story_items[0]
+    story = document.stories[0]
+    manual_story = Story(kind=story.kind, part_name=story.part_name, owner_index=story.owner_index)
+    assert manual_story == story
+    inherited = StoryItem(story=story, kind=owned.kind, index_path=owned.index_path,
+                          text=owned.text, xml=owned.xml, direct_body_index=owned.direct_body_index)
+    assert inherited.revision == 0 and owned.revision == 1
+    before = document.to_bytes()
+    assert document.replace_text_at(inherited, "missing", "unused", expect=0) == 0
+    assert document.to_bytes() == before
+    explicit = StoryItem(story=manual_story, kind=owned.kind, index_path=owned.index_path,
+                         text=owned.text, xml=owned.xml, revision=0)
+    with pytest.raises(StaleElementError, match="Causal provenance is unavailable"):
+        document.replace_text_at(explicit, "missing", "unused", expect=0)
+    missing = StoryItem(story=Story(kind="header", part_name="/word/missing.xml", owner_index=0),
+                        kind="paragraph", index_path=(0,), text="missing", revision=0)
+    from rdocx import RdocxError
+    with pytest.raises(RdocxError, match="no header story"):
+        document.replace_text_at(missing, "missing", "unused", expect=0)
+    assert document.to_bytes() == before
+    document.add_table(1, 1)
+    with pytest.raises(StaleElementError, match="First invalidated by Document.add_table "):
+        document.replace_text_at(inherited, "missing", "unused", expect=0)
+    other = Document()
+    with pytest.raises(ValueError, match="different document"):
+        other.replace_text_at(inherited, "missing", "unused", expect=0)
+    with pytest.raises(ValueError, match="different document"):
+        other.replace_text_at(owned, "missing", "unused", expect=0)

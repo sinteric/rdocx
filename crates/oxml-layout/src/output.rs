@@ -509,6 +509,12 @@ pub struct FontData {
     pub bold: bool,
     /// Whether this is an italic variant.
     pub italic: bool,
+    /// Exact selected nondefault OpenType axis coordinates.
+    pub variations: Vec<([u8; 4], f32)>,
+    /// Paint selected outlines with deterministic1/24em centered stroke.
+    pub synthetic_bold: bool,
+    /// Paint selected outlines with deterministic12degree baseline shear.
+    pub synthetic_italic: bool,
 }
 
 /// Document metadata to pass through to PDF output.
@@ -792,6 +798,9 @@ mod group_output_tests {
                 face_index: 0,
                 bold: false,
                 italic: false,
+                variations: vec![],
+                synthetic_bold: false,
+                synthetic_italic: false,
             }],
             None,
             Vec::new(),

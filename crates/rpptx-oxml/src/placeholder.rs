@@ -205,6 +205,13 @@ impl CT_Placeholder {
         })
     }
 
+    /// Returns only the owned unqualified orientation token, leaving raw metadata unchanged.
+    pub fn orientation(&self) -> Option<&str> {
+        self.raw_attributes
+            .iter()
+            .find_map(|(name, value)| (name == "orient").then_some(value.as_str()))
+    }
+
     /// Returns the explicit type or the PowerPoint body default.
     pub fn effective_type(&self) -> PhType {
         self.ph_type.clone().unwrap_or(PhType::Body)
@@ -234,7 +241,13 @@ impl CT_Placeholder {
         if declare_namespace {
             start.push_attribute(("xmlns:p", P_NS));
             start.push_attribute(("xmlns:a", A_NS));
-            start.push_attribute(("xmlns:r", R_NS));
+            if !self
+                .raw_attributes
+                .iter()
+                .any(|(name, _)| name == "xmlns:r")
+            {
+                start.push_attribute(("xmlns:r", R_NS));
+            }
             start.push_attribute(("xmlns:mc", MC_NS));
         }
         if let Some(ph_type) = &self.ph_type {
@@ -366,7 +379,7 @@ fn capture_application_child(
     boundary: &mut usize,
 ) -> Result<()> {
     if is_placeholder {
-        namespaces.reject_writer_conflicts(FIXED_SHAPE_TREE_PREFIXES)?;
+        namespaces.reject_writer_conflicts(&["p", "a", "mc"])?;
         if placeholder.is_some() {
             return Err(OxmlError::InvalidValue("duplicate p:ph".to_owned()));
         }
@@ -386,7 +399,7 @@ fn validate_root(start: &BytesStart<'_>, namespaces: &NamespaceBindings) -> Resu
             "expected a PresentationML p:ph element".to_owned(),
         ));
     }
-    namespaces.reject_writer_conflicts(FIXED_SHAPE_TREE_PREFIXES)
+    namespaces.reject_writer_conflicts(&["p", "a", "mc"])
 }
 
 fn is_xmlns(name: &str) -> bool {
@@ -395,4 +408,26 @@ fn is_xmlns(name: &str) -> bool {
 
 fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+}
+
+#[cfg(test)]
+#[test]
+fn fx206_placeholder_foreign_relationship_binding_round_trips_once() {
+    let raw = br#"<p:ph xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="urn:foreign" type="body" idx="7" r:keep="opaque"><r:payload/></p:ph>"#;
+    let parsed = CT_Placeholder::from_xml(raw).unwrap();
+    let bytes = parsed.to_xml().unwrap();
+    let xml = std::str::from_utf8(&bytes).unwrap();
+    assert_eq!(xml.matches("xmlns:r=").count(), 1);
+    assert!(xml.contains("r:keep=\"opaque\""));
+    assert!(xml.contains("<r:payload/>"));
+    let reopened = CT_Placeholder::from_xml(&bytes).unwrap();
+    assert_eq!(reopened, parsed);
+    assert_eq!(reopened.to_xml().unwrap(), bytes);
+    for binding in ["p", "a", "mc"] {
+        let changed = xml.replace(
+            &format!("xmlns:{binding}=\""),
+            &format!("xmlns:{binding}=\"urn:foreign:"),
+        );
+        assert!(CT_Placeholder::from_xml(changed.as_bytes()).is_err());
+    }
 }

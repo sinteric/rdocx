@@ -20,6 +20,8 @@ use std::sync::Arc;
 /// margin, the text column or the paragraph.
 #[derive(Debug, Clone)]
 pub struct AnchoredDrawing {
+    /// Rotation of a modeled shape around its own physical center.
+    pub rotation_degrees: f64,
     /// Render underneath the text rather than on top of it.
     pub behind_doc: bool,
     /// Frame the horizontal offset is measured from.

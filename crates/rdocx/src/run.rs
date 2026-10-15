@@ -852,7 +852,12 @@ impl<'a> Run<'a> {
 
     /// Set double strikethrough in place.
     pub fn set_double_strike(&mut self, val: bool) {
-        self.ensure_rpr().dstrike = Some(val);
+        self.set_double_strike_value(Some(val));
+    }
+
+    /// Set or clear the direct double strike setting.
+    pub fn set_double_strike_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.dstrike);
     }
 
     /// Set all caps.
@@ -863,7 +868,12 @@ impl<'a> Run<'a> {
 
     /// Set all caps in place.
     pub fn set_all_caps(&mut self, val: bool) {
-        self.ensure_rpr().caps = Some(val);
+        self.set_all_caps_value(Some(val));
+    }
+
+    /// Set or clear the direct all caps setting.
+    pub fn set_all_caps_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.caps);
     }
 
     /// Set small caps.
@@ -874,7 +884,12 @@ impl<'a> Run<'a> {
 
     /// Set small caps in place.
     pub fn set_small_caps(&mut self, val: bool) {
-        self.ensure_rpr().small_caps = Some(val);
+        self.set_small_caps_value(Some(val));
+    }
+
+    /// Set or clear the direct small caps setting.
+    pub fn set_small_caps_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.small_caps);
     }
 
     /// Set superscript.
@@ -885,7 +900,26 @@ impl<'a> Run<'a> {
 
     /// Set superscript in place.
     pub fn set_superscript(&mut self) {
-        self.ensure_rpr().vert_align = Some("superscript".to_string());
+        self.set_superscript_value(Some(true));
+    }
+
+    /// Set or clear direct superscript without clearing the other active mode.
+    pub fn set_superscript_value(&mut self, value: Option<bool>) {
+        match value {
+            Some(true) => self.ensure_rpr().vert_align = Some("superscript".to_owned()),
+            Some(false) => {
+                if let Some(properties) = self.inner.properties.as_mut()
+                    && properties.vert_align.as_deref() == Some("superscript")
+                {
+                    properties.vert_align = None;
+                }
+            }
+            None => {
+                if let Some(properties) = self.inner.properties.as_mut() {
+                    properties.vert_align = None;
+                }
+            }
+        }
     }
 
     /// Set subscript.
@@ -896,7 +930,26 @@ impl<'a> Run<'a> {
 
     /// Set subscript in place.
     pub fn set_subscript(&mut self) {
-        self.ensure_rpr().vert_align = Some("subscript".to_string());
+        self.set_subscript_value(Some(true));
+    }
+
+    /// Set or clear direct subscript without clearing the other active mode.
+    pub fn set_subscript_value(&mut self, value: Option<bool>) {
+        match value {
+            Some(true) => self.ensure_rpr().vert_align = Some("subscript".to_owned()),
+            Some(false) => {
+                if let Some(properties) = self.inner.properties.as_mut()
+                    && properties.vert_align.as_deref() == Some("subscript")
+                {
+                    properties.vert_align = None;
+                }
+            }
+            None => {
+                if let Some(properties) = self.inner.properties.as_mut() {
+                    properties.vert_align = None;
+                }
+            }
+        }
     }
 
     /// Set character spacing (positive = expanded, negative = condensed).
@@ -908,6 +961,24 @@ impl<'a> Run<'a> {
     /// Set character spacing in place.
     pub fn set_character_spacing(&mut self, spacing: Length) {
         self.ensure_rpr().spacing = Some(spacing.as_twips());
+    }
+
+    /// Set or clear character spacing after checking the signed schema range.
+    pub fn try_set_character_spacing_value(&mut self, value: Option<Length>) -> Result<()> {
+        let spacing = value
+            .map(|length| {
+                i32::try_from(length.to_emu() / 635)
+                    .map(Twips)
+                    .map_err(|_| {
+                        Error::Other("character spacing exceeds signed twip range".to_owned())
+                    })
+            })
+            .transpose()?;
+        if spacing.is_none() && self.inner.properties.is_none() {
+            return Ok(());
+        }
+        self.ensure_rpr().spacing = spacing;
+        Ok(())
     }
 
     /// Set character width scale in percent (100 = normal).
@@ -940,7 +1011,12 @@ impl<'a> Run<'a> {
 
     /// Set hidden/vanish text in place.
     pub fn set_hidden(&mut self, val: bool) {
-        self.ensure_rpr().vanish = Some(val);
+        self.set_hidden_value(Some(val));
+    }
+
+    /// Set or clear the direct hidden setting.
+    pub fn set_hidden_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.vanish);
     }
 
     /// Set the character style by ID.
@@ -1410,6 +1486,26 @@ impl<'a> RunRef<'a> {
         self.property(|rpr| rpr.color_theme_shade)
     }
 
+    /// Return the optional direct all caps setting.
+    pub fn all_caps_value(&self) -> Option<bool> {
+        self.property(|rpr| rpr.caps)
+    }
+
+    /// Return the optional direct small caps setting.
+    pub fn small_caps_value(&self) -> Option<bool> {
+        self.property(|rpr| rpr.small_caps)
+    }
+
+    /// Return the optional direct double strike setting.
+    pub fn double_strike_value(&self) -> Option<bool> {
+        self.property(|rpr| rpr.dstrike)
+    }
+
+    /// Return the optional direct hidden setting.
+    pub fn hidden_value(&self) -> Option<bool> {
+        self.property(|rpr| rpr.vanish)
+    }
+
     /// Direct `w:rtl`, if set.
     pub fn rtl_value(&self) -> Option<bool> {
         self.property(|rpr| rpr.rtl)
@@ -1532,6 +1628,110 @@ mod tests {
     use rdocx_oxml::CT_Document;
     use rdocx_oxml::document::BodyContent;
 
+    #[test]
+    fn fx200_vertical_modes_match_optional_direct_transition_matrix() {
+        for initial in [
+            None,
+            Some("baseline"),
+            Some("superscript"),
+            Some("subscript"),
+        ] {
+            for value in [None, Some(false), Some(true)] {
+                for superscript in [false, true] {
+                    let mut inner = CT_R::new("mode");
+                    if let Some(initial) = initial {
+                        inner.properties = Some(CT_RPr {
+                            vert_align: Some(initial.to_owned()),
+                            position: Some(7),
+                            ..Default::default()
+                        });
+                    }
+                    let selected = if superscript {
+                        "superscript"
+                    } else {
+                        "subscript"
+                    };
+                    {
+                        let mut run = Run { inner: &mut inner };
+                        if superscript {
+                            run.set_superscript_value(value);
+                        } else {
+                            run.set_subscript_value(value);
+                        }
+                    }
+                    let expected = match value {
+                        None => None,
+                        Some(true) => Some(selected),
+                        Some(false) if initial == Some(selected) => None,
+                        Some(false) => initial,
+                    };
+                    assert_eq!(
+                        inner
+                            .properties
+                            .as_ref()
+                            .and_then(|properties| properties.vert_align.as_deref()),
+                        expected
+                    );
+                    assert_eq!(
+                        inner
+                            .properties
+                            .as_ref()
+                            .and_then(|properties| properties.position),
+                        initial.map(|_| 7)
+                    );
+                    if initial.is_none() && value != Some(true) {
+                        assert!(inner.properties.is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fx200_optional_toggles_and_spacing_preserve_absent_nodes_and_signed_range() {
+        let mut inner = CT_R::new("toggle");
+        {
+            let mut run = Run { inner: &mut inner };
+            run.set_double_strike_value(None);
+            run.set_all_caps_value(None);
+            run.set_small_caps_value(None);
+            run.set_hidden_value(None);
+            run.try_set_character_spacing_value(None).unwrap();
+        }
+        assert!(inner.properties.is_none());
+        for value in [Some(true), Some(false), None] {
+            let mut run = Run { inner: &mut inner };
+            run.set_double_strike_value(value);
+            run.set_all_caps_value(value);
+            run.set_small_caps_value(value);
+            run.set_hidden_value(value);
+            let properties = inner.properties.as_ref().unwrap();
+            assert_eq!(
+                (
+                    properties.dstrike,
+                    properties.caps,
+                    properties.small_caps,
+                    properties.vanish
+                ),
+                (value, value, value, value)
+            );
+        }
+        Run { inner: &mut inner }
+            .try_set_character_spacing_value(Some(Length::emu(-636)))
+            .unwrap();
+        assert_eq!(inner.properties.as_ref().unwrap().spacing, Some(Twips(-1)));
+        let before = inner.clone();
+        assert!(
+            Run { inner: &mut inner }
+                .try_set_character_spacing_value(Some(Length::emu(i64::MAX)))
+                .is_err()
+        );
+        assert_eq!(inner, before);
+        Run { inner: &mut inner }
+            .try_set_character_spacing_value(None)
+            .unwrap();
+        assert_eq!(inner.properties.as_ref().unwrap().spacing, None);
+    }
     #[test]
     fn ct_r_public_struct_literal_keeps_its_existing_shape() {
         let run = CT_R {

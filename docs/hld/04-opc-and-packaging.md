@@ -251,6 +251,14 @@ section properties only among preserved nodes, so ordinary paragraphs and
 tables do not repeat namespace-prefix scans. One clone still performs one
 identity-freshening pass and one complete staged reopen.
 
+Python HTML insertion resolves a required live paragraph to its physical story
+and direct-child boundary. Foreign, stale and unsupported owners refuse before
+publication. Native conversion, package validation and detached diagnostic
+allocation finish on a staged candidate before document or revision changes.
+Empty insertion preserves existing handles. Markdown template import preserves
+style, numbering, header, footer and opaque package graphs while replacing the
+main body before its final section boundary.
+
 HTML fragment insertion uses the same transaction. `HtmlImageResource` maps an
 exact source string to caller-owned bytes and a filename. Data-URI images are
 decoded within the aggregate input bound. Raster headers must pass
@@ -1041,6 +1049,15 @@ document state. The mutation becomes visible only after the typed ChartML,
 SpreadsheetML workbook, relationships, content types, structured drawing,
 theme projection, and shared identifier owner all validate.
 
+Chart data replacement resolves the unique current graphic-frame identity,
+its namespace-owned relationship and the actual chart/workbook graph. Shared
+chart or workbook parts use copy-on-write, including style and colour edges.
+Case-equivalent occupied part names cannot be overwritten. Replacement retains
+unselected package entries and source-splices owned relationship/frame targets
+so namespace aliases, foreign attributes and opaque children survive. Cache,
+formula and worksheet changes publish together after validation. Exact no-op
+and failed candidates leave the complete live graph unchanged.
+
 An authored Word chart requires one effective internal document-theme edge.
 Its target must exist, carry the exact theme content type, and parse as a
 DrawingML theme. A valid related theme is reused. Otherwise the facade stages
@@ -1132,11 +1149,39 @@ numbered part after the greatest occupied suffix. The sniffed canonical
 extension and content type are registered with the package. Each source slide
 creates or reuses its own internal image relationship to that shared part, with
 a relative target resolved from the slide part name.
-Cross-presentation slide import uses the same byte equality check for images,
-audio, and video, including media stored outside `/ppt/media/`. The import
-stages the destination package and remaps each copied part's relationship ids
-once. An unsupported internal relationship graph fails before the destination
-changes, while external targets retain their target mode and address.
+Cross-presentation slide import uses complete byte equality for images,
+audio and video, including parts outside `/ppt/media/`. One staged destination
+candidate preflights the selected graph and allocates copied parts, slide IDs,
+relationship scopes and slide-jump maps before publication. Shared parts use
+one source-to-destination part map. Charts include their workbook, style and
+colour dependencies. Embedded objects retain bytes and previews. Notes,
+comments and actual author or person references retain their qualified owners.
+External relationships preserve their address and mode. Unsupported internal
+types report the actual type and owner path before any destination change.
+
+Classic and modern comment identities have separate collision checks. Required
+parent records, replies and assigned persons join the selected closure. Authors
+merge by complete supported identity, not display name. Qualified numeric and
+relationship references remap together, while foreign lookalikes and opaque
+root or record payload remain preserved. Unmapped slide jumps release only the
+actual owned action and unused relationship, preserving shared references and
+click sounds, and produce an owner-specific diagnostic.
+
+Source-formatting import carries required presentation-global table styles and
+embedded font graphs without overwriting destination definitions. Equal graphs
+may be reused only with complete source, namespace and relationship proof.
+Relationship roots, ordered records, opaque payload and effective namespace
+contexts participate in equality. Only graph-proven assigned IDs and resolved
+target identities normalize for comparison. Copied relationship targets are
+resolved from the original owner and written relative to the actual new owner
+without changing retained record metadata.
+Style collisions remap selected imported references to noncolliding identities.
+Source-default style inheritance is preserved explicitly when destination
+defaults differ. Stored font programs retain their original bytes and qualified
+face descriptions. A conflicting same-typeface face or ambiguous opaque
+metadata refuses atomically when both owners cannot be preserved. Only source-enabled programs participate, preserving the source activation
+state. No copied font is re-encoded or assigned fabricated license
+authorization.
 
 The presentation HTML importer accepts image bytes only through
 `HtmlImageResource`. The HTML source string is an exact lookup key. Missing
@@ -1194,6 +1239,12 @@ advances. Fill bytes and truncated input return safely. Preserve these
 invariants when the reader moves to `oxml-media`.
 
 ## Package integrity
+
+A qualified self-closing Word comment owner has an empty paragraph inventory.
+Its record and opaque attributes remain byte-preserved through listing, field
+updates and save/reopen. Namespace ownership and excerpt bounds are checked
+before source offsets become editable coordinates. Foreign lookalikes do not
+become story owners, and invalid scopes return errors.
 
 Both facades expose a `validate()` that is cheap, non-panicking, and run
 automatically under `debug_assertions` before `save`. It checks dangling
@@ -1734,6 +1785,22 @@ slots exactly as they do in the typed paragraph parser. A direct simple field
 advances a modeled run boundary only when its parsed instruction is nonempty.
 Hyperlink revisions and direct runs sharing one outer coordinate receive
 distinct nested ordinals.
+An unchanged main document with no modeled relationship mask candidates
+inventories qualified relationships from retained source XML. Read-only saves
+preserve complete original main-part bytes, including ambiguous local namespace
+owners. Dirty comment edits and owner relocation retain strict unique namespace
+replay and atomic refusal without source or thread metadata publication.
+Rich comment anchor queries retain the unique replay requirement. Exact
+raw-source literal range evidence does not imply rich query admission.
+Entry-owned TOC boundary paragraphs retain their original root attributes and
+opaque property payload. Generated entry styles and tabs overlay only their
+qualified owned source elements in schema order. Started style elements are
+removed as complete elements. Namespace aliases and default bindings identify
+Word owners by URI, while foreign and rebound lookalikes remain opaque. End
+runs and suffix siblings close their inherited namespaces when moved from a
+removed paragraph root. Duplicate or malformed owned properties refuse before
+publication. Unsafe boundary overlays retain the existing safe generic layout,
+with a named atomic refusal for an unsupported single-paragraph boundary.
 Generated entry paragraphs replace only the recorded range. The instruction
 runs, matching field markers, neighbouring raw XML, relationships, and every
 other package part remain outside the edit set. The provisional package and
@@ -1781,3 +1848,165 @@ package and cache. Projection never rebinds opaque content to make insertion
 possible. Simple cache expansion closes each replayed subtree over the owner's
 namespace scope and validates the staged part before publication. Opened and
 self-closing simple owners use the same ownership and refusal checks.
+
+
+### Checked related-story publication
+
+Rich Word authoring resolves the physical paragraph or table owner before
+allocating media or relationships. A picture run and its owner relationship,
+or a note record and its main-story reference, publish in one reopened
+candidate. Related tables and nested cells retain their actual part paths.
+New sections inherit resolved page geometry without copying header or footer
+references. Creating an even-page story enables the corresponding settings
+flag in the same candidate. Failed validation or reopen changes no source,
+identifier allocation or public revision.
+
+DrawingML watermark identity belongs to the selected header representation.
+Replacement and removal require an unchanged fingerprint covering the complete
+API-owned source, including relationship operands. Replacement retires the
+qualified old owner and unreferenced image relationship before allocating the
+new image, so final canonicalization cannot invalidate that fingerprint.
+Pruning removes only API-owned media with no remaining package references.
+Unrelated producer relationships and opaque owners survive. Namespace context
+used for drawing projection remains separate from physical saved XML.
+
+DrawingML text watermark compatibility preserves one WPS choice and a real VML type136 textpath fallback in the same physical owner. Inactive fallback projection cannot paint a second watermark. Half-opacity is admitted before header, relationship or drawing-identity allocation, and other requested text opacity values refuse atomically.
+
+## Checked Word operation source ownership
+
+Captured hyperlink records bind the current physical owner and its ordinal.
+Unrelated link changes retain a proven surviving owner. Removing a link
+retires its captured record even when an identical public record remains or
+is inserted later. Public-field equality cannot resurrect captured authority.
+Manually constructed records retain their separate unique-match contract.
+
+Read-only symbol layout retains explicit Word symbol and numbering source
+codes. Owned diagnostics describe an unknown semantic mapping without rewriting
+that source or claiming an existing fallback glyph is missing.
+
+Document import closes the native fragment dependency graph before publication. Physical locations retain story identity, item kind and index path. Invalid destination indices refuse even when the imported document is empty. Reading properties or exporting text does not allocate package parts. Custom-property snapshots retain PID, fmtid, type and raw unsupported values. App-property mutations act on the latest owner and preserve unrelated producer fields.
+
+Checkbox admission and state selection use expanded Word2010 names, including qualified aliases and the default namespace. Only the selected qualified checked value changes. Foreign same-name elements, attributes, namespace declarations and opaque child order remain source-owned. The selected Unicode scalar and state font are admitted together before any matching control changes. Forbidden XML text and late invalid state values refuse the entire operation.
+
+Checked paragraph, regular-run, table, cell and section-property replacement
+first resolves the actual held physical owner. One complete expected expanded-
+name root, modeled sequence and known property profiles, relationship kind and
+target, introduced identifiers and owner-local section restrictions are
+admitted before staging. A reopened candidate publishes atomically. Identical
+source replacement preserves exact bytes and revisions. Source-bound namespace
+markers retain their actual producer identity and reject ambiguous
+reinterpretation. Consumed paragraph/run readers preserve the caller cursor
+and physical closing QName. Explicit foreign names remain opaque, and legacy
+assumed-run recognition is confined to consumed roots without a supplied Word
+namespace binding. Admission is linear before recursive construction. Modeled
+control paths use an inclusive budget256 with control cost1 and actual typed
+text-box cost16, resetting between siblings. Recognized tables retain the
+inclusive32 boundary. Iterative borrowed-model admission precedes staging
+clones and serialization. Opaque foreign routes do not consume modeled nesting
+authority.
+
+Checked table, cell and section replacement retains expanded root attribute
+names and decoded values, with the required namespace bindings. Attribute
+quoting and entity spelling may be normalized by reconstruction. Captured
+adjacent foreign children retain their exact bytes through replacement,
+scalar edits and save/reopen cycles. Namespace closure supplies the emitted
+owner bindings without rewriting the preserved foreign child payload.
+
+## Picture extraction and one-shot publication
+
+Word picture occurrences retain physical story ownership separately from
+shared media identity. Case aliases resolve to the actual owning package key.
+External IMAGE relationships retain URL metadata and have no embedded bytes,
+media part or extracted file. Linked resizing remains unsupported.
+Extraction preloads complete source bytes, then publishes generated flat names
+for each unique internal part in deterministic first-occurrence order.
+Distinct parts remain distinct even when their bytes match. Missing internal
+media/relationships refuse before output creation. Symlink directories,
+existing destinations and input aliases refuse. Empty extraction creates no
+unnecessary directory. Recoverable nonreplacing publication failure removes
+this invocation's files and an empty newly created directory, preserving
+preexisting unrelated files. Cleanup is best effort and does not promise
+crash-atomic multi-file renames.
+
+Ordered replacement, tag fill, combined fields and slide creation/placement
+use one candidate and checked final publication. Late count, owner or
+serialization failure cannot publish a partial native edit. New CLI mutation
+outputs use the existing extension-based package class and VBA/signature
+contracts, and success JSON follows file publication.
+
+## Checked PowerPoint XML transactions
+
+Checked replacement resolves relationships from the selected physical owner
+part. Internal slide targets must be actual slide parts. Image targets must
+match their actual format and registered content type, with bounded complete
+decoding for supported raster formats. New unsupported media facts refuse.
+Retained unsupported facts require unchanged relationship, type and target
+bytes. Arbitrary empty relationship IDs cannot bypass source ownership.
+
+The transaction preserves unrelated parts and opaque payloads. Actual
+inherited namespace bindings close standalone owner XML, including opaque
+prefixes. A changed selected owner forces emission of its owning part even
+when typed equality ignores source-root markup. Existing relationship,
+metadata and signature invalidation rules apply before candidate publication.
+Exact source no-ops do not rewrite package bytes.
+
+## Embedded font package transactions
+
+Word writes checked single-face sfnt input as ODTTF with its explicit or
+deterministically derived uppercase OOXML GUID. Embedding can stage a missing
+font record and the owned embedTrueTypeFonts setting together with the font
+part and relationship. Descriptive font records retain their source attributes
+and child slots. Font/settings readers resolve actual namespace URIs, accept
+source aliases and distinguish absence from false. Removing a last face retains
+the explicit embed setting until its setter changes it.
+
+PowerPoint embeds an uncompressed EOT version0x00020001, flags0 envelope in a
+font part referenced by the presentation's qualified font list. Four face
+relationship slots retain schema order. Root embedTrueTypeFonts and
+saveSubsetFonts attributes are tri-state. Imported compressed EOT and unknown
+formats remain opaque and exact through no-op saves and unrelated edits.
+Unsupported decoding is reported with absent decoded bytes. License identity
+is checked caller input and has no fabricated PresentationML metadata field.
+
+Before publication, both providers validate actual source ownership, internal
+font relationship kind, unique relationship identity, resolved target and part
+content type. Invalid or ambiguous graphs refuse atomically. Replacing shared
+targets retains all reachable source references, including preserved opaque
+references. EOT headers, string ranges, sfnt directory/table ranges and declared
+lengths are bounded before allocation. No-op operations retain byte identity
+and existing live owners.
+
+Library preservation and native application resave are distinct contracts.
+PowerPoint's qualified positive retains both complete authored EOT parts
+through native save and normal reopen, while remapping relationship IDs and
+normalizing presentation font metadata. Invalid raw sfnt data can remain
+stored without being used by the native application. Missing-font warnings
+are recorded separately from XML repair.
+
+Word may replace embedded font names and GUIDs, add other font parts and save
+an empty bold part under its documented one-font-per-name behavior. Disabling
+embedding can remove font parts on native save even while the already loaded
+document still paints an embedded face. A normal reopened copy can then use
+fallback. These observed native changes do not authorize the library to discard
+opaque source or reinterpret missing decoded bytes as a successfully used font.
+
+## Presentation semantic export resources
+
+Semantic export resolves hyperlinks and images from their actual owning slide
+part. Internal slide links use normalized, case-insensitive OPC part identity.
+Links to omitted hidden slides produce diagnostics. No external resource is
+fetched. Safe HTTP, HTTPS, mail and telephone links retain their target.
+
+Owned image content type, signature and complete body must agree before any
+output is written. Compressed image input is limited to128MiB, decoded images
+and cumulative animation/page data to64MiB, each dimension to16,384 and
+frame/page/scan counts to1,024. Unsupported image encoding returns a precise
+error. The native picture-body validator completes before export destinations
+or assets are allocated. Original image bytes are exported unchanged. Byte-identical pictures
+share one SHA-256 asset name while each picture occurrence remains present.
+
+Native save methods stage and sync the text and every adjacent asset before
+publication. An existing destination, repeated destination or publication
+failure leaves the source and existing outputs unchanged and removes newly
+published outputs. CLI staging applies its explicit overwrite policy to the
+whole output set while protecting the input, including aliases and hard links.

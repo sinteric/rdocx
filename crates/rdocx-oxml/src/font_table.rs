@@ -313,6 +313,81 @@ impl FontTable {
         self.fonts.push(font);
     }
 
+    /// Check whether deleting a record can retain every unowned source payload.
+    pub fn can_remove_font(&self, name: &str) -> Result<bool> {
+        let mut matches = self.fonts.iter().filter(|font| font.name == name);
+        let Some(font) = matches.next() else {
+            return Ok(false);
+        };
+        if matches.next().is_some() {
+            return Err(OxmlError::InvalidValue("ambiguous font record".to_owned()));
+        }
+        let namespace_only = |attributes: &[(String, String)]| {
+            attributes
+                .iter()
+                .all(|(key, _)| key == "xmlns" || key.starts_with("xmlns:"))
+        };
+        if !namespace_only(&font.raw_attributes)
+            || !namespace_only(&font.alternate_name_raw_attributes)
+            || !namespace_only(&font.family_raw_attributes)
+            || !namespace_only(&font.pitch_raw_attributes)
+            || [
+                &font.alternate_name_raw_inner,
+                &font.family_raw_inner,
+                &font.pitch_raw_inner,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|raw| !raw.iter().all(u8::is_ascii_whitespace))
+            || font
+                .raw_children
+                .iter()
+                .any(|(_, raw)| !raw.iter().all(u8::is_ascii_whitespace))
+        {
+            return Err(OxmlError::InvalidValue(
+                "cannot remove opaque font record payload".to_owned(),
+            ));
+        }
+        for face in &font.embedded_fonts {
+            self.can_remove_embedded_font(name, face.kind)?;
+        }
+        Ok(true)
+    }
+
+    /// Check that one uniquely identified face has no unowned deletion payload.
+    pub fn can_remove_embedded_font(&self, name: &str, kind: FontFaceKind) -> Result<bool> {
+        let mut fonts = self.fonts.iter().filter(|font| font.name == name);
+        let Some(font) = fonts.next() else {
+            return Ok(false);
+        };
+        if fonts.next().is_some() {
+            return Err(OxmlError::InvalidValue("ambiguous font record".to_owned()));
+        }
+        let mut faces = font.embedded_fonts.iter().filter(|face| face.kind == kind);
+        let Some(face) = faces.next() else {
+            return Ok(false);
+        };
+        if faces.next().is_some() {
+            return Err(OxmlError::InvalidValue(
+                "ambiguous embedded font face".to_owned(),
+            ));
+        }
+        if face
+            .raw_attributes
+            .iter()
+            .any(|(key, _)| key != "xmlns" && !key.starts_with("xmlns:"))
+            || face
+                .raw_inner
+                .as_ref()
+                .is_some_and(|raw| !raw.iter().all(u8::is_ascii_whitespace))
+        {
+            return Err(OxmlError::InvalidValue(
+                "cannot remove opaque embedded face payload".to_owned(),
+            ));
+        }
+        Ok(true)
+    }
+
     pub fn remove_font(&mut self, name: &str) -> Option<FontRecord> {
         let index = self.fonts.iter().position(|font| font.name == name)?;
         let removed = self.fonts.remove(index);
@@ -927,6 +1002,49 @@ fn element_name(start: &BytesStart<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx220_checked_deletion_retains_opaque_and_ambiguous_source() {
+        for payload in [
+            "<x:opaque exact='yes'/>",
+            "<!--opaque comment-->",
+            "<w:family w:val='roman' x:keep='yes'/>",
+            "<w:embedRegular r:id='rId1' w:fontKey='{00112233-4455-6677-8899-AABBCCDDEEFF}' x:keep='yes'/>",
+        ] {
+            let source = format!(
+                "<w:fonts xmlns:w=\"{W_NS}\" xmlns:r=\"{R_NS}\" xmlns:x=\"urn:opaque\"><w:font w:name='Owner'>{payload}</w:font></w:fonts>"
+            );
+            let table = FontTable::from_xml(source.as_bytes()).unwrap();
+            let before = table.to_xml().unwrap();
+            assert!(table.can_remove_font("Owner").is_err());
+            if payload.contains("embedRegular") {
+                assert!(
+                    table
+                        .can_remove_embedded_font("Owner", FontFaceKind::Regular)
+                        .is_err()
+                );
+            }
+            assert_eq!(table.to_xml().unwrap(), before);
+        }
+        let source = format!(
+            "<w:fonts xmlns:w=\"{W_NS}\"><w:font w:name='Duplicate'/><w:font w:name='Duplicate'/></w:fonts>"
+        );
+        let table = FontTable::from_xml(source.as_bytes()).unwrap();
+        assert!(table.can_remove_font("Duplicate").is_err());
+        assert!(
+            table
+                .can_remove_embedded_font("Duplicate", FontFaceKind::Regular)
+                .is_err()
+        );
+        let mut table = FontTable::new();
+        table.set_font("Owner".to_owned(), None, None, None);
+        assert!(table.can_remove_font("Owner").unwrap());
+        assert!(
+            !table
+                .can_remove_embedded_font("Owner", FontFaceKind::Regular)
+                .unwrap()
+        );
+    }
+
     use super::*;
 
     #[test]

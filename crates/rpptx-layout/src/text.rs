@@ -15,6 +15,8 @@ use crate::ResolveCtx;
 pub struct EffectiveTextProperties {
     pub paragraph: CT_TextParagraphProperties,
     pub run: CT_TextCharacterProperties,
+    /// Source language selected by the same inheritance chain as the run.
+    pub language: Option<String>,
 }
 
 /// The independently resolved properties for all nine DrawingML list levels.
@@ -210,11 +212,14 @@ fn merge_paragraph(effective: &mut EffectiveTextProperties, source: &CT_TextPara
         }
     }
     if let Some(properties) = &source.default_run_properties {
-        merge_character_properties(&mut effective.run, properties);
+        merge_character(effective, properties);
     }
 }
 
 fn merge_character(effective: &mut EffectiveTextProperties, source: &CT_TextCharacterProperties) {
+    if let Some(language) = source.language() {
+        effective.language = Some(language.to_owned());
+    }
     merge_character_properties(&mut effective.run, source);
 }
 
@@ -231,8 +236,20 @@ fn merge_character_properties(
     if source.italic.is_some() {
         effective.italic = source.italic;
     }
-    if source.all_caps.is_some() {
-        effective.all_caps = source.all_caps;
+    if source.all_caps == Some(false) && source.small_caps == Some(false) {
+        // cap="none" clears both modes as one owned value.
+        effective.all_caps = Some(false);
+        effective.small_caps = Some(false);
+    } else {
+        if source.all_caps.is_some() {
+            effective.set_all_caps(source.all_caps);
+        }
+        if source.small_caps.is_some() {
+            effective.set_small_caps(source.small_caps);
+        }
+    }
+    if source.highlight.is_some() {
+        effective.highlight = source.highlight.clone();
     }
     if source.underline.is_some() {
         effective.underline = source.underline;
@@ -385,6 +402,29 @@ mod tests {
             Some(&direct),
         );
         assert_eq!(overridden.run.all_caps, Some(false));
+        assert_eq!(overridden.run.small_caps, Some(false));
+        for inherited_small in [false, true] {
+            let mut effective = CT_TextCharacterProperties::default();
+            if inherited_small {
+                effective.set_small_caps(Some(true));
+            } else {
+                effective.set_all_caps(Some(true));
+            }
+            let source_before = direct.clone();
+            super::merge_character_properties(&mut effective, &direct);
+            assert_eq!(effective.all_caps, Some(false));
+            assert_eq!(effective.small_caps, Some(false));
+            assert_eq!(direct, source_before);
+            let mut paragraph = CT_TextParagraphProperties::default();
+            paragraph.default_run_properties = Some(effective);
+            let bytes = paragraph.to_xml().unwrap();
+            let reopened = CT_TextParagraphProperties::from_xml(&bytes)
+                .unwrap()
+                .default_run_properties
+                .unwrap();
+            assert_eq!(reopened.all_caps, Some(false));
+            assert_eq!(reopened.small_caps, Some(false));
+        }
     }
 
     #[test]
@@ -533,7 +573,15 @@ mod tests {
     #[test]
     fn default_paragraph_properties_round_trip_in_schema_order() {
         let xml = format!(
-            "<a:lstStyle xmlns:a=\"{A_NS}\"><x:before xmlns:x=\"urn:x\"/><defPPr marL=\"100\"/><x:between xmlns:x=\"urn:x\"/><a:lvl1pPr/><x:after xmlns:x=\"urn:x\"/></a:lstStyle>"
+            "<a:lstStyle xmlns:a=\"{A_NS}\"><x:before xmlns:x=\"urn:x\"/><a:defPPr marL=\"100\"/><x:between xmlns:x=\"urn:x\"/><a:lvl1pPr/><x:after xmlns:x=\"urn:x\"/></a:lstStyle>"
+        );
+        let unqualified = xml.replace("<a:defPPr", "<defPPr");
+        let opaque = CT_TextListStyle::from_xml(unqualified.as_bytes()).unwrap();
+        assert!(opaque.default_paragraph_properties.is_none());
+        assert!(
+            String::from_utf8(opaque.to_xml().unwrap())
+                .unwrap()
+                .contains("<defPPr marL=\"100\"/>")
         );
         let style = CT_TextListStyle::from_xml(xml.as_bytes()).unwrap();
         assert_eq!(
@@ -656,5 +704,23 @@ mod tests {
         format!(
             "<p:sp><p:nvSpPr><p:cNvPr/><p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"{index}\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle>{list_style}</a:lstStyle><a:p/></p:txBody></p:sp>"
         )
+    }
+    #[test]
+    fn fx206_language_inherits_by_occurrence_without_promoting_raw_source() {
+        let raw = br#"<q:rPr xmlns:q="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:foreign" lang="tr-TR" x:lang="zz" x:kept="1"/>"#;
+        let props = CT_TextCharacterProperties::from_xml(raw).unwrap();
+        let before = props.clone();
+        assert_eq!(props.language(), Some("tr-TR"));
+        assert_eq!(props, before);
+        let mut effective = EffectiveTextProperties::default();
+        super::merge_character(&mut effective, &props);
+        assert_eq!(effective.language.as_deref(), Some("tr-TR"));
+        let absent = CT_TextCharacterProperties::from_xml(br#"<a:rPr/>"#).unwrap();
+        super::merge_character(&mut effective, &absent);
+        assert_eq!(effective.language.as_deref(), Some("tr-TR"));
+        let own = CT_TextCharacterProperties::from_xml(br#"<a:rPr lang="en-US"/>"#).unwrap();
+        super::merge_character(&mut effective, &own);
+        assert_eq!(effective.language.as_deref(), Some("en-US"));
+        assert_eq!(props, before);
     }
 }

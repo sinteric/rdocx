@@ -1941,6 +1941,69 @@ fn flatten_arc(
     Ok(cubics)
 }
 
+impl CT_PresetGeometry2D {
+    /// Evaluates the preset's connection sites, its `a:cxnLst`, in the
+    /// shape's coordinate space, in definition order, with this geometry's
+    /// adjustments applied.
+    ///
+    /// Site `n` is the point a connector glued with `idx="n"` ends at, before
+    /// the shape's flips and rotation. An unknown preset returns `None`.
+    pub fn connection_sites(
+        &self,
+        size: (f64, f64),
+    ) -> Result<Option<Vec<(f64, f64)>>, GeometryError> {
+        let Some(xml) = preset_shape_definition(&self.preset) else {
+            return Ok(None);
+        };
+        let definition = CT_CustomGeometry2D::from_xml(xml)?;
+        let mut override_evaluator = GuideEvaluator::new(size.0, size.1)?;
+        override_evaluator.apply_adjust_values(self.adjust_values(), &BTreeMap::new())?;
+        let overrides = self
+            .adjust_values()
+            .iter()
+            .map(|guide| Ok((guide.name.clone(), override_evaluator.value(&guide.name)?)))
+            .collect::<Result<BTreeMap<_, _>, GeometryError>>()?;
+        let mut evaluator = GuideEvaluator::new(size.0, size.1)?;
+        evaluator.apply_adjust_values(definition.adjust_values(), &overrides)?;
+        evaluator.evaluate_guides(definition.guides())?;
+
+        let mut sites = Vec::new();
+        let mut reader = quick_xml::NsReader::from_reader(xml);
+        let mut buffer = Vec::new();
+        let mut in_list = false;
+        loop {
+            let (namespace, event) = reader
+                .read_resolved_event_into(&mut buffer)
+                .map_err(|error| GeometryError::Xml(error.to_string()))?;
+            let drawing = matches!(namespace,quick_xml::name::ResolveResult::Bound(ns) if ns.as_ref()==crate::namespace::A_NS.as_bytes());
+            match event {
+                Event::Start(element)
+                    if drawing && local_name(element.name().as_ref()) == b"cxnLst" =>
+                {
+                    in_list = true;
+                }
+                Event::End(element)
+                    if drawing && local_name(element.name().as_ref()) == b"cxnLst" =>
+                {
+                    break;
+                }
+                Event::Empty(element)
+                    if drawing && in_list && local_name(element.name().as_ref()) == b"pos" =>
+                {
+                    let coordinate = |name: &[u8]| {
+                        evaluator.resolve(&GuideOperand::parse(&required_attr(&element, name)?)?)
+                    };
+                    sites.push((coordinate(b"x")?, coordinate(b"y")?));
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        Ok(Some(sites))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,4 @@
-use oxml_py_support::{ContentPath, PathSeg};
+use oxml_py_support::{ContentPath, PathSeg, revision_to_pyerr};
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
@@ -6,7 +6,10 @@ use smallvec::smallvec;
 
 use crate::document::PyDocument;
 use crate::paragraph::PyParagraph;
-use crate::{enum_object, length_object, normalize_index, rdocx_to_pyerr, stale_to_pyerr};
+use crate::{
+    color_hex, color_object, enum_object, length_object, normalize_index, rdocx_to_pyerr,
+    stale_to_pyerr,
+};
 
 fn path_index(
     path: &ContentPath,
@@ -18,6 +21,96 @@ fn path_index(
         .copied()
         .find_map(expected)
         .ok_or_else(|| PyIndexError::new_err(format!("{kind} index is missing")))
+}
+
+#[derive(Clone)]
+pub(crate) enum TableLocation {
+    Body(usize),
+    Related(rdocx::ContentLocation),
+}
+impl TableLocation {
+    fn new(index: usize, related: &Option<rdocx::ContentLocation>) -> Self {
+        related.as_ref().map_or(Self::Body(index), |location| {
+            Self::Related(location.clone())
+        })
+    }
+    pub(crate) fn native(
+        &self,
+        document: &rdocx::Document,
+    ) -> rdocx::Result<rdocx::ContentLocation> {
+        match self {
+            Self::Related(location) => Self::refreshed(document, location),
+            Self::Body(index) => {
+                let slot = document.content_index_of_table(*index).ok_or_else(|| {
+                    rdocx::Error::Other("table has no checked direct physical owner".into())
+                })?;
+                document
+                    .story_item_snapshots()?
+                    .into_iter()
+                    .find(|snapshot| {
+                        snapshot.location().story().kind() == rdocx::StoryKind::Body
+                            && snapshot.location().item_kind() == rdocx::StoryItemKind::Table
+                            && snapshot.is_direct_child()
+                            && snapshot.direct_body_index() == Some(slot)
+                    })
+                    .map(|snapshot| snapshot.location().clone())
+                    .ok_or_else(|| {
+                        rdocx::Error::Other("table has no checked physical source owner".into())
+                    })
+            }
+        }
+    }
+    fn refreshed(
+        document: &rdocx::Document,
+        location: &rdocx::ContentLocation,
+    ) -> rdocx::Result<rdocx::ContentLocation> {
+        let owner = location.story();
+        let story = document
+            .stories()?
+            .into_iter()
+            .find(|story| {
+                story.kind() == owner.kind()
+                    && story.part_name() == owner.part_name()
+                    && story.owner_index() == owner.owner_index()
+            })
+            .ok_or_else(|| rdocx::Error::Other("rich table owner disappeared".to_owned()))?;
+        Ok(rdocx::ContentLocation::new(
+            story,
+            location.item_kind(),
+            location.index_path().to_vec(),
+        ))
+    }
+    fn read<T>(
+        &self,
+        document: &rdocx::Document,
+        read: impl FnOnce(rdocx::TableRef<'_>) -> T,
+    ) -> rdocx::Result<T> {
+        match self {
+            Self::Body(index) => document
+                .table(*index)
+                .map(read)
+                .ok_or_else(|| rdocx::Error::Other("table index out of range".to_owned())),
+            Self::Related(location) => {
+                document.read_story_table(&Self::refreshed(document, location)?, read)
+            }
+        }
+    }
+    fn edit<T>(
+        &self,
+        document: &mut rdocx::Document,
+        edit: impl FnOnce(&mut rdocx::Table<'_>) -> rdocx::Result<T>,
+    ) -> rdocx::Result<T> {
+        match self {
+            Self::Body(index) => edit(
+                &mut document
+                    .table_mut(*index)
+                    .ok_or_else(|| rdocx::Error::Other("table index out of range".to_owned()))?,
+            ),
+            Self::Related(location) => {
+                document.edit_story_table(&Self::refreshed(document, location)?, edit)
+            }
+        }
+    }
 }
 
 fn table_index(path: &ContentPath) -> PyResult<usize> {
@@ -88,7 +181,7 @@ fn vertical_to_int(value: rdocx::VerticalAlignment) -> i32 {
     }
 }
 
-fn border_style_from_name(value: &str) -> PyResult<rdocx::BorderStyle> {
+pub(crate) fn border_style_from_name(value: &str) -> PyResult<rdocx::BorderStyle> {
     match value {
         "none" => Ok(rdocx::BorderStyle::None),
         "single" => Ok(rdocx::BorderStyle::Single),
@@ -133,14 +226,28 @@ fn cell_border_edge(value: &str) -> PyResult<rdocx::CellBorderEdge> {
 }
 
 /// A border edge as `(style, size in eighths of a point, color)`.
-type BorderSnapshot = (String, Option<u32>, Option<String>);
+type BorderSnapshot = (String, Option<u32>, Option<Py<PyAny>>);
 
-fn border_snapshot(border: rdocx::TableBorderRef<'_>) -> BorderSnapshot {
-    (
+fn table_color_hex(value: &Bound<'_, PyAny>, parameter: &str) -> PyResult<String> {
+    if value
+        .extract::<String>()
+        .is_ok_and(|value| value.eq_ignore_ascii_case("auto"))
+    {
+        Ok("auto".to_owned())
+    } else {
+        color_hex(value, parameter)
+    }
+}
+
+fn border_snapshot(py: Python<'_>, border: rdocx::TableBorderRef<'_>) -> PyResult<BorderSnapshot> {
+    Ok((
         border.style().to_owned(),
         border.size_eighths_pt(),
-        border.color().map(str::to_owned),
-    )
+        border
+            .color()
+            .map(|value| color_object(py, value))
+            .transpose()?,
+    ))
 }
 
 /// Cell margins as `(top, right, bottom, left)`, each a `Length` or `None`.
@@ -220,7 +327,10 @@ impl PyTableCollection {
             .borrow(py)
             .revisions
             .capture(smallvec![PathSeg::Body(index)]);
-        Py::new(py, PyTable::new(self.document.clone_ref(py), path))
+        Py::new(
+            py,
+            PyTable::new(self.document.clone_ref(py), path).bind_current(py, None)?,
+        )
     }
 }
 
@@ -291,18 +401,142 @@ impl PyTableIterator {
 pub struct PyTable {
     document: Py<PyDocument>,
     path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyTable {
     pub(crate) fn new(document: Py<PyDocument>, path: ContentPath) -> Self {
-        Self { document, path }
+        Self {
+            document,
+            path,
+            related: None,
+            owner: None,
+            furniture_scope: None,
+        }
     }
 
+    pub(crate) fn for_story(
+        document: Py<PyDocument>,
+        path: ContentPath,
+        location: rdocx::ContentLocation,
+    ) -> Self {
+        Self {
+            document,
+            path,
+            related: Some(location),
+            owner: None,
+            furniture_scope: None,
+        }
+    }
+    pub(crate) fn bind_current(
+        mut self,
+        py: Python<'_>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope = furniture_scope;
+        let index = table_index(&self.path)?;
+        {
+            let document = self.document.borrow(py);
+            match TableLocation::new(index, &self.related).native(&document.inner) {
+                Ok(location) => {
+                    let (path, owner) = document.capture_owner(
+                        &crate::document::WordOwnerLocation::Table(location),
+                        self.path.segs.clone(),
+                        crate::document::WordView::Owner,
+                        self.furniture_scope.as_ref(),
+                    )?;
+                    self.path = path;
+                    self.owner = Some(owner);
+                }
+                Err(_) => {
+                    self.path = document.capture_snapshot(self.path.segs.clone())?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn bind_prepared(
+        mut self,
+        py: Python<'_>,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedWordRevision,
+        candidate: &rdocx::Document,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope =
+            document.prepared_furniture_scope(prepared, furniture_scope.as_ref())?;
+        let index = table_index(&self.path)?;
+        let location = TableLocation::new(index, &self.related)
+            .native(candidate)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let (path, owner) = document.capture_prepared_owner(
+            prepared,
+            &crate::document::WordOwnerLocation::Table(location),
+            self.path.segs.clone(),
+            crate::document::WordView::Owner,
+            self.furniture_scope.as_ref(),
+        )?;
+        self.path = path;
+        self.owner = Some(owner);
+        Ok(self)
+    }
+
+    fn current_related(&self, py: Python<'_>) -> PyResult<Option<rdocx::ContentLocation>> {
+        if let (Some(owner), Some(_)) = (&self.owner, &self.related) {
+            self.path
+                .validate_scopes(
+                    &self.document.borrow(py).revisions,
+                    "table",
+                    "Re-fetch it from its current physical owner.",
+                )
+                .map_err(|error| stale_to_pyerr(py, error))?;
+            return self
+                .document
+                .borrow(py)
+                .current_table_owner(owner)
+                .map(Some);
+        }
+        Ok(self.related.clone())
+    }
+
+    fn read<T>(&self, py: Python<'_>, read: impl FnOnce(rdocx::TableRef<'_>) -> T) -> PyResult<T> {
+        let index = self.validate(py)?;
+        TableLocation::new(index, &self.current_related(py)?)
+            .read(&self.document.borrow(py).inner, read)
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+    pub(crate) fn direct_body_index(&self, py: Python<'_>) -> PyResult<usize> {
+        let index = self.validate(py)?;
+        let document = self.document.borrow(py);
+        if let Some(location) = &self.current_related(py)? {
+            let location = TableLocation::refreshed(&document.inner, location)
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            return document
+                .inner
+                .story_item_snapshots()
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+                .into_iter()
+                .find(|item| {
+                    item.location() == &location
+                        && item.is_direct_child()
+                        && location.story().kind() == rdocx::StoryKind::Body
+                })
+                .and_then(|item| item.direct_body_index())
+                .ok_or_else(|| PyValueError::new_err("content handle is not a direct body child"));
+        }
+        document
+            .inner
+            .content_index_of_table(index)
+            .ok_or_else(|| PyValueError::new_err("content handle is not a direct body child"))
+    }
     pub(crate) fn validate(&self, py: Python<'_>) -> PyResult<usize> {
         let document = self.document.borrow(py);
         self.path
-            .validate_revision(
-                document.revisions.current(),
+            .validate_scopes(
+                &document.revisions,
                 "table",
                 "Re-fetch it with doc.tables[i].",
             )
@@ -321,40 +555,103 @@ impl PyTable {
         edit: impl FnOnce(&mut rdocx::Table<'_>) -> rdocx::Result<T>,
     ) -> PyResult<T> {
         let index = self.validate(py)?;
+        let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let mut table = document
-            .inner
-            .table_mut(index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        edit(&mut table).map_err(|error| rdocx_to_pyerr(py, error))
+        let mut candidate = document.inner.clone_for_staging();
+        let result = TableLocation::new(index, &current_related.clone())
+            .edit(&mut candidate, edit)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document.inner = candidate;
+        Ok(result)
     }
 
     /// Resolve possibly negative row and cell indexes against this table.
     fn cell_coordinates(&self, py: Python<'_>, row: isize, col: isize) -> PyResult<(usize, usize)> {
-        let table_index = self.validate(py)?;
-        let document = self.document.borrow(py);
-        let table = document
-            .inner
-            .table(table_index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        let row = normalize_index(row, table.row_count(), "row")?;
-        let col = normalize_index(
-            col,
-            table.row(row).map(|row| row.cell_count()).unwrap_or(0),
-            "cell",
-        )?;
-        Ok((row, col))
+        self.read(py, |table| {
+            let row = normalize_index(row, table.row_count(), "row")?;
+            let col = normalize_index(
+                col,
+                table.row(row).map(|row| row.cell_count()).unwrap_or(0),
+                "cell",
+            )?;
+            Ok((row, col))
+        })?
     }
 }
 
 #[pymethods]
 impl PyTable {
     #[getter]
+    fn element<'py>(slf: &Bound<'py, Self>) -> Bound<'py, Self> {
+        slf.clone()
+    }
+
+    #[getter]
+    fn xml(&self, py: Python<'_>) -> PyResult<String> {
+        self.validate(py)?;
+        let document = self.document.borrow(py);
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("table XML owner route is unsupported"))?;
+        let location = document.current_table_owner(owner)?;
+        let bytes = document
+            .inner
+            .table_element_xml(&location)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
+        self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("table XML owner route is unsupported"))?;
+        let location = document.current_table_owner(owner)?;
+        let mut candidate = document.inner.clone_for_staging();
+        candidate
+            .replace_table_xml(&location, xml)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document.publish_owner_candidate(
+            py,
+            candidate,
+            "Table.replace_xml",
+            crate::document::WordPublication::ElementXml(
+                crate::document::WordOwnerLocation::Table(location),
+            ),
+        )
+    }
+
+    #[getter]
     fn rows(&self, py: Python<'_>) -> PyResult<Py<PyRowCollection>> {
         self.validate(py)?;
+        let path = match &self.owner {
+            Some(owner) => {
+                let document = self.document.borrow(py);
+                document
+                    .capture_owner(
+                        &crate::document::WordOwnerLocation::Table(
+                            document.current_table_owner(owner)?,
+                        ),
+                        self.path.segs.clone(),
+                        crate::document::WordView::Grid,
+                        self.furniture_scope.as_ref(),
+                    )?
+                    .0
+            }
+            None => self.path.clone(),
+        };
         Py::new(
             py,
-            PyRowCollection::new(self.document.clone_ref(py), self.path.clone()),
+            PyRowCollection::new(
+                self.document.clone_ref(py),
+                path,
+                self.current_related(py)?,
+                self.owner.clone(),
+                self.furniture_scope.clone(),
+            ),
         )
     }
 
@@ -366,40 +663,274 @@ impl PyTable {
             PathSeg::Row(row),
             PathSeg::Cell(col)
         ]);
-        Py::new(py, PyCell::new(self.document.clone_ref(py), path))
+        Py::new(
+            py,
+            PyCell::new(self.document.clone_ref(py), path, self.current_related(py)?)
+                .bind_current(py, self.furniture_scope.clone())?,
+        )
     }
 
     #[getter]
     fn style(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        let index = self.validate(py)?;
-        Ok(self
-            .document
-            .borrow(py)
-            .inner
-            .table(index)
-            .and_then(|table| table.style_id().map(str::to_owned)))
+        self.read(py, |table| table.style_id().map(str::to_owned))
     }
 
     #[setter]
     fn set_style(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let index = self.validate(py)?;
-        self.document
-            .borrow_mut(py)
-            .inner
-            .table_mut(index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .set_style(value);
+        let related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        candidate
+            .ensure_builtin_table_style(value)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let style_id = {
+            let styles = candidate.styles();
+            let exact_id = styles.iter().any(|style| {
+                style.style_id() == value && style.style_type() == rdocx::StyleType::Table
+            });
+            if !exact_id {
+                let matching = styles
+                    .iter()
+                    .filter(|style| {
+                        style.style_type() == rdocx::StyleType::Table
+                            && style
+                                .name()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(value))
+                    })
+                    .count();
+                if matching > 1 {
+                    return Err(PyValueError::new_err("table style name is ambiguous"));
+                }
+            }
+            crate::paragraph::style_id_of_type(&candidate, value, rdocx::StyleType::Table)?
+        };
+        TableLocation::new(index, &related)
+            .edit(&mut candidate, |table| {
+                table.set_style(&style_id);
+                Ok(())
+            })
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        document.inner = candidate;
         Ok(())
     }
 
     #[getter]
+    fn autofit(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table.layout() != Some(rdocx::TableLayout::Fixed)
+        })
+    }
+
+    #[setter]
+    fn set_autofit(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.edit(py, |table| {
+            table.set_layout(if value {
+                rdocx::TableLayout::AutoFit
+            } else {
+                rdocx::TableLayout::Fixed
+            });
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn first_row(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table
+                .look()
+                .unwrap_or(rdocx::TableLook {
+                    horizontal_banding: true,
+                    vertical_banding: true,
+                    ..rdocx::TableLook::default()
+                })
+                .first_row
+        })
+    }
+
+    #[setter]
+    fn set_first_row(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let mut look = self.read(py, |table| {
+            table.look().unwrap_or(rdocx::TableLook {
+                horizontal_banding: true,
+                vertical_banding: true,
+                ..rdocx::TableLook::default()
+            })
+        })?;
+        look.first_row = value;
+        self.edit(py, |table| {
+            table.set_look(look);
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn last_row(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table
+                .look()
+                .unwrap_or(rdocx::TableLook {
+                    horizontal_banding: true,
+                    vertical_banding: true,
+                    ..rdocx::TableLook::default()
+                })
+                .last_row
+        })
+    }
+
+    #[setter]
+    fn set_last_row(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let mut look = self.read(py, |table| {
+            table.look().unwrap_or(rdocx::TableLook {
+                horizontal_banding: true,
+                vertical_banding: true,
+                ..rdocx::TableLook::default()
+            })
+        })?;
+        look.last_row = value;
+        self.edit(py, |table| {
+            table.set_look(look);
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn first_column(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table
+                .look()
+                .unwrap_or(rdocx::TableLook {
+                    horizontal_banding: true,
+                    vertical_banding: true,
+                    ..rdocx::TableLook::default()
+                })
+                .first_column
+        })
+    }
+
+    #[setter]
+    fn set_first_column(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let mut look = self.read(py, |table| {
+            table.look().unwrap_or(rdocx::TableLook {
+                horizontal_banding: true,
+                vertical_banding: true,
+                ..rdocx::TableLook::default()
+            })
+        })?;
+        look.first_column = value;
+        self.edit(py, |table| {
+            table.set_look(look);
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn last_column(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table
+                .look()
+                .unwrap_or(rdocx::TableLook {
+                    horizontal_banding: true,
+                    vertical_banding: true,
+                    ..rdocx::TableLook::default()
+                })
+                .last_column
+        })
+    }
+
+    #[setter]
+    fn set_last_column(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let mut look = self.read(py, |table| {
+            table.look().unwrap_or(rdocx::TableLook {
+                horizontal_banding: true,
+                vertical_banding: true,
+                ..rdocx::TableLook::default()
+            })
+        })?;
+        look.last_column = value;
+        self.edit(py, |table| {
+            table.set_look(look);
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn banded_rows(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table
+                .look()
+                .unwrap_or(rdocx::TableLook {
+                    horizontal_banding: true,
+                    vertical_banding: true,
+                    ..rdocx::TableLook::default()
+                })
+                .horizontal_banding
+        })
+    }
+
+    #[setter]
+    fn set_banded_rows(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let mut look = self.read(py, |table| {
+            table.look().unwrap_or(rdocx::TableLook {
+                horizontal_banding: true,
+                vertical_banding: true,
+                ..rdocx::TableLook::default()
+            })
+        })?;
+        look.horizontal_banding = value;
+        self.edit(py, |table| {
+            table.set_look(look);
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn banded_columns(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |table| {
+            table
+                .look()
+                .unwrap_or(rdocx::TableLook {
+                    horizontal_banding: true,
+                    vertical_banding: true,
+                    ..rdocx::TableLook::default()
+                })
+                .vertical_banding
+        })
+    }
+
+    #[setter]
+    fn set_banded_columns(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let mut look = self.read(py, |table| {
+            table.look().unwrap_or(rdocx::TableLook {
+                horizontal_banding: true,
+                vertical_banding: true,
+                ..rdocx::TableLook::default()
+            })
+        })?;
+        look.vertical_banding = value;
+        self.edit(py, |table| {
+            table.set_look(look);
+            Ok(())
+        })
+    }
+
+    #[getter]
+    fn indent(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.read(py, |table| table.indent())?
+            .map(|value| length_object(py, value))
+            .transpose()
+    }
+
+    #[setter]
+    fn set_indent(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        self.edit(py, |table| {
+            table.set_indent_value(value.map(rdocx::Length::emu))
+        })
+    }
+
+    #[getter]
     fn alignment(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let index = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(index)
-            .and_then(|table| table.alignment())
+        self.read(py, |table| table.alignment())?
             .and_then(alignment_to_int)
             .map(|value| enum_object(py, "WD_TABLE_ALIGNMENT", value))
             .transpose()
@@ -407,46 +938,40 @@ impl PyTable {
 
     #[setter]
     fn set_alignment(&self, py: Python<'_>, value: i32) -> PyResult<()> {
-        let index = self.validate(py)?;
         let value = alignment_from_int(value)?;
-        self.document
-            .borrow_mut(py)
-            .inner
-            .table_mut(index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .set_alignment(value);
-        Ok(())
+        self.edit(py, |table| {
+            table.set_alignment(value);
+            Ok(())
+        })
     }
 
     #[getter]
     fn width(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let index = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(index)
-            .and_then(|table| table.width())
+        self.read(py, |table| table.width())?
             .map(|value| length_object(py, value))
             .transpose()
     }
 
     #[setter]
     fn set_width(&self, py: Python<'_>, value: i64) -> PyResult<()> {
-        let index = self.validate(py)?;
-        self.document
-            .borrow_mut(py)
-            .inner
-            .table_mut(index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .set_width(rdocx::Length::emu(value));
-        Ok(())
+        self.edit(py, |table| {
+            table.set_width(rdocx::Length::emu(value));
+            Ok(())
+        })
     }
 
     #[pyo3(signature = (style, *, size, color))]
-    fn set_borders(&self, py: Python<'_>, style: &str, size: u32, color: &str) -> PyResult<()> {
+    fn set_borders(
+        &self,
+        py: Python<'_>,
+        style: &str,
+        size: u32,
+        color: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let color = table_color_hex(color, "Table.set_borders(color)")?;
         let style = border_style_from_name(style)?;
         self.edit(py, |table| {
-            table.set_all_borders_checked(style, size, color)
+            table.set_all_borders_checked(style, size, &color)
         })
     }
 
@@ -457,36 +982,27 @@ impl PyTable {
         edge: &str,
         style: &str,
         size: u32,
-        color: &str,
+        color: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let color = table_color_hex(color, "Table.set_border(color)")?;
         let edge = table_border_edge(edge)?;
         let style = border_style_from_name(style)?;
         self.edit(py, |table| {
-            table.set_border_checked(edge, style, size, color)
+            table.set_border_checked(edge, style, size, &color)
         })
     }
 
     fn border(&self, py: Python<'_>, edge: &str) -> PyResult<Option<BorderSnapshot>> {
         let edge = table_border_edge(edge)?;
-        let index = self.validate(py)?;
-        Ok(self
-            .document
-            .borrow(py)
-            .inner
-            .table(index)
-            .and_then(|table| table.border(edge).map(border_snapshot)))
+        self.read(py, |table| {
+            table.border(edge).map(|border| border_snapshot(py, border))
+        })?
+        .transpose()
     }
 
     #[getter]
     fn cell_margins(&self, py: Python<'_>) -> PyResult<Option<MarginSnapshot>> {
-        let index = self.validate(py)?;
-        let margins = self
-            .document
-            .borrow(py)
-            .inner
-            .table(index)
-            .and_then(|table| table.cell_margins());
-        margins
+        self.read(py, |table| table.cell_margins())?
             .map(|margins| margin_snapshot(py, margins))
             .transpose()
     }
@@ -512,15 +1028,8 @@ impl PyTable {
 
     #[getter]
     fn grid_widths<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let index = self.validate(py)?;
         let widths = self
-            .document
-            .borrow(py)
-            .inner
-            .table(index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .grid_widths();
-        let widths = widths
+            .read(py, |table| table.grid_widths())?
             .into_iter()
             .map(|width| length_object(py, width))
             .collect::<PyResult<Vec<_>>>()?;
@@ -537,15 +1046,7 @@ impl PyTable {
     }
 
     fn set_column_width(&self, py: Python<'_>, column: isize, width: i64) -> PyResult<()> {
-        let index = self.validate(py)?;
-        let columns = self
-            .document
-            .borrow(py)
-            .inner
-            .table(index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .grid_widths()
-            .len();
+        let columns = self.read(py, |table| table.grid_widths().len())?;
         let column = normalize_index(column, columns, "column")?;
         let applied = self.edit(py, |table| {
             Ok(table.set_column_width(column, rdocx::Length::emu(width)))
@@ -567,16 +1068,29 @@ impl PyTable {
         span: Option<u32>,
     ) -> PyResult<()> {
         let (row, col) = self.cell_coordinates(py, row, col)?;
-        let cells = |table: &mut rdocx::Table<'_>| table.row(row).map(|row| row.cell_count());
-        let changed = self.edit(py, |table| {
-            let before = cells(table);
-            table.set_cell_grid_span_checked(row, col, span)?;
-            Ok(cells(table) != before)
-        })?;
-        // Absorbed or restored cells shift the indexes after this one.
+        let table_index = self.validate(py)?;
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        let changed = {
+            TableLocation::new(table_index, &current_related.clone())
+                .edit(&mut candidate, |table| {
+                    let before = table.row(row).map(|row| row.cell_count());
+                    table.set_cell_grid_span_checked(row, col, span)?;
+                    Ok(table.row(row).map(|row| row.cell_count()) != before)
+                })
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+        };
         if changed {
-            self.document.borrow_mut(py).revisions.bump();
+            let prepared = document.prepare_word_revision(
+                py,
+                &candidate,
+                "Table.set_cell_grid_span",
+                crate::document::WordPublication::Conservative,
+            )?;
+            document.commit_word_revision(prepared)?;
         }
+        document.inner = candidate;
         Ok(())
     }
 
@@ -593,47 +1107,196 @@ impl PyTable {
         self.edit(py, |table| table.set_cell_vertical_merge(row, col, merge))
     }
 
+    fn add_row(&self, py: Python<'_>) -> PyResult<Py<PyRow>> {
+        let index = self.validate(py)?;
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        let inserted = match &current_related.clone() {
+            None => candidate.add_empty_table_row(index),
+            Some(location) => {
+                let location = TableLocation::refreshed(&candidate, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                candidate.edit_story_table(&location, |table| {
+                    let index = table.row_count();
+                    table.add_row()?;
+                    Ok(index)
+                })
+            }
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Table.add_row",
+            crate::document::WordPublication::TableGrid(
+                TableLocation::new(index, &current_related)
+                    .native(&document.inner)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?,
+            ),
+        )?;
+        let mut segments = self.path.segs.clone();
+        segments.push(PathSeg::Row(inserted));
+        let path = document
+            .revisions
+            .capture_prepared(&prepared.revision, segments)
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        let result = Py::new(
+            py,
+            PyRow::new(self.document.clone_ref(py), path, current_related.clone()).bind_prepared(
+                py,
+                &document,
+                &prepared,
+                &candidate,
+                self.furniture_scope.clone(),
+            )?,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(result)
+    }
+
+    #[pyo3(signature = (index, *, before = true))]
+    fn insert_column(&self, py: Python<'_>, index: usize, before: bool) -> PyResult<()> {
+        let table_index = self.validate(py)?;
+        if index >= self.read(py, |table| table.column_count())? {
+            return Err(PyIndexError::new_err(
+                "column insertion index is out of range",
+            ));
+        }
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        match &current_related.clone() {
+            None => candidate.insert_table_column(table_index, index, before),
+            Some(location) => {
+                let location = TableLocation::refreshed(&candidate, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                candidate
+                    .edit_story_table(&location, |table| table.insert_column(index, before, None))
+            }
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Table.insert_column",
+            crate::document::WordPublication::Conservative,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(())
+    }
+
+    fn delete_column(&self, py: Python<'_>, index: usize) -> PyResult<()> {
+        let table_index = self.validate(py)?;
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        match &current_related.clone() {
+            None => candidate.delete_table_column(table_index, index),
+            Some(location) => candidate.delete_story_table_column(
+                &TableLocation::refreshed(&candidate, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?,
+                index,
+            ),
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Table.delete_column",
+            crate::document::WordPublication::Conservative,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(())
+    }
+
     #[pyo3(signature = (index, at = None))]
     fn clone_row(&self, py: Python<'_>, index: isize, at: Option<usize>) -> PyResult<Py<PyRow>> {
         let table_index = self.validate(py)?;
-        let path = {
+        let result = {
+            let current_related = self.current_related(py)?;
             let mut document = self.document.borrow_mut(py);
-            let row_count = document
-                .inner
-                .table(table_index)
-                .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-                .row_count();
+            let mut candidate = document.inner.clone_for_staging();
+            let row_count = TableLocation::new(table_index, &current_related.clone())
+                .read(&candidate, |table| table.row_count())
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
             let source = normalize_index(index, row_count, "row")?;
             let insert_at = at.unwrap_or(source + 1);
             if insert_at > row_count {
                 return Err(PyIndexError::new_err("row insertion index out of range"));
             }
-            let inserted = document
-                .inner
-                .clone_table_row(table_index, source, insert_at)
-                .map_err(|error| rdocx_to_pyerr(py, error))?;
-            document.revisions.bump();
+            let inserted = match &current_related.clone() {
+                Some(location) => {
+                    let location = TableLocation::refreshed(&candidate, location)
+                        .map_err(|error| rdocx_to_pyerr(py, error))?;
+                    candidate.clone_story_table_row(&location, source, insert_at)
+                }
+                None => candidate.clone_table_row(table_index, source, insert_at),
+            }
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+            let prepared = document.prepare_word_revision(
+                py,
+                &candidate,
+                "Table.clone_row",
+                crate::document::WordPublication::Conservative,
+            )?;
             let mut segments = self.path.segs.clone();
             segments.push(PathSeg::Row(inserted));
-            document.revisions.capture(segments)
+            let path = document
+                .revisions
+                .capture_prepared(&prepared.revision, segments)
+                .map_err(oxml_py_support::revision_to_pyerr)?;
+            let result = Py::new(
+                py,
+                PyRow::new(self.document.clone_ref(py), path, current_related.clone())
+                    .bind_prepared(
+                        py,
+                        &document,
+                        &prepared,
+                        &candidate,
+                        self.furniture_scope.clone(),
+                    )?,
+            )?;
+            document.commit_word_revision(prepared)?;
+            document.inner = candidate;
+            result
         };
-        Py::new(py, PyRow::new(self.document.clone_ref(py), path))
+        Ok(result)
     }
 
     fn remove_row(&self, py: Python<'_>, index: isize) -> PyResult<()> {
         let table_index = self.validate(py)?;
+        let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let row_count = document
-            .inner
-            .table(table_index)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .row_count();
-        let row_index = normalize_index(index, row_count, "row")?;
-        document
-            .inner
-            .remove_table_row(table_index, row_index)
+        let mut candidate = document.inner.clone_for_staging();
+        let row_count = TableLocation::new(table_index, &current_related.clone())
+            .read(&candidate, |table| table.row_count())
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.revisions.bump();
+        let row_index = normalize_index(index, row_count, "row")?;
+        match &current_related.clone() {
+            Some(location) => {
+                let location = TableLocation::refreshed(&candidate, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                candidate.remove_story_table_row(&location, row_index)
+            }
+            None => candidate.remove_table_row(table_index, row_index),
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Table.remove_row",
+            crate::document::WordPublication::TableGrid(
+                TableLocation::new(table_index, &current_related)
+                    .native(&document.inner)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?,
+            ),
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
         Ok(())
     }
 }
@@ -642,20 +1305,50 @@ impl PyTable {
 pub struct PyRowCollection {
     document: Py<PyDocument>,
     table_path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    table_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyRowCollection {
-    fn new(document: Py<PyDocument>, table_path: ContentPath) -> Self {
+    fn new(
+        document: Py<PyDocument>,
+        table_path: ContentPath,
+        related: Option<rdocx::ContentLocation>,
+        table_owner: Option<oxml_py_support::RevisionState>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> Self {
         Self {
             document,
             table_path,
+            related,
+            table_owner,
+            furniture_scope,
         }
     }
+    fn current_related(&self, py: Python<'_>) -> PyResult<Option<rdocx::ContentLocation>> {
+        self.table_path
+            .validate_scopes(
+                &self.document.borrow(py).revisions,
+                "table grid view",
+                "Re-fetch it from its current physical table.",
+            )
+            .map_err(|error| stale_to_pyerr(py, error))?;
+        if let (Some(owner), Some(_)) = (&self.table_owner, &self.related) {
+            return self
+                .document
+                .borrow(py)
+                .current_table_owner(owner)
+                .map(Some);
+        }
+        Ok(self.related.clone())
+    }
+
     fn validate(&self, py: Python<'_>) -> PyResult<usize> {
         let document = self.document.borrow(py);
         self.table_path
-            .validate_revision(
-                document.revisions.current(),
+            .validate_scopes(
+                &document.revisions,
                 "row collection",
                 "Re-fetch it with table.rows.",
             )
@@ -664,19 +1357,21 @@ impl PyRowCollection {
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let index = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(index)
-            .map(|table| table.row_count())
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))
+        TableLocation::new(index, &self.current_related(py)?)
+            .read(&self.document.borrow(py).inner, |table| table.row_count())
+            .map_err(|error| rdocx_to_pyerr(py, error))
     }
     fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyRow>> {
         self.validate(py)?;
         let mut segments = self.table_path.segs.clone();
         segments.push(PathSeg::Row(index));
-        let path = self.document.borrow(py).revisions.capture(segments);
-        Py::new(py, PyRow::new(self.document.clone_ref(py), path))
+        let mut path = self.table_path.clone();
+        path.segs = segments;
+        Py::new(
+            py,
+            PyRow::new(self.document.clone_ref(py), path, self.current_related(py)?)
+                .bind_current(py, self.furniture_scope.clone())?,
+        )
     }
 }
 
@@ -714,6 +1409,9 @@ impl PyRowCollection {
             PyRowIterator {
                 document: self.document.clone_ref(py),
                 table_path: self.table_path.clone(),
+                related: self.current_related(py)?,
+                table_owner: self.table_owner.clone(),
+                furniture_scope: self.furniture_scope.clone(),
                 index: 0,
             },
         )
@@ -725,6 +1423,9 @@ struct PyRowIterator {
     document: Py<PyDocument>,
     table_path: ContentPath,
     index: usize,
+    related: Option<rdocx::ContentLocation>,
+    table_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 #[pymethods]
@@ -734,7 +1435,13 @@ impl PyRowIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyRow>>> {
-        let collection = PyRowCollection::new(self.document.clone_ref(py), self.table_path.clone());
+        let collection = PyRowCollection::new(
+            self.document.clone_ref(py),
+            self.table_path.clone(),
+            self.related.clone(),
+            self.table_owner.clone(),
+            self.furniture_scope.clone(),
+        );
         if self.index >= collection.len(py)? {
             return Ok(None);
         }
@@ -748,17 +1455,101 @@ impl PyRowIterator {
 pub struct PyRow {
     document: Py<PyDocument>,
     path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    table_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyRow {
-    fn new(document: Py<PyDocument>, path: ContentPath) -> Self {
-        Self { document, path }
+    fn new(
+        document: Py<PyDocument>,
+        path: ContentPath,
+        related: Option<rdocx::ContentLocation>,
+    ) -> Self {
+        Self {
+            document,
+            path,
+            related,
+            table_owner: None,
+            furniture_scope: None,
+        }
     }
+    fn bind_current(
+        mut self,
+        py: Python<'_>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope = furniture_scope;
+        let index = table_index(&self.path)?;
+        {
+            let document = self.document.borrow(py);
+            match TableLocation::new(index, &self.related).native(&document.inner) {
+                Ok(location) => {
+                    let (path, owner) = document.capture_owner(
+                        &crate::document::WordOwnerLocation::Table(location),
+                        self.path.segs.clone(),
+                        crate::document::WordView::Grid,
+                        self.furniture_scope.as_ref(),
+                    )?;
+                    self.path = path;
+                    self.table_owner = Some(owner);
+                }
+                Err(_) => {
+                    self.path = document.capture_snapshot(self.path.segs.clone())?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    fn bind_prepared(
+        mut self,
+        py: Python<'_>,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedWordRevision,
+        candidate: &rdocx::Document,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope =
+            document.prepared_furniture_scope(prepared, furniture_scope.as_ref())?;
+        let location = TableLocation::new(table_index(&self.path)?, &self.related)
+            .native(candidate)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let (path, owner) = document.capture_prepared_owner(
+            prepared,
+            &crate::document::WordOwnerLocation::Table(location),
+            self.path.segs.clone(),
+            crate::document::WordView::Grid,
+            self.furniture_scope.as_ref(),
+        )?;
+        self.path = path;
+        self.table_owner = Some(owner);
+        Ok(self)
+    }
+
+    fn current_related(&self, py: Python<'_>) -> PyResult<Option<rdocx::ContentLocation>> {
+        self.path
+            .validate_scopes(
+                &self.document.borrow(py).revisions,
+                "table grid view",
+                "Re-fetch it from its current physical table.",
+            )
+            .map_err(|error| stale_to_pyerr(py, error))?;
+        if let (Some(owner), Some(_)) = (&self.table_owner, &self.related) {
+            return self
+                .document
+                .borrow(py)
+                .current_table_owner(owner)
+                .map(Some);
+        }
+        Ok(self.related.clone())
+    }
+
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
         let document = self.document.borrow(py);
         self.path
-            .validate_revision(
-                document.revisions.current(),
+            .validate_scopes(
+                &document.revisions,
                 "row",
                 "Re-fetch it with table.rows[i].",
             )
@@ -768,15 +1559,14 @@ impl PyRow {
 
     fn read<T>(&self, py: Python<'_>, read: impl FnOnce(rdocx::RowRef<'_>) -> T) -> PyResult<T> {
         let (table, row) = self.validate(py)?;
-        let document = self.document.borrow(py);
-        let table = document
-            .inner
-            .table(table)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        let row = table
-            .row(row)
-            .ok_or_else(|| PyIndexError::new_err("row index out of range"))?;
-        Ok(read(row))
+        TableLocation::new(table, &self.current_related(py)?)
+            .read(&self.document.borrow(py).inner, |table| {
+                let row = table
+                    .row(row)
+                    .ok_or_else(|| PyIndexError::new_err("row index out of range"))?;
+                Ok(read(row))
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?
     }
 
     /// Apply one checked native row edit that moves no content, so live
@@ -787,15 +1577,19 @@ impl PyRow {
         edit: impl FnOnce(&mut rdocx::Row<'_>) -> rdocx::Result<()>,
     ) -> PyResult<()> {
         let (table, row) = self.validate(py)?;
+        let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let mut table = document
-            .inner
-            .table_mut(table)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        let mut row = table
-            .row(row)
-            .ok_or_else(|| PyIndexError::new_err("row index out of range"))?;
-        edit(&mut row).map_err(|error| rdocx_to_pyerr(py, error))
+        let mut candidate = document.inner.clone_for_staging();
+        TableLocation::new(table, &current_related.clone())
+            .edit(&mut candidate, |table| {
+                let mut row = table
+                    .row(row)
+                    .ok_or_else(|| rdocx::Error::Other("row index out of range".to_owned()))?;
+                edit(&mut row)
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document.inner = candidate;
+        Ok(())
     }
 }
 
@@ -806,7 +1600,13 @@ impl PyRow {
         self.validate(py)?;
         Py::new(
             py,
-            PyCellCollection::new(self.document.clone_ref(py), self.path.clone()),
+            PyCellCollection::new(
+                self.document.clone_ref(py),
+                self.path.clone(),
+                self.current_related(py)?,
+                self.table_owner.clone(),
+                self.furniture_scope.clone(),
+            ),
         )
     }
 
@@ -884,17 +1684,50 @@ impl PyRow {
 pub struct PyCellCollection {
     document: Py<PyDocument>,
     row_path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    table_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyCellCollection {
-    fn new(document: Py<PyDocument>, row_path: ContentPath) -> Self {
-        Self { document, row_path }
+    fn new(
+        document: Py<PyDocument>,
+        row_path: ContentPath,
+        related: Option<rdocx::ContentLocation>,
+        table_owner: Option<oxml_py_support::RevisionState>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> Self {
+        Self {
+            document,
+            row_path,
+            related,
+            table_owner,
+            furniture_scope,
+        }
     }
+    fn current_related(&self, py: Python<'_>) -> PyResult<Option<rdocx::ContentLocation>> {
+        self.row_path
+            .validate_scopes(
+                &self.document.borrow(py).revisions,
+                "table grid view",
+                "Re-fetch it from its current physical table.",
+            )
+            .map_err(|error| stale_to_pyerr(py, error))?;
+        if let (Some(owner), Some(_)) = (&self.table_owner, &self.related) {
+            return self
+                .document
+                .borrow(py)
+                .current_table_owner(owner)
+                .map(Some);
+        }
+        Ok(self.related.clone())
+    }
+
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
         let document = self.document.borrow(py);
         self.row_path
-            .validate_revision(
-                document.revisions.current(),
+            .validate_scopes(
+                &document.revisions,
                 "cell collection",
                 "Re-fetch it with row.cells.",
             )
@@ -903,19 +1736,24 @@ impl PyCellCollection {
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let (table, row) = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(table)
-            .and_then(|table| table.row(row).map(|row| row.cell_count()))
+        TableLocation::new(table, &self.current_related(py)?)
+            .read(&self.document.borrow(py).inner, |table| {
+                table.row(row).map(|row| row.cell_count())
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?
             .ok_or_else(|| PyIndexError::new_err("row index out of range"))
     }
     fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyCell>> {
         self.validate(py)?;
         let mut segments = self.row_path.segs.clone();
         segments.push(PathSeg::Cell(index));
-        let path = self.document.borrow(py).revisions.capture(segments);
-        Py::new(py, PyCell::new(self.document.clone_ref(py), path))
+        let mut path = self.row_path.clone();
+        path.segs = segments;
+        Py::new(
+            py,
+            PyCell::new(self.document.clone_ref(py), path, self.current_related(py)?)
+                .bind_current(py, self.furniture_scope.clone())?,
+        )
     }
 }
 
@@ -953,6 +1791,9 @@ impl PyCellCollection {
             PyCellIterator {
                 document: self.document.clone_ref(py),
                 row_path: self.row_path.clone(),
+                related: self.current_related(py)?,
+                table_owner: self.table_owner.clone(),
+                furniture_scope: self.furniture_scope.clone(),
                 index: 0,
             },
         )
@@ -964,6 +1805,9 @@ struct PyCellIterator {
     document: Py<PyDocument>,
     row_path: ContentPath,
     index: usize,
+    related: Option<rdocx::ContentLocation>,
+    table_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 #[pymethods]
@@ -973,7 +1817,13 @@ impl PyCellIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyCell>>> {
-        let collection = PyCellCollection::new(self.document.clone_ref(py), self.row_path.clone());
+        let collection = PyCellCollection::new(
+            self.document.clone_ref(py),
+            self.row_path.clone(),
+            self.related.clone(),
+            self.table_owner.clone(),
+            self.furniture_scope.clone(),
+        );
         if self.index >= collection.len(py)? {
             return Ok(None);
         }
@@ -987,17 +1837,104 @@ impl PyCellIterator {
 pub struct PyCell {
     document: Py<PyDocument>,
     path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyCell {
-    fn new(document: Py<PyDocument>, path: ContentPath) -> Self {
-        Self { document, path }
+    fn physical_story(
+        &self,
+        py: Python<'_>,
+        document: &rdocx::Document,
+        related: &Option<rdocx::ContentLocation>,
+        table: usize,
+        row: usize,
+        cell: usize,
+    ) -> PyResult<rdocx::StoryId> {
+        let location = TableLocation::new(table, related)
+            .native(document)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document
+            .story_table_cell(&location, row, cell)
+            .map_err(|error| rdocx_to_pyerr(py, error))
     }
+
+    fn new(
+        document: Py<PyDocument>,
+        path: ContentPath,
+        related: Option<rdocx::ContentLocation>,
+    ) -> Self {
+        Self {
+            document,
+            path,
+            related,
+            owner: None,
+            furniture_scope: None,
+        }
+    }
+    fn bind_current(
+        mut self,
+        py: Python<'_>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> PyResult<Self> {
+        self.furniture_scope = furniture_scope;
+        let table = table_index(&self.path)?;
+        let row = row_index(&self.path)?;
+        let cell = cell_index(&self.path)?;
+        {
+            let document = self.document.borrow(py);
+            match TableLocation::new(table, &self.related).native(&document.inner) {
+                Ok(table) => {
+                    let story = document
+                        .inner
+                        .story_table_cell(&table, row, cell)
+                        .map_err(|error| rdocx_to_pyerr(py, error))?;
+                    let (path, owner) = document.capture_owner(
+                        &crate::document::WordOwnerLocation::Cell {
+                            table,
+                            row,
+                            cell,
+                            story,
+                        },
+                        self.path.segs.clone(),
+                        crate::document::WordView::Owner,
+                        self.furniture_scope.as_ref(),
+                    )?;
+                    self.path = path;
+                    self.owner = Some(owner);
+                }
+                Err(_) => {
+                    self.path = document.capture_snapshot(self.path.segs.clone())?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    fn current_related(&self, py: Python<'_>) -> PyResult<Option<rdocx::ContentLocation>> {
+        self.path
+            .validate_scopes(
+                &self.document.borrow(py).revisions,
+                "cell",
+                "Re-fetch it from its current physical owner.",
+            )
+            .map_err(|error| stale_to_pyerr(py, error))?;
+        if let (Some(owner), Some(_)) = (&self.owner, &self.related) {
+            return self
+                .document
+                .borrow(py)
+                .current_cell_owner(owner)
+                .map(|(table, _, _)| Some(table));
+        }
+        Ok(self.related.clone())
+    }
+
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize, usize)> {
         let document = self.document.borrow(py);
         self.path
-            .validate_revision(
-                document.revisions.current(),
+            .validate_scopes(
+                &document.revisions,
                 "cell",
                 "Re-fetch it with row.cells[i].",
             )
@@ -1011,15 +1948,14 @@ impl PyCell {
 
     fn read<T>(&self, py: Python<'_>, read: impl FnOnce(rdocx::CellRef<'_>) -> T) -> PyResult<T> {
         let (table, row, cell) = self.validate(py)?;
-        let document = self.document.borrow(py);
-        let table = document
-            .inner
-            .table(table)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        let cell = table
-            .cell(row, cell)
-            .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-        Ok(read(cell))
+        TableLocation::new(table, &self.current_related(py)?)
+            .read(&self.document.borrow(py).inner, |table| {
+                let cell = table
+                    .cell(row, cell)
+                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+                Ok(read(cell))
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?
     }
 
     /// Apply one checked native cell edit that moves no content, so live
@@ -1030,20 +1966,134 @@ impl PyCell {
         edit: impl FnOnce(&mut rdocx::Cell<'_>) -> rdocx::Result<()>,
     ) -> PyResult<()> {
         let (table, row, cell) = self.validate(py)?;
+        let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let mut table = document
-            .inner
-            .table_mut(table)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        let mut cell = table
-            .cell(row, cell)
-            .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-        edit(&mut cell).map_err(|error| rdocx_to_pyerr(py, error))
+        let mut candidate = document.inner.clone_for_staging();
+        TableLocation::new(table, &current_related.clone())
+            .edit(&mut candidate, |table| {
+                let mut cell = table
+                    .cell(row, cell)
+                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
+                edit(&mut cell)
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document.inner = candidate;
+        Ok(())
     }
 }
 
 #[pymethods]
 impl PyCell {
+    #[getter]
+    fn element<'py>(slf: &Bound<'py, Self>) -> Bound<'py, Self> {
+        slf.clone()
+    }
+
+    #[getter]
+    fn xml(&self, py: Python<'_>) -> PyResult<String> {
+        self.validate(py)?;
+        let document = self.document.borrow(py);
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("cell XML owner route is unsupported"))?;
+        let (location, row, cell) = document.current_cell_owner(owner)?;
+        let bytes = document
+            .inner
+            .cell_element_xml(&location, row, cell)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
+        self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("cell XML owner route is unsupported"))?;
+        let (location, row, cell) = document.current_cell_owner(owner)?;
+        let story = document
+            .inner
+            .story_table_cell(&location, row, cell)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let mut candidate = document.inner.clone_for_staging();
+        candidate
+            .replace_cell_xml(&location, row, cell, xml)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document.publish_owner_candidate(
+            py,
+            candidate,
+            "Cell.replace_xml",
+            crate::document::WordPublication::ElementXml(
+                crate::document::WordOwnerLocation::Cell {
+                    table: location,
+                    row,
+                    cell,
+                    story,
+                },
+            ),
+        )
+    }
+
+    #[pyo3(signature = (data, filename=None, width=None, height=None, *, options=None))]
+    fn add_picture(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        filename: Option<&str>,
+        width: Option<&Bound<'_, PyAny>>,
+        height: Option<&Bound<'_, PyAny>>,
+        options: Option<PyRef<'_, crate::document::PyPictureOptions>>,
+    ) -> PyResult<Py<crate::document::PyPicture>> {
+        let (table, row, cell) = self.validate(py)?;
+        let (data, filename) = crate::document::picture_input(data, filename)?;
+        let width = crate::document::checked_section_length(width, "picture width")?
+            .map(rdocx::Length::emu);
+        let height = crate::document::checked_section_length(height, "picture height")?
+            .map(rdocx::Length::emu);
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let story = self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
+        let mut candidate = document.inner.clone_for_staging();
+        let location = candidate
+            .insert_picture_to_story_with_options(
+                &story,
+                None,
+                &data,
+                &filename,
+                width,
+                height,
+                options.map(|o| o.inner.clone()),
+            )
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let picture = candidate
+            .pictures()
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+            .into_iter()
+            .find(|p| p.location == location)
+            .ok_or_else(|| PyIndexError::new_err("inserted cell picture was not inventoried"))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Cell.add_picture",
+            crate::document::WordPublication::Conservative,
+        )?;
+        let result = Py::new(
+            py,
+            crate::document::PyPicture {
+                inner: picture,
+                binding: document
+                    .revisions
+                    .capture_prepared(&prepared.revision, smallvec![])
+                    .map_err(revision_to_pyerr)?,
+            },
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(result)
+    }
+
     /// Replace literal text in this cell and its supported nested descendants.
     #[pyo3(signature = (old, new, *, expect = None))]
     fn replace_text(
@@ -1053,122 +2103,416 @@ impl PyCell {
         new: &str,
         expect: Option<usize>,
     ) -> PyResult<usize> {
-        let cell = self.validate(py)?;
+        let (table, row, cell) = self.validate(py)?;
+        let related = match &self.current_related(py)? {
+            Some(location) => {
+                let document = self.document.borrow(py);
+                let location = TableLocation::refreshed(&document.inner, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                Some(
+                    document
+                        .inner
+                        .story_table_cell(&location, row, cell)
+                        .map_err(|error| rdocx_to_pyerr(py, error))?,
+                )
+            }
+            None => None,
+        };
         self.document
             .borrow_mut(py)
-            .scoped_replacement(py, |document| {
-                document.try_replace_text_in_cell(cell, None, old, new, expect)
+            .scoped_replacement(py, "Cell.replace_text", |document| match related.as_ref() {
+                Some(story) => document.try_replace_text_in_story_cell(story, old, new, expect),
+                None => {
+                    document.try_replace_text_in_cell((table, row, cell), None, old, new, expect)
+                }
             })
+    }
+
+    fn merge(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        other: &Bound<'_, Self>,
+    ) -> PyResult<Py<PyCell>> {
+        let this = slf.borrow();
+        let other = other.borrow();
+        if this.document.as_ptr() != other.document.as_ptr() {
+            return Err(PyValueError::new_err(
+                "merge cell belongs to a different document",
+            ));
+        }
+        let (table, row, cell) = this.validate(py)?;
+        let (other_table, other_row, other_cell) = other.validate(py)?;
+        let related = this.current_related(py)?;
+        let other_related = other.current_related(py)?;
+        let mut document = this.document.borrow_mut(py);
+        let location = TableLocation::new(table, &related)
+            .native(&document.inner)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let other_location = TableLocation::new(other_table, &other_related)
+            .native(&document.inner)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        if location != other_location {
+            return Err(PyValueError::new_err(
+                "merge cells belong to different physical tables",
+            ));
+        }
+        if (row, cell) == (other_row, other_cell) {
+            return Ok(slf.clone().unbind());
+        }
+        let mut candidate = document.inner.clone_for_staging();
+        let merged = candidate
+            .edit_story_table(&location, |table| {
+                table.merge_cells((row, cell), (other_row, other_cell))
+            })
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let candidate_location = TableLocation::new(table, &related)
+            .native(&candidate)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let story = candidate
+            .story_table_cell(&candidate_location, merged.0, merged.1)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Cell.merge",
+            crate::document::WordPublication::TableGrid(location),
+        )?;
+        let segments = smallvec![
+            PathSeg::Body(table),
+            PathSeg::Row(merged.0),
+            PathSeg::Cell(merged.1)
+        ];
+        let (path, owner) = document.capture_prepared_owner(
+            &prepared,
+            &crate::document::WordOwnerLocation::Cell {
+                table: candidate_location,
+                row: merged.0,
+                cell: merged.1,
+                story,
+            },
+            segments,
+            crate::document::WordView::Owner,
+            this.furniture_scope.as_ref(),
+        )?;
+        let mut result = PyCell::new(this.document.clone_ref(py), path, related);
+        result.owner = Some(owner);
+        result.furniture_scope = this.furniture_scope.clone();
+        let result = Py::new(py, result)?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(result)
+    }
+
+    fn split(&self, py: Python<'_>) -> PyResult<()> {
+        let (table, row, cell) = self.validate(py)?;
+        let noop = self.read(py, |cell| {
+            cell.grid_span().unwrap_or(1) == 1
+                && cell.v_merge().is_none()
+                && !cell.has_horizontal_merge()
+        })?;
+        if noop {
+            return Ok(());
+        }
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        match &current_related.clone() {
+            Some(location) => {
+                let location = TableLocation::refreshed(&candidate, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                candidate.edit_story_table(&location, |table| {
+                    table.split_cell(row, cell)?;
+                    Ok(())
+                })
+            }
+            None => {
+                let logical_column = candidate
+                    .table(table)
+                    .and_then(|table| {
+                        let row = table.row(row)?;
+                        (0..cell).try_fold(
+                            row.grid_before().unwrap_or(0) as usize,
+                            |column, index| {
+                                column
+                                    .checked_add(row.cell(index)?.grid_span().unwrap_or(1) as usize)
+                            },
+                        )
+                    })
+                    .ok_or_else(|| {
+                        PyValueError::new_err("cell has no checked logical grid position")
+                    })?;
+                candidate
+                    .split_table_cell(table, row, logical_column)
+                    .map(|_| ())
+            }
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Cell.split",
+            crate::document::WordPublication::Conservative,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(())
     }
 
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
+        self.read(py, |cell| cell.text())
+    }
+    #[getter]
+    fn tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let (table, row, cell) = self.validate(py)?;
-        self.document
-            .borrow(py)
+        let current_related = self.current_related(py)?;
+        let document = self.document.borrow(py);
+        let story = self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
+        let mut tables = Vec::new();
+        for item in document
             .inner
-            .table(table)
-            .and_then(|table| table.cell(row, cell).map(|cell| cell.text()))
-            .ok_or_else(|| PyIndexError::new_err("cell index out of range"))
+            .story_items(&story)
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+        {
+            if item.kind() == rdocx::StoryItemKind::Table {
+                let location = item.location().clone();
+                let path = document
+                    .revisions
+                    .capture(smallvec![PathSeg::Body(location.index_path()[0])]);
+                tables.push(Py::new(
+                    py,
+                    PyTable::for_story(self.document.clone_ref(py), path, location)
+                        .bind_current(py, self.furniture_scope.clone())?,
+                )?);
+            }
+        }
+        PyTuple::new(py, tables)
+    }
+    fn add_table(&self, py: Python<'_>, rows: usize, cols: usize) -> PyResult<Py<PyTable>> {
+        let (table, row, cell) = self.validate(py)?;
+        let current_related = self.current_related(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        let story = self.physical_story(py, &candidate, &current_related, table, row, cell)?;
+        let before = candidate
+            .story_items(&story)
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+            .into_iter()
+            .filter(|item| item.kind() == rdocx::StoryItemKind::Table)
+            .count();
+        TableLocation::new(table, &current_related.clone())
+            .edit(&mut candidate, |table| {
+                table
+                    .cell(row, cell)
+                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?
+                    .add_table_checked(rows, cols)?;
+                Ok(())
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let story = self.physical_story(py, &candidate, &current_related, table, row, cell)?;
+        let tables = candidate
+            .story_items(&story)
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+            .into_iter()
+            .filter(|item| item.kind() == rdocx::StoryItemKind::Table)
+            .map(|item| item.location().clone())
+            .collect::<Vec<_>>();
+        if tables.len() != before + 1 {
+            return Err(PyValueError::new_err(
+                "nested table insertion did not retain physical owner correspondence",
+            ));
+        }
+        let location = tables
+            .last()
+            .cloned()
+            .ok_or_else(|| PyValueError::new_err("nested table was not published"))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Cell.add_table",
+            crate::document::WordPublication::Conservative,
+        )?;
+        let path = document
+            .revisions
+            .capture_prepared(
+                &prepared.revision,
+                smallvec![PathSeg::Body(location.index_path()[0])],
+            )
+            .map_err(oxml_py_support::revision_to_pyerr)?;
+        let result = Py::new(
+            py,
+            PyTable::for_story(self.document.clone_ref(py), path, location).bind_prepared(
+                py,
+                &document,
+                &prepared,
+                &candidate,
+                self.furniture_scope.clone(),
+            )?,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
+        Ok(result)
     }
     #[setter]
     fn set_text(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let (table, row, cell) = self.validate(py)?;
+        let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
-        let inner = &mut document.inner;
-        py.detach(|| inner.try_set_cell_text(table, row, cell, value))
-            .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.revisions.bump();
+        let mut candidate = document.inner.clone_for_staging();
+        match &current_related.clone() {
+            Some(_) => {
+                TableLocation::new(table, &current_related.clone()).edit(&mut candidate, |table| {
+                    table
+                        .cell(row, cell)
+                        .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?
+                        .try_set_text(value)
+                })
+            }
+            None => candidate.try_set_cell_text(table, row, cell, value),
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Cell.text",
+            TableLocation::new(table, &current_related)
+                .native(&document.inner)
+                .map(|location| crate::document::WordPublication::CellText(location, row, cell))
+                .unwrap_or(crate::document::WordPublication::Conservative),
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.inner = candidate;
         Ok(())
     }
     #[getter]
     fn paragraphs(&self, py: Python<'_>) -> PyResult<Py<PyCellParagraphCollection>> {
         self.validate(py)?;
+        let path = match &self.owner {
+            Some(owner) => {
+                let document = self.document.borrow(py);
+                let (table, row, cell) = document.current_cell_owner(owner)?;
+                let story = document
+                    .inner
+                    .story_table_cell(&table, row, cell)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                document
+                    .capture_owner(
+                        &crate::document::WordOwnerLocation::Cell {
+                            table,
+                            row,
+                            cell,
+                            story,
+                        },
+                        self.path.segs.clone(),
+                        crate::document::WordView::Content,
+                        self.furniture_scope.as_ref(),
+                    )?
+                    .0
+            }
+            None => self.path.clone(),
+        };
         Py::new(
             py,
-            PyCellParagraphCollection::new(self.document.clone_ref(py), self.path.clone()),
+            PyCellParagraphCollection::new(
+                self.document.clone_ref(py),
+                path,
+                self.current_related(py)?,
+                self.owner.clone(),
+                self.furniture_scope.clone(),
+            ),
         )
     }
     fn add_paragraph(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyParagraph>> {
         let (table, row, cell) = self.validate(py)?;
-        let path = {
+        let result = {
+            let current_related = self.current_related(py)?;
             let mut document = self.document.borrow_mut(py);
-            let paragraph = {
-                let mut table = document
-                    .inner
-                    .table_mut(table)
-                    .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                let mut cell = table
-                    .cell(row, cell)
-                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                let paragraph = cell.paragraph_count();
-                cell.add_paragraph(text);
-                paragraph
+            let mut candidate = document.inner.clone_for_staging();
+            let paragraph = TableLocation::new(table, &current_related.clone())
+                .edit(&mut candidate, |table| {
+                    let mut cell = table
+                        .cell(row, cell)
+                        .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
+                    let paragraph = cell.paragraph_count();
+                    cell.add_paragraph(text);
+                    Ok(paragraph)
+                })
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            let prepared = document.prepare_word_revision(
+                py,
+                &candidate,
+                "Cell.add_paragraph",
+                crate::document::WordPublication::Conservative,
+            )?;
+            let path = document
+                .revisions
+                .capture_prepared(
+                    &prepared.revision,
+                    smallvec![
+                        PathSeg::Body(table),
+                        PathSeg::Row(row),
+                        PathSeg::Cell(cell),
+                        PathSeg::Para(paragraph)
+                    ],
+                )
+                .map_err(oxml_py_support::revision_to_pyerr)?;
+            let paragraph = match &current_related.clone() {
+                Some(location) => {
+                    let location = TableLocation::refreshed(&candidate, location)
+                        .map_err(|error| rdocx_to_pyerr(py, error))?;
+                    let location = candidate
+                        .story_table_cell_paragraph_location(&location, row, cell, paragraph)
+                        .map_err(|error| rdocx_to_pyerr(py, error))?;
+                    PyParagraph::for_story(self.document.clone_ref(py), path, location)
+                        .bind_prepared(
+                            py,
+                            &document,
+                            &prepared,
+                            &candidate,
+                            self.furniture_scope.clone(),
+                        )?
+                }
+                None => PyParagraph::new(self.document.clone_ref(py), path).bind_prepared(
+                    py,
+                    &document,
+                    &prepared,
+                    &candidate,
+                    self.furniture_scope.clone(),
+                )?,
             };
-            document.revisions.bump();
-            document.revisions.capture(smallvec![
-                PathSeg::Body(table),
-                PathSeg::Row(row),
-                PathSeg::Cell(cell),
-                PathSeg::Para(paragraph)
-            ])
+            let result = Py::new(py, paragraph)?;
+            document.commit_word_revision(prepared)?;
+            document.inner = candidate;
+            result
         };
-        Py::new(py, PyParagraph::new(self.document.clone_ref(py), path))
+        Ok(result)
     }
     #[getter]
     fn width(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let (table, row, cell) = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(table)
-            .and_then(|table| table.cell(row, cell).and_then(|cell| cell.width()))
+        self.read(py, |cell| cell.width())?
             .map(|value| length_object(py, value))
             .transpose()
     }
     #[setter]
     fn set_width(&self, py: Python<'_>, value: i64) -> PyResult<()> {
-        let (table, row, cell) = self.validate(py)?;
-        let mut document = self.document.borrow_mut(py);
-        let mut table = document
-            .inner
-            .table_mut(table)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        table
-            .cell(row, cell)
-            .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?
-            .set_width(rdocx::Length::emu(value));
-        Ok(())
+        self.edit(py, |cell| {
+            cell.set_width(rdocx::Length::emu(value));
+            Ok(())
+        })
     }
     #[getter]
     fn vertical_alignment(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let (table, row, cell) = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(table)
-            .and_then(|table| {
-                table
-                    .cell(row, cell)
-                    .and_then(|cell| cell.vertical_alignment())
-            })
+        self.read(py, |cell| cell.vertical_alignment())?
             .map(|value| enum_object(py, "WD_CELL_VERTICAL_ALIGNMENT", vertical_to_int(value)))
             .transpose()
     }
     #[setter]
     fn set_vertical_alignment(&self, py: Python<'_>, value: i32) -> PyResult<()> {
-        let (table, row, cell) = self.validate(py)?;
         let value = vertical_from_int(value)?;
-        let mut document = self.document.borrow_mut(py);
-        let mut table = document
-            .inner
-            .table_mut(table)
-            .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-        table
-            .cell(row, cell)
-            .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?
-            .set_vertical_alignment(value);
-        Ok(())
+        self.edit(py, |cell| {
+            cell.set_vertical_alignment(value);
+            Ok(())
+        })
     }
 
     #[getter]
@@ -1182,18 +2526,25 @@ impl PyCell {
     }
 
     #[getter]
-    fn shading(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        self.read(py, |cell| cell.shading_fill().map(str::to_owned))
+    fn shading(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.read(py, |cell| cell.shading_fill().map(str::to_owned))?
+            .as_deref()
+            .map(|value| color_object(py, value))
+            .transpose()
     }
 
     #[setter]
-    fn set_shading(&self, py: Python<'_>, value: &str) -> PyResult<()> {
-        self.edit(py, |cell| cell.set_shading_checked(value))
+    fn set_shading(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let value = table_color_hex(value, "Cell.shading")?;
+        self.edit(py, |cell| cell.set_shading_checked(&value))
     }
 
     fn border(&self, py: Python<'_>, edge: &str) -> PyResult<Option<BorderSnapshot>> {
         let edge = cell_border_edge(edge)?;
-        self.read(py, |cell| cell.border(edge).map(border_snapshot))
+        self.read(py, |cell| {
+            cell.border(edge).map(|border| border_snapshot(py, border))
+        })?
+        .transpose()
     }
 
     #[pyo3(signature = (edge, style, *, size, color))]
@@ -1203,11 +2554,14 @@ impl PyCell {
         edge: &str,
         style: &str,
         size: u32,
-        color: &str,
+        color: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let color = table_color_hex(color, "Cell.set_border(color)")?;
         let edge = cell_border_edge(edge)?;
         let style = border_style_from_name(style)?;
-        self.edit(py, |cell| cell.set_border_checked(edge, style, size, color))
+        self.edit(py, |cell| {
+            cell.set_border_checked(edge, style, size, &color)
+        })
     }
 
     #[getter]
@@ -1241,20 +2595,50 @@ impl PyCell {
 pub struct PyCellParagraphCollection {
     document: Py<PyDocument>,
     cell_path: ContentPath,
+    related: Option<rdocx::ContentLocation>,
+    cell_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 impl PyCellParagraphCollection {
-    fn new(document: Py<PyDocument>, cell_path: ContentPath) -> Self {
+    fn new(
+        document: Py<PyDocument>,
+        cell_path: ContentPath,
+        related: Option<rdocx::ContentLocation>,
+        cell_owner: Option<oxml_py_support::RevisionState>,
+        furniture_scope: Option<oxml_py_support::RevisionState>,
+    ) -> Self {
         Self {
             document,
             cell_path,
+            related,
+            cell_owner,
+            furniture_scope,
         }
     }
+    fn current_related(&self, py: Python<'_>) -> PyResult<Option<rdocx::ContentLocation>> {
+        self.cell_path
+            .validate_scopes(
+                &self.document.borrow(py).revisions,
+                "cell paragraph collection",
+                "Re-fetch it from its current physical cell.",
+            )
+            .map_err(|error| stale_to_pyerr(py, error))?;
+        if let (Some(owner), Some(_)) = (&self.cell_owner, &self.related) {
+            return self
+                .document
+                .borrow(py)
+                .current_cell_owner(owner)
+                .map(|(table, _, _)| Some(table));
+        }
+        Ok(self.related.clone())
+    }
+
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize, usize)> {
         let document = self.document.borrow(py);
         self.cell_path
-            .validate_revision(
-                document.revisions.current(),
+            .validate_scopes(
+                &document.revisions,
                 "cell paragraph collection",
                 "Re-fetch it with cell.paragraphs.",
             )
@@ -1267,11 +2651,11 @@ impl PyCellParagraphCollection {
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let (table, row, cell) = self.validate(py)?;
-        self.document
-            .borrow(py)
-            .inner
-            .table(table)
-            .and_then(|table| table.cell(row, cell).map(|cell| cell.paragraph_count()))
+        TableLocation::new(table, &self.current_related(py)?)
+            .read(&self.document.borrow(py).inner, |table| {
+                table.cell(row, cell).map(|cell| cell.paragraph_count())
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?
             .ok_or_else(|| PyIndexError::new_err("cell index out of range"))
     }
     fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyParagraph>> {
@@ -1279,7 +2663,28 @@ impl PyCellParagraphCollection {
         let mut segments = self.cell_path.segs.clone();
         segments.push(PathSeg::Para(index));
         let path = self.document.borrow(py).revisions.capture(segments);
-        Py::new(py, PyParagraph::new(self.document.clone_ref(py), path))
+        let related = match &self.current_related(py)? {
+            Some(location) => {
+                let (_, row, cell) = self.validate(py)?;
+                let document = self.document.borrow(py);
+                let location = TableLocation::refreshed(&document.inner, location)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                Some(
+                    document
+                        .inner
+                        .story_table_cell_paragraph_location(&location, row, cell, index)
+                        .map_err(|error| rdocx_to_pyerr(py, error))?,
+                )
+            }
+            None => None,
+        };
+        let paragraph = match related {
+            Some(location) => PyParagraph::for_story(self.document.clone_ref(py), path, location)
+                .bind_current(py, self.furniture_scope.clone())?,
+            None => PyParagraph::new(self.document.clone_ref(py), path)
+                .bind_current(py, self.furniture_scope.clone())?,
+        };
+        Py::new(py, paragraph)
     }
 }
 
@@ -1317,6 +2722,9 @@ impl PyCellParagraphCollection {
             PyCellParagraphIterator {
                 document: self.document.clone_ref(py),
                 cell_path: self.cell_path.clone(),
+                related: self.current_related(py)?,
+                cell_owner: self.cell_owner.clone(),
+                furniture_scope: self.furniture_scope.clone(),
                 index: 0,
             },
         )
@@ -1328,6 +2736,9 @@ struct PyCellParagraphIterator {
     document: Py<PyDocument>,
     cell_path: ContentPath,
     index: usize,
+    related: Option<rdocx::ContentLocation>,
+    cell_owner: Option<oxml_py_support::RevisionState>,
+    furniture_scope: Option<oxml_py_support::RevisionState>,
 }
 
 #[pymethods]
@@ -1337,8 +2748,13 @@ impl PyCellParagraphIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyParagraph>>> {
-        let collection =
-            PyCellParagraphCollection::new(self.document.clone_ref(py), self.cell_path.clone());
+        let collection = PyCellParagraphCollection::new(
+            self.document.clone_ref(py),
+            self.cell_path.clone(),
+            self.related.clone(),
+            self.cell_owner.clone(),
+            self.furniture_scope.clone(),
+        );
         if self.index >= collection.len(py)? {
             return Ok(None);
         }

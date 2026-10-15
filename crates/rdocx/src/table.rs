@@ -578,6 +578,7 @@ fn checked_table_border(
         space: Some(0),
         color: Some(checked_table_color("border color", color)?),
         extra_attributes: Vec::new(),
+        source_xml: None,
     })
 }
 
@@ -703,6 +704,207 @@ fn empty_grid_cell(width: i32) -> CT_Tc {
     cell
 }
 
+/// An empty cell with `source`'s cell formatting, for a cell that a
+/// structural edit adds beside or below it.
+///
+/// Shading, borders, alignment, margins, wrapping, text direction and the
+/// conditional-format cache are copied. Merge state is not copied. Unmodelled formatting refuses before a new
+/// owner can be created, and the cell holds one empty paragraph.
+fn formatted_empty_cell(source: &CT_Tc, width: Option<CT_TblWidth>) -> Result<CT_Tc> {
+    if source
+        .properties
+        .as_ref()
+        .is_some_and(|p| !p.extra_xml.is_empty())
+    {
+        return Err(Error::Other(
+            "opaque cell formatting cannot be cloned into a new owner".into(),
+        ));
+    }
+    let mut cell = CT_Tc::new();
+    let mut properties = source.properties.clone().unwrap_or_default();
+    properties.grid_span = None;
+    properties.h_merge = None;
+    properties.v_merge = None;
+    properties.width = width;
+    if properties != CT_TcPr::default() {
+        cell.properties = Some(properties);
+    }
+    Ok(cell)
+}
+
+/// Add `amount` twips to a fixed width, never below zero, leaving `auto` and
+/// percentages alone.
+fn widen_fixed(width: &mut Option<CT_TblWidth>, amount: i32) -> Result<()> {
+    if let Some(width) = width.as_mut().filter(|width| width.width_type == "dxa") {
+        width.w = width
+            .w
+            .checked_add(amount)
+            .ok_or_else(|| Error::Other("table width leaves the twip range".to_owned()))?;
+        if width.w < 0 {
+            return Err(Error::Other(
+                "fixed table width cannot become negative".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Grid-column edits address direct rows and direct cells only, so a row or
+/// cell wrapped in a content control is refused before anything changes.
+fn check_column_edit_topology(table: &CT_Tbl) -> Result<usize> {
+    if !table.content_controls.is_empty()
+        || table
+            .rows
+            .iter()
+            .any(|row| !row.content_controls.is_empty())
+    {
+        return Err(Error::Other(
+            "a table column cannot be edited while rows or cells sit in content controls"
+                .to_owned(),
+        ));
+    }
+    if table.rows.iter().flat_map(|row| &row.cells).any(|cell| {
+        cell.properties
+            .as_ref()
+            .is_some_and(|p| p.h_merge.is_some())
+    }) {
+        return Err(Error::Other(
+            "legacy horizontal merge topology cannot be edited".to_owned(),
+        ));
+    }
+    validate_table_topology(table)?;
+    Ok(table.grid.as_ref().map_or(0, |grid| grid.columns.len()))
+}
+
+/// Insert `cell` before direct cell `index`, keeping preserved row children
+/// at their cell boundaries.
+fn insert_row_cell(row: &mut CT_Row, index: usize, cell: CT_Tc) {
+    for (position, _) in &mut row.extra_xml {
+        if *position != usize::MAX && *position > index {
+            *position += 1;
+        }
+    }
+    row.cells.insert(index, cell);
+}
+
+/// Remove direct cell `index`. Preserved row children before it move to the
+/// next cell boundary.
+fn remove_row_cell(row: &mut CT_Row, index: usize) {
+    for (position, _) in &mut row.extra_xml {
+        if *position != usize::MAX && *position > index {
+            *position -= 1;
+        }
+    }
+    row.cells.remove(index);
+}
+
+/// Remove grid column `column` from a table, keeping the grid, spans, row
+/// omissions, vertical merges and fixed widths consistent.
+///
+/// A cell spanning the column narrows by one grid column. A cell covering
+/// only that column is removed with its content. A row whose only cell would
+/// disappear is refused, as is the last grid column. The table is unchanged
+/// on error.
+pub(crate) fn remove_grid_column(table: &mut CT_Tbl, column: usize) -> Result<()> {
+    let columns = check_column_edit_topology(table)?;
+    if column >= columns {
+        return Err(Error::Other(format!(
+            "column index {column} is out of range for a table with {columns} grid columns"
+        )));
+    }
+    if columns == 1 {
+        return Err(Error::Other(
+            "a table keeps at least one column, so its only column cannot be removed".to_owned(),
+        ));
+    }
+    let mut candidate = table.clone();
+    let grid = candidate
+        .grid
+        .as_mut()
+        .expect("the topology check found a grid");
+    let width = grid.columns.remove(column).width.0;
+    for row in &mut candidate.rows {
+        let ranges = row_cell_ranges(row, columns)?;
+        let Some(index) = ranges
+            .iter()
+            .position(|(start, end)| (*start..*end).contains(&column))
+        else {
+            // The column lies in this row's leading or trailing omission.
+            let properties = row
+                .properties
+                .as_mut()
+                .expect("a row with grid omissions has row properties");
+            if column < ranges[0].0 {
+                properties.grid_before = properties
+                    .grid_before
+                    .map(|value| value - 1)
+                    .filter(|value| *value > 0);
+                widen_fixed(&mut properties.width_before, -width)?;
+            } else {
+                properties.grid_after = properties
+                    .grid_after
+                    .map(|value| value - 1)
+                    .filter(|value| *value > 0);
+                widen_fixed(&mut properties.width_after, -width)?;
+            }
+            continue;
+        };
+        let (start, end) = ranges[index];
+        if end - start > 1 {
+            let cell = row.cells[index]
+                .properties
+                .get_or_insert_with(CT_TcPr::default);
+            cell.grid_span = Some((end - start - 1) as u32).filter(|span| *span > 1);
+            widen_fixed(&mut cell.width, -width)?;
+        } else if row.cells.len() == 1 {
+            return Err(Error::Other(
+                "removing the column would leave a table row without cells".to_owned(),
+            ));
+        } else {
+            remove_row_cell(row, index);
+        }
+    }
+    if let Some(properties) = candidate.properties.as_mut() {
+        widen_fixed(&mut properties.width, -width)?;
+    }
+    validate_table_topology(&candidate)?;
+    *table = candidate;
+    Ok(())
+}
+
+/// The rows of the vertical merge that holds the cell covering grid range
+/// `range` in row `row`, top to bottom, or only `row` when that cell is not
+/// vertically merged.
+fn vertical_merge_rows(
+    table: &CT_Tbl,
+    columns: usize,
+    row: usize,
+    range: (usize, usize),
+) -> Result<std::ops::RangeInclusive<usize>> {
+    let merge_at = |row: usize| -> Result<Option<VMerge>> {
+        let Some(current) = table.rows.get(row) else {
+            return Ok(None);
+        };
+        let ranges = row_cell_ranges(current, columns)?;
+        Ok(ranges
+            .iter()
+            .position(|candidate| *candidate == range)
+            .and_then(|index| current.cells[index].properties.as_ref()?.v_merge))
+    };
+    if merge_at(row)?.is_none() {
+        return Ok(row..=row);
+    }
+    let mut top = row;
+    while top > 0 && merge_at(top)? == Some(VMerge::Continue) && merge_at(top - 1)?.is_some() {
+        top -= 1;
+    }
+    let mut bottom = row;
+    while merge_at(bottom + 1)? == Some(VMerge::Continue) {
+        bottom += 1;
+    }
+    Ok(top..=bottom)
+}
+
 // ---- Mutable Table ----
 
 /// A mutable reference to a table in a document.
@@ -711,6 +913,333 @@ pub struct Table<'a> {
 }
 
 impl<'a> Table<'a> {
+    /// Append an empty row with the last row's row and cell formatting, as
+    /// python-docx `Table.add_row` does, and return it.
+    ///
+    /// Each new cell keeps the grid span, width and cell formatting of the
+    /// cell above it and holds one empty paragraph. A vertical merge does not
+    /// continue into the new row. Row properties are copied without tracked
+    /// row changes, and the row-level table-property exception and preserved
+    /// row attributes such as `w14:paraId` are not copied. A table whose rows
+    /// or cells sit in content controls is refused, as the column edits are.
+    pub fn add_row(&mut self) -> Result<Row<'_>> {
+        check_column_edit_topology(self.inner)?;
+        let last =
+            self.inner.rows.last().ok_or_else(|| {
+                Error::Other("a table without rows has no row to copy".to_owned())
+            })?;
+        if last
+            .properties
+            .as_ref()
+            .is_some_and(|p| !p.extra_xml.is_empty())
+        {
+            return Err(Error::Other(
+                "opaque row formatting cannot be cloned into a new owner".into(),
+            ));
+        }
+        let mut row = CT_Row::new();
+        row.properties = last.properties.clone().map(|mut properties| {
+            properties.revision_markers.clear();
+            properties.revision_xml.clear();
+            properties.revision_xml_positions.clear();
+            properties.extra_xml.clear();
+            properties.moved_away = false;
+            properties
+        });
+        for cell in &last.cells {
+            let source = cell.properties.as_ref();
+            let mut copy = formatted_empty_cell(cell, source.and_then(|p| p.width.clone()))?;
+            if let Some(span) = source.and_then(|properties| properties.grid_span) {
+                copy.properties
+                    .get_or_insert_with(CT_TcPr::default)
+                    .grid_span = Some(span);
+            }
+            row.cells.push(copy);
+        }
+        let mut candidate = self.inner.clone();
+        candidate.rows.push(row);
+        validate_table_topology(&candidate)?;
+        *self.inner = candidate;
+        Ok(Row {
+            inner: self.inner.rows.last_mut().expect("the row was appended"),
+        })
+    }
+
+    /// Insert a column before or after a referenced logical grid column.
+    ///
+    /// The default width and new cell formatting come from that reference.
+    /// A referenced omitted column extends its omission, while a boundary
+    /// inside a span widens that span. The table is unchanged on error.
+    pub fn insert_column(
+        &mut self,
+        reference: usize,
+        before: bool,
+        width: Option<Length>,
+    ) -> Result<()> {
+        let columns = check_column_edit_topology(self.inner)?;
+        if reference >= columns {
+            return Err(Error::Other(format!(
+                "column insertion index {reference} is out of range for a table with {columns} grid columns"
+            )));
+        }
+        let index = reference + usize::from(!before);
+        let mut candidate = self.inner.clone();
+        let grid = candidate
+            .grid
+            .as_mut()
+            .expect("the topology check found a grid");
+        let width = match width {
+            Some(width) => {
+                let twips = checked_table_twips("column width", width)?;
+                if twips == 0 {
+                    return Err(Error::Other(
+                        "table column width must be positive".to_owned(),
+                    ));
+                }
+                twips
+            }
+            None => grid.columns[reference].width.0,
+        };
+        grid.columns.insert(
+            index,
+            rdocx_oxml::table::CT_TblGridCol {
+                width: rdocx_oxml::Twips(width),
+            },
+        );
+        for row in &mut candidate.rows {
+            let ranges = row_cell_ranges(row, columns)?;
+            let (first, last) = (ranges[0].0, ranges[ranges.len() - 1].1);
+            if reference < first || reference >= last {
+                let properties = row
+                    .properties
+                    .as_mut()
+                    .expect("a row with grid omissions has row properties");
+                if reference < first {
+                    properties.grid_before = properties.grid_before.map(|value| value + 1);
+                    widen_fixed(&mut properties.width_before, width)?;
+                } else {
+                    properties.grid_after = properties.grid_after.map(|value| value + 1);
+                    widen_fixed(&mut properties.width_after, width)?;
+                }
+                continue;
+            }
+            if let Some(spanning) = ranges
+                .iter()
+                .position(|(start, end)| *start < index && index < *end)
+            {
+                let (start, end) = ranges[spanning];
+                let properties = row.cells[spanning]
+                    .properties
+                    .get_or_insert_with(CT_TcPr::default);
+                properties.grid_span = Some((end - start + 1) as u32);
+                widen_fixed(&mut properties.width, width)?;
+                continue;
+            }
+            let at = ranges
+                .iter()
+                .position(|(start, _)| *start == index)
+                .unwrap_or(row.cells.len());
+            let source = ranges
+                .iter()
+                .position(|(start, end)| (*start..*end).contains(&reference))
+                .ok_or_else(|| Error::Other("reference column has no physical cell".into()))?;
+            let cell = formatted_empty_cell(&row.cells[source], Some(CT_TblWidth::dxa(width)))?;
+            insert_row_cell(row, at, cell);
+        }
+        if let Some(properties) = candidate.properties.as_mut() {
+            widen_fixed(&mut properties.width, width)?;
+        }
+        validate_table_topology(&candidate)?;
+        *self.inner = candidate;
+        Ok(())
+    }
+
+    /// Merge a checked rectangle of whole physical cells, retaining their content.
+    pub fn merge_cells(
+        &mut self,
+        from: (usize, usize),
+        to: (usize, usize),
+    ) -> Result<(usize, usize)> {
+        let columns = check_column_edit_topology(self.inner)?;
+        let bounds = |(row, cell): (usize, usize)| -> Result<(usize, usize)> {
+            row_cell_ranges(
+                self.inner
+                    .rows
+                    .get(row)
+                    .ok_or_else(|| Error::Other("merge row is absent".into()))?,
+                columns,
+            )?
+            .get(cell)
+            .copied()
+            .ok_or_else(|| Error::Other("merge cell is absent".into()))
+        };
+        let a = bounds(from)?;
+        let b = bounds(to)?;
+        let top = from.0.min(to.0);
+        let bottom = from.0.max(to.0);
+        let left = a.0.min(b.0);
+        let right = a.1.max(b.1);
+        if from == to {
+            return Ok(from);
+        }
+        let mut selected = Vec::new();
+        for row in top..=bottom {
+            let ranges = row_cell_ranges(&self.inner.rows[row], columns)?;
+            let first = ranges
+                .iter()
+                .position(|range| range.0 == left)
+                .ok_or_else(|| Error::Other("merge cuts an existing cell boundary".into()))?;
+            let last = ranges
+                .iter()
+                .position(|range| range.1 == right)
+                .ok_or_else(|| Error::Other("merge cuts an existing cell boundary".into()))?;
+            if first > last {
+                return Err(Error::Other("merge rectangle has no cells".into()));
+            }
+            for (offset, cell) in self.inner.rows[row].cells[first..=last].iter().enumerate() {
+                if !cell.extra_xml.is_empty()
+                    || (offset > 0
+                        && cell.properties.as_ref().is_some_and(|p| {
+                            !p.extra_xml.is_empty()
+                                || p.borders.as_ref().is_some_and(|b| !b.extra_xml.is_empty())
+                        }))
+                    || cell
+                        .properties
+                        .as_ref()
+                        .is_some_and(|p| p.v_merge.is_some())
+                {
+                    return Err(Error::Other("merge cannot discard opaque cell metadata or existing vertical merge ownership".into()));
+                }
+            }
+            selected.push((first, last));
+        }
+        let mut candidate = self.inner.clone();
+        let mut content = Vec::new();
+        for (offset, (first, last)) in selected.iter().enumerate() {
+            for cell in &candidate.rows[top + offset].cells[*first..=*last] {
+                content.extend(cell.content.clone());
+            }
+        }
+        let width = candidate
+            .grid
+            .as_ref()
+            .ok_or_else(|| Error::Other("merge grid is absent".into()))?
+            .columns[left..right]
+            .iter()
+            .try_fold(0_i32, |sum, col| {
+                sum.checked_add(col.width.0)
+                    .ok_or_else(|| Error::Other("merged cell width overflow".into()))
+            })?;
+        let span =
+            u32::try_from(right - left).map_err(|_| Error::Other("merge span overflow".into()))?;
+        for (offset, (first, last)) in selected.iter().enumerate() {
+            let row = &mut candidate.rows[top + offset];
+            for index in (*first + 1..=*last).rev() {
+                remove_row_cell(row, index);
+            }
+            let cell = &mut row.cells[*first];
+            let properties = cell.properties.get_or_insert_with(CT_TcPr::default);
+            properties.grid_span = (span > 1).then_some(span);
+            properties.width = Some(CT_TblWidth::dxa(width));
+            properties.v_merge = (bottom > top).then_some(if offset == 0 {
+                VMerge::Restart
+            } else {
+                VMerge::Continue
+            });
+            cell.content = if offset == 0 {
+                content.clone()
+            } else {
+                vec![CellContent::Paragraph(CT_P::new())]
+            };
+        }
+        validate_table_topology(&candidate)?;
+        *self.inner = candidate;
+        Ok((top, selected[0].0))
+    }
+
+    /// Split a merged cell into one cell per grid column and row it covers,
+    /// undoing its `w:gridSpan` and `w:vMerge`.
+    ///
+    /// `cell` may be any cell of a vertical merge, which splits the whole
+    /// merge. Each cell of the merge keeps its content and formatting. The
+    /// cells added for the spanned grid columns are empty, carry the same
+    /// cell formatting and take their grid column widths. Returns how many
+    /// cells the merge became, one when the cell was not merged. The table is
+    /// unchanged on error.
+    pub fn split_cell(&mut self, row: usize, cell: usize) -> Result<usize> {
+        let columns = check_column_edit_topology(self.inner)?;
+        let range = *row_cell_ranges(
+            self.inner
+                .rows
+                .get(row)
+                .ok_or_else(|| Error::Other(format!("table row {row} does not exist")))?,
+            columns,
+        )?
+        .get(cell)
+        .ok_or_else(|| Error::Other(format!("table row {row} cell {cell} does not exist")))?;
+        if self.inner.rows[row].cells[cell]
+            .properties
+            .as_ref()
+            .is_some_and(|properties| properties.h_merge.is_some())
+        {
+            return Err(Error::Other(
+                "the cell is merged with the legacy w:hMerge, which split_cell does not undo, \
+                 so remove its w:hMerge marks or rebuild the merge with a grid span first"
+                    .to_owned(),
+            ));
+        }
+        let rows = vertical_merge_rows(self.inner, columns, row, range)?;
+        if rows.start() == rows.end()
+            && range.1 - range.0 == 1
+            && self.inner.rows[row].cells[cell]
+                .properties
+                .as_ref()
+                .is_none_or(|p| p.v_merge.is_none())
+        {
+            return Ok(1);
+        }
+        // Each original member stays at its leftmost resulting cell. Its
+        // paragraph content and producer identity are retained in place, while
+        // only admitted cell formatting is copied into new empty cells.
+        let mut candidate = self.inner.clone();
+        let grid_widths = candidate
+            .grid
+            .as_ref()
+            .expect("the topology check found a grid")
+            .columns
+            .iter()
+            .map(|column| column.width.0)
+            .collect::<Vec<_>>();
+        let (start, end) = range;
+        for row_index in rows.clone() {
+            let row = &mut candidate.rows[row_index];
+            let index = row_cell_ranges(row, columns)?
+                .iter()
+                .position(|candidate| *candidate == range)
+                .expect("every row of a vertical merge has a cell over its range");
+            let fixed = row.cells[index]
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.width.as_ref())
+                .is_none_or(|width| width.width_type == "dxa");
+            if let Some(properties) = row.cells[index].properties.as_mut() {
+                properties.v_merge = None;
+                properties.grid_span = None;
+                if fixed {
+                    properties.width = Some(CT_TblWidth::dxa(grid_widths[start]));
+                }
+            }
+            for (offset, width) in grid_widths[start + 1..end].iter().enumerate() {
+                let added =
+                    formatted_empty_cell(&row.cells[index], Some(CT_TblWidth::dxa(*width)))?;
+                insert_row_cell(row, index + 1 + offset, added);
+            }
+        }
+        validate_table_topology(&candidate)?;
+        *self.inner = candidate;
+        Ok(rows.count() * (end - start))
+    }
+
     /// Set the table style by ID.
     pub fn style(mut self, style_id: &str) -> Self {
         self.set_style(style_id);
@@ -794,10 +1323,21 @@ impl<'a> Table<'a> {
         self.ensure_tbl_pr().indent = Some(CT_TblWidth::dxa(length.as_twips().0));
     }
 
-    /// Set a checked nonnegative table indentation.
+    /// Set a checked signed table indentation.
     pub fn set_indent_checked(&mut self, length: Length) -> Result<()> {
-        let twips = checked_table_twips("indentation", length)?;
-        self.ensure_tbl_pr().indent = Some(CT_TblWidth::dxa(twips));
+        self.set_indent_value(Some(length))
+    }
+
+    /// Set or clear direct indentation without creating properties on clear.
+    pub fn set_indent_value(&mut self, length: Option<Length>) -> Result<()> {
+        let twips = length
+            .map(|length| checked_table_offset_twips("indentation", length))
+            .transpose()?;
+        if let Some(twips) = twips {
+            self.ensure_tbl_pr().indent = Some(CT_TblWidth::dxa(twips));
+        } else if let Some(properties) = self.inner.properties.as_mut() {
+            properties.indent = None;
+        }
         Ok(())
     }
 
@@ -845,6 +1385,7 @@ impl<'a> Table<'a> {
             space: Some(0),
             color: Some(color.to_string()),
             extra_attributes: Vec::new(),
+            source_xml: None,
         };
         let borders = self
             .ensure_tbl_pr()

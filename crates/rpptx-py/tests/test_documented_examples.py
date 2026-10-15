@@ -222,7 +222,9 @@ def test_lazy_collections_and_stale_handles_are_loud():
 
     assert len(prs.slides) == 2
     assert list(prs.slides[:1])[0].shapes[-1].text == ""
-    with pytest.raises(rpptx.StaleElementError, match=r"revision 2.*revision 3"):
+    assert held.text == ""
+    prs.slides[0].shapes.remove(held)
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by ShapeCollection.remove "):
         _ = held.text
 
 
@@ -246,18 +248,18 @@ def _assert_stale_after_exactly_one_bump(rpptx, operation):
     assert current == captured + 1
 
 
-def _assert_exact_stale(rpptx, operation, kind, captured, current, recovery):
+def _assert_exact_stale(rpptx, operation, kind, captured, current, recovery, cause):
     expected = (
-        f"{kind} handle was created at document revision {captured}, but the "
+        f"stale {kind} handle was created at document revision {captured}, but the "
         f"document is now at revision {current} (a structural change "
-        f"invalidated it). {recovery}"
+        f"invalidated it). First invalidated by {cause} at committed revision {current}. {recovery}"
     )
     with pytest.raises(rpptx.StaleElementError) as raised:
         operation()
     assert str(raised.value) == expected
 
 
-def test_structural_append_invalidates_every_preexisting_path_handle():
+def test_structural_append_retires_slide_inventory_and_preserves_existing_owners():
     import rpptx
 
     prs = rpptx.Presentation()
@@ -265,50 +267,14 @@ def test_structural_append_invalidates_every_preexisting_path_handle():
     layout = layouts[6]
     slides = prs.slides
     slide = slides.add_slide(layout)
-
-    _assert_exact_stale(
-        rpptx,
-        lambda: len(slides),
-        "slide collection",
-        0,
-        1,
-        "Re-fetch it with prs.slides.",
-    )
-    _assert_exact_stale(
-        rpptx,
-        lambda: len(layouts),
-        "slide layout collection",
-        0,
-        1,
-        "Re-fetch it with prs.slide_layouts.",
-    )
-    _assert_exact_stale(
-        rpptx,
-        lambda: layout.name,
-        "slide layout",
-        0,
-        1,
-        "Re-fetch it with prs.slide_layouts[6].",
-    )
+    _assert_exact_stale(rpptx, lambda: len(slides), "slide collection", 0, 1,
+                        "Re-fetch it with prs.slides.", "SlideCollection.add_slide")
+    assert len(layouts) > 6
+    assert layout.name == prs.slide_layouts[6].name
     shapes = slide.shapes
-    shapes.add_textbox(0, 0, 100, 100)
-
-    _assert_exact_stale(
-        rpptx,
-        lambda: slide.shapes,
-        "slide",
-        1,
-        2,
-        "Re-fetch it with prs.slides[0].",
-    )
-    _assert_exact_stale(
-        rpptx,
-        lambda: len(shapes),
-        "shape collection",
-        1,
-        2,
-        "Re-fetch it with prs.slides[0].shapes.",
-    )
+    shape = shapes.add_textbox(0, 0, 100, 100)
+    assert len(slide.shapes) == len(shapes) == 1
+    assert shape.text == ""
 
 
 def test_stale_shape_text_and_table_paths_report_exact_recovery():
@@ -334,7 +300,7 @@ def test_stale_shape_text_and_table_paths_report_exact_recovery():
     columns = table.columns
     column = columns[0]
     cell = table.cell(0, 0)
-    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides.remove(prs.slides[0])
 
     cases = (
         (lambda: slide.shapes, "slide", "Re-fetch it with prs.slides[0]."),
@@ -353,7 +319,7 @@ def test_stale_shape_text_and_table_paths_report_exact_recovery():
         (lambda: cell.text, "cell", "Re-fetch it with prs.slides[0].shapes[1].table.cell(0, 0)."),
     )
     for operation, kind, recovery in cases:
-        _assert_exact_stale(rpptx, operation, kind, 4, 5, recovery)
+        _assert_exact_stale(rpptx, operation, kind, 4, 5, recovery, "SlideCollection.remove")
 
 
 def test_whole_text_replacement_stales_descendant_handles_once():
@@ -369,13 +335,11 @@ def test_whole_text_replacement_stales_descendant_handles_once():
     run = paragraph.runs[0]
     shape.text = "after"
     for operation in (
-        lambda: shape.text,
-        lambda: frame.text,
         lambda: paragraph.text,
         lambda: run.text,
     ):
         _assert_stale_after_exactly_one_bump(rpptx, operation)
-    assert prs.slides[0].shapes[-1].text == "after"
+    assert shape.text == frame.text == prs.slides[0].shapes[-1].text == "after"
 
     prs = rpptx.Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[6])
@@ -385,9 +349,9 @@ def test_whole_text_replacement_stales_descendant_handles_once():
     paragraph = frame.paragraphs[0]
     run = paragraph.runs[0]
     frame.text = "after"
-    for operation in (lambda: frame.text, lambda: paragraph.text, lambda: run.text):
+    for operation in (lambda: paragraph.text, lambda: run.text):
         _assert_stale_after_exactly_one_bump(rpptx, operation)
-    assert prs.slides[0].shapes[-1].text_frame.text == "after"
+    assert frame.text == prs.slides[0].shapes[-1].text_frame.text == "after"
 
     prs = rpptx.Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[6])
@@ -397,8 +361,12 @@ def test_whole_text_replacement_stales_descendant_handles_once():
     paragraph = frame.paragraphs[0]
     run = paragraph.runs[0]
     paragraph.text = "after"
-    for operation in (lambda: paragraph.text, lambda: run.text):
-        _assert_stale_after_exactly_one_bump(rpptx, operation)
+    assert paragraph.text == "after"
+    _assert_exact_stale(
+        rpptx, lambda: run.text, "run", 3, 4,
+        "Re-fetch it with prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].",
+        "Paragraph.text",
+    )
     assert prs.slides[0].shapes[-1].text_frame.paragraphs[0].text == "after"
 
 
@@ -436,12 +404,9 @@ def test_run_text_replaces_in_place_and_keeps_every_handle_live():
     assert [run.text for run in fresh] == ["", "world"]
 
     paragraph.text = "whole"
-    for operation in (
-        lambda: shape.left,
-        lambda: len(slide.shapes),
-        lambda: second.text,
-        lambda: font.bold,
-    ):
+    assert shape.left == left
+    assert len(slide.shapes) == 1
+    for operation in (lambda: second.text, lambda: font.bold):
         _assert_stale_after_exactly_one_bump(rpptx, operation)
     assert prs.slides[0].shapes[0].text == "whole"
 
@@ -472,7 +437,7 @@ def test_nested_group_paths_report_exact_recovery(tmp_path):
     runs = paragraph.runs
     run = runs[0]
     font = paragraph.font
-    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides.remove(prs.slides[0])
 
     cases = (
         (lambda: len(nested_shapes), "shape collection", "Re-fetch it with prs.slides[0].shapes[0].shapes[0].shapes."),
@@ -485,7 +450,7 @@ def test_nested_group_paths_report_exact_recovery(tmp_path):
         (lambda: font.bold, "font", "Re-fetch it with prs.slides[0].shapes[0].shapes[0].shapes[0].text_frame.paragraphs[0].font."),
     )
     for operation, kind, recovery in cases:
-        _assert_exact_stale(rpptx, operation, kind, 0, 1, recovery)
+        _assert_exact_stale(rpptx, operation, kind, 0, 1, recovery, "SlideCollection.remove")
 
 
 def test_unit_constructors_truncate_fractional_values_toward_zero():
@@ -714,9 +679,13 @@ def test_pinned_python_pptx_bidirectional_seven_example_records(tmp_path):
 
     image_path = tmp_path / "monty-truth.png"
     _write_tiny_png(image_path)
+    # Compare writers against one explicit independent template.
+    template = io.BytesIO()
+    OraclePresentation().save(template)
+    template_bytes = template.getvalue()
     authored = (
         _author_documented_decks(
-            rpptx.Presentation,
+            lambda: rpptx.Presentation.from_bytes(template_bytes),
             RpptxInches,
             RpptxPt,
             RpptxShape,
@@ -724,7 +693,7 @@ def test_pinned_python_pptx_bidirectional_seven_example_records(tmp_path):
             image_path,
         ),
         _author_documented_decks(
-            OraclePresentation,
+            lambda: OraclePresentation(io.BytesIO(template_bytes)),
             OracleInches,
             OraclePt,
             OracleShape,
@@ -746,53 +715,47 @@ def test_pinned_python_pptx_bidirectional_seven_example_records(tmp_path):
 
 
 def _add_speaker_notes(source, target, text):
-    with zipfile.ZipFile(source) as archive:
-        parts = {name: archive.read(name) for name in archive.namelist()}
+    from pptx import Presentation as OraclePresentation
+    from pptx.enum.shapes import PP_PLACEHOLDER
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+    from pptx.oxml import parse_xml
 
-    content_types = parts["[Content_Types].xml"].decode()
-    parts["[Content_Types].xml"] = content_types.replace(
-        "</Types>",
-        '<Override PartName="/ppt/notesSlides/notesSlide1.xml" '
-        'ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>'
-        "</Types>",
-    ).encode()
-    slide_rels = parts["ppt/slides/_rels/slide1.xml.rels"].decode()
-    parts["ppt/slides/_rels/slide1.xml.rels"] = slide_rels.replace(
-        "</Relationships>",
-        '<Relationship Id="rId2" '
-        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" '
-        'Target="../notesSlides/notesSlide1.xml"/>'
-        "</Relationships>",
-    ).encode()
-    parts["ppt/notesSlides/notesSlide1.xml"] = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
-        'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
-        "<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/>"
-        "<p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>"
-        "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Notes Placeholder\"/>"
-        "<p:cNvSpPr/><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr>"
-        "</p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p>"
-        '<a:r><a:rPr b="1"><a:extLst>'
+    assert importlib.metadata.version("python-pptx") == "1.0.2"
+    oracle = OraclePresentation(source)
+    notes = oracle.slides[0].notes_slide
+    kinds = [shape.placeholder_format.type for shape in notes.placeholders]
+    for kind in (PP_PLACEHOLDER.SLIDE_IMAGE, PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.SLIDE_NUMBER):
+        assert kinds.count(kind) == 1
+    local_masters = [rel for rel in notes.part.rels.values() if rel.reltype == RT.NOTES_MASTER]
+    global_masters = [rel for rel in oracle.part.rels.values() if rel.reltype == RT.NOTES_MASTER]
+    assert len(local_masters) == len(global_masters) == 1
+    assert not local_masters[0].is_external and not global_masters[0].is_external
+    assert local_masters[0].target_part.partname == global_masters[0].target_part.partname
+    # python-pptx 1.0.2 relates its notes master without registering its XML id.
+    # Build a complete independent fixture before testing the consumer.
+    if not oracle._element.xpath("./p:notesMasterIdLst"):
+        registration = parse_xml(
+            '<p:notesMasterIdLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            '<p:notesMasterId/></p:notesMasterIdLst>'
+        )
+        registration[0].set(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id",
+            global_masters[0].rId,
+        )
+        prior = oracle._element.find(
+            "{http://schemas.openxmlformats.org/presentationml/2006/main}sldMasterIdLst"
+        )
+        oracle._element.insert(0 if prior is None else oracle._element.index(prior) + 1, registration)
+    assert oracle._element.xpath("./p:notesMasterIdLst/p:notesMasterId/@r:id") == [global_masters[0].rId]
+    notes.notes_text_frame.text = text
+    run = notes.notes_text_frame.paragraphs[0].runs[0]
+    run.font.bold = True
+    run._r.get_or_add_rPr().append(parse_xml(
+        '<a:extLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
         '<a:ext uri="{6D487B31-4C56-4F45-AED3-4C741AC43E77}">'
-        '<x:payload xmlns:x="urn:rdocx:test"/></a:ext></a:extLst></a:rPr>'
-        f"<a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>"
-        "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/>"
-        "</p:clrMapOvr></p:notes>"
-    ).encode()
-    parts["ppt/notesSlides/_rels/notesSlide1.xml.rels"] = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" '
-        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" '
-        'Target="../notesMasters/notesMaster1.xml"/>'
-        '<Relationship Id="rId2" '
-        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" '
-        'Target="../slides/slide1.xml"/></Relationships>'
-    ).encode()
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, data in parts.items():
-            archive.writestr(name, data)
+        '<x:payload xmlns:x="urn:rdocx:test"/></a:ext></a:extLst>'
+    ))
+    oracle.save(target)
 
 
 def test_presentation_render_comments_and_notes_match_native_snapshots(tmp_path):
@@ -1028,14 +991,18 @@ def test_notes_mutation_preserves_text_through_save_and_reopen(tmp_path):
     held = presentation.slides[0]
     held.notes_text = "Final speaker note"
     assert presentation.slides[0].notes_text == "Final speaker note"
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held.notes_text
+    assert held.notes_text == presentation.slides[0].notes_text
 
     presentation.save(output)
     assert rpptx.Presentation(output).slides[0].notes_text == "Final speaker note"
     with zipfile.ZipFile(output) as archive:
         notes_xml = archive.read("ppt/notesSlides/notesSlide1.xml").decode()
-    assert '<p:ph type="body" idx="1"' in notes_xml
+    import xml.etree.ElementTree as ET
+    ns = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+    source_notes = ET.fromstring(_package_parts(with_notes.read_bytes())["ppt/notesSlides/notesSlide1.xml"])
+    expected_body = next(ph.attrib for ph in source_notes.iter(ns + "ph") if ph.get("type") == "body")
+    actual_body = next(ph.attrib for ph in ET.fromstring(notes_xml).iter(ns + "ph") if ph.get("type") == "body")
+    assert actual_body == expected_body
     assert 'b="1"' in notes_xml
     assert "x:payload" in notes_xml
 
@@ -1044,8 +1011,7 @@ def test_notes_mutation_preserves_text_through_save_and_reopen(tmp_path):
     assert held.notes_text is None
     held.notes_text = "Created speaker note"
     assert without_notes.slides[0].notes_text == "Created speaker note"
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held.notes_text
+    assert held.notes_text == without_notes.slides[0].notes_text
 
 
 def test_python_round_three_authoring_and_inspection_is_typed_and_lossless(tmp_path):
@@ -1094,7 +1060,7 @@ def test_python_round_three_authoring_and_inspection_is_typed_and_lossless(tmp_p
     run = shape.text_frame.paragraphs[0].runs[0]
     assert run.font.name == "Aptos"
     assert run.font.size == rpptx.Pt(18)
-    assert run.font.color == "123456"
+    assert str(run.font.color.rgb) == "123456"
     run.text = "updated"
     presentation.slides[0].notes_text = "final note"
     presentation.save(output)
@@ -1178,7 +1144,9 @@ def _textbox_presentation(rpptx):
 def _text_body_xml(path):
     with zipfile.ZipFile(path) as archive:
         slide_xml = archive.read("ppt/slides/slide1.xml").decode()
-    return slide_xml[slide_xml.index("<p:txBody>") : slide_xml.index("</p:txBody>")]
+    start = re.search(r"<p:txBody(?=[\s>])[^>]*>", slide_xml)
+    assert start is not None, "expected the qualified PresentationML text-body owner"
+    return slide_xml[start.start() : slide_xml.index("</p:txBody>", start.end())]
 
 
 def _replace_in_slide(source, target, old, new):
@@ -1219,10 +1187,15 @@ def test_text_frame_margins_anchor_wrap_and_auto_size_round_trip_and_clear(tmp_p
     output = tmp_path / "frame.pptx"
     presentation.save(output)
 
-    assert _text_body_xml(output).startswith(
-        '<p:txBody><a:bodyPr lIns="228600" tIns="38100" rIns="0" bIns="50800" '
-        'anchor="b" wrap="none"><a:spAutoFit/></a:bodyPr>'
-    )
+    import xml.etree.ElementTree as ET
+    p_ns = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+    a_ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    body = ET.fromstring(_package_parts(output.read_bytes())["ppt/slides/slide1.xml"]).find(".//" + p_ns + "txBody")
+    assert body is not None and body.tag == p_ns + "txBody"
+    assert [child.tag for child in body] == [a_ns + "bodyPr", a_ns + "lstStyle", a_ns + "p"]
+    properties = body.find(a_ns + "bodyPr")
+    assert properties.attrib == {"lIns": "228600", "tIns": "38100", "rIns": "0", "bIns": "50800", "anchor": "b", "wrap": "none"}
+    assert [child.tag for child in properties] == [a_ns + "spAutoFit"]
     presentation = rpptx.Presentation(output)
     frame = presentation.slides[0].shapes[0].text_frame
     assert (
@@ -1247,7 +1220,9 @@ def test_text_frame_margins_anchor_wrap_and_auto_size_round_trip_and_clear(tmp_p
     ):
         setattr(frame, name, None)
     presentation.save(output)
-    assert _text_body_xml(output).startswith("<p:txBody><a:bodyPr/>")
+    body = ET.fromstring(_package_parts(output.read_bytes())["ppt/slides/slide1.xml"]).find(".//" + p_ns + "txBody")
+    properties = body.find(a_ns + "bodyPr")
+    assert properties is not None and properties.attrib == {} and list(properties) == []
 
 
 def test_text_frame_margins_read_universal_measures_and_the_justified_anchors(tmp_path):
@@ -1356,7 +1331,7 @@ def test_run_font_setters_round_trip_and_none_clears_each_attribute(tmp_path):
     presentation = _textbox_presentation(rpptx)
     font = presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
     names = ("italic", "underline", "strike", "all_caps", "name", "color", "size", "bold")
-    assert [getattr(font, name) for name in names] == [None] * len(names)
+    assert [font.color.rgb if name == "color" else getattr(font, name) for name in names] == [None] * len(names)
 
     font.italic = True
     font.underline = True
@@ -1376,13 +1351,13 @@ def test_run_font_setters_round_trip_and_none_clears_each_attribute(tmp_path):
     ) in _text_body_xml(output)
     presentation = rpptx.Presentation(output)
     font = presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
-    assert [getattr(font, name) for name in names] == [
+    assert [font.color.rgb if name == "color" else getattr(font, name) for name in names] == [
         True,
         True,
         True,
         True,
         "Georgia",
-        "123456",
+        RGBColor(0x12, 0x34, 0x56),
         rpptx.Pt(20),
         False,
     ]
@@ -1432,14 +1407,14 @@ def test_font_color_takes_triples_or_hex_and_keeps_transforms_it_does_not_name(t
     presentation = rpptx.Presentation(colored)
     paragraph = presentation.slides[0].shapes[0].text_frame.paragraphs[0]
     alpha, theme = paragraph.runs[0].font, paragraph.runs[1].font
-    assert alpha.color == "FF0000"
-    assert theme.color is None
+    assert str(alpha.color.rgb) == "FF0000"
+    assert theme.color.rgb is None
     alpha.color = "00ff00"
     theme.color = (1, 2, 3)
-    assert (alpha.color, theme.color) == ("00FF00", "010203")
-    assert paragraph.font.color is None
+    assert (str(alpha.color.rgb), str(theme.color.rgb)) == ("00FF00", "010203")
+    assert paragraph.font.color.rgb is None
     paragraph.font.color = rpptx.RGBColor.from_string("ABCDEF")
-    assert paragraph.font.color == "ABCDEF"
+    assert str(paragraph.font.color.rgb) == "ABCDEF"
     presentation.save(output)
 
     body = _text_body_xml(output)
@@ -1451,6 +1426,35 @@ def test_font_color_takes_triples_or_hex_and_keeps_transforms_it_does_not_name(t
     alpha.color = None
     presentation.save(output)
     assert "00FF00" not in _text_body_xml(output)
+
+
+def test_fx206_small_caps_checked_modes_noop_and_same_owner_reopen(tmp_path):
+    import rpptx
+
+    presentation = _textbox_presentation(rpptx)
+    owner = presentation.slides[0].shapes[0].text_frame.paragraphs[0]
+    font = owner.runs[0].font
+    first = tmp_path / "caps-first.pptx"
+    second = tmp_path / "caps-second.pptx"
+    presentation.save(first)
+    before = _text_body_xml(first)
+    assert font.small_caps is None
+    assert font.all_caps is None
+    font.small_caps = None
+    presentation.save(second)
+    assert _text_body_xml(second) == before
+    for name, value, token in [("small_caps", True, "small"), ("all_caps", True, "all"), ("small_caps", False, "none"), ("small_caps", True, "small")]:
+        setattr(font, name, value)
+        assert owner.text == "hello", "formatting preserves the actual owner and logical source text"
+        presentation.save(first)
+        xml = _text_body_xml(first)
+        assert xml.count("cap=") == 1 and f'cap="{token}"' in xml
+        reopened = rpptx.Presentation(first)
+        fresh = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+        assert fresh.small_caps is (True if token == "small" else False if token == "none" else None)
+        assert fresh.all_caps is (True if token == "all" else False if token == "none" else None)
+        reopened.save(second)
+        assert _text_body_xml(second) == xml
 
 
 def test_font_strike_caps_and_name_keep_the_variants_they_cannot_name(tmp_path):
@@ -1679,7 +1683,7 @@ def test_text_properties_agree_with_python_pptx_in_both_directions(tmp_path):
     assert paragraph.line_spacing == 2.5
     assert (paragraph.space_before, paragraph.space_after) == (rpptx.Pt(12), rpptx.Pt(3))
     font = paragraph.runs[0].font
-    assert (font.italic, font.underline, font.name, font.color, font.size) == (
+    assert (font.italic, font.underline, font.name, str(font.color.rgb), font.size) == (
         True,
         rpptx.MSO_UNDERLINE.DOUBLE_LINE,
         "Georgia",
@@ -1772,8 +1776,7 @@ def test_run_hyperlink_address_reads_writes_and_prunes_like_python_pptx(tmp_path
     assert b"https://example.com/c" in prs.to_pdf()
     held = first.hyperlink
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError, match=r"\.runs\[0\]\.hyperlink\."):
-        _ = held.address
+    assert held.address == first.hyperlink.address
     output = tmp_path / "hyperlinks.pptx"
     prs.save(output)
 
@@ -1860,8 +1863,7 @@ def test_shape_click_action_links_and_jumps_like_python_pptx(tmp_path):
     assert prs.to_bytes() == before
     held = rect.click_action
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError, match=r"\.click_action"):
-        _ = held.target_slide
+    assert held.target_slide == rect.click_action.target_slide
     output = tmp_path / "click-actions.pptx"
     prs.save(output)
 
@@ -2055,8 +2057,11 @@ def test_slide_layout_hidden_and_background_round_trip_through_python_pptx(tmp_p
     background.fill.fore_color.rgb = RGBColor(0x12, 0x34, 0x56)
     assert background.fill.type == MSO_FILL_TYPE.SOLID
     assert first.follow_master_background is False
+    inherited_paint = prs.render_slide_to_png(1, dpi=72)
     second.follow_master_background = False
-    assert second.background.fill.type == MSO_FILL_TYPE.BACKGROUND
+    # Detaching preserves the actual inherited reference, not a fabricated no-fill.
+    assert second.background.fill.type is None
+    assert prs.render_slide_to_png(1, dpi=72) == inherited_paint
     output = tmp_path / "slides-out.pptx"
     prs.save(output)
 
@@ -2066,6 +2071,8 @@ def test_slide_layout_hidden_and_background_round_trip_through_python_pptx(tmp_p
     assert oracle.slides[0].follow_master_background is False
     assert oracle.slides[0].background.fill.fore_color.rgb == pptx.dml.color.RGBColor(0x12, 0x34, 0x56)
     assert oracle.slides[1].follow_master_background is False
+    assert oracle.slides[1]._element.xpath("./p:cSld/p:bg/p:bgRef/@idx") == ["1001"]
+    assert oracle.slides[1]._element.xpath("./p:cSld/p:bg/p:bgRef/a:schemeClr/@val") == ["bg1"]
 
     prs.slides[0].follow_master_background = True
     prs.slides[0].hidden = False
@@ -2087,7 +2094,7 @@ def test_slide_layout_assignment_retargets_the_slide_and_keeps_unplaced_placehol
     slide = prs.slides[0]
     body_geometry = slide.shapes[1].effective_geometry()
     slide.slide_layout = prs.slide_layouts[5]
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: slide.slide_layout)
+    assert slide.slide_layout == prs.slide_layouts[5]
     slide = prs.slides[0]
     assert slide.slide_layout == prs.slide_layouts[5]
     title, body = slide.shapes
@@ -2345,8 +2352,8 @@ def test_fill_and_line_formats_write_what_python_pptx_reads(tmp_path):
     fill.solid()
     assert shape.fill.fore_color.rgb == RGBColor(0xFF, 0x00, 0x00)
     assert str(shape.fill.fore_color.rgb) == "FF0000"
-    with pytest.raises(ValueError, match="assigned value must be type RGBColor"):
-        fill.fore_color.rgb = (1, 2, 3)
+    with pytest.raises(TypeError, match="FillFormat.fore_color.rgb"):
+        fill.fore_color.rgb = (1, 2)
 
     line = shape.line
     assert (line.width, line.color.rgb, line.fill.type) == (0, None, None)
@@ -2371,8 +2378,7 @@ def test_fill_and_line_formats_write_what_python_pptx_reads(tmp_path):
 
     held = prs.slides[0].shapes[0].fill
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held.type
+    assert held.type == prs.slides[0].shapes[0].fill.type
     output = tmp_path / "fills.pptx"
     prs.save(output)
     parts = _package_parts(output.read_bytes())
@@ -2465,8 +2471,7 @@ def test_table_cells_merge_split_fill_and_margins_like_python_pptx(tmp_path):
     assert cell.margin_top is None
     held_fill = cell.fill
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError, match=r"table\.cell\(2, 0\)\.fill"):
-        _ = held_fill.type
+    assert held_fill.type == cell.fill.type
     split = tmp_path / "split.pptx"
     prs.save(split)
 
@@ -2538,10 +2543,8 @@ def test_table_row_heights_and_cell_borders_write_what_python_pptx_reads(tmp_pat
     assert (cell.border_top.fill.type, cell.border_bottom.fill.type) == (None, MSO_FILL_TYPE.SOLID)
     held_border = cell.border_right
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError, match=r"table\.cell\(0, 0\)\.border_right\."):
-        _ = held_border.width
-    with pytest.raises(rpptx.StaleElementError, match=r"table\.rows\[2\]\."):
-        _ = held.height
+    assert held_border.width == cell.border_right.width
+    assert held.height == prs.slides[0].shapes[0].table.rows[2].height
     output = tmp_path / "rows-borders.pptx"
     prs.save(output)
     xml = _package_parts(output.read_bytes())["ppt/slides/slide1.xml"].decode()
@@ -2610,8 +2613,12 @@ def test_table_rows_and_columns_are_added_and_removed_like_python_pptx_add_tr(tm
     row = rows.add_row()
     assert type(row).__name__ == "Row"
     assert row.height == rpptx.Inches(0.6)
-    for operation in (lambda: held_cell.text, lambda: len(rows)):
-        _assert_stale_after_exactly_one_bump(rpptx, operation)
+    _assert_stale_after_exactly_one_bump(rpptx, lambda: held_cell.text)
+    assert len(rows) == 5
+    stable = prs.to_bytes()
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by RowCollection.add_row "):
+        held_cell.text = "unsafe"
+    assert prs.to_bytes() == stable
     shape = prs.slides[0].shapes[1]
     assert (shape.width, shape.height) == (rpptx.Inches(9), rpptx.Inches(3))
     table = shape.table
@@ -2653,10 +2660,10 @@ def test_table_rows_and_columns_are_added_and_removed_like_python_pptx_add_tr(tm
         table.rows.remove(table.columns[0])
     assert prs.to_bytes() == before
     held_row = table.rows[0]
-    prs.slides.add_slide(prs.slide_layouts[6])
+    added_row = table.rows.add_row()
     with pytest.raises(rpptx.StaleElementError, match=r"table\.rows\[0\]\."):
         prs.slides[0].shapes[1].table.rows.remove(held_row)
-    prs.slides.remove(prs.slides[1])
+    table.rows.remove(added_row)
     output = tmp_path / "rows-columns.pptx"
     prs.save(output)
     xml = _package_parts(output.read_bytes())["ppt/slides/slide1.xml"].decode()
@@ -2807,8 +2814,7 @@ def test_line_dash_style_and_ends_write_what_python_pptx_reads(tmp_path):
 
     held = line.tail_end
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError, match=r"shapes\[1\]\.line\.tail_end"):
-        _ = held.type
+    assert held.type == line.tail_end.type
 
     # A custom dash reads as None, and a preset or None replaces it.
     deck = pptx.Presentation()
@@ -3001,15 +3007,13 @@ def test_shadow_parameters_write_the_outer_shadow_on_every_kind_python_pptx_shad
         shapes[0].shadow.blur_radius = -1
     with pytest.raises(ValueError, match="shadow direction must be a finite number"):
         shapes[0].shadow.direction = float("nan")
-    with pytest.raises(ValueError, match="assigned value must be type RGBColor"):
-        shapes[0].shadow.color.rgb = (1, 2, 3)
+    with pytest.raises(TypeError, match="ShadowFormat.color.rgb"):
+        shapes[0].shadow.color.rgb = (1, 2)
     held = shapes[0].shadow
     held_color = held.color
     prs.slides.add_slide(prs.slide_layouts[6])
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held.visible
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held_color.rgb
+    assert held.visible == shapes[0].shadow.visible
+    assert held_color.rgb == shapes[0].shadow.color.rgb
     with pytest.raises(NotImplementedError, match="GraphicFrame"):
         _ = prs.slides[1].shapes.add_table(1, 1, 0, 0, 10, 10).shadow
 
@@ -3134,7 +3138,7 @@ def test_picture_crop_matches_python_pptx_in_both_directions(tmp_path):
     assert (read.crop_left, read.crop_top, read.crop_right) == (0.0, 0.2, 0.33333)
 
 
-def test_shapes_move_changes_the_z_order_and_stales_handles_once(tmp_path):
+def test_shapes_move_changes_z_order_and_preserves_owner_handles(tmp_path):
     import rpptx
 
     prs = rpptx.Presentation()
@@ -3145,10 +3149,8 @@ def test_shapes_move_changes_the_z_order_and_stales_handles_once(tmp_path):
     held = shapes[0]
     shapes.move(0, -1)
     assert [shape.name for shape in prs.slides[0].shapes] == ["middle", "front", "back"]
-    for operation in (lambda: held.name, lambda: len(shapes)):
-        _assert_stale_after_exactly_one_bump(rpptx, operation)
-    with pytest.raises(rpptx.StaleElementError, match=r"prs\.slides\[0\]\.shapes\[0\]\."):
-        _ = held.name
+    assert held.name == "back"
+    assert len(shapes) == 3
     prs.slides[0].shapes.move(-1, 1)
     assert [shape.name for shape in prs.slides[0].shapes] == ["middle", "back", "front"]
     before = prs.to_bytes()
@@ -3177,10 +3179,8 @@ def test_group_shapes_add_members_and_the_group_fits_them(tmp_path):
     group = prs.slides[0].shapes.add_group_shape()
     shapes = group.shapes
     textbox = shapes.add_textbox(emu, emu, emu, emu)
-    for operation in (lambda: group.name, lambda: len(shapes)):
-        _assert_stale_after_exactly_one_bump(rpptx, operation)
-    with pytest.raises(rpptx.StaleElementError, match=r"prs\.slides\[0\]\.shapes\[0\]\.shapes\."):
-        shapes.add_textbox(0, 0, 1, 1)
+    assert group.name is not None
+    assert len(shapes) == 1
     textbox.text = "inside"
     group = prs.slides[0].shapes[0]
     assert (group.left, group.top, group.width, group.height) == (emu, emu, emu, emu)
@@ -3290,8 +3290,18 @@ def test_a_group_in_an_alternate_content_fallback_does_not_take_new_shapes(tmp_p
     prs = rpptx.Presentation(source)
     fallback_group = prs.slides[0].shapes[0].shapes[0]
     assert int(fallback_group.shape_type) == 6
+    before = prs.to_bytes()
     with pytest.raises(ValueError, match="mc:AlternateContent fallback cannot take new shapes"):
         fallback_group.shapes.add_textbox(0, 0, 10, 10)
+    assert prs.to_bytes() == before
+    assert int(fallback_group.shape_type) == 6
+    prs.slides[0].shapes.add_textbox(0, 0, 10, 10)
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by ShapeCollection.add_textbox "):
+        _ = fallback_group.shape_type
+    fresh_fallback = prs.slides[0].shapes[0].shapes[0]
+    prs.slides[0].shapes[1].text = "ordinary edit"
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by Shape.text "):
+        _ = fresh_fallback.shape_type
 
 
 def test_an_empty_nested_group_lets_python_pptx_refit_its_parent(tmp_path):
@@ -3329,8 +3339,7 @@ def test_shapes_and_slides_are_removed_and_reordered_with_stale_handles(tmp_path
     held = prs.slides[0]
     prs.slides.move(0, -1)
     assert [slide.shapes[0].text for slide in prs.slides] == ["slide 1", "slide 2", "slide 0"]
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held.shapes
+    assert held.shapes[0].text == "slide 0"
     with pytest.raises(IndexError):
         prs.slides.move(0, 3)
     prs.slides.remove(prs.slides[1])
@@ -3345,13 +3354,18 @@ def test_shapes_and_slides_are_removed_and_reordered_with_stale_handles(tmp_path
     group = prs.slides[0].shapes.add_group_shape()
     assert len(prs.slides[0].shapes) == 3
     shapes = prs.slides[0].shapes
-    with pytest.raises(ValueError, match="shape is not in this collection"):
+    selected = shapes[0]
+    selected_id, selected_xml = selected.shape_id, selected.xml
+    before_foreign_removal = prs.to_bytes()
+    with pytest.raises(ValueError, match=r"^shape owner is not in this presentation collection$"):
         prs.slides[1].shapes.remove(shapes[0])
-    with pytest.raises(rpptx.StaleElementError):
-        shapes.remove(picture)
-    shapes.remove(shapes[1])
-    with pytest.raises(rpptx.StaleElementError):
-        _ = group.name
+    assert prs.to_bytes() == before_foreign_removal
+    assert selected.shape_id == shapes[0].shape_id == selected_id
+    assert selected.xml == selected_xml
+    shapes.remove(picture)
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by ShapeCollection.remove "):
+        _ = picture.name
+    assert group.name is not None
     assert [shape.shape_type for shape in prs.slides[0].shapes] == [17, 6]
     output = tmp_path / "removed.pptx"
     prs.save(output)
@@ -3382,8 +3396,8 @@ def test_slide_duplicate_inserts_after_the_source_with_its_notes(tmp_path):
     ]
     assert [slide.notes_text for slide in prs.slides] == [None, "note 1", "note 1", None]
     assert (duplicate.shapes[0].text, duplicate.notes_text) == ("slide 1", "note 1")
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: held.text)
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: source.notes_text)
+    assert held.text == "slide 2"
+    assert source.notes_text == "note 1"
     duplicate.notes_text = "copy note"
     assert [slide.notes_text for slide in prs.slides] == [None, "note 1", "copy note", None]
 
@@ -3480,14 +3494,13 @@ def test_try_replace_text_checks_the_expected_count_before_publishing():
     assert held.text == "NAME and NAME"
 
     assert prs.try_replace_text("NAME", "Ada", expect=4) == 4
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: held.text)
+    assert held.text == "Ada and Ada"
     shapes = prs.slides[0].shapes
     assert (shapes[0].text, shapes[1].table.cell(0, 0).text) == ("Ada and Ada", "Ada")
     assert prs.slides[0].notes_text == "Notes for Ada"
     held = prs.slides[0].shapes[0]
     assert prs.try_replace_text("Ada", "Grace") == 4
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: held.text)
-    assert prs.slides[0].shapes[0].text == "Grace and Grace"
+    assert held.text == prs.slides[0].shapes[0].text == "Grace and Grace"
 
 
 def test_slide_resolve_and_remove_comment_match_the_cli_operations():
@@ -3525,7 +3538,7 @@ def test_slide_resolve_and_remove_comment_match_the_cli_operations():
     assert [comment.status for comment in slide.comments] == [None, None]
 
     slide.resolve_comment(comment_id)
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: slide.comments)
+    assert slide.comments[0].status == "resolved"
     thread, second = prs.slides[0].comments
     assert (thread.id, thread.status, second.status) == (comment_id, "resolved", None)
     assert [(reply.id, reply.status) for reply in thread.replies] == [(reply_id, None)]
@@ -3603,7 +3616,7 @@ def test_try_replace_text_scoped_to_a_slide_or_a_text_frame(tmp_path):
     assert prs.to_bytes() == before
 
     assert held.try_replace_text("Same text", "Other text", expect=3, notes=False) == 3
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: held.shapes)
+    assert held.shapes[0].text == "Other text"
     first = prs.slides[0]
     shapes = first.shapes
     assert shapes[0].text == "Other text"
@@ -3627,7 +3640,7 @@ def test_try_replace_text_scoped_to_a_slide_or_a_text_frame(tmp_path):
     assert frame.try_replace_text("MISSING", "x") == 0
     assert prs.to_bytes() == snapshot
     assert frame.try_replace_text("Same text", "Other text", expect=2) == 2
-    _assert_stale_after_exactly_one_bump(rpptx, lambda: frame.text)
+    assert frame.text == "Other text and Other text"
     assert prs.slides[1].shapes[0].text == "Other text and Other text"
     assert prs.slides[1].notes_text == "Same text in the notes"
     assert prs.slides[1].shapes[0].text_frame.try_replace_text("Other", "New") == 2
@@ -3703,8 +3716,41 @@ def test_import_slide_carries_pictures_links_notes_and_background_from_another_d
     source = rpptx.Presentation(_python_pptx_deck(tmp_path / "source.pptx", build_source))
     prs = rpptx.Presentation(_python_pptx_deck(tmp_path / "target.pptx", build_target))
     before = prs.to_bytes()
-    with pytest.raises(rpptx.RpptxError, match="has a chart, which is not carried"):
-        prs.slides.import_slide(source.slides[1])
+    source_before = source.to_bytes()
+    chart_target = rpptx.Presentation()
+    existing = chart_target.slides.add_slide(chart_target.slide_layouts[6])
+    existing.shapes.add_textbox(0, 0, 914400, 914400).text = "Retained destination"
+    existing_xml = existing.element.xml
+    existing_parts = _package_parts(chart_target.to_bytes())
+    chart_slide = chart_target.slides.import_slide(source.slides[1])
+    chart_shapes = [shape for shape in chart_slide.shapes if shape.has_chart]
+    assert len(chart_shapes) == 1
+    chart = chart_shapes[0].chart
+    assert chart.categories == ("a", "b")
+    assert chart.series[0].name == "s" and chart.series[0].values == [1.0, 2.0]
+    chart_output = tmp_path / "imported-chart.pptx"
+    chart_target.save(chart_output)
+    source_workbooks = sorted(
+        value for name, value in _package_parts(source_before).items()
+        if name.startswith("ppt/embeddings/") and name.endswith(".xlsx")
+    )
+    imported_workbooks = sorted(
+        value for name, value in _package_parts(chart_output.read_bytes()).items()
+        if name.startswith("ppt/embeddings/") and name.endswith(".xlsx")
+    )
+    assert len(source_workbooks) == 1 and imported_workbooks == source_workbooks
+    imported_parts = _package_parts(chart_output.read_bytes())
+    assert existing.element.xml == existing_xml
+    assert imported_parts["ppt/slides/slide1.xml"] == existing_parts["ppt/slides/slide1.xml"]
+    assert imported_parts["ppt/slides/_rels/slide1.xml.rels"] == existing_parts["ppt/slides/_rels/slide1.xml.rels"]
+    reopened = rpptx.Presentation(chart_output)
+    assert reopened.slides[0].shapes[0].text == "Retained destination"
+    reopened_charts = [shape for shape in reopened.slides[1].shapes if shape.has_chart]
+    assert len(reopened_charts) == 1
+    reopened_chart = reopened_charts[0].chart
+    assert reopened_chart.categories == ("a", "b")
+    assert reopened_chart.series[0].values == [1.0, 2.0]
+    assert source.to_bytes() == source_before
     assert prs.to_bytes() == before
     with pytest.raises(ValueError, match="layout is not a layout of this presentation"):
         prs.slides.import_slide(source.slides[0], layout=source.slide_layouts[1])
@@ -3713,8 +3759,7 @@ def test_import_slide_carries_pictures_links_notes_and_background_from_another_d
 
     held = prs.slides[0]
     imported = prs.slides.import_slide(source.slides[0], index=0)
-    with pytest.raises(rpptx.StaleElementError):
-        _ = held.shapes
+    assert len(held.shapes) == len(prs.slides[1].shapes)
     assert [shape.name for shape in imported.shapes] == [
         "Title 1", "Content Placeholder 2", "Picture 3", "TextBox 4",
     ]
@@ -4310,6 +4355,9 @@ def test_issue_217_complete_deck_chain(tmp_path):
     card = deck.slides[0].shapes[0]
     card.text = "Card TOKEN"
     card = deck.slides[0].shapes[0]
+    # Compare shadow paint without unrelated endpoint-gradient interpolation.
+    card.fill.solid()
+    card.fill.fore_color.rgb = RGBColor(0x4F, 0x81, 0xBD)
     card.shadow.color.rgb = RGBColor(0x12, 0x34, 0x56)
     card.shadow.alpha = 0.5
     card.shadow.blur_radius = rpptx.Pt(6)
@@ -4324,6 +4372,9 @@ def test_issue_217_complete_deck_chain(tmp_path):
     deck.slides[0].shapes.add_shape(MSO_SHAPE.RECTANGLE, unit, 3 * unit, 2 * unit, unit)
     deck.slides[0].shapes[2].auto_shape_type = MSO_SHAPE.CHEVRON
     deck.slides[0].shapes[2].text = "Preset"
+    # Isolate preset geometry from inherited endpoint-gradient interpolation.
+    deck.slides[0].shapes[2].fill.solid()
+    deck.slides[0].shapes[2].fill.fore_color.rgb = RGBColor(0x4F, 0x81, 0xBD)
     imported = deck.slides.import_slide(source.slides[0], index=1)
     assert imported.notes_text == "Imported notes"
     assert imported.shapes[1].image.blob == _tiny_png(0x22, 0x88, 0xCC)
@@ -4469,9 +4520,13 @@ def test_issue_158_deck_fixture_acceptance(tmp_path):
     # feature appears in the source deck, but both must survive the same edits.
     parts = _package_parts(source_bytes)
     slide7 = parts["ppt/slides/slide7.xml"]
+    # This sentinel checks omitted-angle source preservation and orientation.
+    # Three non-mirrored stops use piecewise-linear interpolation in both
+    # viewers. PowerPoint endpoint gamma has a separate native paint control.
     gradient = (
         b'<p:bg><p:bgPr><a:gradFill rotWithShape="1"><a:gsLst>'
         b'<a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs>'
+        b'<a:gs pos="50000"><a:srgbClr val="F0F5FA"/></a:gs>'
         b'<a:gs pos="100000"><a:srgbClr val="E0EAF4"/></a:gs>'
         b'</a:gsLst><a:lin scaled="0"/></a:gradFill><a:effectLst/>'
         b'</p:bgPr></p:bg>'
@@ -4689,3 +4744,5801 @@ def test_issue_158_deck_fixture_acceptance(tmp_path):
         close = sum(max(errors[offset:offset + 3]) <= 24 for offset in range(0, len(errors), 3))
         assert close / (len(errors) / 3) >= min_close, label
         assert sum(errors) / len(errors) <= max_mean, label
+
+
+def test_table_cells_expose_the_same_editable_text_frame_surface_as_shapes():
+    from rpptx import Presentation
+    from rpptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, 0, 0, Inches(4), Inches(2)).table
+    cell = table.cell(0, 0)
+    frame = cell.text_frame
+    frame.text = "Cell text"
+    assert cell.text == "Cell text"
+    assert len(cell.text_frame.paragraphs) == 1
+
+
+def _f_x194_table():
+    from rpptx import Presentation, Inches
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    return prs, slide.shapes.add_table(2, 2, 0, 0, Inches(4), Inches(2)).table
+
+
+def test_cell_text_frame_structural_edits_stale_every_earlier_nested_handle():
+    from rpptx import StaleElementError
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "seed"
+    frame = cell.text_frame
+    paragraphs = frame.paragraphs
+    paragraph = paragraphs[0]
+    runs = paragraph.runs
+    run = runs[0]
+    font = run.font
+    other = table.cell(1, 1).text_frame
+    cell.text = "changed"
+    for operation in (lambda: len(paragraphs), lambda: paragraph.text,
+                      lambda: len(runs), lambda: run.text, lambda: font.bold):
+        with pytest.raises(StaleElementError, match=r"First invalidated by Cell.text "):
+            operation()
+    assert cell.text == frame.text == "changed"
+    assert other.text == ""
+    assert len(table.rows) == 2
+    frame = cell.text_frame
+    new_paragraph = frame.add_paragraph()
+    assert new_paragraph.text == ""
+    assert frame.text == cell.text
+    fresh_frame = cell.text_frame
+    retired_runs = new_paragraph.runs
+    new_run = new_paragraph.add_run("new run")
+    assert new_run.text == "new run"
+    with pytest.raises(StaleElementError, match=r"First invalidated by Paragraph.add_run at committed revision"):
+        _ = new_paragraph.text
+    with pytest.raises(StaleElementError, match=r"First invalidated by Paragraph.add_run at committed revision"):
+        len(retired_runs)
+    assert fresh_frame.paragraphs[1].text == "new run"
+    assert fresh_frame.text == cell.text
+    paragraph = cell.text_frame.paragraphs[0]
+    held_run = paragraph.runs[0]
+    paragraph.text = "replacement"
+    assert paragraph.text == "replacement"
+    _assert_stale_after_exactly_one_bump(__import__("rpptx"), lambda: held_run.text)
+    with pytest.raises(StaleElementError, match=r"First invalidated by Paragraph.text at committed revision"):
+        _ = held_run.text
+    assert cell.text.startswith("replacement")
+    assert prs.slides[0].shapes[0].table.cell(0, 0).text == cell.text
+
+
+def test_cell_text_topology_failures_and_no_match_preserve_source_and_handles():
+    from rpptx import ReplacementCountError
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "needle"
+    frame = cell.text_frame
+    paragraph = frame.paragraphs[0]
+    before = prs.to_bytes()
+    assert frame.try_replace_text("absent", "other", expect=0) == 0
+    with pytest.raises(ReplacementCountError):
+        frame.try_replace_text("needle", "other", expect=2)
+    with pytest.raises(Exception, match="empty"):
+        frame.try_replace_text("", "other")
+    with pytest.raises(Exception):
+        cell.merge(cell)
+    with pytest.raises(Exception):
+        cell.split()
+    assert prs.to_bytes() == before
+    assert paragraph.text == "needle"
+    assert frame.text == "needle"
+    assert frame.try_replace_text("needle", "other", expect=1) == 1
+    from rpptx import StaleElementError
+    with pytest.raises(StaleElementError):
+        _ = paragraph.text
+    assert cell.text == "other"
+
+
+def test_cell_text_frame_edits_preserve_merge_origin_and_continuation_ownership():
+    from rpptx import StaleElementError
+    prs, table = _f_x194_table()
+    origin, continuation = table.cell(0, 0), table.cell(0, 1)
+    origin.text = "origin"
+    continuation.text = "continuation"
+    old = continuation.text_frame
+    origin.merge(continuation)
+    assert old.text == continuation.text
+    assert continuation.is_spanned
+    continuation.text = "explicit continuation"
+    assert continuation.text_frame.text == "explicit continuation"
+    assert "explicit continuation" not in origin.text_frame.text
+    old = origin.text_frame
+    origin.split()
+    assert old.text == origin.text
+    assert not continuation.is_spanned
+    assert table.cell(1, 1).text == ""
+    assert len(prs.slides[0].shapes[0].table.rows) == 2
+
+
+def test_cell_text_value_edits_and_unrelated_structure_retain_handles():
+    from rpptx import StaleElementError, Pt
+    from rpptx.enum.text import MSO_ANCHOR
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "value"
+    frame = cell.text_frame
+    p = frame.paragraphs[0]
+    run = p.runs[0]
+    font = run.font
+    run.text = "changed"
+    font.bold = True
+    font.size = Pt(18)
+    p.space_after = Pt(4)
+    frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    frame.word_wrap = True
+    assert frame.text == p.text == run.text == "changed"
+    assert font.bold is True
+    assert frame.vertical_anchor == MSO_ANCHOR.MIDDLE
+    prs.slides.add_slide(prs.slide_layouts[6])
+    assert cell.text == frame.text == p.text == run.text == "changed"
+    assert font.bold is True
+    prs.slides[0].shapes.remove(prs.slides[0].shapes[0])
+    for operation in (lambda: cell.text, lambda: frame.text, lambda: p.text,
+                      lambda: run.text, lambda: font.bold):
+        with pytest.raises(StaleElementError, match=r"First invalidated by ShapeCollection.remove "):
+            operation()
+
+
+def test_cell_hyperlink_assignment_rejects_before_relationship_mutation():
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "link"
+    hyperlink = cell.text_frame.paragraphs[0].runs[0].hyperlink
+    assert hyperlink.address is None
+    before = prs.to_bytes()
+    for value in ("https://example.com", None, ""):
+        with pytest.raises(ValueError, match="cell hyperlink assignment"):
+            hyperlink.address = value
+        assert prs.to_bytes() == before
+        assert hyperlink.address is None
+
+
+def test_cell_text_frame_getter_and_missing_body_failures_do_not_materialize_source():
+    from rpptx import Presentation, ReplacementCountError
+    prs, _ = _f_x194_table()
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as source, zipfile.ZipFile(out, "w") as target:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "ppt/slides/slide1.xml":
+                data, count = re.subn(rb"<a:txBody\b[^>]*>.*?</a:txBody>", b"", data, count=1, flags=re.S)
+                assert count == 1
+            target.writestr(member, data)
+    prs = Presentation.from_bytes(out.getvalue())
+    cell = prs.slides[0].shapes[0].table.cell(0, 0)
+    before = prs.to_bytes()
+    frame = cell.text_frame
+    assert frame.autofit is None
+    assert frame.try_replace_text("absent", "replacement", expect=0) == 0
+    with pytest.raises(ReplacementCountError):
+        frame.try_replace_text("absent", "replacement", expect=1)
+    with pytest.raises(Exception, match="empty"):
+        frame.try_replace_text("", "replacement")
+    assert prs.to_bytes() == before
+    cell.text = "materialized by edit"
+    assert cell.text_frame.text == "materialized by edit"
+
+
+def test_cell_text_frame_edits_reach_pdf_and_raster_output(tmp_path):
+    import subprocess
+    from PIL import Image
+    from rpptx import Presentation, Pt
+    from rpptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "F-X194 first"
+    p = cell.text_frame.paragraphs[0]
+    run = p.runs[0]
+    run.font.name = "Liberation Sans"
+    run.font.size = Pt(20)
+    run.font.bold = True
+    run.font.color = "CC0000"
+    p.alignment = PP_ALIGN.CENTER
+    p.line_spacing = 1.2
+    p.space_before = Pt(2)
+    p.space_after = Pt(3)
+    frame = cell.text_frame
+    frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    frame.word_wrap = True
+    p2 = frame.add_paragraph()
+    r2 = p2.add_run("F-X194 second")
+    r2.font.name = "Liberation Sans"
+    r2.font.size = Pt(18)
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    cell = reopened.slides[0].shapes[0].table.cell(0, 0)
+    assert cell.text == "F-X194 first\nF-X194 second"
+    p = cell.text_frame.paragraphs[0]
+    assert p.runs[0].font.size == Pt(20)
+    assert p.runs[0].font.bold is True
+    assert str(p.runs[0].font.color.rgb) == "CC0000"
+    assert p.alignment == PP_ALIGN.CENTER
+    assert p.space_before == Pt(2) and p.space_after == Pt(3)
+    assert cell.text_frame.word_wrap is True
+    pdf = tmp_path / "cell.pdf"
+    pdf.write_bytes(reopened.to_pdf())
+    extracted = subprocess.check_output(["pdftotext", str(pdf), "-"], text=True)
+    assert "F-X194 first" in extracted and "F-X194 second" in extracted
+    png = reopened.render_slide_to_png(0, dpi=72)
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    assert any(red > green + 40 and red > blue + 40 for red, green, blue in image.getdata())
+
+
+def test_grouped_table_cell_frame_resolves_and_imported_hyperlink_reads():
+    import xml.etree.ElementTree as ET
+    from rpptx import Presentation, Pt
+    prs, table = _f_x194_table()
+    table.cell(0, 0).text = "Grouped link"
+    pns = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    ans = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    rns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    # Keep the fixture on the existing canonical-prefix parser contract.
+    ET.register_namespace("p", pns)
+    ET.register_namespace("a", ans)
+    ET.register_namespace("r", rns)
+    ET.register_namespace("", "http://schemas.openxmlformats.org/package/2006/relationships")
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as source, zipfile.ZipFile(out, "w") as target:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "ppt/slides/slide1.xml":
+                root = ET.fromstring(data)
+                tree = root.find(".//{" + pns + "}spTree")
+                table_node = tree.find("{" + pns + "}graphicFrame")
+                tree.remove(table_node)
+                group = ET.SubElement(tree, "{" + pns + "}grpSp")
+                nv = ET.SubElement(group, "{" + pns + "}nvGrpSpPr")
+                ET.SubElement(nv, "{" + pns + "}cNvPr", id="10", name="Cell owner group")
+                ET.SubElement(nv, "{" + pns + "}cNvGrpSpPr")
+                ET.SubElement(nv, "{" + pns + "}nvPr")
+                props = ET.SubElement(group, "{" + pns + "}grpSpPr")
+                xfrm = ET.SubElement(props, "{" + ans + "}xfrm")
+                for tag, attrs in (("off", {"x":"0", "y":"0"}), ("ext", {"cx":"3657600", "cy":"1828800"}),
+                                   ("chOff", {"x":"0", "y":"0"}), ("chExt", {"cx":"3657600", "cy":"1828800"})):
+                    ET.SubElement(xfrm, "{" + ans + "}" + tag, attrs)
+                group.append(table_node)
+                run = table_node.find(".//{" + ans + "}r")
+                rp = run.find("{" + ans + "}rPr")
+                if rp is None:
+                    rp = ET.Element("{" + ans + "}rPr")
+                    run.insert(0, rp)
+                ET.SubElement(rp, "{" + ans + "}hlinkClick", {"{" + rns + "}id":"rIdCellLink"})
+                data = ET.tostring(root)
+            elif member.filename == "ppt/slides/_rels/slide1.xml.rels":
+                root = ET.fromstring(data)
+                ET.SubElement(root, "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship",
+                              Id="rIdCellLink", Type=rns + "/hyperlink", Target="https://example.com/grouped", TargetMode="External")
+                data = ET.tostring(root)
+            target.writestr(member, data)
+    prs = Presentation.from_bytes(out.getvalue())
+    table = prs.slides[0].shapes[0].shapes[0].table
+    cell = table.cell(0, 0)
+    frame = cell.text_frame
+    run = frame.paragraphs[0].runs[0]
+    assert run.hyperlink.address == "https://example.com/grouped"
+    run.font.size = Pt(17)
+    run.text = "Grouped edited"
+    assert frame.text == "Grouped edited"
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    cell = reopened.slides[0].shapes[0].shapes[0].table.cell(0, 0)
+    assert cell.text == "Grouped edited"
+    assert cell.text_frame.paragraphs[0].runs[0].font.size == Pt(17)
+
+
+def _f_x197_ppt_colour_surface(prs, surface):
+    from rpptx.enum.shapes import MSO_CONNECTOR
+    slide = prs.slides[0]
+    if surface.startswith("font"):
+        if "cell" in surface:
+            cell = slide.shapes.add_table(1, 1, 0, 0, 100, 100).table.cell(0, 0)
+            frame = cell.text_frame
+            frame.text = "colour"
+            frame = cell.text_frame
+        else:
+            frame = slide.shapes[0].text_frame
+        paragraph = frame.paragraphs[0]
+        font = paragraph.font if "default" in surface else paragraph.runs[0].font
+        colour = font.color
+        if surface.endswith("direct"):
+            return lambda value: setattr(font, "color", value), colour
+        return lambda value: setattr(colour, "rgb", value), colour
+    if surface == "background-fill":
+        fill = slide.background.fill
+        fill.solid()
+        colour = fill.fore_color
+    elif surface.startswith("cell"):
+        cell = slide.shapes.add_table(1, 1, 0, 0, 100, 100).table.cell(0, 0)
+        if surface == "cell-fill":
+            cell.fill.solid()
+            colour = cell.fill.fore_color
+        else:
+            colour = getattr(cell, "border_" + surface.removeprefix("cell-")).color
+    else:
+        kind, property_name = surface.split("-")
+        if kind == "picture":
+            shape = slide.shapes.add_picture(io.BytesIO(_tiny_png()), 0, 0)
+        elif kind == "connector":
+            shape = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, 0, 0, 100, 100)
+        elif kind == "group":
+            shape = slide.shapes.add_group_shape()
+        else:
+            shape = slide.shapes[0]
+        if property_name == "fill":
+            shape.fill.solid()
+            colour = shape.fill.fore_color
+        elif property_name == "line":
+            colour = shape.line.color
+        else:
+            colour = shape.shadow.color
+    return lambda value: setattr(colour, "rgb", value), colour
+
+
+_F_X197_PPT_COLOUR_SURFACES = [
+    "font-run-direct", "font-run-rgb", "font-default-direct", "font-default-rgb",
+    "font-cell-direct", "font-cell-rgb", "font-cell-default-direct", "font-cell-default-rgb",
+    "shape-fill", "picture-fill", "connector-fill", "cell-fill", "background-fill",
+    "shape-line", "picture-line", "connector-line", "cell-top", "cell-bottom", "cell-left", "cell-right",
+    "shape-shadow", "picture-shadow", "connector-shadow", "group-shadow",
+]
+
+
+@pytest.mark.parametrize("surface", _F_X197_PPT_COLOUR_SURFACES)
+@pytest.mark.parametrize("form", ["rgb", "triple", "hex", "hash"])
+def test_every_powerpoint_colour_setter_accepts_rgb_and_optional_hash_hex(surface, form):
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    from xml.etree import ElementTree as ET
+    prs = _textbox_presentation(rpptx)
+    expected = RGBColor(0xA1, 0xB2, 0xC3)
+    assert RGBColor.from_string("#a1b2c3") == expected
+    assert RGBColor.from_string("a1b2c3") == expected
+    value = {"rgb": expected, "triple": tuple(expected), "hex": "a1b2c3", "hash": "#a1b2c3"}[form]
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    setter(value)
+    assert colour.rgb == expected and isinstance(colour.rgb, RGBColor)
+    saved = prs.to_bytes()
+    setter(value)
+    assert prs.to_bytes() == saved
+    reopened = rpptx.Presentation.from_bytes(saved)
+    with zipfile.ZipFile(io.BytesIO(reopened.to_bytes())) as package:
+        root = ET.fromstring(package.read("ppt/slides/slide1.xml"))
+        assert any(node.get("val") == "A1B2C3" for node in root.iter("{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr"))
+
+
+@pytest.mark.parametrize("surface", _F_X197_PPT_COLOUR_SURFACES)
+@pytest.mark.parametrize("value,error_type", [(object(), TypeError), (7, TypeError), ((1, 2), TypeError), ((1.5, 2, 3), TypeError), ((10**100, 2, 3), ValueError), ((-1, 2, 3), ValueError), ("##123456", ValueError), ("１２３４５６", ValueError), ("12345\ud800", ValueError), (" 123456", ValueError)])
+def test_powerpoint_colour_errors_are_atomic_on_every_existing_owner(surface, value, error_type):
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    before = prs.to_bytes()
+    prior = colour.rgb
+    with pytest.raises(error_type) as caught:
+        setter(value)
+    parameter = "Font.color" + ("" if surface.endswith("direct") else ".rgb") if surface.startswith("font") else "ShadowFormat.color.rgb" if surface.endswith("shadow") else "LineFormat.color.rgb" if surface.endswith("line") or surface in ("cell-top", "cell-bottom", "cell-left", "cell-right") else "FillFormat.fore_color.rgb"
+    assert parameter in str(caught.value)
+    if error_type is TypeError:
+        assert type(value).__name__ in str(caught.value)
+    assert "RGBColor" in str(caught.value) or "hex" in str(caught.value) or "channels" in str(caught.value)
+    assert prs.to_bytes() == before
+    assert colour.rgb == prior
+
+
+def test_powerpoint_font_colour_format_preserves_theme_and_transform_sources():
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    colour = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+    assert colour.rgb is None
+    colour.theme_color = "accent1"
+    colour.brightness = 0.25
+    assert colour.type == "theme"
+    assert colour.theme_color == "accent1"
+    assert colour.rgb is None
+    reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+    actual = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+    assert actual.theme_color == "accent1"
+    assert actual.brightness == 0.25
+
+
+@pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "shape-fill", "shape-line"])
+@pytest.mark.parametrize("value,modulation,offset", [(-1.0, 0, None), (-0.4, 60000, None), (0.0, None, None), (0.4, 60000, 40000), (1.0, 0, 100000), (0.123456, 87654, 12346)])
+def test_powerpoint_brightness_matches_pinned_finite_oracle_and_preserves_non_luminance(surface, value, modulation, offset):
+    import rpptx
+    import re
+    from xml.etree import ElementTree as ET
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    colour.theme_color = "accent1"
+    parts = _package_parts(prs.to_bytes())
+    xml = parts["ppt/slides/slide1.xml"]
+    # The explicit accent1 below belongs to the selected colour owner.
+    xml, count = re.subn(rb'<a:schemeClr val="accent1"\s*/>', b'<a:schemeClr val="accent1"><a:alpha val="43000"/><a:tint val="12000"/><a:lumMod val="70000"/><a:lumOff val="30000"/></a:schemeClr>', xml)
+    assert count == 1
+    parts["ppt/slides/slide1.xml"] = xml
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    if surface.startswith("font"):
+        paragraph = prs.slides[0].shapes[0].text_frame.paragraphs[0]
+        colour = (paragraph.font if "default" in surface else paragraph.runs[0].font).color
+    else:
+        colour = prs.slides[0].shapes[0].fill.fore_color if surface == "shape-fill" else prs.slides[0].shapes[0].line.color
+    colour.brightness = value
+    expected = offset / 100000 if offset is not None else modulation / 100000 - 1 if modulation is not None else 0.0
+    assert colour.brightness == pytest.approx(expected)
+    reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+    root = ET.fromstring(_package_parts(reopened.to_bytes())["ppt/slides/slide1.xml"])
+    ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    node = next(node for node in root.iter(ns + "schemeClr") if node.get("val") == "accent1")
+    actual = {child.tag.removeprefix(ns): int(child.get("val")) for child in node}
+    wanted = {"alpha": 43000, "tint": 12000}
+    if modulation is not None:
+        wanted["lumMod"] = modulation
+    if offset is not None:
+        wanted["lumOff"] = offset
+    assert actual == wanted
+
+
+@pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "shape-fill", "shape-line", "shape-shadow"])
+@pytest.mark.parametrize("value,error_type", [(True, TypeError), (None, TypeError), ("0.4", TypeError), (float("nan"), ValueError), (float("inf"), ValueError), (-1.1, ValueError), (1.1, ValueError)])
+def test_powerpoint_brightness_strict_finite_policy_errors_are_atomic(surface, value, error_type):
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    colour.theme_color = "accent1"
+    before = prs.to_bytes()
+    with pytest.raises(error_type, match="brightness"):
+        colour.brightness = value
+    assert prs.to_bytes() == before
+    assert colour.theme_color == "accent1"
+
+
+@pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "font-cell-rgb", "cell-fill", "cell-top", "shape-shadow"])
+def test_powerpoint_colour_views_reject_stale_owners_without_mutating_source(surface):
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    setter("123456")
+    prs.slides[0].shapes.remove(prs.slides[0].shapes[0])
+    if surface in {"font-cell-rgb", "cell-fill", "cell-top"}:
+        # The first deletion removes the unrelated textbox, not the table owner.
+        assert str(colour.rgb) == "123456"
+        colour.rgb = "ABCDEF"
+        assert str(colour.rgb) == "ABCDEF"
+        prs.slides[0].shapes.remove(prs.slides[0].shapes[0])
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.StaleElementError):
+        _ = colour.rgb
+    with pytest.raises(rpptx.StaleElementError):
+        colour.rgb = "ABCDEF"
+    assert prs.to_bytes() == before
+
+
+_F_X197_RAW_COLOUR_CHILDREN = (
+    b'<a:futureTransform val="12345"/>',
+    b'<fx:colourMetadata xmlns:fx="urn:f-x197:opaque" marker="  retain &amp; exact  "><fx:child/>opaque<!--keep--></fx:colourMetadata>',
+)
+
+
+@pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "shape-fill", "shape-line", "shape-shadow"])
+@pytest.mark.parametrize("source_kind,replacement", [("rgb", "rgb"), ("theme", "theme"), ("theme", "rgb"), ("rgb", "theme")])
+def test_powerpoint_colour_replacement_preserves_family_specific_transforms_and_opaque_children(surface, source_kind, replacement):
+    import rpptx
+    import re
+    from xml.etree import ElementTree as ET
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    if source_kind == "rgb":
+        setter("123456")
+        tag, original = "srgbClr", "123456"
+    else:
+        colour.theme_color = "accent1"
+        tag, original = "schemeClr", "accent1"
+    parts = _package_parts(prs.to_bytes())
+    xml = parts["ppt/slides/slide1.xml"]
+    # Replace exactly the chosen owner's explicit colour, preserving all siblings.
+    pattern = rb'<a:' + tag.encode() + rb' val="' + original.encode() + rb'"(?:\s*/>|>.*?</a:' + tag.encode() + rb'>)'
+    fixture = '<a:' + tag + ' val="' + original + '"><a:alpha val="43000"/><a:tint val="12000"/><a:gamma/>' + b''.join(_F_X197_RAW_COLOUR_CHILDREN).decode() + '</a:' + tag + '>'
+    xml, count = re.subn(pattern, fixture.encode(), xml, flags=re.DOTALL)
+    assert count == 1
+    parts["ppt/slides/slide1.xml"] = xml
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    shape = prs.slides[0].shapes[0]
+    if surface.startswith("font"):
+        paragraph = shape.text_frame.paragraphs[0]
+        colour = (paragraph.font if "default" in surface else paragraph.runs[0].font).color
+    elif surface == "shape-fill":
+        colour = shape.fill.fore_color
+    elif surface == "shape-line":
+        colour = shape.line.color
+    else:
+        colour = shape.shadow.color
+    before = prs.to_bytes()
+    assert colour.type == ("rgb" if source_kind == "rgb" else "theme")
+    _ = colour.rgb, colour.theme_color, colour.brightness
+    assert prs.to_bytes() == before
+    for raw in _F_X197_RAW_COLOUR_CHILDREN:
+        assert _package_parts(before)["ppt/slides/slide1.xml"].count(raw) == 1
+    colour.brightness = 0.25
+    brightness_saved = prs.to_bytes()
+    brightness_reopened = rpptx.Presentation.from_bytes(brightness_saved)
+    brightness_xml = _package_parts(brightness_reopened.to_bytes())["ppt/slides/slide1.xml"]
+    for raw in _F_X197_RAW_COLOUR_CHILDREN:
+        assert brightness_xml.count(raw) == 1
+    assert colour.brightness == 0.25
+    if replacement == "rgb":
+        colour.rgb = "ABCDEF"
+        target_tag, target_value = "srgbClr", "ABCDEF"
+    else:
+        colour.theme_color = "accent2"
+        target_tag, target_value = "schemeClr", "accent2"
+    reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+    actual_parts = _package_parts(reopened.to_bytes())
+    ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    root = ET.fromstring(actual_parts["ppt/slides/slide1.xml"])
+    node = next(node for node in root.iter(ns + target_tag) if node.get("val") == target_value)
+    actual = {child.tag.removeprefix(ns): child.get("val") for child in node if child.tag in {ns + name for name in ("alpha", "tint", "gamma", "lumMod", "lumOff")}}
+    if source_kind == replacement:
+        assert actual == {"alpha": "43000", "tint": "12000", "gamma": None, "lumMod": "75000", "lumOff": "25000"}
+        for raw in _F_X197_RAW_COLOUR_CHILDREN:
+            assert actual_parts["ppt/slides/slide1.xml"].count(raw) == 1
+        assert b"<a:gamma/>" in actual_parts["ppt/slides/slide1.xml"]
+    elif surface == "shape-shadow":
+        assert actual == {"alpha": "43000"}
+    else:
+        assert actual == {}
+    if source_kind != replacement:
+        for raw in _F_X197_RAW_COLOUR_CHILDREN:
+            assert raw not in actual_parts["ppt/slides/slide1.xml"]
+    assert actual_parts["ppt/slides/_rels/slide1.xml.rels"] == parts["ppt/slides/_rels/slide1.xml.rels"]
+
+
+@pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "font-cell-rgb", "font-cell-default-rgb"])
+def test_powerpoint_unset_font_colour_reads_and_clears_do_not_create_properties(surface):
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    before = prs.to_bytes()
+    assert (colour.rgb, colour.type, colour.theme_color, colour.brightness) == (None, None, None, None)
+    assert prs.to_bytes() == before
+    colour.rgb = None
+    assert prs.to_bytes() == before
+    colour.theme_color = None
+    assert prs.to_bytes() == before
+    with pytest.raises(ValueError, match="explicit colour"):
+        colour.brightness = 0.4
+    assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("surface", ["shape-fill", "shape-line", "shape-shadow", "cell-fill", "cell-top"])
+def test_powerpoint_non_font_colours_retain_none_refusal_and_source(surface):
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    before = prs.to_bytes()
+    with pytest.raises(TypeError):
+        colour.rgb = None
+    with pytest.raises(TypeError):
+        colour.theme_color = None
+    assert prs.to_bytes() == before
+
+
+def test_powerpoint_nested_font_colour_reaches_saved_rendered_pixels():
+    import rpptx
+    from PIL import Image
+    def render(value):
+        prs = _textbox_presentation(rpptx)
+        font = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+        font.name = "Liberation Sans"
+        font.size = rpptx.Pt(28)
+        font.color.rgb = value
+        return rpptx.Presentation.from_bytes(prs.to_bytes()).render_slide_to_png(0, dpi=72)
+    red = render("#FF0000")
+    assert red == render("ff0000")
+    blue = render("0000FF")
+    assert red != blue
+    assert any(r > g + 40 and r > b + 40 for r, g, b in Image.open(io.BytesIO(red)).convert("RGB").getdata())
+    assert any(b > g + 40 and b > r + 40 for r, g, b in Image.open(io.BytesIO(blue)).convert("RGB").getdata())
+
+
+def test_powerpoint_theme_and_brightness_reach_deterministic_pdf_and_raster_pixels(tmp_path):
+    import shutil
+    import subprocess
+    from xml.etree import ElementTree as ET
+    from PIL import Image
+    import rpptx
+    executable = shutil.which("pdftoppm")
+    assert executable is not None
+    version = subprocess.run([executable, "-v"], capture_output=True, text=True, timeout=60)
+    assert version.returncode == 0 and "26.01.0" in version.stdout + version.stderr
+    namespace = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    def render(name, rgb=None, theme=None, brightness=0.0):
+        prs = _textbox_presentation(rpptx)
+        font = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+        font.name = "Liberation Sans"
+        font.size = rpptx.Pt(28)
+        if theme is None:
+            font.color.rgb = rgb
+        else:
+            font.color.theme_color = theme
+            font.color.brightness = brightness
+        parts = _package_parts(prs.to_bytes())
+        tree = ET.fromstring(parts["ppt/theme/theme1.xml"])
+        for token, value in (("accent1", "FF0000"), ("accent2", "0000FF")):
+            colour = tree.find(".//" + namespace + token + "/" + namespace + "srgbClr")
+            assert colour is not None
+            colour.set("val", value)
+        parts["ppt/theme/theme1.xml"] = ET.tostring(tree)
+        reopened = rpptx.Presentation.from_bytes(_package_bytes(parts))
+        if theme is not None:
+            colour = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+            assert colour.rgb is None and colour.theme_color == theme
+            assert colour.brightness == pytest.approx(brightness)
+        png = Image.open(io.BytesIO(reopened.render_slide_to_png(0, dpi=72))).convert("RGB")
+        pdf = reopened.to_pdf()
+        assert pdf.startswith(b"%PDF")
+        source = tmp_path / (name + ".pdf")
+        source.write_bytes(pdf)
+        prefix = tmp_path / name
+        result = subprocess.run([executable, "-f", "1", "-singlefile", "-r", "72", "-png", str(source), str(prefix)], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        raster = Image.open(prefix.with_suffix(".png")).convert("RGB")
+        return png, raster
+    red = render("literal-red", rgb="FF0000")
+    blue = render("literal-blue", rgb="0000FF")
+    theme_red = render("theme-red", theme="accent1")
+    theme_blue = render("theme-blue", theme="accent2")
+    lighter = render("theme-lighter", theme="accent1", brightness=0.4)
+    darker = render("theme-darker", theme="accent1", brightness=-0.4)
+    for index in (0, 1):
+        assert theme_red[index].size == red[index].size == lighter[index].size == darker[index].size
+        assert theme_red[index].tobytes() == red[index].tobytes()
+        assert theme_blue[index].tobytes() == blue[index].tobytes()
+        baseline = list(red[index].getdata())
+        solid = [position for position, pixel in enumerate(baseline) if pixel == (255, 0, 0)]
+        assert len(solid) > 5
+        light_pixels = list(lighter[index].getdata())
+        dark_pixels = list(darker[index].getdata())
+        for position in solid:
+            r, g, b = light_pixels[position]
+            assert r > 220 and g > 40 and b > 40
+            r, g, b = dark_pixels[position]
+            assert 0 < r < 220 and g < 10 and b < 10
+        assert any(b > r + 40 and b > g + 40 for r, g, b in blue[index].getdata())
+
+
+@pytest.mark.parametrize("code,token", list(enumerate(["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink", "tx1", "bg1", "tx2", "bg2"], start=1)))
+def test_powerpoint_supported_theme_enum_values_round_trip_without_invented_rgb(code, token):
+    import rpptx
+    from rpptx.enum.dml import MSO_THEME_COLOR
+    prs = _textbox_presentation(rpptx)
+    colour = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+    colour.theme_color = MSO_THEME_COLOR(code)
+    assert colour.rgb is None and colour.type == "theme"
+    assert colour.theme_color == token
+    reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+    assert reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color.theme_color == token
+
+
+def test_powerpoint_fill_foreground_prerequisite_and_shadow_default_opacity_remain_intact():
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    shape = prs.slides[0].shapes[0]
+    before = prs.to_bytes()
+    with pytest.raises(TypeError, match="foreground"):
+        _ = shape.fill.fore_color
+    assert prs.to_bytes() == before
+    shadow = shape.shadow
+    shadow.color.rgb = "123456"
+    assert shadow.alpha == 0.4
+    shadow.alpha = 0.25
+    shadow.color.theme_color = "accent1"
+    assert shadow.alpha == 0.25
+    shadow.color.rgb = "654321"
+    assert shadow.alpha == 0.25
+
+
+@pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "shape-fill", "shape-line", "shape-shadow", "cell-fill", "cell-top"])
+@pytest.mark.parametrize("value,error_type", [("unknown", ValueError), (0, ValueError), (-2, ValueError), (17, ValueError), (True, TypeError), (object(), TypeError)])
+def test_powerpoint_invalid_theme_selection_is_atomic_on_all_colour_owner_kinds(surface, value, error_type):
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    setter, colour = _f_x197_ppt_colour_surface(prs, surface)
+    setter("123456")
+    before = prs.to_bytes()
+    with pytest.raises(error_type, match="theme_color"):
+        colour.theme_color = value
+    assert prs.to_bytes() == before
+    assert str(colour.rgb) == "123456"
+
+
+@pytest.mark.parametrize("kind,source,type_token", [("srgbClr", '<a:srgbClr val="123456"/>', "rgb"), ("schemeClr", '<a:schemeClr val="accent1"/>', "theme"), ("prstClr", '<a:prstClr val="red"/>', "preset"), ("sysClr", '<a:sysClr val="windowText" lastClr="000000"/>', "system")])
+def test_powerpoint_imported_colour_kind_reads_do_not_invent_rgb_or_materialize_source(kind, source, type_token):
+    import rpptx
+    import re
+    prs = _textbox_presentation(rpptx)
+    font = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+    font.color = "123456"
+    parts = _package_parts(prs.to_bytes())
+    parts["ppt/slides/slide1.xml"], count = re.subn(rb'<a:srgbClr val="123456"\s*/>', source.encode(), parts["ppt/slides/slide1.xml"])
+    assert count == 1
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    colour = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+    before = prs.to_bytes()
+    assert colour.type == type_token
+    assert colour.theme_color == ("accent1" if kind == "schemeClr" else None)
+    if kind == "srgbClr":
+        assert str(colour.rgb) == "123456"
+    else:
+        assert colour.rgb is None
+    assert prs.to_bytes() == before
+
+
+def test_powerpoint_cell_colour_view_obeys_the_existing_cell_text_generation():
+    import rpptx
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "first"
+    colour = cell.text_frame.paragraphs[0].runs[0].font.color
+    colour.rgb = "123456"
+    cell.text = "second"
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by Cell.text "):
+        _ = colour.rgb
+    with pytest.raises(rpptx.StaleElementError, match=r"First invalidated by Cell.text "):
+        colour.theme_color = "accent1"
+    assert prs.to_bytes() == before
+    fresh = cell.text_frame.paragraphs[0].runs[0]
+    assert fresh.text == "second"
+    assert str(fresh.font.color.rgb) == "123456"
+    assert prs.to_bytes() == before
+    reopened = rpptx.Presentation.from_bytes(before)
+    actual = reopened.slides[0].shapes[0].table.cell(0, 0).text_frame.paragraphs[0].runs[0]
+    assert actual.text == "second"
+    assert str(actual.font.color.rgb) == "123456"
+
+
+def test_fx206_ancestors_and_unrelated_cell_text_survive_local_topology():
+    from rpptx import Presentation, StaleElementError
+
+    presentation = Presentation()
+    layout = presentation.slide_layouts[6]
+    slide = presentation.slides.add_slide(layout)
+    table_shape = slide.shapes.add_table(2, 2, 0, 0, 1000, 1000)
+    table = table_shape.table
+    cell = table.cell(0, 0)
+    other = table.cell(1, 1)
+    cell.text = "old"
+    other.text = "other"
+    frame = cell.text_frame
+    paragraph = frame.paragraphs[0]
+    run = paragraph.runs[0]
+    font = run.font
+    other_frame = other.text_frame
+    cell.text = "new"
+    assert cell.text == frame.text == "new"
+    assert other_frame.text == "other"
+    assert len(table.rows) == 2
+    assert table_shape.has_table
+    assert len(slide.shapes) == 1
+    assert layout.name is not None
+    for get_value in (lambda: paragraph.text, lambda: run.text, lambda: font.bold):
+        with pytest.raises(StaleElementError, match=r"First invalidated by Cell.text "):
+            get_value()
+
+
+def test_fx206_shape_and_slide_moves_preserve_current_owner_lookup():
+    from rpptx import Presentation
+
+    presentation = Presentation()
+    first = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = first.shapes.add_textbox(0, 0, 100, 100)
+    shape.text = "held"
+    other = first.shapes.add_textbox(0, 0, 100, 100)
+    other.text = "other"
+    first.shapes.move(0, 1)
+    assert shape.text == "held"
+    assert other.text == "other"
+    second = presentation.slides.add_slide(presentation.slide_layouts[6])
+    second.shapes.add_textbox(0, 0, 100, 100).text = "second"
+    presentation.slides.move(0, 1)
+    assert shape.text == "held"
+    shape.text = "after move"
+    assert presentation.slides[1].shapes[1].text == "after move"
+    assert second.shapes[0].text == "second"
+
+
+def test_fx206_removed_reused_shape_id_never_resurrects_a_handle():
+    from rpptx import Presentation, StaleElementError
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    removed = slide.shapes.add_textbox(0, 0, 100, 100)
+    old_id = removed.shape_id
+    slide.shapes.remove(removed)
+    replacement = slide.shapes.add_textbox(0, 0, 100, 100)
+    assert replacement.shape_id == old_id
+    replacement.text = "replacement"
+    with pytest.raises(StaleElementError) as raised:
+        _ = removed.text
+    assert "First invalidated by ShapeCollection.remove " in str(raised.value)
+    assert "Shape.text" not in str(raised.value)
+    assert replacement.text == "replacement"
+
+
+def test_fx206_grid_change_retires_cells_but_preserves_table_and_other_shapes():
+    from rpptx import Presentation, StaleElementError
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    table_shape = slide.shapes.add_table(2, 2, 0, 0, 1000, 1000)
+    table = table_shape.table
+    other = slide.shapes.add_textbox(0, 0, 100, 100)
+    other.text = "outside"
+    held = table.cell(0, 0)
+    held_rows = table.rows
+    added = held_rows.add_row()
+    assert len(table.rows) == 3
+    assert len(table.columns) == 2
+    assert [table.cell(2, index).text for index in range(2)] == ["", ""]
+    assert added.height == table.rows[2].height
+    assert other.text == "outside"
+    assert table_shape.has_table
+    with pytest.raises(StaleElementError, match=r"First invalidated by RowCollection.add_row "):
+        _ = held.text
+    assert len(held_rows) == 3
+
+
+def test_fx206_failed_edits_and_noops_preserve_owner_and_descendant_states():
+    from rpptx import Presentation, ReplacementCountError
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 100, 100)
+    shape.text = "needle"
+    frame = shape.text_frame
+    paragraph = frame.paragraphs[0]
+    before = presentation.to_bytes()
+    with pytest.raises(ReplacementCountError):
+        frame.try_replace_text("needle", "changed", expect=2)
+    assert presentation.to_bytes() == before
+    assert paragraph.text == "needle"
+    assert frame.try_replace_text("missing", "changed", expect=0) == 0
+    slide.shapes.move(0, 0)
+    presentation.slides.move(0, 0)
+    assert presentation.to_bytes() == before
+    assert paragraph.text == "needle"
+
+
+    # The same displayed string is not a no-op when a match spans formatted runs.
+    from rpptx import StaleElementError
+    import xml.etree.ElementTree as ET
+
+    for route, cause in (("slide", "Slide.try_replace_text"),
+                         ("presentation", "Presentation.try_replace_text")):
+        deck = Presentation()
+        held_slide = deck.slides.add_slide(deck.slide_layouts[6])
+        held_shape = held_slide.shapes.add_textbox(0, 0, 100, 100)
+        held_frame = held_shape.text_frame
+        first = held_frame.paragraphs[0].add_run()
+        first.text = "A"
+        first.font.bold = True
+        second = held_frame.paragraphs[0].add_run()
+        second.text = "B"
+        second.font.italic = True
+        # Setup additions retire descendants, so capture only final owner facts.
+        held_paragraph = held_frame.paragraphs[0]
+        old_first, old_second = held_paragraph.runs
+        old_font = old_second.font
+        unrelated_slide = deck.slides.add_slide(deck.slide_layouts[6])
+        unrelated_shape = unrelated_slide.shapes.add_textbox(0, 0, 100, 100)
+        unrelated_shape.text = "outside"
+        unrelated_run = unrelated_shape.text_frame.paragraphs[0].runs[0]
+        replace = held_slide.try_replace_text if route == "slide" else deck.try_replace_text
+        original = deck.to_bytes()
+        with pytest.raises(ReplacementCountError):
+            replace("AB", "AB", expect=2)
+        assert deck.to_bytes() == original
+        assert [old_first.text, old_second.text] == ["A", "B"]
+        assert replace("missing", "AB", expect=0) == 0
+        assert deck.to_bytes() == original
+        assert old_font.italic is True
+        assert replace("AB", "AB", expect=1) == 1
+        assert held_slide.shapes[0].shape_id == held_shape.shape_id
+        assert held_frame.text == held_shape.text == "AB"
+        assert unrelated_run.text == "outside"
+        for value in (lambda: held_paragraph.text, lambda: old_first.text,
+                      lambda: old_second.text, lambda: old_font.italic):
+            with pytest.raises(StaleElementError, match="First invalidated by " + cause + " "):
+                value()
+        fresh = held_frame.paragraphs[0].runs
+        assert [run.text for run in fresh] == ["AB", ""]
+        assert fresh[0].font.bold is True and fresh[1].font.italic is True
+        saved = deck.to_bytes()
+        assert saved != original
+        parts = _package_parts(saved)
+        root = ET.fromstring(parts["ppt/slides/slide1.xml"])
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        runs = root.findall(".//a:p/a:r", ns)
+        assert [run.find("a:t", ns).text or "" for run in runs] == ["AB", ""]
+        assert runs[0].find("a:rPr", ns).get("b") == "1"
+        assert runs[1].find("a:rPr", ns).get("i") == "1"
+        reopened = Presentation.from_bytes(saved)
+        reopened_runs = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs
+        assert [run.text for run in reopened_runs] == ["AB", ""]
+        assert reopened_runs[0].font.bold is True and reopened_runs[1].font.italic is True
+        assert reopened.slides[1].shapes[0].text == "outside"
+
+
+def test_fx206_duplicate_imported_ids_remain_readable_and_structural_refusal_is_atomic(tmp_path):
+    from rpptx import Presentation
+
+    original = Presentation()
+    slide = original.slides.add_slide(original.slide_layouts[6])
+    first = slide.shapes.add_textbox(0, 0, 100, 100)
+    first.text = "first"
+    second = slide.shapes.add_textbox(0, 0, 100, 100)
+    second.text = "second"
+    source = tmp_path / "unique.pptx"
+    imported = tmp_path / "duplicate.pptx"
+    original.save(source)
+    _replace_in_slide(source, imported, f'id="{second.shape_id}"', f'id="{first.shape_id}"')
+    presentation = Presentation(imported)
+    held_slide = presentation.slides[0]
+    held_first, held_second = held_slide.shapes[0], held_slide.shapes[1]
+    assert held_first.shape_id == held_second.shape_id
+    assert (held_first.text, held_second.text) == ("first", "second")
+    before = presentation.to_bytes()
+    with pytest.raises(ValueError, match="ambiguous shape id"):
+        held_slide.shapes.move(0, 1)
+    assert presentation.to_bytes() == before
+    assert (held_first.text, held_second.text) == ("first", "second")
+    with pytest.raises(ValueError, match="ambiguous shape id"):
+        held_slide.shapes.add_textbox(0, 0, 100, 100)
+    assert presentation.to_bytes() == before
+    assert (held_first.text, held_second.text) == ("first", "second")
+
+
+@pytest.mark.parametrize("axis", ["rows", "columns"])
+@pytest.mark.parametrize("reorder", ["shape", "slide"])
+def test_fx206_held_table_collection_uses_current_parent_identity(axis, reorder, tmp_path):
+    from rpptx import Presentation, StaleElementError
+
+    presentation = Presentation()
+    first = presentation.slides.add_slide(presentation.slide_layouts[6])
+    a = first.shapes.add_table(2, 2, 0, 0, 1000, 1000).table
+    second = first if reorder == "shape" else presentation.slides.add_slide(presentation.slide_layouts[6])
+    b = second.shapes.add_table(2, 2, 0, 0, 1000, 1000).table
+    a.cell(0, 0).text = "A"
+    b.cell(0, 0).text = "B"
+    held_collection = getattr(a, axis)
+    held_cell = a.cell(0, 0)
+    if reorder == "shape":
+        first.shapes.move(0, 1)
+        fresh_a = presentation.slides[0].shapes[1].table
+        fresh_b = presentation.slides[0].shapes[0].table
+    else:
+        presentation.slides.move(0, 1)
+        fresh_a = presentation.slides[1].shapes[0].table
+        fresh_b = presentation.slides[0].shapes[0].table
+    before = presentation.to_bytes()
+    with pytest.raises(ValueError, match="not in this collection"):
+        held_collection.remove(getattr(fresh_b, axis)[1])
+    assert presentation.to_bytes() == before
+    assert held_cell.text == "A"
+    assert len(getattr(a, axis)) == len(getattr(b, axis)) == 2
+    held_collection.remove(getattr(fresh_a, axis)[1])
+    assert len(getattr(a, axis)) == 1
+    assert len(getattr(b, axis)) == 2
+    assert a.cell(0, 0).text == "A"
+    assert b.cell(0, 0).text == "B"
+    with pytest.raises(StaleElementError, match="First invalidated by .*Collection.remove "):
+        _ = held_cell.text
+    target = tmp_path / f"parent-{axis}-{reorder}.pptx"
+    presentation.save(target)
+    reopened = Presentation(target)
+    actual_a = reopened.slides[0 if reorder == "shape" else 1].shapes[1 if reorder == "shape" else 0].table
+    actual_b = reopened.slides[0].shapes[0].table
+    assert len(getattr(actual_a, axis)) == 1
+    assert len(getattr(actual_b, axis)) == 2
+    assert (actual_a.cell(0, 0).text, actual_b.cell(0, 0).text) == ("A", "B")
+
+
+def test_fx206_held_hyperlink_resolves_current_slide_and_prunes_only_its_relationships(tmp_path):
+    import xml.etree.ElementTree as ET
+    from rpptx import Presentation, RpptxError
+
+    presentation = Presentation()
+    slides = [presentation.slides.add_slide(presentation.slide_layouts[6]) for _ in range(2)]
+    shapes = [slide.shapes.add_textbox(0, 0, 1000, 1000) for slide in slides]
+    for shape, marker in zip(shapes, ("A", "B")):
+        shape.text = marker
+    links = [shape.text_frame.paragraphs[0].runs[0].hyperlink for shape in shapes]
+    links[0].address = "https://example.test/a"
+    links[1].address = "https://example.test/b"
+    assert shapes[0].shape_id == shapes[1].shape_id
+    parts = _package_parts(presentation.to_bytes())
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    rel_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    ids = [ET.fromstring(parts[f"ppt/slides/slide{i}.xml"]).find(".//a:hlinkClick", ns).attrib[rel_attr] for i in (1, 2)]
+    assert ids[0] == ids[1]
+    presentation.slides.move(0, 1)
+    assert (links[0].address, links[1].address) == ("https://example.test/a", "https://example.test/b")
+    links[0].address = "https://example.test/a2"
+    assert links[1].address == "https://example.test/b"
+    parts = _package_parts(presentation.to_bytes())
+    assert b"https://example.test/a2" in parts["ppt/slides/_rels/slide1.xml.rels"]
+    assert b'Target="https://example.test/a"' not in parts["ppt/slides/_rels/slide1.xml.rels"]
+    assert b"https://example.test/b" in parts["ppt/slides/_rels/slide2.xml.rels"]
+    inserted = presentation.slides.import_slide(slides[1], index=0)
+    assert inserted.shapes[0].text == "B"
+    assert (links[0].address, links[1].address) == ("https://example.test/a2", "https://example.test/b")
+    before = presentation.to_bytes()
+    with pytest.raises(RpptxError, match="control characters"):
+        links[0].address = "https://example.test/\ninvalid"
+    assert presentation.to_bytes() == before
+    links[0].address = None
+    assert links[0].address is None
+    assert links[1].address == "https://example.test/b"
+    assert inserted.shapes[0].text_frame.paragraphs[0].runs[0].hyperlink.address == "https://example.test/b"
+    parts = _package_parts(presentation.to_bytes())
+    assert b"https://example.test/a2" not in parts["ppt/slides/_rels/slide1.xml.rels"]
+    assert b"https://example.test/b" in parts["ppt/slides/_rels/slide2.xml.rels"]
+    target = tmp_path / "moved-links.pptx"
+    presentation.save(target)
+    reopened = Presentation(target)
+    assert [(slide.shapes[0].text, slide.shapes[0].text_frame.paragraphs[0].runs[0].hyperlink.address) for slide in reopened.slides] == [("B", "https://example.test/b"), ("B", "https://example.test/b"), ("A", None)]
+
+
+@pytest.mark.parametrize("foreign_state", ["live", "grid", "removed"])
+def test_fx206_merge_rejects_foreign_identity_before_foreign_staleness(foreign_state):
+    from rpptx import Presentation, StaleElementError
+
+    receiver = Presentation()
+    slide = receiver.slides.add_slide(receiver.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, 0, 0, 1000, 1000).table
+    cell = table.cell(0, 0)
+    cell.text = "receiver"
+    run = cell.text_frame.paragraphs[0].runs[0]
+    foreign = Presentation()
+    foreign_slide = foreign.slides.add_slide(foreign.slide_layouts[6])
+    foreign_shape = foreign_slide.shapes.add_table(2, 2, 0, 0, 1000, 1000)
+    foreign_table = foreign_shape.table
+    foreign_cell = foreign_table.cell(0, 0)
+    foreign_cell.text = "foreign"
+    if foreign_state == "grid":
+        foreign_table.rows.add_row()
+    elif foreign_state == "removed":
+        foreign_slide.shapes.remove(foreign_shape)
+    if foreign_state == "live":
+        assert foreign_cell.text == "foreign"
+    else:
+        with pytest.raises(StaleElementError):
+            _ = foreign_cell.text
+    before = receiver.to_bytes()
+    with pytest.raises(ValueError, match="other_cell from different table"):
+        cell.merge(foreign_cell)
+    assert receiver.to_bytes() == before
+    assert cell.text == run.text == "receiver"
+    assert len(table.rows) == len(table.columns) == 2
+
+# Prospective additions to the existing installed-test carrier. Not executed.
+def test_fx206_group_ungroup_preserves_held_children_and_retires_only_group(tmp_path):
+    from rpptx import Presentation, StaleElementError
+    p=Presentation();slide=p.slides.add_slide(p.slide_layouts[6])
+    a=slide.shapes.add_textbox(100,200,1000,800);a.text="A"
+    b=slide.shapes.add_textbox(1500,900,700,600);b.text="B"
+    paragraph=a.text_frame.paragraphs[0];run=paragraph.runs[0]
+    ids=(a.shape_id,b.shape_id)
+    group=slide.shapes.group([a,b])
+    assert [s.shape_id for s in group.shapes]==list(ids)
+    assert (a.text,b.text,run.text)==("A","B","A")
+    assert (a.left,a.top,b.left,b.top)==(100,200,1500,900)
+    returned=group.ungroup()
+    assert [s.shape_id for s in returned]==list(ids)
+    assert (a.text,b.text,run.text)==("A","B","A")
+    with __import__('pytest').raises(StaleElementError,match="First invalidated by Shape.ungroup "):
+        _=group.shape_id
+    target=tmp_path/'grouped.pptx';p.save(target)
+    actual=Presentation(target)
+    assert [s.shape_id for s in actual.slides[0].shapes]==list(ids)
+    assert [s.text for s in actual.slides[0].shapes]==["A","B"]
+
+
+def test_fx206_noncontiguous_group_and_foreign_selection_are_atomic():
+    import pytest
+    from rpptx import Presentation, RpptxError
+    p=Presentation();slide=p.slides.add_slide(p.slide_layouts[6])
+    shapes=[slide.shapes.add_textbox(x,0,80,40) for x in [0,100,200]]
+    foreign=Presentation();other=foreign.slides.add_slide(foreign.slide_layouts[6]).shapes.add_textbox(0,0,80,40)
+    before=p.to_bytes()
+    with pytest.raises(RpptxError, match=r"^group shapes failed: group selection must be contiguous$") as failure:
+        slide.shapes.group([shapes[0],shapes[2]])
+    assert type(failure.value) is RpptxError
+    assert p.to_bytes()==before
+    with pytest.raises(ValueError, match=r"^shape owner is not in this presentation collection$"):
+        slide.shapes.align([shapes[0],other],"left")
+    assert p.to_bytes()==before
+    assert [s.left for s in shapes]==[0,100,200]
+
+
+def test_fx206_signed_distribution_keeps_handles_and_noop_is_exact():
+    from rpptx import Presentation
+    p=Presentation();slide=p.slides.add_slide(p.slide_layouts[6])
+    shapes=[slide.shapes.add_textbox(x,0,w,20) for x,w in [(0,100),(50,120),(80,100)]]
+    for s in shapes:s.text="live"
+    held=[s.text_frame.paragraphs[0].runs[0] for s in shapes]
+    slide.shapes.distribute(shapes,"horizontal")
+    assert [s.left for s in shapes]==[0,30,80]
+    assert [r.text for r in held]==["live"]*3
+    before=p.to_bytes();slide.shapes.distribute(shapes,"horizontal")
+    assert p.to_bytes()==before
+    assert [r.text for r in held]==["live"]*3
+
+# Source-only prospective installed controls, no imports or execution here.
+def test_fx206_glue_relocates_with_grouped_target_and_detaches_only_deleted_end(tmp_path):
+    from rpptx import Presentation
+    from rpptx.enum.shapes import MSO_CONNECTOR_TYPE
+    p=Presentation();slide=p.slides.add_slide(p.slide_layouts[6])
+    target=slide.shapes.add_shape('rect',100,200,100,80)
+    sibling=slide.shapes.add_textbox(1000,1000,100,80)
+    end=slide.shapes.add_shape('rect',900,700,100,80)
+    c=slide.shapes.add_connector(MSO_CONNECTOR_TYPE.STRAIGHT,150,200,950,700)
+    c.begin_connect(target,0);c.end_connect(end,0)
+    held=target.shape_id;other=end.shape_id
+    group=slide.shapes.group([target,sibling])
+    assert target.shape_id==held
+    target.left=300;target.top=400
+    assert (c.begin_x,c.begin_y,c.end_x,c.end_y)==(350,400,950,700)
+    before=p.to_bytes();c.begin_connect(target,0);assert p.to_bytes()==before
+    c.begin_x=123
+    assert (c.begin_x,c.begin_y,c.end_x,c.end_y)==(123,400,950,700)
+    assert b'stCxn' not in c.xml and b'endCxn' in c.xml
+    slide.shapes.remove(group)
+    assert (c.begin_x,c.begin_y,c.end_x,c.end_y)==(123,400,950,700)
+    assert end.shape_id==other
+    path=tmp_path/'connectors.pptx';p.save(path);q=Presentation(path)
+    saved=q.slides[0].shapes[-1]
+    assert (saved.begin_x,saved.begin_y,saved.end_x,saved.end_y)==(123,400,950,700)
+    assert b'stCxn' not in saved.xml and b'endCxn' in saved.xml
+
+
+def test_fx206_foreign_and_cross_slide_glue_refusal_precedes_read_and_is_atomic():
+    import pytest
+    from rpptx import Presentation,StaleElementError
+    from rpptx.enum.shapes import MSO_CONNECTOR_TYPE
+    p=Presentation();s=p.slides.add_slide(p.slide_layouts[6]);t=p.slides.add_slide(p.slide_layouts[6])
+    c=s.shapes.add_connector(MSO_CONNECTOR_TYPE.STRAIGHT,0,0,100,100)
+    other=t.shapes.add_shape('rect',0,0,100,100)
+    f=Presentation();fs=f.slides.add_slide(f.slide_layouts[6]);foreign=fs.shapes.add_shape('rect',0,0,100,100);fs.shapes.remove(foreign)
+    before=p.to_bytes()
+    with pytest.raises(ValueError,match='another presentation'):c.begin_connect(foreign,0)
+    assert p.to_bytes()==before
+    with pytest.raises(ValueError,match='another slide'):c.end_connect(other,0)
+    assert p.to_bytes()==before
+    local=s.shapes.add_shape('rect',200,300,100,80);s.shapes.remove(local);before=p.to_bytes()
+    with pytest.raises(StaleElementError):c.begin_connect(local,0)
+    assert p.to_bytes()==before
+
+
+def test_fx206_failed_site_and_borrowed_table_resize_preserve_all_owners():
+    import pytest
+    from rpptx import Presentation, RpptxError
+    from rpptx.enum.shapes import MSO_CONNECTOR_TYPE
+    p=Presentation();s=p.slides.add_slide(p.slide_layouts[6]);target=s.shapes.add_shape('rect',100,200,100,80)
+    target.text='kept';run=target.text_frame.paragraphs[0].runs[0]
+    c=s.shapes.add_connector(MSO_CONNECTOR_TYPE.STRAIGHT,0,0,100,100);before=p.to_bytes()
+    with pytest.raises(
+        RpptxError,
+        match=rf"^connect connector failed: shape id {target.shape_id} has [0-9]+ connection sites, 0 to [0-9]+, not 99$",
+    ) as failure:
+        c.begin_connect(target,99)
+    assert type(failure.value) is RpptxError
+    assert p.to_bytes()==before and run.text=='kept'
+    table=s.shapes.add_table(1,1,1000,2000,300,400);cell=table.table.cell(0,0);cell.text='table'
+    table.table.columns[0].width=500
+    assert table.width==500 and cell.text=='table'
+
+
+def test_fx206_arrangement_slide_reference_and_group_owner_relocation_are_atomic():
+    import pytest
+    from rpptx import Presentation
+    p=Presentation();s=p.slides.add_slide(p.slide_layouts[6])
+    a=s.shapes.add_textbox(100,200,100,80);b=s.shapes.add_textbox(500,700,100,80)
+    a.text='A';held=a.text_frame.paragraphs[0].runs[0]
+    group=s.shapes.group([a,b]);before=p.to_bytes()
+    with pytest.raises(ValueError):s.shapes.align([group,a],'left')
+    assert p.to_bytes()==before and held.text=='A'
+    group.shapes.align([a,b],'left')
+    assert a.left==b.left and held.text=='A'
+    children=group.ungroup()
+    s.shapes.align([a],'center','slide')
+    assert a.left==(p.slide_width-a.width)//2 and children[0].shape_id==a.shape_id
+    s.shapes.distribute([a],'horizontal','slide')
+    assert a.left==(p.slide_width-a.width)//2 and held.text=='A'
+
+
+# Imported fixtures use real generated packages and legal typed group shells.
+# These controls are prospective. No Python import/test has been run in preparation.
+def _fx206_replace_slide_source(deck_bytes, rewrite):
+    import io
+    import zipfile
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(deck_bytes)) as original:
+        with zipfile.ZipFile(output, "w") as patched:
+            for item in original.infolist():
+                body = original.read(item.filename)
+                if item.filename == "ppt/slides/slide1.xml":
+                    body = rewrite(body.decode("utf-8")).encode("utf-8")
+                patched.writestr(item, body)
+    return output.getvalue()
+
+
+def _fx206_actual_slide_shapes(xml, count):
+    import re
+    members = re.findall(r"<p:sp(?:\s[^>]*)?>.*?</p:sp>", xml, re.DOTALL)
+    assert len(members) == count, "generated fixture changed its source shape inventory"
+    return members
+
+
+def _fx206_group_source(members, *, id=50, scale=10000, prefix="", extra=""):
+    return (
+        f'<p:grpSp{prefix}><p:nvGrpSpPr><p:cNvPr id="{id}"></p:cNvPr>'
+        '<p:cNvGrpSpPr></p:cNvGrpSpPr><p:nvPr></p:nvPr></p:nvGrpSpPr>'
+        f'<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{scale}" cy="10000"/>'
+        '<a:chOff x="0" y="0"/><a:chExt cx="10000" cy="10000"/>'
+        f'</a:xfrm></p:grpSpPr>{members}{extra}</p:grpSp>'
+    )
+
+
+def test_fx206_imported_interleaved_raw_member_group_roundtrip_keeps_order_and_handles(tmp_path):
+    import io
+    import zipfile
+    from rpptx import Presentation
+    p = Presentation()
+    slide = p.slides.add_slide(p.slide_layouts[6])
+    slide.shapes.add_textbox(100, 200, 100, 80).text = "A"
+    slide.shapes.add_textbox(500, 200, 100, 80).text = "B"
+    raw = '<f:payload keep="&#65;"><f:value>  unchanged  </f:value></f:payload>'
+    def insert_between(xml):
+        second = _fx206_actual_slide_shapes(xml, 2)[1]
+        return xml.replace('<p:sld ', '<p:sld xmlns:f="urn:outer" ', 1).replace(second, raw + second, 1)
+    patched = _fx206_replace_slide_source(p.to_bytes(), insert_between)
+    q = Presentation.from_bytes(patched)
+    a, b = q.slides[0].shapes[0], q.slides[0].shapes[1]
+    identities = [a.shape_id, b.shape_id]
+    group = q.slides[0].shapes.group([a, b])
+    assert [s.shape_id for s in group.shapes] == identities
+    assert (a.text, b.text) == ("A", "B")
+    source = group.xml.decode()
+    assert source.index('>A<') < source.index(raw) < source.index('>B<')
+    path = tmp_path / "raw-grouped.pptx"
+    q.save(path)
+    r = Presentation(path)
+    r.slides[0].shapes[0].ungroup()
+    target = tmp_path / "raw-ungrouped.pptx"
+    r.save(target)
+    reopened = Presentation(target)
+    assert [s.shape_id for s in reopened.slides[0].shapes] == identities
+    assert [s.text for s in reopened.slides[0].shapes] == ["A", "B"]
+    with zipfile.ZipFile(target) as archive:
+        source = archive.read("ppt/slides/slide1.xml").decode()
+    assert source.index('>A<') < source.index(raw) < source.index('>B<')
+
+
+def test_fx206_imported_identity_raw_ungroup_and_nested_namespace_roundtrip(tmp_path):
+    import io
+    import zipfile
+    import xml.etree.ElementTree as ET
+    from rpptx import Presentation, StaleElementError
+    for shadow in [False, True]:
+        p = Presentation()
+        slide = p.slides.add_slide(p.slide_layouts[6])
+        member = slide.shapes.add_textbox(100, 200, 100, 80)
+        member.text = "retained"
+        def insert_outer(xml):
+            shape = _fx206_actual_slide_shapes(xml, 1)[0]
+            inner_prefix = (' xmlns:f="urn:inner"' if shadow else '') + ' f:keep="value"'
+            inner = _fx206_group_source(shape + '<f:payload keep="&#65;"/>', id=51, prefix=inner_prefix)
+            body = '<f:before/>' + inner + '<f:after>  unchanged  </f:after>'
+            outer = _fx206_group_source(body, prefix=' xmlns:f="urn:ancestor"')
+            return xml.replace('<p:sld ', '<p:sld xmlns:f="urn:outer" ', 1).replace(shape, outer, 1)
+        patched = _fx206_replace_slide_source(p.to_bytes(), insert_outer)
+        q = Presentation.from_bytes(patched)
+        outer_shape = q.slides[0].shapes[0]
+        outer_children = outer_shape.shapes
+        nested = outer_shape.shapes[0]
+        held = nested.shapes[0]
+        outer_shape.ungroup()
+        assert nested.shape_id == 51 and held.text == "retained"
+        for retired in (lambda: outer_shape.xml, lambda: len(outer_children)):
+            with pytest.raises(StaleElementError, match=r"First invalidated by Shape.ungroup "):
+                retired()
+        target = tmp_path / f"promoted-{shadow}.pptx"
+        q.save(target)
+        r = Presentation(target)
+        assert r.slides[0].shapes[0].shapes[0].text == "retained"
+        with zipfile.ZipFile(target) as archive:
+            xml = archive.read("ppt/slides/slide1.xml")
+        root = ET.fromstring(xml)
+        ns = "urn:inner" if shadow else "urn:ancestor"
+        nested_root = root.find('.//{http://schemas.openxmlformats.org/presentationml/2006/main}grpSp')
+        assert nested_root.attrib[f"{{{ns}}}keep"] == "value"
+        payload = root.find(f".//{{{ns}}}payload")
+        assert payload is not None and payload.attrib["keep"] == "A"
+        tree = root.find('.//{http://schemas.openxmlformats.org/presentationml/2006/main}spTree')
+        assert [child.tag for child in list(tree)[2:]] == [
+            "{urn:ancestor}before",
+            "{http://schemas.openxmlformats.org/presentationml/2006/main}grpSp",
+            "{urn:ancestor}after",
+        ]
+        assert root.find('.//{urn:ancestor}after').text == "  unchanged  "
+        nested_children = nested.shapes
+        held_paragraph = held.text_frame.paragraphs[0]
+        q.slides[0].shapes.remove(nested)
+        for retired in (lambda: nested.xml, lambda: len(nested_children),
+                        lambda: held.text, lambda: held_paragraph.text):
+            with pytest.raises(StaleElementError, match=r"First invalidated by ShapeCollection.remove "):
+                retired()
+        remaining = _package_parts(q.to_bytes())["ppt/slides/slide1.xml"]
+        assert b'<f:before xmlns:f="urn:ancestor"/>' in remaining
+        assert b'<f:after xmlns:f="urn:ancestor">  unchanged  </f:after>' in remaining
+        remaining_tree = ET.fromstring(remaining).find(
+            './/{http://schemas.openxmlformats.org/presentationml/2006/main}spTree'
+        )
+        assert [child.tag for child in list(remaining_tree)[2:]] == [
+            "{urn:ancestor}before", "{urn:ancestor}after",
+        ]
+
+
+def test_fx206_imported_opaque_composition_and_group_owner_refusals_are_atomic():
+    import io
+    import pytest
+    from rpptx import Presentation, RpptxError
+    for scale, raw, extra in [
+        (20000, '<f:payload/>', ''),
+        (10000, '', '<p:extLst><p:ext uri="unknown"><f:payload keep="&#65;"/></p:ext></p:extLst>'),
+    ]:
+        p = Presentation()
+        slide = p.slides.add_slide(p.slide_layouts[6])
+        member = slide.shapes.add_textbox(100, 200, 100, 80)
+        member.text = "kept"
+        def insert_group(xml):
+            shape = _fx206_actual_slide_shapes(xml, 1)[0]
+            group_source = _fx206_group_source(shape + raw, scale=scale, extra=extra)
+            return xml.replace('<p:sld ', '<p:sld xmlns:f="urn:outer" ', 1).replace(shape, group_source, 1)
+        patched = _fx206_replace_slide_source(p.to_bytes(), insert_group)
+        q = Presentation.from_bytes(patched)
+        group = q.slides[0].shapes[0]
+        held = group.shapes[0].text_frame.paragraphs[0].runs[0]
+        before = q.to_bytes()
+        with pytest.raises(RpptxError, match="unmodeled member|group-owned"):
+            group.ungroup()
+        assert q.to_bytes() == before
+        assert group.shape_id == 50 and held.text == "kept"
+
+
+@pytest.mark.parametrize("owner_kind", ["run", "paragraph-default", "table-cell"])
+def test_fx206_highlight_live_authoring_noop_atomic_rgb_and_reopen(tmp_path, owner_kind):
+    import rpptx
+
+    presentation = _textbox_presentation(rpptx)
+    owner = presentation.slides[0].shapes[0].text_frame.paragraphs[0]
+    if owner_kind == "table-cell":
+        table = presentation.slides[0].shapes.add_table(1, 1, 0, 0, rpptx.Inches(4), rpptx.Inches(2)).table
+        table.cell(0, 0).text = "hello"
+        owner = table.cell(0, 0).text_frame.paragraphs[0]
+    font = owner.font if owner_kind == "paragraph-default" else owner.runs[0].font
+    def body_xml(path):
+        with zipfile.ZipFile(path) as archive:
+            return archive.read("ppt/slides/slide1.xml").decode()
+    first = tmp_path / "highlight-first.pptx"
+    second = tmp_path / "highlight-second.pptx"
+    presentation.save(first)
+    before = body_xml(first)
+    live = font.highlight
+    assert live.rgb is None
+    font.highlight = None
+    presentation.save(second)
+    assert body_xml(second) == before
+    font.highlight = "12AB34"
+    assert str(live.rgb) == "12AB34"
+    assert owner.text == "hello"
+    presentation.save(first)
+    written = body_xml(first)
+    import xml.etree.ElementTree as ET
+    highlights = ET.fromstring(written).findall(".//{http://schemas.openxmlformats.org/drawingml/2006/main}highlight")
+    assert len(highlights) == 1
+    colour = highlights[0].find("{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr")
+    assert colour is not None and colour.attrib["val"] == "12AB34"
+    assert 'val="12AB34"' in written
+    for malformed in ("GG0000", (256, 0, 0), ("1", 0, 0)):
+        with pytest.raises((TypeError, ValueError)):
+            font.highlight = malformed
+        presentation.save(second)
+        assert body_xml(second) == written
+        assert str(live.rgb) == "12AB34"
+    # Legacy integer triples retain Python bool-as-integer channel compatibility.
+    font.highlight = (True, False, True)
+    assert str(live.rgb) == "010001"
+    font.highlight = "12AB34"
+    presentation.save(second)
+    assert body_xml(second) == written
+    reopened = rpptx.Presentation(first)
+    fresh_owner = (reopened.slides[0].shapes[1].table.cell(0, 0).text_frame.paragraphs[0]
+                   if owner_kind == "table-cell" else reopened.slides[0].shapes[0].text_frame.paragraphs[0])
+    fresh = fresh_owner.font if owner_kind == "paragraph-default" else fresh_owner.runs[0].font
+    assert str(fresh.highlight.rgb) == "12AB34"
+    reopened.save(second)
+    assert body_xml(second) == written
+    font.highlight = None
+    assert live.rgb is None
+    presentation.save(second)
+    assert "<a:highlight" not in body_xml(second)
+    assert owner.text == "hello"
+
+
+def test_fx206_highlight_alpha_foreign_payload_theme_and_atomic_clear(tmp_path):
+    import rpptx
+
+    source = tmp_path / "highlight-source.pptx"
+    imported = tmp_path / "highlight-import.pptx"
+    first = tmp_path / "highlight-output.pptx"
+    second = tmp_path / "highlight-repeat.pptx"
+    _textbox_presentation(rpptx).save(source)
+    _replace_in_slide(source, imported, "<a:r><a:t>hello</a:t></a:r>",
+        '<a:r><a:rPr><a:highlight xmlns:x="urn:fx206" x:owner="opaque"><a:srgbClr val="FF0000">'
+        '<a:alpha val="50000"/><x:alpha val="123"/></a:srgbClr><!--keep--></a:highlight></a:rPr><a:t>hello</a:t></a:r>')
+    presentation = rpptx.Presentation(imported)
+    owner = presentation.slides[0].shapes[0].text_frame.paragraphs[0]
+    font = owner.runs[0].font
+    assert str(font.highlight.rgb) == "FF0000"
+    presentation.save(first)
+    before = _text_body_xml(first)
+    font.highlight = "00FF00"
+    presentation.save(first)
+    written = _text_body_xml(first)
+    assert 'val="00FF00"' in written and '<a:alpha val="50000"/>' in written
+    assert '<x:alpha val="123"/>' in written and 'x:owner="opaque"' in written and '<!--keep-->' in written
+    with pytest.raises(ValueError):
+        font.highlight = None
+    presentation.save(second)
+    assert _text_body_xml(second) == written
+    assert owner.text == "hello"
+    reopened = rpptx.Presentation(first)
+    reopened.save(second)
+    assert _text_body_xml(second) == written
+    # A fresh canonical owner exercises existing X197 theme/brightness authoring.
+    fresh = _textbox_presentation(rpptx)
+    live = fresh.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.highlight
+    live.theme_color = "accent1"
+    live.brightness = 0.25
+    fresh.save(second)
+    themed = _text_body_xml(second)
+    assert 'schemeClr val="accent1"' in themed
+    assert 'lumMod val="75000"' in themed and 'lumOff val="25000"' in themed
+    assert before != written
+
+
+@pytest.mark.parametrize("transform", [
+    '<a:alpha val="50000" x:keep="&#65;"/>',
+    '<a:alpha val="50000" x:keep="&#65;"> </a:alpha>',
+])
+def test_fx206_highlight_transform_attributes_refuse_destructive_public_edits(tmp_path, transform):
+    import rpptx
+
+    source = tmp_path / "transform-source.pptx"
+    imported = tmp_path / "transform-import.pptx"
+    saved = tmp_path / "transform-saved.pptx"
+    repeat = tmp_path / "transform-repeat.pptx"
+    _textbox_presentation(rpptx).save(source)
+    _replace_in_slide(source, imported, "<a:r><a:t>hello</a:t></a:r>",
+        '<a:r><a:rPr><a:highlight xmlns:x="urn:fx206"><a:srgbClr val="FF0000">'
+        + transform + '</a:srgbClr></a:highlight></a:rPr><a:t>hello</a:t></a:r>')
+    presentation = rpptx.Presentation(imported)
+    owner = presentation.slides[0].shapes[0].text_frame.paragraphs[0]
+    font = owner.runs[0].font
+    live = font.highlight
+    assert str(live.rgb) == "FF0000"
+    presentation.save(saved)
+    before = _text_body_xml(saved)
+    assert transform in before
+    for operation in ("rgb", "theme", "brightness", "clear"):
+        with pytest.raises(ValueError, match="opaque transform attributes"):
+            if operation == "rgb":
+                font.highlight = "00FF00"
+            elif operation == "theme":
+                live.theme_color = "accent1"
+            elif operation == "brightness":
+                live.brightness = 0.25
+            else:
+                font.highlight = None
+        presentation.save(repeat)
+        assert _text_body_xml(repeat) == before
+        assert str(live.rgb) == "FF0000" and owner.text == "hello"
+    reopened = rpptx.Presentation(saved)
+    fresh = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.highlight
+    assert str(fresh.rgb) == "FF0000"
+    reopened.save(repeat)
+    assert _text_body_xml(repeat) == before
+
+def _fx195_checksum(data):
+    padded = data + b'\x00' * (-len(data) % 4)
+    return sum(struct.unpack('>' + str(len(padded) // 4) + 'I', padded)) & 4294967295
+
+def _fx195_renamed_font(source, family):
+    data = bytearray(source)
+    count = struct.unpack_from('>H', data, 4)[0]
+    tables = {}
+    for i in range(count):
+        entry = 12 + 16 * i
+        tag = bytes(data[entry:entry + 4])
+        offset, length = struct.unpack_from('>II', data, entry + 8)
+        assert offset + length <= len(data)
+        tables[tag] = (entry, offset, length)
+    _, off, length = tables[b'name']
+    table = data[off:off + length]
+    _, records, storage = struct.unpack_from('>HHH', table, 0)
+    changes = 0
+    for i in range(records):
+        platform, encoding, language, ident, size, offset = struct.unpack_from('>HHHHHH', table, 6 + 12 * i)
+        start = storage + offset
+        assert start + size <= len(table)
+        if platform not in (0, 1, 3):
+            continue
+        codec = 'mac_roman' if platform == 1 else 'utf-16-be'
+        value = bytes(table[start:start + size]).decode(codec)
+        edited = value.replace('Carlito', family).replace('Caladea', family)
+        if edited != value:
+            encoded = edited.encode(codec)
+            assert len(encoded) == size
+            table[start:start + size] = encoded
+            changes += 1
+    assert changes > 0
+    data[off:off + length] = table
+    _, head, headlen = tables[b'head']
+    assert headlen >= 12
+    data[head + 8:head + 12] = b'\x00' * 4
+    for tag, (entry, offset, length) in tables.items():
+        struct.pack_into('>I', data, entry + 4, _fx195_checksum(bytes(data[offset:offset + length])))
+    struct.pack_into('>I', data, head + 8, 2981146554 - _fx195_checksum(bytes(data)) & 4294967295)
+    assert _fx195_checksum(bytes(data)) == 2981146554
+    for tag, (entry, offset, length) in tables.items():
+        if tag not in (b'name', b'head'):
+            assert data[offset:offset + length] == source[offset:offset + length]
+    assert family.encode('utf-16-be') in table
+    return bytes(data)
+
+def _fx195_font_inputs():
+    from pathlib import Path
+    directory = Path(__file__).resolve().parents[2] / 'oxml-layout' / 'fonts'
+    family = 'FX195CX'
+    first = _fx195_renamed_font((directory / 'Carlito-Regular.ttf').read_bytes(), family)
+    second = _fx195_renamed_font((directory / 'Caladea-Regular.ttf').read_bytes(), family)
+    assert first != second
+    return (family, first, second)
+
+def _fx195_presentation(family):
+    import rpptx as module
+    import xml.etree.ElementTree as ET
+    name = family
+    obj = module.Presentation()
+    slide = obj.slides.add_slide(obj.slide_layouts[6])
+    shape = slide.shapes.add_textbox(914400, 914400, 5486400, 914400)
+    shape.text = 'WWWW iiiii caller FX195 controlled geometry'
+    run = obj.slides[0].shapes[0].text_frame.paragraphs[0].runs[0]
+    run.font.name = name
+    obj.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.size = 20 * 12700
+    obj.slides[0].notes_text = 'FX195 NOTES caller controlled geometry'
+    raw = obj.to_bytes()
+    parts = {}
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        parts = {n: z.read(n) for n in z.namelist()}
+    notes = [n for n in parts if re.fullmatch('ppt/notesSlides/notesSlide\\d+\\.xml', n)]
+    assert len(notes) == 1
+    ns = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    root = ET.fromstring(parts[notes[0]])
+    edited = 0
+    for r in root.iter(ns + 'r'):
+        text = r.find(ns + 't')
+        if text is None or 'FX195 NOTES' not in (text.text or ''):
+            continue
+        prop = r.find(ns + 'rPr')
+        if prop is None:
+            prop = ET.Element(ns + 'rPr')
+            r.insert(0, prop)
+        latin = prop.find(ns + 'latin')
+        if latin is None:
+            latin = ET.SubElement(prop, ns + 'latin')
+        latin.set('typeface', name)
+        edited += 1
+    assert edited == 1
+    parts[notes[0]] = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as z:
+        for n, b in parts.items():
+            z.writestr(n, b)
+    obj = module.Presentation.from_bytes(buf.getvalue())
+    assert 'FX195 NOTES' in obj.slides[0].notes_text
+    assert name.encode() in parts[notes[0]]
+    assert obj.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.name == name
+    return obj
+
+@pytest.mark.parametrize('method', ['to_pdf', 'render_slide_to_png', 'render_all_slides', 'text_layout', 'to_notes_pdf', 'render_all_notes'])
+def test_fx195_installed_ppt_caller_selection_and_ordered_inputs(method, tmp_path):
+    family, first, second = _fx195_font_inputs()
+    presentation = _fx195_presentation(family)
+    before = presentation.to_bytes()
+
+    def invoke(kwargs):
+        if method == 'render_slide_to_png':
+            return presentation.render_slide_to_png(0, dpi=72, **kwargs)
+        if method == 'render_all_slides':
+            return presentation.render_all_slides(dpi=72, **kwargs)
+        if method == 'render_all_notes':
+            return presentation.render_all_notes(dpi=72, **kwargs)
+        return getattr(presentation, method)(**kwargs)
+    first_args, second_args = ({'fonts': [(family, first)]}, {'fonts': [(family, second)]})
+    reference, alternative = (invoke(first_args), invoke(second_args))
+    assert reference != alternative, f'{method} must use actual physical caller face in slide/notes paint or metrics'
+    if method in ('to_pdf', 'to_notes_pdf'):
+        assert b'FX195CX' in reference and reference.startswith(b'%PDF')
+    if method == 'text_layout':
+        assert reference and reference[0].lines
+        assert reference[0].lines[0].bounds.width != alternative[0].lines[0].bounds.width
+    first_dir, second_dir, empty = (tmp_path / 'first', tmp_path / 'second', tmp_path / 'empty')
+    for directory in (first_dir, second_dir, empty):
+        directory.mkdir()
+    (first_dir / (family + '.ttf')).write_bytes(first)
+    (second_dir / (family + '.ttf')).write_bytes(second)
+    assert invoke({'font_dir': first_dir}) == reference
+    assert invoke({'font_dirs': [second_dir, first_dir]}) == reference
+    assert invoke({'font_dirs': [first_dir, second_dir]}) == alternative
+    assert invoke({'font_dirs': [second_dir], **first_args}) == reference
+    assert invoke(first_args) == reference
+    ordinary = invoke({})
+    assert invoke({'fonts': []}) == ordinary
+    assert invoke({'font_dir': empty}) == ordinary
+    assert invoke({'fonts': [], 'font_dirs': [empty]}) == ordinary
+    assert invoke({'font_dirs': []}) == ordinary
+    assert invoke({'font_dir': empty}) == ordinary
+    with pytest.raises(ValueError, match='font_dir.*font_dirs'):
+        invoke({'font_dir': first_dir, 'font_dirs': []})
+    with pytest.raises(TypeError, match='font_dirs'):
+        invoke({'font_dirs': str(first_dir)})
+    with pytest.raises(FileNotFoundError, match='font directory.*missing'):
+        invoke({'font_dirs': [tmp_path / 'missing']})
+    with pytest.raises(NotADirectoryError, match='font directory'):
+        invoke({'font_dirs': [first_dir / (family + '.ttf')]})
+    bad = tmp_path / 'bad'
+    bad.mkdir()
+    (bad / 'broken.ttf').write_bytes(b'not a supported font')
+    with pytest.raises(Exception, match='font file.*broken.ttf'):
+        invoke({'font_dirs': [bad]})
+    denied = tmp_path / 'denied'
+    denied.mkdir()
+    denied.chmod(0)
+    try:
+        from rpptx import RpptxError
+        with pytest.raises((PermissionError, RpptxError), match=re.escape(str(denied))) as failure:
+            invoke({'font_dirs': [denied]})
+        assert 'permission denied' in str(failure.value).lower()
+    finally:
+        denied.chmod(448)
+    assert presentation.to_bytes() == before
+
+def _fx195_four_i_ink_width(source, points):
+    tables = {}
+    for offset in range(12, 12 + struct.unpack_from('>H', source, 4)[0] * 16, 16):
+        tables[source[offset:offset + 4]] = struct.unpack_from('>II', source, offset + 8)
+    cmap, _ = tables[b'cmap']
+    glyph = None
+    for record in range(struct.unpack_from('>H', source, cmap + 2)[0]):
+        platform, encoding, relative = struct.unpack_from('>HHI', source, cmap + 4 + 8 * record)
+        subtable = cmap + relative
+        if platform not in (0, 3) or struct.unpack_from('>H', source, subtable)[0] != 4:
+            continue
+        segments = struct.unpack_from('>H', source, subtable + 6)[0] // 2
+        for segment in range(segments):
+            end = struct.unpack_from('>H', source, subtable + 14 + 2 * segment)[0]
+            start = struct.unpack_from('>H', source, subtable + 16 + 2 * segments + 2 * segment)[0]
+            if start <= ord('i') <= end:
+                delta = struct.unpack_from('>h', source, subtable + 16 + 4 * segments + 2 * segment)[0]
+                range_at = subtable + 16 + 6 * segments + 2 * segment
+                relative = struct.unpack_from('>H', source, range_at)[0]
+                glyph = ord('i') if relative == 0 else struct.unpack_from('>H', source, range_at + relative + 2 * (ord('i') - start))[0]
+                glyph = (glyph + delta) % 65536
+                break
+        if glyph is not None:
+            break
+    assert glyph is not None and glyph > 0
+    head, _ = tables[b'head']
+    units = struct.unpack_from('>H', source, head + 18)[0]
+    hhea, _ = tables[b'hhea']
+    metrics = struct.unpack_from('>H', source, hhea + 34)[0]
+    hmtx, _ = tables[b'hmtx']
+    advance = struct.unpack_from('>H', source, hmtx + 4 * min(glyph, metrics - 1))[0]
+    loca, _ = tables[b'loca']
+    if struct.unpack_from('>h', source, head + 50)[0] == 0:
+        glyph_offset = struct.unpack_from('>H', source, loca + 2 * glyph)[0] * 2
+    else:
+        glyph_offset = struct.unpack_from('>I', source, loca + 4 * glyph)[0]
+    glyf, _ = tables[b'glyf']
+    x_min = struct.unpack_from('>h', source, glyf + glyph_offset + 2)[0]
+    x_max = struct.unpack_from('>h', source, glyf + glyph_offset + 6)[0]
+    assert x_max > x_min and units > 0
+    return (3 * advance + x_max - x_min) * points / units
+
+def _fx195_painted_width(png):
+    from PIL import Image
+    image = Image.open(io.BytesIO(png)).convert('RGB')
+    mask = image.convert('L').point(lambda value: 255 if value < 200 else 0)
+    bounds = mask.getbbox()
+    assert bounds is not None, 'caller text must actually paint'
+    return bounds[2] - bounds[0]
+
+def _fx195_collection(first, second):
+    collection = bytearray(b'ttcf\x00\x01\x00\x00\x00\x00\x00\x02' + b'\x00' * 8)
+    for index, source in enumerate((first, second)):
+        offset = len(collection)
+        struct.pack_into('>I', collection, 12 + 4 * index, offset)
+        face = bytearray(source)
+        count = struct.unpack_from('>H', face, 4)[0]
+        for table in range(count):
+            at = 12 + table * 16 + 8
+            original = struct.unpack_from('>I', face, at)[0]
+            struct.pack_into('>I', face, at, original + offset)
+        collection.extend(face)
+        collection.extend(b'\x00' * (-len(collection) % 4))
+    return bytes(collection)
+
+def test_fx195_ppt_caller_png_matches_independent_font_ink_and_collection(tmp_path):
+    from pathlib import Path
+    from rpptx import Presentation
+    family, first, second = _fx195_font_inputs()
+    presentation = Presentation()
+    presentation.slides.add_slide(presentation.slide_layouts[6])
+    presentation.slides[0].shapes.add_textbox(914400, 914400, 5486400, 914400).text = 'iiii'
+    presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.name = family
+    presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.size = 36 * 12700
+    before = presentation.to_bytes()
+    paintings = []
+    for source in (first, second):
+        png = presentation.render_slide_to_png(0, dpi=72, fonts=[(family, source)])
+        assert abs(_fx195_painted_width(png) - _fx195_four_i_ink_width(source, 36)) <= 2, 'selected physical font must paint the independent metric width'
+        paintings.append(png)
+    assert paintings[0] != paintings[1]
+    ordinary = (Path(__file__).resolve().parents[2] / 'oxml-layout' / 'fonts' / 'Carlito-Regular.ttf').read_bytes()
+    directory = tmp_path / 'collection'
+    directory.mkdir()
+    (directory / 'filename-alias.ttc').write_bytes(_fx195_collection(ordinary, second))
+    assert presentation.render_slide_to_png(0, dpi=72, font_dirs=[directory]) == paintings[1]
+    assert presentation.to_bytes() == before
+
+
+
+
+def _fx195_variable_svg_geometry(svg, weight, variable):
+    import xml.etree.ElementTree as ET
+    tree = ET.fromstring(svg)
+    for node in tree.iter():
+        if not node.tag.endswith('}text'):
+            continue
+        assert 'stroke' not in node.attrib and 'transform' not in node.attrib
+        style = node.attrib.pop('style', None)
+        if variable:
+            assert style is not None and style.startswith('font-synthesis:none;font-variation-settings:')
+            selectors = dict((tag,float(value)) for tag,value in re.findall(r"'([A-Za-z0-9]{4})' ([-+0-9.]+)",style))
+            assert selectors.get('wght') == weight
+            assert set(selectors) <= {'wght','wdth'}
+            if 'wdth' in selectors: assert selectors['wdth'] == 100
+        else:
+            assert style is None
+    # Font definitions are representation differences. Actual and independent
+    # static source bytes are authenticated separately before this comparison.
+    # Keep every other element, attribute, text, position and child order.
+    for parent in tree.iter():
+        for child in list(parent):
+            if child.tag.endswith('}style'):
+                assert child.text and '@font-face{' in child.text
+                parent.remove(child)
+    return ET.tostring(tree,encoding='unicode')
+
+
+def _fx195_save_variable_svg_artifact(actual, expected, weight, directory):
+    import base64
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import xml.etree.ElementTree as ET
+    authority = json.loads((Path(os.environ['F_X195_VARIABLE_ORACLES'])/'receipt.json').read_text())
+    row = next(row for row in authority['controls'] if row['script']=='Thai' and row['weight']==weight)
+    node = next(node for node in ET.fromstring(actual).iter() if node.tag.endswith('}text') and ''.join(node.itertext())==row['text'])
+    family = node.get('font-family')
+    assert "'wght' " + str(weight) in node.get('style',''), 'selected coordinates must be emitted on this real owner'
+    sources = re.findall(r"@font-face\{font-family:'([^']+)';src:url\('data:[^;]+;base64,([^']+)'\)",actual)
+    font = next(base64.b64decode(value) for name,value in sources if name==family)
+    assert hashlib.sha256(font).hexdigest()==row['source_sha256']
+    expected_sources = re.findall(r"@font-face\{font-family:'([^']+)';src:url\('data:[^;]+;base64,([^']+)'\)",expected)
+    assert len(expected_sources)==1
+    assert hashlib.sha256(base64.b64decode(expected_sources[0][1])).hexdigest()==row['output_sha256']
+    a,e=directory/'variable-installed.svg',directory/'variable-independent-static.svg'
+    a.write_text(actual); e.write_text(expected)
+    root=ET.fromstring(actual)
+    dimensions=[float(root.get(key).removesuffix('pt')) for key in ('width','height')]
+    assert dimensions==[round(value) for value in dimensions], '72dpi companion requires integer page dimensions'
+    artifact={'case':'variable-'+str(weight),'svg':str(a),'svgSHA':hashlib.sha256(a.read_bytes()).hexdigest(),'expectedSVG':str(e),'expectedSVGSHA':hashlib.sha256(e.read_bytes()).hexdigest(),'fontFamily':family,'fontSHA':row['source_sha256'],'fontIndex':0,'oracleFont':row['output'],'oracleFontSHA':row['output_sha256'],'width':int(dimensions[0]),'height':int(dimensions[1]),'threshold':.99,'selector':"'wght' "+str(weight)}
+    # The emitted SVG remains unchanged. The serial native stage qualifies its
+    # selected-instance font resolver separately because usvg ignores CSS axes.
+    (directory/'variable-installed-svg-artifact.json').write_text(json.dumps(artifact,indent=2)+'\n')
+# Candidate additions for each existing installed test carrier, not a new module.
+# Root must bind the supplied retained-oracle directory and source receipts.
+
+def _fx195_style_oracles():
+    import hashlib
+    import json
+    from pathlib import Path
+    import os
+    directory = Path(os.environ['F_X195_VARIABLE_ORACLES'])
+    receipt = json.loads((directory / 'receipt.json').read_text())
+    assert receipt['tools']['hb-shape'] == 'hb-shape (HarfBuzz) 14.4.0'
+    rows = [row for row in receipt['controls'] if row['script'] == 'Thai']
+    assert {row['weight'] for row in rows} == {400, 700}
+    selected = {}
+    for row in rows:
+        variable = Path(row['source']).read_bytes()
+        static = Path(row['output']).read_bytes()
+        assert hashlib.sha256(variable).hexdigest() == row['source_sha256']
+        assert hashlib.sha256(static).hexdigest() == row['output_sha256']
+        assert row['source_instance_positioning_matches_static'] is True
+        assert row['source_static_svg_path_topology_matches'] is True
+        assert row['source_static_svg_path_max_coordinate_delta_font_units'] <= 0.008
+        assert sum(glyph['ax'] for glyph in row['shape']) > 0
+        selected[row['weight']] = variable, static, row['text']
+    assert selected[400][0] == selected[700][0]
+    assert selected[400][1] != selected[700][1]
+    return selected
+
+
+def _fx195_style_observation(value, method, directory, label):
+    # Full pixel canvases are compared, not registered/cropped masks that could
+    # hide changed advances, page origins, selected page order or clipping.
+    import subprocess
+    from PIL import Image
+    if method in ('to_pdf', 'to_notes_pdf'):
+        source = directory / (label + '.pdf')
+        source.write_bytes(value)
+        target = directory / label
+        result = subprocess.run(
+            [_fx195_pinned_poppler(), '-r', '72', '-png', str(source), str(target)],
+            capture_output=True, timeout=120, check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode(errors='replace')
+        images = sorted(directory.glob(label + '-*.png'), key=lambda p: int(p.stem.rsplit('-', 1)[1]))
+        assert images
+        return [(image.size, image.tobytes()) for path in images for image in [Image.open(path).convert('RGBA')]]
+    if method in ('render_page_to_png', 'render_slide_to_png'):
+        image = Image.open(io.BytesIO(value)).convert('RGBA')
+        assert image.convert('RGB').convert('L').getextrema()[0] < 200
+        return image.size, image.tobytes()
+    if method in ('render_all_pages', 'render_pages', 'render_all_slides', 'render_all_notes'):
+        assert value
+        return [_fx195_style_observation(png, 'render_page_to_png', directory, label) for png in value]
+    if method == 'render_page_to_svg':
+        # This is positioning/searchable-text evidence, not installed SVG paint.
+        # Raw caller font data can differ between the independently instanced
+        # static reference and variable source. Preserve every geometry/style
+        # attribute while ignoring only the actual embedded font data URI.
+        assert 'data:font/' in value
+        return re.sub(r'data:font/[^;]+;base64,[A-Za-z0-9+/=]+', 'FONT_BYTES', value)
+    if method in ('layout', 'layout_page'):
+        return value
+    assert method == 'text_layout'
+    assert value and value[0].lines
+    return [(line.bounds.x, line.bounds.y, line.bounds.width, line.bounds.height) for item in value for line in item.lines]
+
+
+def _fx195_variable_pdf_source_equivalence(actual_pdf, static_pdf, wrong_pdf, weight, parts, directory, notes):
+    # Per-owner paint is qualified only after exact source/Tf/CID/geometry proof.
+    import hashlib
+    import json
+    import math
+    import os
+    from pathlib import Path
+    from PIL import Image
+    authority=json.loads((Path(os.environ['F_X195_VARIABLE_ORACLES'])/'receipt.json').read_text())
+    row=next(r for r in authority['controls'] if r['script']=='Thai' and r['weight']==weight)
+    source=Path(row['output']).read_bytes()
+    assert hashlib.sha256(source).hexdigest()==row['output_sha256']
+    glyph_ids=list(dict.fromkeys(g['g'] for g in row['shape']))
+    images = [_fx195_pdf_style_images(pdf,directory,label) for pdf,label in [(actual_pdf,'variable-qualified'),(static_pdf,'static-qualified'),(wrong_pdf,'wrong-qualified')]]
+    assert all(len(pages)==1 for pages in images)
+    actual,expected,wrong = [pages[0] for pages in images]
+    assert actual.size==expected.size==wrong.size
+    source_case={'case':'variable-weight','expected':source,'files':[source],'axis':None,'text':row['text']}
+    fixture=io.BytesIO()
+    with zipfile.ZipFile(fixture,'w') as package:
+        for name,data in parts.items():package.writestr(name,data)
+    anchors=_fx195_style_fixture_owners(fixture.getvalue(),source_case,actual.size,notes,points=24)
+    actual_proof=_fx195_variable_pdf_reachable_proof(actual_pdf,anchors,row,source)
+    static_proof=_fx195_variable_pdf_reachable_proof(static_pdf,anchors,row,source)
+    assert actual_proof['size']==static_proof['size']==actual.size
+    assert actual_proof['reachableStreams']==static_proof['reachableStreams'], 'all reachable drawing commands must stay exact'
+    records = {gid:_fx195_source_glyph(source,'',glyph_index=gid) for gid in glyph_ids}
+    extrema=[]; pen=0
+    for shaped in row['shape']:
+        record=records[shaped['g']]; x0,y0,x1,y1=record['bounds']
+        extrema.extend([(pen+shaped['dx']+x0,shaped['dy']+y0),(pen+shaped['dx']+x1,shaped['dy']+y1)])
+        pen+=shaped['ax']
+    assert pen==row['total_x_advance']
+    rois=[]; observations=[]
+    for anchor in anchors:
+        x,y=anchor['origin'];factor=24*anchor['scale']/row['units_per_em']
+        roi=(math.floor(x+min(v[0] for v in extrema)*factor)-2,math.floor(y-max(v[1] for v in extrema)*factor)-2,math.ceil(x+max(v[0] for v in extrema)*factor)+2,math.ceil(y-min(v[1] for v in extrema)*factor)+2)
+        assert 0<=roi[0]<roi[2]<=actual.width and 0<=roi[1]<roi[3]<=actual.height
+        score=_fx195_mask_ssim(actual,expected,roi)
+        weight_score=_fx195_mask_ssim(actual,wrong,roi)
+        displaced=Image.new(expected.mode,expected.size,'white')
+        displaced.paste(expected,(3,0))
+        geometry_score=_fx195_mask_ssim(actual,displaced,roi)
+        assert score>=.99, (anchor,score)
+        assert weight_score<.99 and geometry_score<.99, (anchor,weight_score,geometry_score)
+        rois.append(roi); observations.append({'owner':anchor.get('owner'),'roi':roi,'positive':score,'wrongWeight':weight_score,'wrongOrigin':geometry_score})
+    # No global white-page score. All pixels outside independent source bounds
+    # remain exactly equal, retaining clipping and unrelated owner evidence.
+    outside_actual=actual.copy();outside_expected=expected.copy()
+    from PIL import ImageDraw
+    for image in (outside_actual,outside_expected):
+        draw=ImageDraw.Draw(image)
+        for x0,y0,x1,y1 in rois:draw.rectangle((x0,y0,x1-1,y1-1),fill='white')
+    assert outside_actual.tobytes()==outside_expected.tobytes()
+    (directory/'variable-pdf-source-equivalence.json').write_text(json.dumps({'weight':weight,'originalStaticSHA':row['output_sha256'],'subsetGeometryAndAdvanceExact':True,'owners':observations,'outsideSourceROIsExact':True},indent=2)+'\n')
+
+
+def _fx195_variable_pdf_reachable_proof(pdf, owners, row, source):
+    # Existing qualified raw PDF syntax, no new PDF-reader dependency.
+    # Each reachable shown CID is tied to its scoped Tf font and expected HB
+    # source glyph at independently declared OOXML placement.
+    import math
+    import hashlib
+    import zlib
+    objects = {}
+    for match in re.finditer(rb'(?m)(\d+)\s+0\s+obj\b(.*?)\bendobj\b',pdf,re.S):
+        oid,body=int(match[1]),match[2]
+        stream=re.search(rb'\bstream\r?\n(.*?)\r?\nendstream\b',body,re.S)
+        header=body[:stream.start()] if stream else body
+        data=stream[1] if stream else None
+        if data is not None and b'/FlateDecode' in header:data=zlib.decompress(data)
+        assert oid not in objects;objects[oid]=(header,data)
+    pages=[oid for oid,(header,_) in objects.items() if re.search(rb'/Type\s*/Page\b',header)]
+    assert len(pages)==1
+    identity=(1.,0.,0.,1.,0.,0.)
+    def compose(a,b):
+        return (a[0]*b[0]+a[2]*b[1],a[1]*b[0]+a[3]*b[1],a[0]*b[2]+a[2]*b[3],a[1]*b[2]+a[3]*b[3],a[0]*b[4]+a[2]*b[5]+a[4],a[1]*b[4]+a[3]*b[5]+a[5])
+    def dictionary_after(header,key):
+        found=re.search(rb'/'+key+rb'\s*(\d+\s+0\s+R|<<)',header)
+        if found is None:return None
+        if found[1]!=b'<<':return objects[int(found[1].split()[0])][0]
+        start=found.end()-2;depth=0
+        for token in re.finditer(rb'<<|>>',header[start:]):
+            depth+=1 if token[0]==b'<<' else -1
+            if depth==0:return header[start:start+token.end()]
+        raise AssertionError('unclosed resource dictionary')
+    def resources(oid,inherited=b''):
+        header=objects[oid][0];own=dictionary_after(header,b'Resources')
+        if own is not None:return own
+        parent=re.search(rb'/Parent\s+(\d+)\s+0\s+R',header)
+        return resources(int(parent[1]),inherited) if parent else inherited
+    def literal(token):
+        if token.startswith(b'<'):
+            return bytes.fromhex(token[1:-1].decode())
+        assert token.startswith(b'(') and token.endswith(b')')
+        data=token[1:-1];out=bytearray();i=0
+        escapes={ord('n'):10,ord('r'):13,ord('t'):9,ord('b'):8,ord('f'):12}
+        while i<len(data):
+            value=data[i];i+=1
+            if value==92:
+                assert i<len(data);value=data[i];i+=1
+                if 48<=value<=55:
+                    digits=bytes([value])
+                    while i<len(data) and len(digits)<3 and 48<=data[i]<=55:digits+=bytes([data[i]]);i+=1
+                    value=int(digits,8)
+                else:value=escapes.get(value,value)
+            out.append(value)
+        return bytes(out)
+    glyph_ids=list(dict.fromkeys(g['g'] for g in row['shape']))
+    cid_map={gid:i+1 for i,gid in enumerate(glyph_ids)}
+    expected_records={gid:_fx195_source_glyph(source,'',glyph_index=gid) for gid in glyph_ids}
+    points=24;upem=row['units_per_em'];expected={};pen=0
+    for owner in owners:expected[owner['owner']]=[]
+    for shaped in row['shape']:
+        for owner in owners:
+            factor=points*owner['scale']/upem
+            expected[owner['owner']].append({'cid':cid_map[shaped['g']],'sourceGID':shaped['g'],'x':owner['origin'][0]+(pen+shaped['dx'])*factor,'y':owner['origin'][1]-shaped['dy']*factor})
+        pen+=shaped['ax']
+    assert pen==row['total_x_advance']
+    seen={name:[] for name in expected};font_cache={};reachable=[]
+    def font_data(oid):
+        if oid in font_cache:return font_cache[oid]
+        font=objects[oid][0]
+        descendant=re.search(rb'/DescendantFonts\s*\[\s*(\d+)\s+0\s+R\s*\]',font);assert descendant
+        cid=objects[int(descendant[1])][0];assert re.search(rb'/CIDToGIDMap\s*/Identity\b',cid)
+        descriptor=re.search(rb'/FontDescriptor\s+(\d+)\s+0\s+R',cid);assert descriptor
+        stream_ref=re.search(rb'/FontFile2\s+(\d+)\s+0\s+R',objects[int(descriptor[1])][0]);assert stream_ref
+        sfnt=objects[int(stream_ref[1])][1];assert sfnt is not None
+        width_match=re.search(rb'/W\s*\[\s*1\s*\[([^]]+)\]\s*\]',cid);assert width_match
+        widths=[float(v) for v in width_match[1].split()];assert len(widths)==len(glyph_ids)
+        tables={sfnt[o:o+4]:struct.unpack_from('>II',sfnt,o+8) for o in range(12,12+16*struct.unpack_from('>H',sfnt,4)[0],16)}
+        assert struct.unpack_from('>H',sfnt,tables[b'maxp'][0]+4)[0]==len(glyph_ids)+1
+        for subset_gid,gid in enumerate(glyph_ids,1):
+            actual=_fx195_source_glyph(sfnt,'',glyph_index=subset_gid);reference=expected_records[gid]
+            assert actual['upem']==reference['upem']==upem==1000
+            assert actual['advance']==reference['advance']==widths[subset_gid-1]
+            assert actual['bounds']==reference['bounds'] and actual['instruction_bytes']==reference['instruction_bytes']==0
+            path=lambda record:[_fx195_source_path_commands(c,lambda point:point[:2]) for c in record['contours']]
+            assert path(actual)==path(reference)
+        font_cache[oid]=(sfnt,widths);return font_cache[oid]
+    tokens=re.compile(rb'\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]*>|/[^\s<>\[\](){}%]+|[-+]?(?:\d+\.\d*|\.\d+|\d+)|[A-Za-z][A-Za-z0-9*\'\"]*|[\[\]]')
+    def execute(oid,ctx,res,path):
+        assert len(path)<16 and oid not in path
+        data=objects[oid][1];assert data is not None
+        reachable.append((oid,data));ctx=dict(ctx);stack=[];args=[];in_text=False;cursor=0.
+        for token in tokens.findall(data):
+            if token[:1] in b'/([<' or re.fullmatch(rb'[-+]?(?:\d+\.\d*|\.\d+|\d+)',token) or token==b']':args.append(token);continue
+            op=token
+            if op==b'q':stack.append(dict(ctx))
+            elif op==b'Q':assert stack;ctx=stack.pop()
+            elif op==b'cm':assert len(args)==6;ctx['ctm']=compose(ctx['ctm'],tuple(float(v) for v in args))
+            elif op==b'BT':in_text=True;ctx['tm']=identity;cursor=0.
+            elif op==b'ET':in_text=False
+            elif op==b'Tf':
+                assert len(args)==2;ctx['size']=float(args[1]);ctx['font']=args[0]
+            elif op==b'Tm':assert len(args)==6;ctx['tm']=tuple(float(v) for v in args);cursor=0.
+            elif op in (b'Td',b'TD'):
+                assert len(args)==2;ctx['tm']=compose(ctx['tm'],(1.,0.,0.,1.,float(args[0]),float(args[1])));cursor=0.
+            elif op==b'T*':assert ctx.get('size')!=points, 'unqualified selected line-break positioning'
+            elif op in (b'Tj',b'TJ') and in_text and ctx.get('size')==points:
+                fonts=dictionary_after(res,b'Font');assert fonts is not None
+                found=re.search(re.escape(ctx['font'])+rb'\s+(\d+)\s+0\s+R',fonts);assert found
+                font_oid=int(found[1]);sfnt,widths=font_data(font_oid)
+                for value in args:
+                    if value in (b'[',b']'):continue
+                    if not value.startswith((b'(',b'<')):
+                        cursor-=float(value)*points/1000;continue
+                    encoded=literal(value);assert len(encoded)%2==0
+                    for cid in struct.unpack('>'+str(len(encoded)//2)+'H',encoded):
+                        assert 1<=cid<=len(widths)
+                        local=compose(ctx['ctm'],ctx['tm']);canvas=compose((1.,0.,0.,-1.,0.,float(ctx['pageHeight'])),local)
+                        x=canvas[0]*cursor+canvas[4];y=canvas[1]*cursor+canvas[5]
+                        assert all(math.isfinite(v) for v in (x,y))
+                        matches=[]
+                        for owner in owners:
+                            consumed=len(seen[owner['owner']]);sequence=expected[owner['owner']]
+                            if consumed==len(sequence):continue
+                            target=sequence[consumed]
+                            if abs(x-target['x'])<=.00005 and abs(y-target['y'])<=.00005 and cid==target['cid']:
+                                assert abs(canvas[0]-owner['scale'])<=.00001 and abs(canvas[1])<=.00001 and abs(canvas[2])<=.00001 and abs(canvas[3]+owner['scale'])<=.00001
+                                matches.append(owner['owner'])
+                        assert len(matches)==1, ('reachable CID must match exactly one independent source owner',cid,x,y)
+                        seen[matches[0]].append({'cid':cid,'fontObject':font_oid,'fontSHA':hashlib.sha256(sfnt).hexdigest(),'position':(x,y)})
+                        cursor+=widths[cid-1]*points/1000
+            elif op==b'Do':
+                assert len(args)==1;xobjects=dictionary_after(res,b'XObject');assert xobjects is not None
+                found=re.search(re.escape(args[0])+rb'\s+(\d+)\s+0\s+R',xobjects);assert found
+                child=int(found[1]);header=objects[child][0]
+                if re.search(rb'/Subtype\s*/Form\b',header):
+                    state=dict(ctx);matrix=re.search(rb'/Matrix\s*\[([^]]+)\]',header)
+                    if matrix:state['ctm']=compose(state['ctm'],tuple(float(v) for v in matrix[1].split()))
+                    execute(child,state,resources(child,res),path+(oid,))
+                else:assert re.search(rb'/Subtype\s*/Image\b',header)
+            args=[]
+        assert not stack and not in_text
+    page=pages[0];header=objects[page][0]
+    box=re.search(rb'/MediaBox\s*\[([^]]+)\]',header);assert box
+    box=tuple(float(v) for v in box[1].split());assert box[:2]==(0.,0.)
+    content=re.search(rb'/Contents\s*(\d+\s+0\s+R|\[[^]]+\])',header);assert content
+    refs=[int(v) for v in re.findall(rb'(\d+)\s+0\s+R',content[1])];assert len(refs)==1
+    execute(refs[0],{'ctm':identity,'size':None,'tm':identity,'pageHeight':box[3]},resources(page),())
+    assert all(len(seen[name])==len(row['shape']) for name in expected), 'all and only source owners must paint the complete HB glyph sequence'
+    return {'size':box[2:],'seen':seen,'reachableStreams':reachable,'fontPayloads':font_cache}
+
+
+@pytest.mark.parametrize('weight', [400, 700])
+@pytest.mark.parametrize('method', ['to_pdf', 'render_slide_to_png', 'render_all_slides', 'text_layout', 'to_notes_pdf', 'render_all_notes'])
+def test_fx195_installed_ppt_variable_instances_match_independent_static(method, weight, tmp_path):
+    # _fx195_presentation creates a genuine notes part. Set the actual slide
+    # and physical notes runs to the same source text/style before measuring.
+    import xml.etree.ElementTree as ET
+    variable, static, text = _fx195_style_oracles()[weight]
+    family = 'FX195CallerThai'
+    presentation = _fx195_presentation(family)
+    with zipfile.ZipFile(io.BytesIO(presentation.to_bytes())) as package:
+        parts = {name: package.read(name) for name in package.namelist()}
+    ns = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    counts = {'slide': 0, 'notes': 0}
+    for name in list(parts):
+        kind = 'slide' if re.fullmatch(r'ppt/slides/slide\d+\.xml', name) else 'notes' if re.fullmatch(r'ppt/notesSlides/notesSlide\d+\.xml', name) else None
+        if kind is None:
+            continue
+        root = ET.fromstring(parts[name])
+        for run in root.iter(ns + 'r'):
+            properties = run.find(ns + 'rPr')
+            latin = properties.find(ns + 'latin') if properties is not None else None
+            if latin is None or latin.get('typeface') != family:
+                continue
+            properties.set('b', '1' if weight == 700 else '0')
+            properties.set('sz', '2400')
+            run.find(ns + 't').text = text
+            counts[kind] += 1
+        parts[name] = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+    assert counts == {'slide': 1, 'notes': 1}, 'both real caller font owners must exist'
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, 'w') as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    import rpptx
+    presentation = rpptx.Presentation.from_bytes(package.getvalue())
+    before = presentation.to_bytes()
+
+    def invoke(data):
+        kwargs = {'fonts': [(family, data)]}
+        if method == 'render_slide_to_png':
+            return presentation.render_slide_to_png(0, dpi=72, **kwargs)
+        if method == 'render_all_slides':
+            return presentation.render_all_slides(dpi=72, **kwargs)
+        if method == 'render_all_notes':
+            return presentation.render_all_notes(dpi=72, **kwargs)
+        return getattr(presentation, method)(**kwargs)
+
+    static_output, actual_output = invoke(static), invoke(variable)
+    expected = _fx195_style_observation(static_output, method, tmp_path, 'static')
+    actual = _fx195_style_observation(actual_output, method, tmp_path, 'variable')
+    wrong_output = invoke(_fx195_style_oracles()[1100 - weight][1])
+    if method in ('to_pdf', 'to_notes_pdf'):
+        _fx195_variable_pdf_source_equivalence(actual_output,static_output,wrong_output,weight,parts,tmp_path,notes=method=='to_notes_pdf')
+    else:
+        assert actual == expected
+    assert _fx195_style_observation(invoke(variable), method, tmp_path, 'repeat') == actual
+    wrong_weight = _fx195_style_observation(wrong_output, method, tmp_path, 'wrong-weight')
+    assert actual != wrong_weight, 'each selected entrypoint must distinguish wrong physical coordinates'
+    assert presentation.to_bytes() == before
+
+# Append to the existing installed carriers only. No production code.
+
+_FX195_STYLE_CASES = ('genuine-italic', 'ital-axis', 'slnt-axis', 'synthetic-bold', 'synthetic-italic', 'synthetic-combined')
+
+
+def _fx195_style_case(case):
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    font_dir = Path(__file__).resolve().parents[2] / 'oxml-layout' / 'fonts'
+    if case == 'genuine-italic':
+        regular = (font_dir / 'Carlito-Regular.ttf').read_bytes()
+        italic = (font_dir / 'Carlito-Italic.ttf').read_bytes()
+        # The runtime admission binds both bundled source hashes and LICENSE-Carlito.
+        guards = json.loads(Path(os.environ['F_X195_STYLE_FONT_GUARDS']).read_text())
+        for name, data in [('Carlito-Regular.ttf', regular), ('Carlito-Italic.ttf', italic)]:
+            assert hashlib.sha256(data).hexdigest() == guards[name]
+        assert regular != italic
+        return {'case': case, 'family': 'FX195StyleCaller', 'text': 'iiii', 'files': [regular, italic], 'ordinary': [regular], 'expected': italic, 'bold': False, 'italic': True, 'axis': None, 'synthesis': False}
+    axis_dir = Path(os.environ['F_X195_AXIS_ORACLES'])
+    receipt = json.loads((axis_dir / 'receipt.json').read_text())
+    key = 'ital' if case == 'ital-axis' else 'slnt' if case == 'slnt-axis' else 'none'
+    control = next(row for row in receipt['controls'] if row['axis'] == key)
+    data = (axis_dir / (key + '.ttf')).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == control['input_sha256']
+    # Authenticated complete R18 tuple protocol, including phantom points.
+    directory = {data[o:o+4]: struct.unpack_from('>II', data, o+8) for o in range(12,12+16*struct.unpack_from('>H',data,4)[0],16)}
+    if key != 'none':
+        gv = directory[b'gvar'][0]
+        assert struct.unpack_from('>III',data,gv+20) == (0,0,29)
+        assert struct.unpack_from('>HHHH',data,gv+32) == (1,10,19,0xA000)
+        assert data[gv+42:gv+44] == b'\x00\x47'
+        assert list(struct.unpack_from('>8h',data,gv+44)) == [0,0,140,140,0,0,0,0]
+        assert data[gv+60] == 0x87
+    else:
+        assert b'fvar' not in directory and b'gvar' not in directory
+    assert control['exit_code'] == 0
+    measured = json.loads(control['stdout'])
+    assert measured == [{'g': 1, 'cl': 0, 'dx': 0, 'dy': 0, 'ax': 600, 'ay': 0}]
+    if key != 'none':
+        static = (axis_dir / (key + '-static.ttf')).read_bytes()
+        assert hashlib.sha256(static).hexdigest() == control['static']['sha256']
+        assert control['static']['glyph1_points'] == [[50, 0], [450, 0], [590, 700], [190, 700]]
+        assert control['static']['fvar_absent'] is True
+    return {'case': case, 'family': 'FX195StyleCaller', 'text': 'A', 'files': [data], 'ordinary': [data], 'expected': None, 'bold': case in ('synthetic-bold', 'synthetic-combined'), 'italic': case != 'synthetic-bold', 'axis': key if key != 'none' else None, 'synthesis': key == 'none'}
+
+
+def _fx195_i_advance(source, points):
+    tables = {}
+    for offset in range(12, 12 + struct.unpack_from('>H', source, 4)[0] * 16, 16):
+        tables[source[offset:offset + 4]] = struct.unpack_from('>II', source, offset + 8)
+    cmap, _ = tables[b'cmap']
+    glyph = None
+    for record in range(struct.unpack_from('>H', source, cmap + 2)[0]):
+        platform, encoding, relative = struct.unpack_from('>HHI', source, cmap + 4 + 8 * record)
+        subtable = cmap + relative
+        if platform not in (0, 3) or struct.unpack_from('>H', source, subtable)[0] != 4:
+            continue
+        segments = struct.unpack_from('>H', source, subtable + 6)[0] // 2
+        for segment in range(segments):
+            end = struct.unpack_from('>H', source, subtable + 14 + 2 * segment)[0]
+            start = struct.unpack_from('>H', source, subtable + 16 + 2 * segments + 2 * segment)[0]
+            if start <= ord('i') <= end:
+                delta = struct.unpack_from('>h', source, subtable + 16 + 4 * segments + 2 * segment)[0]
+                range_at = subtable + 16 + 6 * segments + 2 * segment
+                relative = struct.unpack_from('>H', source, range_at)[0]
+                glyph = ord('i') if relative == 0 else struct.unpack_from('>H', source, range_at + relative + 2 * (ord('i') - start))[0]
+                glyph = (glyph + delta) % 65536
+                break
+        if glyph is not None:
+            break
+    assert glyph is not None and glyph > 0
+    head, _ = tables[b'head']
+    units = struct.unpack_from('>H', source, head + 18)[0]
+    hhea, _ = tables[b'hhea']
+    metrics = struct.unpack_from('>H', source, hhea + 34)[0]
+    hmtx, _ = tables[b'hmtx']
+    advance = struct.unpack_from('>H', source, hmtx + 4 * min(glyph, metrics - 1))[0]
+    loca, _ = tables[b'loca']
+    if struct.unpack_from('>h', source, head + 50)[0] == 0:
+        glyph_offset = struct.unpack_from('>H', source, loca + 2 * glyph)[0] * 2
+    else:
+        glyph_offset = struct.unpack_from('>I', source, loca + 4 * glyph)[0]
+    glyf, _ = tables[b'glyf']
+    x_min = struct.unpack_from('>h', source, glyf + glyph_offset + 2)[0]
+    x_max = struct.unpack_from('>h', source, glyf + glyph_offset + 6)[0]
+    assert x_max > x_min and units > 0
+    return advance * points / units
+
+
+def _fx195_pdf_style_anchors(pdf, page_size, case, expected_preview_scale=None):
+    # Parse reachable content only. Compose PDF q/Q and cm, text matrices and
+    # Form XObject matrices before converting bottom-up PDF to canvas points.
+    # No actual bitmap bounds, registration or first-match selection is used.
+    import math
+    import zlib
+    objects = {}
+    for match in re.finditer(rb'(?m)(\d+)\s+0\s+obj\b(.*?)\bendobj\b', pdf, re.S):
+        oid, body = int(match[1]), match[2]
+        stream = re.search(rb'\bstream\r?\n(.*?)\r?\nendstream\b', body, re.S)
+        header = body[:stream.start()] if stream else body
+        data = stream[1] if stream else None
+        if data is not None and b'/FlateDecode' in header:
+            data = zlib.decompress(data)
+        assert oid not in objects
+        objects[oid] = (header, data)
+    pages = [oid for oid,(header,_) in objects.items() if re.search(rb'/Type\s*/Page\b',header)]
+    assert len(pages) == 1, 'single physical page fixture is required'
+    identity = (1.,0.,0.,1.,0.,0.)
+    def compose(a,b):
+        return (a[0]*b[0]+a[2]*b[1], a[1]*b[0]+a[3]*b[1], a[0]*b[2]+a[2]*b[3], a[1]*b[2]+a[3]*b[3], a[0]*b[4]+a[2]*b[5]+a[4], a[1]*b[4]+a[3]*b[5]+a[5])
+    def dictionary_after(header,key):
+        found = re.search(rb'/'+key+rb'\s*(\d+\s+0\s+R|<<)',header)
+        if found is None: return None
+        value=found[1]
+        if value != b'<<': return objects[int(value.split()[0])][0]
+        start=found.end()-2; depth=0
+        for token in re.finditer(rb'<<|>>',header[start:]):
+            depth += 1 if token[0]==b'<<' else -1
+            if depth==0: return header[start:start+token.end()]
+        raise AssertionError('unclosed actual PDF resource dictionary')
+    def resources(oid, inherited=b''):
+        header=objects[oid][0]
+        own=dictionary_after(header,b'Resources')
+        if own is not None: return own
+        parent=re.search(rb'/Parent\s+(\d+)\s+0\s+R',header)
+        return resources(int(parent[1]),inherited) if parent else inherited
+    tokens=re.compile(rb'\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]*>|/[^\s<>\[\](){}%]+|[-+]?(?:\d+\.\d*|\.\d+|\d+)|[A-Za-z][A-Za-z0-9*\'\"]*|[\[\]]')
+    anchors=[]
+    def execute(oid,ctx,res,path):
+        assert len(path)<16 and oid not in path, 'cyclic or unsupported deep form fixture'
+        header,data=objects[oid]
+        assert data is not None
+        ctx=dict(ctx); ctx['history']=list(ctx['history']); stack=[]; args=[]; in_text=False; captured=False
+        for token in tokens.findall(data):
+            if token[:1] in b'/([<' or re.fullmatch(rb'[-+]?(?:\d+\.\d*|\.\d+|\d+)',token) or token==b']':
+                args.append(token); continue
+            op=token
+            if op==b'q': stack.append(dict(ctx,history=list(ctx['history'])))
+            elif op==b'Q': assert stack; ctx=stack.pop()
+            elif op==b'cm':
+                assert len(args)==6
+                matrix=tuple(float(v) for v in args)
+                assert all(math.isfinite(v) for v in matrix)
+                ctx['ctm']=compose(ctx['ctm'],matrix);ctx['history'].append(matrix)
+            elif op==b'BT': in_text=True;captured=False;ctx['tm']=identity
+            elif op==b'ET': in_text=False
+            elif op==b'Tf': assert len(args)==2;ctx['size']=float(args[1])
+            elif op==b'Tm': assert len(args)==6;ctx['tm']=tuple(float(v) for v in args)
+            elif op in (b'Td',b'TD',b'T*'):
+                assert ctx.get('size')!=48, 'fixture text positioning needs a separately qualified adapter'
+            elif op in (b'Tj',b'TJ') and in_text and ctx.get('size')==48 and not captured:
+                assert args, '48pt owner must actually show text'
+                captured=True; tm=ctx['tm']
+                assert tm[:4]==(1.,0.,0.,-1.), 'nominal fixture requires upright local text matrix'
+                placement=ctx['ctm']
+                if case['synthesis'] and case['italic']:
+                    style=(1.,0.,-math.tan(math.radians(12)),1.,tm[5]*math.tan(math.radians(12)),0.)
+                    assert ctx['history'] and all(abs(a-b)<=.00002 for a,b in zip(ctx['history'][-1],style)), 'actual synthetic shear must equal independent style policy'
+                    placement=identity
+                    for matrix in ctx['history'][:-1]: placement=compose(placement,matrix)
+                canvas=compose((1.,0.,0.,-1.,0.,float(page_size[1])),placement)
+                assert abs(canvas[1])<.00001 and abs(canvas[2])<.00001 and canvas[0]>0 and abs(canvas[0]-canvas[3])<.00001, 'source fixture requires uniform nonrotated external placement'
+                origin=(canvas[0]*tm[4]+canvas[2]*tm[5]+canvas[4],canvas[1]*tm[4]+canvas[3]*tm[5]+canvas[5])
+                assert all(math.isfinite(v) for v in origin)
+                anchors.append({'origin':origin,'scale':canvas[0],'matrix':canvas,'path':path+(oid,)})
+            elif op==b'Do':
+                assert len(args)==1 and args[0].startswith(b'/')
+                xobjects=dictionary_after(res,b'XObject')
+                assert xobjects is not None
+                target=re.search(re.escape(args[0])+rb'\s+(\d+)\s+0\s+R',xobjects)
+                assert target is not None
+                child=int(target[1]);child_header=objects[child][0]
+                if re.search(rb'/Subtype\s*/Form\b',child_header):
+                    state=dict(ctx,history=list(ctx['history']))
+                    matrix=re.search(rb'/Matrix\s*\[([^]]+)\]',child_header)
+                    if matrix:
+                        transform=tuple(float(v) for v in matrix[1].split());assert len(transform)==6
+                        state['ctm']=compose(state['ctm'],transform);state['history'].append(transform)
+                    execute(child,state,resources(child,res),path+(oid,))
+                else:
+                    assert re.search(rb'/Subtype\s*/Image\b',child_header), 'unknown XObject fixture'
+            args=[]
+        assert not stack and not in_text
+    header=objects[pages[0]][0]
+    content=re.search(rb'/Contents\s*(\d+\s+0\s+R|\[[^]]+\])',header)
+    assert content is not None
+    refs=[int(v) for v in re.findall(rb'(\d+)\s+0\s+R',content[1])]
+    assert refs
+    # This producer uses one content stream. Independent resources and forms
+    # are supported, while multiple streams need state carried across streams.
+    assert len(refs)==1, 'multiple content-stream fixture needs qualified continuous state'
+    execute(refs[0],{'ctm':identity,'history':[],'size':None,'tm':identity},resources(pages[0]),())
+    if expected_preview_scale is None:
+        assert len(anchors)==1 and abs(anchors[0]['scale']-1)<.00001
+        anchors[0]['owner']='body'
+    else:
+        assert len(anchors)==2, 'real notes body and real slide preview must both paint'
+        body=[a for a in anchors if abs(a['scale']-1)<.00001]
+        preview=[a for a in anchors if abs(a['scale']-expected_preview_scale)<.00001]
+        assert len(body)==len(preview)==1 and body[0] is not preview[0]
+        assert 0<expected_preview_scale<1
+        body[0]['owner']='notes-body';preview[0]['owner']='slide-preview'
+    return anchors
+
+
+def _fx195_notes_preview_scale(parts):
+    import xml.etree.ElementTree as ET
+    p='{http://schemas.openxmlformats.org/presentationml/2006/main}'
+    a='{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    presentation=ET.fromstring(parts['ppt/presentation.xml'])
+    size=presentation.find(p+'sldSz');assert size is not None
+    slide_width,slide_height=float(size.get('cx')),float(size.get('cy'))
+    groups=[]
+    for names in (r'ppt/notesSlides/notesSlide\d+\.xml',r'ppt/notesMasters/notesMaster\d+\.xml'):
+        found=[]
+        for name,data in parts.items():
+            if not re.fullmatch(names,name):continue
+            for shape in ET.fromstring(data).iter(p+'sp'):
+                ph=shape.find(p+'nvSpPr/'+p+'nvPr/'+p+'ph')
+                if ph is None or ph.get('type')!='sldImg':continue
+                ext=shape.find(p+'spPr/'+a+'xfrm/'+a+'ext')
+                if ext is not None:found.append((float(ext.get('cx')),float(ext.get('cy'))))
+        if found:groups=found;break
+    assert len(groups)==1, 'one actual source-established preview rectangle is required'
+    return min(groups[0][0]/slide_width,groups[0][1]/slide_height)
+
+
+def _fx195_pinned_poppler():
+    # Both actual product PDF and independently authored reference use this binary.
+    import hashlib
+    import subprocess
+    import os
+    from pathlib import Path
+    executable = Path(os.environ['F_X195_POPPLER'])
+    assert executable.is_file()
+    if hashlib.sha256(executable.read_bytes()).hexdigest() != 'd813ee83025433b811b5b7e982dc061751a1ea6cf03773107c398d2a597b70d9':
+        import runpy
+        installer = Path(__file__).resolve().parents[3] / 'scripts/install_pinned_poppler.py'
+        runpy.run_path(str(installer))['authenticated_tool'](
+            Path(os.environ['F_X195_POPPLER_BUILD_RECEIPT']),
+            os.environ['F_X195_POPPLER_BUILD_RECEIPT_SHA'], executable,
+        )
+    version = subprocess.run([str(executable), '-v'], capture_output=True, timeout=10, check=False)
+    assert version.returncode == 0 and version.stderr.startswith(b'pdftoppm version 26.01.0\n')
+    return str(executable)
+
+
+def _fx195_independent_style_paint(case, page_size, origin, font_scale=1., *, negative=None):
+    # Independently authored PDF from original/static physical font bytes.
+    # No product writer, shaper, subsetter, image registration or mask-derived ROI.
+    import math
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    from PIL import Image
+    source = case['expected'] if case['case'] == 'genuine-italic' else case['files'][0]
+    if case['axis']:
+        source = (Path(os.environ['F_X195_AXIS_ORACLES']) / (case['axis']+'-static.ttf')).read_bytes()
+    bold = case['bold']
+    shear = math.tan(math.radians(12)) if case['synthesis'] and case['italic'] else 0.
+    if negative == 'style':
+        if case['case'] == 'genuine-italic':
+            source = case['ordinary'][0]
+        elif case['axis']:
+            source = case['files'][0]
+        else:
+            bold, shear = False, 0.
+    points = 48 * font_scale
+    x, y = origin
+    if negative == 'origin':
+        x += 3.
+    if negative == 'shear':
+        assert case['synthesis'] and case['italic']
+        shear = math.tan(math.radians(6))
+    def u16(offset):
+        return struct.unpack_from('>H', source, offset)[0]
+    tables = {source[o:o+4]:struct.unpack_from('>II',source,o+8) for o in range(12,12+16*u16(4),16)}
+    cmap = tables[b'cmap'][0]
+    char = ord(case['text'][0])
+    glyph = None
+    for record in range(u16(cmap+2)):
+        platform, encoding, relative = struct.unpack_from('>HHI',source,cmap+4+record*8)
+        sub = cmap+relative
+        if platform not in (0,3) or u16(sub) != 4:
+            continue
+        count = u16(sub+6)//2
+        for segment in range(count):
+            end,start = u16(sub+14+2*segment),u16(sub+16+2*count+2*segment)
+            if start <= char <= end:
+                delta = struct.unpack_from('>h',source,sub+16+4*count+2*segment)[0]
+                at = sub+16+6*count+2*segment
+                offset = u16(at)
+                raw = char if offset == 0 else u16(at+offset+2*(char-start))
+                glyph = (raw+delta)%65536
+                break
+        if glyph is not None:
+            break
+    assert glyph is not None and glyph > 0
+    upem = u16(tables[b'head'][0]+18)
+    metric_count = u16(tables[b'hhea'][0]+34)
+    advance = u16(tables[b'hmtx'][0]+4*min(glyph,metric_count-1))*points/upem
+    long_loca = struct.unpack_from('>h',source,tables[b'head'][0]+50)[0] == 1
+    glyph_offset = struct.unpack_from('>I' if long_loca else '>H',source,tables[b'loca'][0]+glyph*(4 if long_loca else 2))[0]
+    if not long_loca:
+        glyph_offset *= 2
+    bounds = struct.unpack_from('>hhhh',source,tables[b'glyf'][0]+glyph_offset+2)
+    radius = points/48 if bold else 0.
+    corners = [(gx*points/upem+shear*gy*points/upem,gy*points/upem) for gx in (bounds[0],bounds[2]) for gy in (bounds[1],bounds[3])]
+    left = math.floor(x+min(px for px,py in corners)-radius*(1+abs(shear)))-3
+    right = math.ceil(x+(len(case['text'])-1)*advance+max(px for px,py in corners)+radius*(1+abs(shear)))+3
+    top = math.floor(y-max(py for px,py in corners)-radius)-3
+    bottom = math.ceil(y-min(py for px,py in corners)+radius)+3
+    assert 0 <= left < right <= page_size[0] and 0 <= top < bottom <= page_size[1]
+    content = f'q\n1 0 0 -1 0 {page_size[1]} cm\n0 0 0 rg\n'
+    if shear:
+        content += f'1 0 {-shear} 1 {shear*y} 0 cm\n'
+    if bold:
+        content += f'0 0 0 RG\n{points/24} w\n1 J\n1 j\n2 Tr\n'
+    encoded = (glyph.to_bytes(2,'big')*len(case['text'])).hex()
+    content += f'BT\n/F0 {points} Tf\n1 0 0 -1 {x} {y} Tm\n<{encoded}> Tj\nET\nQ\n'
+    raw = content.encode('ascii')
+    width = advance*1000/points
+    box = ' '.join(str(v*1000/upem) for v in struct.unpack_from('>hhhh',source,tables[b'head'][0]+36))
+    objects = [
+        b'<< /Type /Catalog /Pages 2 0 R >>',
+        b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_size[0]} {page_size[1]}] /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>'.encode(),
+        f'<< /Length {len(raw)} >>\nstream\n'.encode()+raw+b'endstream',
+        b'<< /Type /Font /Subtype /Type0 /BaseFont /IndependentSource /Encoding /Identity-H /DescendantFonts [6 0 R] >>',
+        f'<< /Type /Font /Subtype /CIDFontType2 /BaseFont /IndependentSource /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R /CIDToGIDMap /Identity /DW {width} /W [{glyph} [{width}]] >>'.encode(),
+        f'<< /Type /FontDescriptor /FontName /IndependentSource /Flags 4 /FontBBox [{box}] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 8 0 R >>'.encode(),
+        f'<< /Length {len(source)} /Length1 {len(source)} >>\nstream\n'.encode()+source+b'\nendstream',
+    ]
+    pdf, offsets = b'%PDF-1.7\n', []
+    for index,obj in enumerate(objects,1):
+        offsets.append(len(pdf))
+        pdf += f'{index} 0 obj\n'.encode()+obj+b'\nendobj\n'
+    xref = len(pdf)
+    pdf += f'xref\n0 {len(objects)+1}\n0000000000 65535 f \n'.encode()
+    pdf += b''.join(f'{offset:010} 00000 n \n'.encode() for offset in offsets)
+    pdf += f'trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+    with tempfile.TemporaryDirectory(prefix='fx195-independent-vector-') as temp:
+        path = Path(temp)/'source.pdf'
+        path.write_bytes(pdf)
+        version = subprocess.run([_fx195_pinned_poppler(),'-v'],capture_output=True,timeout=10,check=False)
+        assert version.returncode == 0 and b'pdftoppm version 26.01.0' in version.stderr, 'qualified Poppler26.01.0 is required'
+        result = subprocess.run([_fx195_pinned_poppler(),'-r','72','-png',str(path),str(Path(temp)/'source')],capture_output=True,timeout=120,check=False)
+        assert result.returncode == 0, result.stderr.decode(errors='replace')
+        image = Image.open(Path(temp)/'source-1.png').convert('RGBA')
+        image.load()
+    return image,(left,top,right,bottom),len(case['text'])*advance
+
+
+
+
+def _fx195_mask_ssim(actual, expected, roi):
+    # The ROI comes from independent source bounds and the emitted text anchor,
+    # never from image registration or an actual-mask bounding box.
+    a = list(actual.convert('L').crop(roi).getdata())
+    b = list(expected.convert('L').crop(roi).getdata())
+    assert len(a) == len(b) and len(a) > 1
+    assert min(a) < 200 and min(b) < 200
+    ma,mb = sum(a)/len(a),sum(b)/len(b)
+    va = sum((v-ma)**2 for v in a)/(len(a)-1)
+    vb = sum((v-mb)**2 for v in b)/(len(b)-1)
+    cov = sum((x-ma)*(y-mb) for x,y in zip(a,b))/(len(a)-1)
+    return ((2*ma*mb+2.55**2)*(2*cov+7.65**2))/((ma*ma+mb*mb+2.55**2)*(va+vb+7.65**2))
+
+
+def _fx195_pdf_style_images(pdf, directory, label):
+    import subprocess
+    from PIL import Image
+    path = directory / (label+'.pdf')
+    path.write_bytes(pdf)
+    result = subprocess.run([_fx195_pinned_poppler(),'-r','72','-png',str(path),str(directory/label)], capture_output=True, timeout=120, check=False)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    files = sorted(directory.glob(label+'-*.png'), key=lambda p:int(p.stem.rsplit('-',1)[1]))
+    assert len(files) == 1, 'single actual styled owner fixture must produce one physical page'
+    return [Image.open(path).convert('RGBA') for path in files]
+
+
+def _fx195_svg_style_artifact(svg, case, expected, cubic, roi, origin, advance, directory):
+    import base64
+    import hashlib
+    import json
+    import xml.etree.ElementTree as ET
+    import os
+    from pathlib import Path
+    tree = ET.fromstring(svg)
+    texts = [node for node in tree.iter() if node.tag.endswith('}text') and ''.join(node.itertext()) == case['text']]
+    assert len(texts) == 1
+    node = texts[0]
+    xs = [float(x) for x in node.get('x','').split()]
+    assert xs and abs(xs[0]-origin[0]) <= 0.000001
+    assert abs(float(node.get('y'))-origin[1]) <= 0.000001
+    if len(xs) > 1:
+        step = advance / len(case['text'])
+        assert len(xs) == len(case['text'])
+        assert all(abs(value-(origin[0]+i*step)) <= 0.000001 for i,value in enumerate(xs))
+    else:
+        assert len(case['text']) == 1
+    assert node.get('textLength') is None, 'these nominal scalar fixtures need no identity textLength oracle workaround'
+    family = node.get('font-family')
+    matches = re.findall(r"@font-face\{font-family:'([^']+)';src:url\('data:[^;]+;base64,([^']+)'\)", svg)
+    source = [base64.b64decode(value) for name,value in matches if name == family]
+    assert len(source) == 1 and source[0] in case['files'], 'actual embedded font must be the physical requested source'
+    svg_path = directory/(case['case']+'-installed.svg')
+    expected_path = directory/(case['case']+'-independent.png')
+    svg_path.write_text(svg)
+    expected.save(expected_path)
+    assert cubic.size == expected.size
+    cubic_path = directory/(case['case']+'-independent-cubic.png')
+    cubic.save(cubic_path)
+    static_path = str(Path(os.environ['F_X195_AXIS_ORACLES']) / (case['axis']+'-static.ttf')) if case['axis'] else None
+    static_sha = hashlib.sha256(Path(static_path).read_bytes()).hexdigest() if static_path else None
+    artifact = {'oracleFont':static_path,'oracleFontSHA':static_sha,'case':case['case'],'svg':str(svg_path),'svgSHA':hashlib.sha256(svg_path.read_bytes()).hexdigest(),'expected':str(expected_path),'expectedSHA':hashlib.sha256(expected_path.read_bytes()).hexdigest(),'expectedQuadratic':str(expected_path),'expectedQuadraticSHA':hashlib.sha256(expected_path.read_bytes()).hexdigest(),'expectedCubic':str(cubic_path),'expectedCubicSHA':hashlib.sha256(cubic_path.read_bytes()).hexdigest(),'fontFamily':family,'fontSHA':hashlib.sha256(source[0]).hexdigest(),'fontIndex':0,'roi':list(roi),'origin':list(origin),'advance':advance,'width':expected.width,'height':expected.height,'axis':case['axis'],'smallStaticControl':case['axis'] is not None,'threshold':0.99}
+    # Serial ROOT native companion receives this immutable receipt after the
+    # installed stage. There is deliberately no Cargo fallback here.
+    receipt = directory/(case['case']+'-installed-svg-artifact.json')
+    receipt.write_text(json.dumps(artifact,indent=2)+'\n')
+
+
+_FX195_REFERENCE_RENDERER_SOURCE = 'use std::{env, fs};\nuse resvg::{usvg, tiny_skia};\n\nfn count_paths(group: &usvg::Group) -> Result<usize, String> {\n    let mut count = 0;\n    for node in group.children() {\n        match node {\n            usvg::Node::Group(child) => count += count_paths(child)?,\n            usvg::Node::Path(_) => count += 1,\n            usvg::Node::Text(_) | usvg::Node::Image(_) => {\n                return Err("reference must contain paths only".into());\n            }\n        }\n    }\n    Ok(count)\n}\n\nfn main() -> Result<(), String> {\n    let args: Vec<String> = env::args().collect();\n    if args.len() != 3 { return Err("renderer INPUT.svg OUTPUT.png".into()); }\n    let bytes = fs::read(&args[1]).map_err(|e| e.to_string())?;\n    if bytes.len() > 1_000_000 { return Err("reference SVG exceeds admitted bound".into()); }\n    let options = usvg::Options::default(); // Empty font database, no system-font load.\n    let tree = usvg::Tree::from_data(&bytes, &options).map_err(|e| e.to_string())?;\n    let paths = count_paths(tree.root())?;\n    if paths == 0 || paths > 16 { return Err("unexpected path-only owner count".into()); }\n    let size = tree.size().to_int_size();\n    let mut image = tiny_skia::Pixmap::new(size.width(), size.height())\n        .ok_or_else(|| "invalid physical canvas".to_owned())?;\n    image.fill(tiny_skia::Color::WHITE);\n    resvg::render(&tree, tiny_skia::Transform::identity(), &mut image.as_mut());\n    image.save_png(&args[2]).map_err(|e| e.to_string())?;\n    println!("paths={paths} width={} height={} font_database=empty", size.width(), size.height());\n    Ok(())\n}\n'
+
+def _fx195_source_glyph(source,char, *, glyph_index=None):
+ import struct,hashlib
+ def u16(at):return struct.unpack_from('>H',source,at)[0]
+ tables={source[o:o+4]:struct.unpack_from('>II',source,o+8) for o in range(12,12+16*u16(4),16)}
+ assert source[:4]==b'\x00\x01\x00\x00'
+ assert all(o+n<=len(source) for o,n in tables.values())
+ g=glyph_index
+ if g is None:
+  cmap=tables[b'cmap'][0];g=None
+  for i in range(u16(cmap+2)):
+   platform,encoding,rel=struct.unpack_from('>HHI',source,cmap+4+8*i);at=cmap+rel
+   if platform not in (0,3) or u16(at)!=4:continue
+   count=u16(at+6)//2
+   for j in range(count):
+    hi=u16(at+14+2*j);lo=u16(at+16+2*count+2*j)
+    if lo<=ord(char)<=hi:
+     delta=struct.unpack_from('>h',source,at+16+4*count+2*j)[0];r=at+16+6*count+2*j;off=u16(r)
+     if off==0:g=(ord(char)+delta)%65536
+     else:
+      raw=u16(r+off+2*(ord(char)-lo));g=(raw+delta)%65536 if raw else 0
+     break
+   if g is not None:break
+ assert g and g<u16(tables[b'maxp'][0]+4)
+ head=tables[b'head'][0];upem=u16(head+18);long=struct.unpack_from('>h',source,head+50)[0];assert long in (0,1)
+ def loc(k):return struct.unpack_from('>I' if long else '>H',source,tables[b'loca'][0]+k*(4 if long else 2))[0]*(1 if long else 2)
+ def decode(index,depth=0):
+  assert depth<8
+  first,last=loc(index),loc(index+1);assert 0<=first<last<=tables[b'glyf'][1]
+  raw=source[tables[b'glyf'][0]+first:tables[b'glyf'][0]+last];n=struct.unpack_from('>h',raw)[0];bounds=struct.unpack_from('>hhhh',raw,2)
+  if n<0:
+   at=10;contours=[];components=[]
+   while True:
+    flags,child=struct.unpack_from('>HH',raw,at);at+=4
+    assert flags&2,'bounded composite requires explicit XY offsets, not point attachment'
+    args=struct.unpack_from('>hh' if flags&1 else '>bb',raw,at);at+=4 if flags&1 else 2
+    xx,xy,yx,yy=1.,0.,0.,1.
+    if flags&8:xx=yy=struct.unpack_from('>h',raw,at)[0]/16384;at+=2
+    elif flags&64:xx,yy=[v/16384 for v in struct.unpack_from('>hh',raw,at)];at+=4
+    elif flags&128:xx,xy,yx,yy=[v/16384 for v in struct.unpack_from('>hhhh',raw,at)];at+=8
+    assert not flags&4,'ROUND_XY_TO_GRID offset rule requires separate qualification'
+    assert not flags&2048 or (xx,xy,yx,yy)==(1.,0.,0.,1.),'scaled offset requires separate qualification'
+    child_contours,_,_,_=decode(child,depth+1)
+    contours.extend([[(xx*x+xy*y+args[0],yx*x+yy*y+args[1],on) for x,y,on in contour] for contour in child_contours])
+    components.append({'glyph':child,'flags':flags,'offset':args,'matrix':[xx,xy,yx,yy]})
+    if not flags&32:break
+   instructions=struct.unpack_from('>H',raw,at)[0] if flags&256 else 0
+   if flags&256:at+=2+instructions
+   assert at<=len(raw)
+   return contours,bounds,instructions,raw
+  assert n>0
+  ends=list(struct.unpack_from('>'+str(n)+'H',raw,10));assert ends==sorted(set(ends))
+  at=10+2*n;instructions=struct.unpack_from('>H',raw,at)[0];at+=2+instructions;flags=[]
+  while len(flags)<ends[-1]+1:
+   f=raw[at];at+=1;flags.append(f)
+   if f&8:repeat=raw[at];at+=1;flags.extend([f]*repeat)
+  assert len(flags)==ends[-1]+1 and not any(f&128 for f in flags)
+  coords=[]
+  for short,same in [(2,16),(4,32)]:
+   vals=[];v=0
+   for f in flags:
+    if f&short:
+     d=raw[at];at+=1;v+=d if f&same else -d
+    elif not f&same:v+=struct.unpack_from('>h',raw,at)[0];at+=2
+    vals.append(v)
+   coords.append(vals)
+  assert at<=len(raw)
+  points=[(x,y,bool(f&1)) for x,y,f in zip(*coords,flags)];contours=[];start=0
+  for end in ends:contours.append(points[start:end+1]);start=end+1
+  return contours,bounds,instructions,raw
+ contours,bounds,instructions,raw=decode(g)
+ metric_count=u16(tables[b'hhea'][0]+34);advance=u16(tables[b'hmtx'][0]+4*min(g,metric_count-1))
+ return {'source_sha256':hashlib.sha256(source).hexdigest(),'glyph':g,'upem':upem,'advance':advance,'bounds':bounds,'instruction_bytes':instructions,'glyph_bytes_sha256':hashlib.sha256(raw).hexdigest(),'contours':contours}
+
+
+def _fx195_source_path_commands(points,transform,cubic=False):
+ mid=lambda a,b:((a[0]+b[0])/2,(a[1]+b[1])/2,True)
+ if points[0][2]:start=points[0];seq=points[1:]
+ elif points[-1][2]:start=points[-1];seq=points[:-1]
+ else:start=mid(points[-1],points[0]);seq=points[:]
+ seq=seq+[start];current=start;result=[]
+ def values(*pts):return ' '.join(f'{v:.12f}' for p in pts for v in transform(p))
+ result.append('M '+values(start));i=0
+ while i<len(seq):
+  p=seq[i]
+  if p[2]:result.append('L '+values(p));current=p;i+=1
+  else:
+   nxt=seq[i+1];end=nxt if nxt[2] else mid(p,nxt)
+   if cubic:
+    a=(current[0]+2*(p[0]-current[0])/3,current[1]+2*(p[1]-current[1])/3);b=(end[0]+2*(p[0]-end[0])/3,end[1]+2*(p[1]-end[1])/3)
+    result.append('C '+values(a,b,end))
+   else:result.append('Q '+values(p,end))
+   current=end;i+=2 if nxt[2] else 1
+ result.append('Z');return ' '.join(result)
+
+
+
+def _fx195_independent_path_paint(case, page_size, origin, font_scale=1., *, negative=None, cubic=False):
+    # Authored original/static source contours, no production contour/shaper/decoder.
+    import hashlib, json, math, os, subprocess, tempfile
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+    from PIL import Image
+    source = case['expected'] if case['case'] == 'genuine-italic' else case['files'][0]
+    if case['axis']:
+        source = (Path(os.environ['F_X195_AXIS_ORACLES']) / (case['axis']+'-static.ttf')).read_bytes()
+    bold = case['bold']
+    shear = math.tan(math.radians(12)) if case['synthesis'] and case['italic'] else 0.
+    if negative == 'style':
+        if case['case'] == 'genuine-italic': source = case['ordinary'][0]
+        elif case['axis']: source = case['files'][0]
+        else: bold, shear = False, 0.
+    points = 48 * font_scale
+    record = _fx195_source_glyph(source, case['text'][0])
+    assert len(set(case['text'])) == 1
+    factor = points / record['upem']
+    # Preserve the independently read metric and physical unit-conversion order.
+    advance = record['advance'] * points / record['upem']
+    x,y = origin
+    if negative == 'origin': x += 3.
+    if negative == 'shear':
+        assert case['synthesis'] and case['italic']
+        shear = math.tan(math.radians(6))
+    radius = points/48 if bold else 0.
+    bounds = record['bounds']
+    corners = [(gx*factor+shear*gy*factor,gy*factor) for gx in (bounds[0],bounds[2]) for gy in (bounds[1],bounds[3])]
+    roi = (math.floor(x+min(px for px,py in corners)-radius*(1+abs(shear)))-3,
+           math.floor(y-max(py for px,py in corners)-radius)-3,
+           math.ceil(x+(len(case['text'])-1)*advance+max(px for px,py in corners)+radius*(1+abs(shear)))+3,
+           math.ceil(y-min(py for px,py in corners)+radius)+3)
+    assert 0 <= roi[0] < roi[2] <= page_size[0] and 0 <= roi[1] < roi[3] <= page_size[1]
+    ns = 'http://www.w3.org/2000/svg'
+    ET.register_namespace('', ns)
+    tree = ET.Element('{'+ns+'}svg', {'width':str(page_size[0]),'height':str(page_size[1]),'viewBox':f'0 0 {page_size[0]} {page_size[1]}'})
+    for index in range(len(case['text'])):
+        data = ' '.join(_fx195_source_path_commands(contour, lambda p:(x+index*advance+p[0]*factor,y-p[1]*factor),cubic) for contour in record['contours'])
+        attrs = {'d':data,'fill':'#000000','fill-rule':'nonzero'}
+        if bold: attrs.update({'stroke':'#000000','stroke-width':f'{points/24:.12f}','stroke-linecap':'round','stroke-linejoin':'round','paint-order':'fill stroke'})
+        if shear: attrs['transform'] = f'matrix(1 0 {-shear:.12f} 1 {shear*y:.12f} 0)'
+        ET.SubElement(tree,'{'+ns+'}path',attrs)
+    raw = ET.tostring(tree,encoding='utf-8',xml_declaration=True)
+    assert all(node.tag=='{'+ns+'}path' for node in tree)
+    assert not any(token in raw for token in [b'<text',b'<image',b'<use',b'<defs',b'font',b'href',b'url(',b'<filter'])
+    qualification_path = Path(os.environ['F_X195_PATH_REFERENCE_QUALIFICATION'])
+    assert hashlib.sha256(qualification_path.read_bytes()).hexdigest() == os.environ['F_X195_PATH_REFERENCE_QUALIFICATION_SHA']
+    q = json.loads(qualification_path.read_text())
+    assert q['actual_compiler_exit'] == 0 and q['actual_transitive_abi_qualified'] is True
+    assert q['renderer_source_sha256'] == hashlib.sha256(_FX195_REFERENCE_RENDERER_SOURCE.encode()).hexdigest()
+    assert q['rustc_verbose_version'].startswith('rustc 1.97.1 ') and 'host: aarch64-apple-darwin\n' in q['rustc_verbose_version']
+    assert q['actual_transitive_versions'] == {'resvg':'0.48.1','usvg':'0.48.1','tiny-skia':'0.12.0'}
+    compile_receipt = Path(q['actualCompileReceipt'])
+    assert hashlib.sha256(compile_receipt.read_bytes()).hexdigest() == q['actualCompileReceiptSHA']
+    compiled = json.loads(compile_receipt.read_text())
+    assert compiled['actualExit'] == 0 and compiled['guardsBefore'] is True and compiled['guardsAfter'] is True
+    painter = Path(q['renderer_binary'])
+    assert hashlib.sha256(painter.read_bytes()).hexdigest() == q['renderer_binary_sha256'] == compiled['binarySHA']
+    assert hashlib.sha256(Path(q['qualified_resvg_rlib']).read_bytes()).hexdigest() == q['qualified_resvg_rlib_sha256']
+    with tempfile.TemporaryDirectory(prefix='fx195-original-path-') as temp:
+        input_path,output_path = Path(temp)/'original.svg',Path(temp)/'original.png'
+        input_path.write_bytes(raw)
+        result = subprocess.run([str(painter),str(input_path),str(output_path)],capture_output=True,timeout=120,check=False)
+        assert result.returncode == 0, result.stderr.decode(errors='replace')
+        image = Image.open(output_path).convert('RGBA')
+        image.load()
+    record.update({'source_sha256':hashlib.sha256(source).hexdigest(),'svg_sha256':hashlib.sha256(raw).hexdigest(),
+                   'origin':list(origin),'scale':font_scale,'roi':list(roi),'negative':negative,'cubic':cubic,
+                   'qualification':str(qualification_path),'qualificationSHA':os.environ['F_X195_PATH_REFERENCE_QUALIFICATION_SHA'],
+                   'rendererSHA':q['renderer_binary_sha256'],'stdout':result.stdout.decode(),'actualExit':result.returncode})
+    return image,roi,len(case['text'])*advance,record
+
+
+def _fx195_style_fixture_owners(before, case, page_size, notes=False, points=48):
+    # Bounded fixture placement from original OOXML and original physical metrics.
+    import os, math, struct, zipfile, io
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+    source = case['expected'] if case['case']=='genuine-italic' else case['files'][0]
+    if case['axis']: source = (Path(os.environ['F_X195_AXIS_ORACLES'])/(case['axis']+'-static.ttf')).read_bytes()
+    tables = {source[o:o+4]:struct.unpack_from('>II',source,o+8) for o in range(12,12+16*struct.unpack_from('>H',source,4)[0],16)}
+    upem = struct.unpack_from('>H',source,tables[b'head'][0]+18)[0]
+    with zipfile.ZipFile(io.BytesIO(before)) as z: parts = {name:z.read(name) for name in z.namelist()}
+    if 'word/document.xml' in parts:
+        w='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        tree=ET.fromstring(parts['word/document.xml']);section=tree.find('.//'+w+'sectPr');assert section is not None
+        margin=section.find(w+'pgMar');size=section.find(w+'pgSz');assert margin is not None and size is not None
+        assert tuple(round(int(size.get(w+key))/20) for key in ['w','h']) == tuple(page_size)
+        assert ''.join(n.text or '' for n in tree.iter(w+'t')) == case['text']
+        os2=tables[b'OS/2'][0];flags=struct.unpack_from('>H',source,os2+62)[0]
+        ascent=struct.unpack_from('>h',source,os2+68)[0] if flags&128 else struct.unpack_from('>H',source,os2+74)[0]
+        return [{'owner':'body','origin':(int(margin.get(w+'left'))/20,int(margin.get(w+'top'))/20+points*ascent/upem),'scale':1.}]
+    p='{http://schemas.openxmlformats.org/presentationml/2006/main}';a='{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    slide_names=[name for name in parts if re.fullmatch(r'ppt/slides/slide\d+\.xml',name)];assert len(slide_names)==1
+    slide=ET.fromstring(parts[slide_names[0]]);shapes=[shape for shape in slide.iter(p+'sp') if ''.join(n.text or '' for n in shape.iter(a+'t'))==case['text']];assert len(shapes)==1
+    presentation=ET.fromstring(parts['ppt/presentation.xml']);size=presentation.find(p+'sldSz');assert size is not None
+    slide_size=tuple(float(size.get(key))/12700 for key in ['cx','cy'])
+    asc,desc=struct.unpack_from('>hh',source,tables[b'hhea'][0]+4);height=points*1.2;descent=-desc*points/upem
+    baseline=max(height*min(asc/(asc-desc),.75),height-descent)
+    def bounds(shape):
+        xf=shape.find(p+'spPr/'+a+'xfrm');assert xf is not None and xf.get('rot','0')=='0' and xf.get('flipH','0') in ('0','false') and xf.get('flipV','0') in ('0','false')
+        off,ext=xf.find(a+'off'),xf.find(a+'ext');assert off is not None and ext is not None
+        return tuple(float(off.get(key))/12700 for key in ['x','y'])+tuple(float(ext.get(key))/12700 for key in ['cx','cy'])
+    def origin(shape):
+        x,y,_,_=bounds(shape);bp=shape.find(p+'txBody/'+a+'bodyPr');assert bp is not None
+        assert bp.get('anchor','t')=='t' and bp.get('vert','horz')=='horz'
+        return x+float(bp.get('lIns','91440'))/12700,y+float(bp.get('tIns','45720'))/12700+baseline
+    body={'owner':'body','origin':origin(shapes[0]),'scale':1.}
+    if not notes:
+        assert tuple(round(v) for v in slide_size)==tuple(page_size)
+        return [body]
+    notes_names=[name for name in parts if re.fullmatch(r'ppt/notesSlides/notesSlide\d+\.xml',name)];masters=[name for name in parts if re.fullmatch(r'ppt/notesMasters/notesMaster\d+\.xml',name)];assert len(notes_names)==len(masters)==1
+    note=ET.fromstring(parts[notes_names[0]]);master=ET.fromstring(parts[masters[0]])
+    def kind(shape):
+        ph=shape.find(p+'nvSpPr/'+p+'nvPr/'+p+'ph');return ph.get('type') if ph is not None else None
+    note_shapes=[shape for shape in note.iter(p+'sp') if ''.join(n.text or '' for n in shape.iter(a+'t'))==case['text']];assert len(note_shapes)==1 and kind(note_shapes[0])=='body'
+    nshape=note_shapes[0]
+    if nshape.find(p+'spPr/'+a+'xfrm') is None:
+        owned=[shape for shape in master.iter(p+'sp') if kind(shape)=='body'];assert len(owned)==1
+        # Position is inherited, bodyPr insets remain from the current source owner.
+        inherited=ET.fromstring(ET.tostring(nshape));sppr=inherited.find(p+'spPr');assert sppr is not None
+        sppr.append(ET.fromstring(ET.tostring(owned[0].find(p+'spPr/'+a+'xfrm'))));nshape=inherited
+    notes_size=presentation.find(p+'notesSz');assert notes_size is not None and tuple(round(float(notes_size.get(key))/12700) for key in ['cx','cy'])==tuple(page_size)
+    images=[shape for shape in note.iter(p+'sp') if kind(shape)=='sldImg' and shape.find(p+'spPr/'+a+'xfrm') is not None]
+    if not images:images=[shape for shape in master.iter(p+'sp') if kind(shape)=='sldImg']
+    assert len(images)==1
+    x,y,width,height=bounds(images[0]);scale=min(width/slide_size[0],height/slide_size[1])
+    preview_origin=(x+(width-slide_size[0]*scale)/2+body['origin'][0]*scale,y+(height-slide_size[1]*scale)/2+body['origin'][1]*scale)
+    return [{'owner':'notes-body','origin':origin(nshape),'scale':1.},{'owner':'slide-preview','origin':preview_origin,'scale':scale}]
+
+
+def _fx195_assert_installed_style(case, method, invoke, companion_pdf, companion_png, before, source_bytes, directory, expected_preview_scale=None):
+    from PIL import Image
+    import hashlib,json
+    pdf = companion_pdf()
+    pdf_image = _fx195_pdf_style_images(pdf,directory,'position-reference')[0]
+    actual_owners = _fx195_pdf_style_anchors(pdf,pdf_image.size,case,expected_preview_scale)
+    owners = _fx195_style_fixture_owners(before,case,pdf_image.size,expected_preview_scale is not None)
+    assert len(actual_owners)==len(owners)
+    for owner in owners:
+        actual = [item for item in actual_owners if item['owner']==owner['owner']]
+        assert len(actual)==1
+        assert abs(actual[0]['scale']-owner['scale']) <= .00001
+        assert all(abs(x-y)<=.00002 for x,y in zip(actual[0]['origin'],owner['origin'])), 'actual anchor must match independently declared fixture placement'
+    controls=[]
+    for owner in owners:
+        pdf_expected,roi,advance = _fx195_independent_style_paint(case,pdf_image.size,owner['origin'],owner['scale'])
+        assert _fx195_mask_ssim(pdf_image,pdf_expected,roi) >= .99, f"PDF {owner['owner']} must paint independently measured original font-text"
+        expected,path_roi,path_advance,proof = _fx195_independent_path_paint(case,pdf_image.size,owner['origin'],owner['scale'])
+        cubic,cubic_roi,cubic_advance,cubic_proof = _fx195_independent_path_paint(case,pdf_image.size,owner['origin'],owner['scale'],cubic=True)
+        assert path_roi==cubic_roi==roi and path_advance==cubic_advance==advance
+        controls.append((owner,pdf_expected,expected,cubic,roi,advance))
+        (directory/(owner['owner']+'-independent-source-paths.json')).write_text(json.dumps({'quadratic':proof,'cubic':cubic_proof},indent=2)+'\n')
+    (directory/'style-position-owners.json').write_text(json.dumps({
+        'case':case['case'],'method':method,'pdfSHA':hashlib.sha256(pdf).hexdigest(),'physicalPageSize':list(pdf_image.size),
+        'owners':owners,'actualOwners':actual_owners,'independentPointSize':48,'expectedPreviewScale':expected_preview_scale,
+        'sourceFixtureSHA':hashlib.sha256(before).hexdigest(),'originalPhysicalFontSHAs':[hashlib.sha256(data).hexdigest() for data in case['files']],
+        'threshold':.99,'adapter':'original OOXML fixture and physical metrics, independently checked reachable PDF owner matrices',
+    },indent=2)+'\n')
+    png_image = Image.open(io.BytesIO(companion_png())).convert('RGBA')
+    for owner,pdf_expected,expected,cubic,roi,advance in controls:
+        assert png_image.size==expected.size==cubic.size
+        assert _fx195_mask_ssim(png_image,expected,roi)>=.99, f"PNG quadratic {owner['owner']}"
+        assert _fx195_mask_ssim(png_image,cubic,roi)>=.99, f"PNG cubic {owner['owner']}"
+    owner,pdf_expected,expected,cubic,roi,advance = next(control for control in controls if control[0]['owner']!='slide-preview')
+    origin=owner['origin'];value=invoke();is_pdf=method in ('to_pdf','to_notes_pdf')
+    if is_pdf: images=_fx195_pdf_style_images(value,directory,'actual-method')
+    elif method in ('render_page_to_png','render_slide_to_png'):images=[Image.open(io.BytesIO(value)).convert('RGBA')]
+    elif method in ('render_all_pages','render_pages','render_all_slides','render_all_notes'):
+        assert len(value)==1;images=[Image.open(io.BytesIO(value[0])).convert('RGBA')]
+    elif method=='render_page_to_svg':
+        _fx195_svg_style_artifact(value,case,expected,cubic,roi,origin,advance,directory);images=[]
+    elif method=='text_layout':
+        assert len(value)==1 and len(value[0].lines)==1
+        assert abs(value[0].lines[0].bounds.width-advance)<=.00001;images=[]
+    elif method=='layout':
+        assert len(value)==1 and value[0].body_index==0 and value[0].physical_page==1
+        assert value[0].bounds.x>=0 and value[0].bounds.height>=33.6;images=[]
+    else:
+        assert method=='layout_page' and value is not None
+        assert value.page_number==1 and value.width==expected.width and value.height==expected.height;images=[]
+    for image in images:
+        for owner,pdf_expected,expected,cubic,roi,advance in controls:
+            assert image.size==expected.size
+            if is_pdf: assert _fx195_mask_ssim(image,pdf_expected,roi)>=.99, f"selected PDF {owner['owner']}"
+            else:
+                assert _fx195_mask_ssim(image,expected,roi)>=.99, f"selected PNG quadratic {owner['owner']}"
+                assert _fx195_mask_ssim(image,cubic,roi)>=.99, f"selected PNG cubic {owner['owner']}"
+    assert _fx195_style_observation(invoke(),method,directory,'repeat')==_fx195_style_observation(value,method,directory,'first')
+    assert source_bytes()==before
+    for owner,pdf_expected,expected,cubic,roi,advance in controls:
+        wrong = dict(case,expected=case['ordinary'][0]) if case['case']=='genuine-italic' else dict(case,axis=None,bold=False,italic=False,synthesis=True)
+        wrong_pdf,_,_ = _fx195_independent_style_paint(wrong,expected.size,owner['origin'],owner['scale'])
+        wrong_path,_,_,_ = _fx195_independent_path_paint(wrong,expected.size,owner['origin'],owner['scale'])
+        assert _fx195_mask_ssim(wrong_pdf,pdf_expected,roi)<.99, f"independent PDF wrong geometry {owner['owner']}"
+        assert _fx195_mask_ssim(wrong_path,expected,roi)<.99, f"independent path wrong geometry {owner['owner']}"
+        for negative in ('style','origin')+(('shear',) if case['synthesis'] and case['italic'] else ()):
+            wrong_pdf,_,_ = _fx195_independent_style_paint(case,expected.size,owner['origin'],owner['scale'],negative=negative)
+            wrong_path,_,_,_ = _fx195_independent_path_paint(case,expected.size,owner['origin'],owner['scale'],negative=negative)
+            assert _fx195_mask_ssim(wrong_pdf,pdf_expected,roi)<.99, f"independent PDF {negative} discriminator {owner['owner']}"
+            assert _fx195_mask_ssim(wrong_path,expected,roi)<.99, f"independent path {negative} discriminator {owner['owner']}"
+
+
+
+@pytest.mark.parametrize('style_case', _FX195_STYLE_CASES)
+@pytest.mark.parametrize('method', ['to_pdf','render_slide_to_png','render_all_slides','text_layout','to_notes_pdf','render_all_notes'])
+def test_fx195_installed_ppt_styles_match_independent_paint(method, style_case, tmp_path):
+    import xml.etree.ElementTree as ET
+    import rpptx
+    case = _fx195_style_case(style_case)
+    presentation = _fx195_presentation(case['family'])
+    with zipfile.ZipFile(io.BytesIO(presentation.to_bytes())) as package:
+        parts = {name:package.read(name) for name in package.namelist()}
+    ns = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+    counts = {'slide':0,'notes':0}
+    for name in list(parts):
+        kind = 'slide' if re.fullmatch(r'ppt/slides/slide\d+\.xml',name) else 'notes' if re.fullmatch(r'ppt/notesSlides/notesSlide\d+\.xml',name) else None
+        if kind is None: continue
+        tree = ET.fromstring(parts[name])
+        for run in tree.iter(ns+'r'):
+            prop = run.find(ns+'rPr')
+            latin = prop.find(ns+'latin') if prop is not None else None
+            if latin is None or latin.get('typeface') != case['family']: continue
+            prop.set('sz','4800')
+            prop.set('b','1' if case['bold'] else '0')
+            prop.set('i','1' if case['italic'] else '0')
+            run.find(ns+'t').text = case['text']
+            counts[kind]+=1
+        parts[name]=ET.tostring(tree,encoding='utf-8',xml_declaration=True)
+    assert counts == {'slide':1,'notes':1}
+    output = io.BytesIO()
+    with zipfile.ZipFile(output,'w') as z:
+        for name,data in parts.items(): z.writestr(name,data)
+    presentation = rpptx.Presentation.from_bytes(output.getvalue())
+    before = presentation.to_bytes()
+    kwargs = {'fonts':[(case['family'],data) for data in case['files']]}
+    notes = method in ('to_notes_pdf','render_all_notes')
+    preview_scale = _fx195_notes_preview_scale(parts) if notes else None
+    def invoke():
+        if method == 'render_slide_to_png': return presentation.render_slide_to_png(0,dpi=72,**kwargs)
+        if method == 'render_all_slides': return presentation.render_all_slides(dpi=72,**kwargs)
+        if method == 'render_all_notes': return presentation.render_all_notes(dpi=72,**kwargs)
+        return getattr(presentation,method)(**kwargs)
+    pdf = lambda:presentation.to_notes_pdf(**kwargs) if notes else presentation.to_pdf(**kwargs)
+    png = lambda:presentation.render_all_notes(dpi=72,**kwargs)[0] if notes else presentation.render_slide_to_png(0,dpi=72,**kwargs)
+    _fx195_assert_installed_style(case,method,invoke,pdf,png,before,presentation.to_bytes,tmp_path,preview_scale)
+
+
+
+@pytest.mark.parametrize("reason", ["index", "placeholder", "concrete", "gradient_placeholder", "gradient_concrete", "line_gradient_placeholder", "line_gradient_concrete"])
+@pytest.mark.parametrize("placed", [False, True])
+def test_fx206_installed_member_recovery_paints_siblings_and_preserves_source(reason, placed, tmp_path):
+    import io
+    import zipfile
+    import rpptx
+    from PIL import Image
+    seed=rpptx.Presentation()
+    seed.slides.add_slide(seed.slide_layouts[6])
+    def member(ident, width, properties, style="", positioned=True):
+        transform=(f'<a:xfrm><a:off x="127000" y="127000"/><a:ext cx="{width}" cy="254000"/></a:xfrm>' if positioned else '')
+        return f'<p:sp><p:nvSpPr><p:cNvPr id="{ident}" name="owner{ident}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>{transform}<a:prstGeom prst="rect"/>{properties}<f:opaque xmlns:f="urn:f206:member" literal="&#x41;"/></p:spPr>{style}</p:sp>'
+    properties,style={
+        'index':('', '<p:style><a:lnRef idx="0"/><a:fillRef idx="999"/><a:effectRef idx="0"/><a:fontRef idx="minor"/></p:style>'),
+        'placeholder':('<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>',''),
+        'concrete':('<a:solidFill><a:prstClr val="futureColour"/></a:solidFill>',''),
+        'gradient_placeholder':('<a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill>',''),
+        'gradient_concrete':('<a:gradFill><a:gsLst><a:gs pos="0"><a:prstClr val="futureColour"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill>',''),
+        'line_gradient_placeholder':('<a:ln><a:gradFill><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill></a:ln>',''),
+        'line_gradient_concrete':('<a:ln><a:gradFill><a:gsLst><a:gs pos="0"><a:prstClr val="futureColour"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill></a:ln>',''),
+    }[reason]
+    children=member(1,254000,'<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>')+member(2,254000,properties,style,placed)+member(3,50800,'<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>')
+    xml=f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" showMasterSp="0"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="10" name="root"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:grpSp><p:nvGrpSpPr><p:cNvPr id="11" name="parent"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="63500" y="63500"/><a:ext cx="2540000" cy="2540000"/><a:chOff x="0" y="0"/><a:chExt cx="1270000" cy="1270000"/></a:xfrm></p:grpSpPr>{children}</p:grpSp></p:spTree></p:cSld></p:sld>'
+    buf=io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(seed.to_bytes())) as original, zipfile.ZipFile(buf,'w') as edited:
+        for info in original.infolist():
+            edited.writestr(info,xml.encode() if info.filename=='ppt/slides/slide1.xml' else original.read(info.filename))
+    deck=rpptx.Presentation.from_bytes(buf.getvalue());before=deck.to_bytes()
+    png=deck.render_slide_to_png(0,dpi=72)
+    image=Image.open(io.BytesIO(png)).convert('RGB')
+    assert image.getpixel((28,40))==(0,255,0)
+    assert image.getpixel((40,40))==(255,0,0)
+    if placed:
+        red,green,blue=image.getpixel((64,40))
+        assert red<200 and green<80 and blue<80, 'failed member outline at independent scaled edge'
+    assert deck.to_pdf().startswith(b'%PDF-')
+    assert deck.to_bytes()==before
+    saved=tmp_path/'recovery.pptx';deck.save(saved)
+    reopened=rpptx.Presentation(saved)
+    assert reopened.render_slide_to_png(0,dpi=72)==png
+    with zipfile.ZipFile(io.BytesIO(reopened.to_bytes())) as a, zipfile.ZipFile(io.BytesIO(before)) as b:
+        assert a.read('ppt/slides/slide1.xml')==b.read('ppt/slides/slide1.xml')
+    with pytest.raises(rpptx.RpptxError):
+        rpptx.Presentation.from_bytes(b'not a package')
+
+
+def test_fx206_internal_run_target_surface_base_positive_owner():
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    run = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0]
+    assert run.text and run.hyperlink.address is None
+    before = prs.to_bytes()
+    assert before.startswith(b"PK")
+    assert hasattr(type(run.hyperlink), "target_slide"), "existing valid owned run must expose checked slide-target capability"
+    assert prs.to_bytes() == before
+
+
+def test_fx206_internal_run_slide_targets_prune_and_preserve_live_owners(tmp_path):
+    import xml.etree.ElementTree as ET
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides.add_slide(prs.slide_layouts[6])
+    frame = prs.slides[0].shapes[0].text_frame
+    frame.paragraphs[0].add_run(" shared")
+    frame = prs.slides[0].shapes[0].text_frame
+    paragraph = frame.paragraphs[0]
+    first, second = paragraph.runs
+    link = first.hyperlink
+    font = first.font
+    shape = prs.slides[0].shapes[0]
+    shape_id = shape.shape_id
+    before = prs.to_bytes()
+    assert link.target_slide is None
+    assert prs.to_bytes() == before
+    link.target_slide = None
+    assert prs.to_bytes() == before
+    shape.click_action.target_slide = prs.slides[1]
+    first.hyperlink.target_slide = prs.slides[1]
+    second.hyperlink.target_slide = prs.slides[1]
+    assert link.target_slide == prs.slides[1]
+    assert link.address == "slide2.xml"
+    assert paragraph.text == frame.text and first.text and font.bold is None
+    shared = prs.to_bytes()
+    link.target_slide = prs.slides[1]
+    assert prs.to_bytes() == shared
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+          "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+    parts = _package_parts(shared)
+    slide_xml = ET.fromstring(parts["ppt/slides/slide1.xml"])
+    clicks = slide_xml.findall(".//a:hlinkClick", ns)
+    assert len(clicks) == 3
+    ids = {click.get("{" + ns["r"] + "}id") for click in clicks}
+    assert len(ids) == 1 and None not in ids
+    assert all(click.get("action") == "ppaction://hlinksldjump" for click in clicks)
+    shared_id = next(iter(ids))
+    link.target_slide = prs.slides[2]
+    for invalid in (object(), 1, "slide"):
+        before = prs.to_bytes()
+        with pytest.raises(TypeError):
+            link.target_slide = invalid
+        assert prs.to_bytes() == before and link.target_slide == prs.slides[2]
+    other = rpptx.Presentation()
+    foreign = other.slides.add_slide(other.slide_layouts[6])
+    before = prs.to_bytes()
+    with pytest.raises(ValueError, match="not in this presentation"):
+        link.target_slide = foreign
+    assert prs.to_bytes() == before
+    second.hyperlink.target_slide = None
+    shape.click_action.target_slide = None
+    rels = ET.fromstring(_package_parts(prs.to_bytes())["ppt/slides/_rels/slide1.xml.rels"])
+    assert all(rel.get("Id") != shared_id for rel in rels)
+    link.address = "https://example.test/run"
+    assert link.target_slide is None and link.address == "https://example.test/run"
+    link.target_slide = prs.slides[0]
+    assert link.target_slide == prs.slides[0]
+    assert first.text and shape.shape_id == shape_id and font.bold is None
+    saved = prs.to_bytes()
+    reopened = rpptx.Presentation.from_bytes(saved)
+    fresh = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].hyperlink
+    assert fresh.target_slide == reopened.slides[0] and fresh.address == "slide1.xml"
+    path = tmp_path / "internal-run-links.pptx"
+    reopened.save(path)
+    normal = rpptx.Presentation(path)
+    assert normal.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].hyperlink.target_slide == normal.slides[0]
+    link.target_slide = prs.slides[2]
+    prs.slides.remove(prs.slides[2])
+    fresh = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].hyperlink
+    assert fresh.target_slide is None and fresh.address is None
+    stale = fresh
+    prs.slides[0].shapes[0].text_frame.text = "replacement"
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.StaleElementError, match="TextFrame.text"):
+        _ = stale.target_slide
+    with pytest.raises(rpptx.StaleElementError, match="TextFrame.text"):
+        stale.target_slide = None
+    assert prs.to_bytes() == before
+
+
+def test_fx206_cell_internal_run_link_refuses_before_relationship_mutation():
+    import rpptx
+    prs, table = _f_x194_table()
+    cell = table.cell(0, 0)
+    cell.text = "cell link"
+    hyperlink = cell.text_frame.paragraphs[0].runs[0].hyperlink
+    before = prs.to_bytes()
+    for value in (prs.slides[0], None):
+        with pytest.raises(ValueError, match="cell hyperlink assignment"):
+            hyperlink.target_slide = value
+        assert prs.to_bytes() == before
+        assert hyperlink.address is None
+
+
+
+def test_fx206_installed_imported_run_alias_and_foreign_a_round_trip(tmp_path):
+    import re
+    import xml.etree.ElementTree as ET
+    import rpptx
+    prs = _textbox_presentation(rpptx)
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides.add_slide(prs.slide_layouts[6])
+    owner = prs.slides[0].shapes[0]
+    owner_id = owner.shape_id
+    link = owner.text_frame.paragraphs[0].runs[0].hyperlink
+    link.target_slide = prs.slides[1]
+    parts = _package_parts(prs.to_bytes())
+    drawing = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    relationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    root = ET.fromstring(parts["ppt/slides/slide1.xml"])
+    clicks = list(root.iter("{" + drawing + "}hlinkClick"))
+    assert len(clicks) == 1
+    relation_id = clicks[0].get("{" + relationships + "}id")
+    assert relation_id
+    xml = parts["ppt/slides/slide1.xml"].decode()
+    matches = list(re.finditer(r"<a:rPr(?:\s[^>]*)?>.*?</a:rPr>", xml))
+    assert len(matches) == 1, "one explicit owned run-property source fixture"
+    imported = (f'<q:rPr xmlns:q="{drawing}" xmlns:rel="{relationships}" '
+                'xmlns:a=\'urn:foreign-a\' xmlns:r=\'urn:foreign-r\' xmlns:f="urn:payload" f:keep=\'&#65;\'>'
+                '<a:hlinkClick r:id=\'foreign\'><a:payload f:keep=\'&#66;\'/></a:hlinkClick>'
+                f'<q:hlinkClick rel:id="{relation_id}" r:id=\'opaque\' action="ppaction://hlinksldjump" tooltip=\'&#67;\'>'
+                '<a:payload f:keep=\'&#68;\'/></q:hlinkClick></q:rPr>')
+    parts["ppt/slides/slide1.xml"] = (xml[:matches[0].start()] + imported + xml[matches[0].end():]).encode()
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as package:
+        for name, data in parts.items():
+            package.writestr(name, data)
+    deck = rpptx.Presentation.from_bytes(stream.getvalue())
+    shape = deck.slides[0].shapes[0]
+    assert shape.shape_id == owner_id
+    run = shape.text_frame.paragraphs[0].runs[0]
+    hyperlink = run.hyperlink
+    assert run.text == "hello" and hyperlink.target_slide == deck.slides[1]
+    before = deck.to_bytes()
+    hyperlink.target_slide = deck.slides[1]
+    assert deck.to_bytes() == before
+    hyperlink.target_slide = deck.slides[2]
+    assert hyperlink.target_slide == deck.slides[2] and run.text == "hello"
+    saved = deck.to_bytes()
+    xml = _package_parts(saved)["ppt/slides/slide1.xml"].decode()
+    for token in ["<q:rPr", "xmlns:a='urn:foreign-a'", "xmlns:r='urn:foreign-r'", "f:keep='&#65;'",
+                  "<a:hlinkClick r:id='foreign'><a:payload f:keep='&#66;'/></a:hlinkClick>",
+                  "r:id='opaque'", "tooltip='&#67;'", "<a:payload f:keep='&#68;'/>"]:
+        assert token in xml
+    reopened = rpptx.Presentation.from_bytes(saved)
+    assert reopened.slides[0].shapes[0].shape_id == owner_id
+    assert reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].hyperlink.target_slide == reopened.slides[2]
+    assert reopened.to_bytes() == saved
+    path = tmp_path / "imported-alias-links.pptx"
+    reopened.save(path)
+    normal = rpptx.Presentation(path)
+    assert normal.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].hyperlink.target_slide == normal.slides[2]
+    hyperlink.address = "https://example.test/aliased"
+    assert hyperlink.address == "https://example.test/aliased" and hyperlink.target_slide is None
+    hyperlink.target_slide = None
+    cleared = deck.to_bytes()
+    xml = _package_parts(cleared)["ppt/slides/slide1.xml"].decode()
+    assert "<a:hlinkClick r:id='foreign'><a:payload f:keep='&#66;'/></a:hlinkClick>" in xml
+    assert hyperlink.address is None and hyperlink.target_slide is None
+    assert rpptx.Presentation.from_bytes(cleared).to_bytes() == cleared
+
+def test_fx206_cell_anchor_modes_round_trip_keep_physical_text_handles(tmp_path):
+    import xml.etree.ElementTree as ET
+    import rpptx
+    from rpptx.enum.text import MSO_ANCHOR
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table_shape = slide.shapes.add_table(1, 1, 0, 0, 1000000, 1000000)
+    cell = table_shape.table.cell(0, 0)
+    cell.text = "anchor text"
+    cell = prs.slides[0].shapes[0].table.cell(0, 0)
+    frame = cell.text_frame
+    frame.vertical_anchor = MSO_ANCHOR.BOTTOM
+    paragraph = frame.paragraphs[0]
+    run = paragraph.runs[0]
+    font = run.font
+    initial_bold = font.bold
+    before = prs.to_bytes()
+    assert cell.vertical_anchor is None
+    assert prs.to_bytes() == before
+    for value, token in [(MSO_ANCHOR.TOP, "t"), (MSO_ANCHOR.MIDDLE, "ctr"),
+                         (MSO_ANCHOR.BOTTOM, "b"), (None, None)]:
+        cell.vertical_anchor = value
+        assert cell.vertical_anchor == value
+        assert frame.vertical_anchor == MSO_ANCHOR.BOTTOM
+        assert run.text == "anchor text" and font.bold == initial_bold
+        assert paragraph.text == "anchor text"
+        saved = prs.to_bytes()
+        cell.vertical_anchor = value
+        assert prs.to_bytes() == saved
+        with zipfile.ZipFile(io.BytesIO(saved)) as archive:
+            xml = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        assert xml.find(".//a:tcPr", ns).get("anchor") == token
+        assert xml.find(".//a:bodyPr", ns).get("anchor") == "b"
+        reopened = rpptx.Presentation.from_bytes(saved)
+        fresh = reopened.slides[0].shapes[0].table.cell(0, 0)
+        assert fresh.vertical_anchor == value
+        assert fresh.text_frame.vertical_anchor == MSO_ANCHOR.BOTTOM
+        assert fresh.text == "anchor text"
+        path = tmp_path / "cell-anchor.pptx"
+        reopened.save(path)
+        assert rpptx.Presentation(path).slides[0].shapes[0].table.cell(0, 0).vertical_anchor == value
+    for invalid, kind in [(999, ValueError), ("bottom", TypeError), (object(), TypeError)]:
+        before = prs.to_bytes()
+        with pytest.raises(kind):
+            cell.vertical_anchor = invalid
+        assert prs.to_bytes() == before
+        assert run.text == "anchor text" and font.bold == initial_bold
+    prs.slides[0].shapes.remove(prs.slides[0].shapes[0])
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.StaleElementError, match="ShapeCollection.remove"):
+        _ = cell.vertical_anchor
+    with pytest.raises(rpptx.StaleElementError, match="ShapeCollection.remove"):
+        cell.vertical_anchor = MSO_ANCHOR.TOP
+    assert prs.to_bytes() == before
+
+
+def test_fx206_cell_anchor_clear_retains_foreign_tcpr_payload():
+    import rpptx
+    from rpptx.enum.text import MSO_ANCHOR
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_table(1, 1, 0, 0, 1000000, 1000000)
+    source = prs.to_bytes()
+    edited = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(source)) as archive, zipfile.ZipFile(edited, "w") as output:
+        for info in archive.infolist():
+            payload = archive.read(info.filename)
+            if info.filename == "ppt/slides/slide1.xml":
+                assert payload.count(b"<a:tcPr") == 1
+                match = re.search(rb"<a:tcPr([^>]*)/>", payload)
+                assert match is not None
+                replacement = b"<a:tcPr" + match.group(1) + b" xmlns:x='urn:foreign' x:keep='&#65;&#x42;' x:anchor='foreign' anchor='ctr'><x:opaque xmlns:a='urn:foreign'><a:node/></x:opaque></a:tcPr>"
+                payload = payload[:match.start()] + replacement + payload[match.end():]
+            output.writestr(info, payload)
+    reopened = rpptx.Presentation.from_bytes(edited.getvalue())
+    cell = reopened.slides[0].shapes[0].table.cell(0, 0)
+    assert cell.vertical_anchor == MSO_ANCHOR.MIDDLE
+    for value in [MSO_ANCHOR.BOTTOM, None, MSO_ANCHOR.TOP]:
+        cell.vertical_anchor = value
+        saved = reopened.to_bytes()
+        with zipfile.ZipFile(io.BytesIO(saved)) as archive:
+            xml = archive.read("ppt/slides/slide1.xml")
+        assert b"x:keep='&#65;&#x42;'" in xml
+        assert b"x:anchor='foreign'" in xml
+        assert b"<x:opaque xmlns:a='urn:foreign'><a:node/></x:opaque>" in xml
+        assert rpptx.Presentation.from_bytes(saved).slides[0].shapes[0].table.cell(0, 0).vertical_anchor == value
+        cell.vertical_anchor = value
+        assert reopened.to_bytes() == saved
+
+
+
+def test_fx206_every_created_layout_placeholder_name_matches_pinned_reference(tmp_path):
+    from pathlib import Path
+    import importlib.metadata
+    import pptx
+    import rpptx
+    assert importlib.metadata.version("python-pptx") == "1.0.2"
+    source = Path(__file__).resolve().parents[2] / "rpptx" / "assets" / "default.pptx"
+    payload = source.read_bytes()
+    expected = pptx.Presentation(io.BytesIO(payload))
+    actual = rpptx.Presentation.from_bytes(payload)
+    assert len(actual.slide_layouts) == len(expected.slide_layouts) == 11
+    held_layouts = actual.slide_layouts
+    for index in range(11):
+        expected_slide = expected.slides.add_slide(expected.slide_layouts[index])
+        actual_slide = actual.slides.add_slide(held_layouts[index])
+        names = [shape.name for shape in actual_slide.shapes]
+        assert names == [shape.name for shape in expected_slide.shapes], expected.slide_layouts[index].name
+        assert len(set(names)) == len(names)
+        assert len(set(shape.shape_id for shape in actual_slide.shapes)) == len(names)
+    destination = tmp_path / "all-layout-names.pptx"
+    actual.save(destination)
+    reopened = rpptx.Presentation(destination)
+    assert [[shape.name for shape in slide.shapes] for slide in reopened.slides] == [[shape.name for shape in slide.shapes] for slide in actual.slides]
+
+
+@pytest.mark.parametrize("size,crop_axis", [((120, 60), "horizontal"), ((60, 120), "vertical")])
+def test_fx206_picture_placeholder_fill_owner_crop_and_atomicity(size, crop_axis):
+    import io
+    import zipfile
+    from PIL import Image
+    from lxml import etree
+    import rpptx
+
+    presentation = rpptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[8])
+    with zipfile.ZipFile(io.BytesIO(presentation.to_bytes())) as archive:
+        root = etree.fromstring(archive.read("ppt/slides/slide1.xml"))
+        namespaces = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+        picture_ids = root.xpath("//p:sp[p:nvSpPr/p:nvPr/p:ph/@type='pic']/p:nvSpPr/p:cNvPr/@id", namespaces=namespaces)
+    assert len(picture_ids) == 1
+    placeholder = next(shape for shape in slide.shapes if shape.shape_id == int(picture_ids[0]))
+    assert placeholder.effective_geometry() is not None
+    assert callable(getattr(placeholder, "insert_picture", None)), "picture placeholder insertion is absent"
+    before = presentation.to_bytes()
+    with pytest.raises(rpptx.RpptxError):
+        placeholder.insert_picture(b"not-an-image")
+    assert presentation.to_bytes() == before
+    original_id, original_name = placeholder.shape_id, placeholder.name
+    original_index = next(i for i, shape in enumerate(slide.shapes) if shape.shape_id == original_id)
+    geometry = placeholder.effective_geometry()
+    assert geometry is not None
+    sibling = slide.shapes[0]
+    stream = io.BytesIO()
+    colours = [(190, 20, 30), (20, 190, 30), (20, 30, 190), (190, 130, 20), (130, 20, 190), (20, 130, 190), (90, 20, 30), (20, 90, 30), (20, 30, 90)]
+    image = Image.new("RGB", size)
+    for row in range(3):
+        for column in range(3):
+            image.paste(colours[row * 3 + column], (column * size[0] // 3, row * size[1] // 3, (column + 1) * size[0] // 3, (row + 1) * size[1] // 3))
+    image.save(stream, format="PNG")
+    picture = placeholder.insert_picture(stream.getvalue())
+    assert picture.shape_id == original_id and picture.name == original_name
+    assert picture.effective_geometry() == geometry
+    assert slide.shapes[original_index].shape_id == original_id
+    assert sibling.shape_id != original_id
+    with pytest.raises(rpptx.StaleElementError, match="Shape.insert_picture"):
+        _ = placeholder.shape_id
+    if crop_axis == "horizontal":
+        assert picture.crop_left == picture.crop_right and picture.crop_left > 0
+        assert picture.crop_top == picture.crop_bottom == 0
+    else:
+        assert picture.crop_top == picture.crop_bottom and picture.crop_top > 0
+        assert picture.crop_left == picture.crop_right == 0
+    saved = presentation.to_bytes()
+    assert saved != before
+    with zipfile.ZipFile(io.BytesIO(saved)) as archive:
+        root = etree.fromstring(archive.read("ppt/slides/slide1.xml"))
+        ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main", "a": "http://schemas.openxmlformats.org/drawingml/2006/main", "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
+        owners = root.xpath("//p:pic[p:nvPicPr/p:cNvPr/@id=$id]", namespaces=ns, id=str(original_id))
+        assert len(owners) == 1
+        assert owners[0].xpath("p:nvPicPr/p:nvPr/p:ph/@type", namespaces=ns) == ["pic"]
+        assert len(owners[0].xpath("p:blipFill/a:blip/@r:embed", namespaces=ns)) == 1
+        assert owners[0].xpath("p:spPr/a:prstGeom/@prst", namespaces=ns) == ["rect"]
+        assert owners[0].xpath("p:spPr/a:custGeom", namespaces=ns) == []
+        assert [etree.QName(child).localname for child in owners[0].xpath("p:spPr/*[self::a:xfrm or self::a:prstGeom]", namespaces=ns)] == ["xfrm", "prstGeom"]
+    reopened = rpptx.Presentation.from_bytes(saved)
+    again = reopened.slides[0].shapes[original_index]
+    assert again.shape_id == original_id and again.name == original_name
+    actual_png = presentation.render_slide_to_png(0, dpi=72.0)
+    assert actual_png is not None
+    actual = Image.open(io.BytesIO(actual_png)).convert("RGB")
+    left, top, width, height = (float(int(value)) / 12700.0 for value in geometry)
+    # Independent centered cover mapping, using only original pixel dimensions
+    # and the inherited native rectangle. No product crop values feed this oracle.
+    source_aspect = size[0] / size[1]
+    box_aspect = width / height
+    crop_x = (1.0 - box_aspect / source_aspect) / 2.0 if source_aspect > box_aspect else 0.0
+    crop_y = (1.0 - source_aspect / box_aspect) / 2.0 if source_aspect < box_aspect else 0.0
+    differs_from_uncropped = False
+    for fx, fy in [(0.30, 0.25), (0.70, 0.25), (0.30, 0.75), (0.70, 0.75)]:
+        sx = (crop_x + fx * (1 - 2 * crop_x)) * size[0]
+        sy = (crop_y + fy * (1 - 2 * crop_y)) * size[1]
+        colour = image.getpixel((int(sx), int(sy)))
+        uncropped = image.getpixel((int(fx * size[0]), int(fy * size[1])))
+        differs_from_uncropped |= colour != uncropped
+        pixel = actual.getpixel((round(left + width * fx), round(top + height * fy)))
+        assert max(abs(a - b) for a, b in zip(pixel, colour)) <= 1
+    assert differs_from_uncropped, "the painter control must distinguish cover crop from stretch"
+    assert reopened.render_slide_to_png(0, dpi=72.0) == actual_png
+    stable = presentation.to_bytes()
+    with pytest.raises(rpptx.RpptxError, match="not an unfilled picture placeholder"):
+        picture.insert_picture(b"not-an-image")
+    assert presentation.to_bytes() == stable
+
+
+@pytest.mark.parametrize("extent_y", [2 * 914400, 3 * 914400 // 2], ids=["uniform-2x", "nonuniform-2x-1p5x"])
+def test_fx206_issue323_added_group_connector_paints_combined_affine_and_keeps_owners(extent_y, tmp_path):
+    import io
+    import math
+    import re
+    from PIL import Image
+    from lxml import etree
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    from rpptx.enum.shapes import MSO_CONNECTOR
+
+    unit = 914400
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    rectangle = slide.shapes.add_shape("rect", 0, 0, 2 * unit, unit)
+    rectangle.fill.solid()
+    rectangle.fill.fore_color.rgb = RGBColor(180, 30, 40)
+    rectangle.line.width = 0
+    rectangle_id = rectangle.shape_id
+    parts = _package_parts(deck.to_bytes())
+    text = parts["ppt/slides/slide1.xml"].decode()
+    body = _fx206_actual_slide_shapes(text, 1)[0]
+    opaque = '<a:extLst><a:ext uri="urn:fx206:preserved"><f:payload xmlns:f="urn:fx206:opaque" keep="&#65;"> untouched </f:payload></a:ext></a:extLst>'
+    assert body.count("</p:spPr>") == 1
+    body = body.replace("</p:spPr>", opaque + "</p:spPr>")
+    transform = (
+        '<a:xfrm rot="1800000" flipH="1"><a:off x="2286000" y="2286000"/>'
+        f'<a:ext cx="3657600" cy="{extent_y}"/><a:chOff x="0" y="0"/>'
+        '<a:chExt cx="1828800" cy="914400"/></a:xfrm>'
+    )
+    group_xml = _fx206_group_source(body)
+    group_xml, changed = re.subn(r"<a:xfrm>.*?</a:xfrm>", transform, group_xml, count=1, flags=re.DOTALL)
+    assert changed == 1
+    patched = _fx206_replace_slide_source(deck.to_bytes(), lambda xml: xml.replace(_fx206_actual_slide_shapes(xml, 1)[0], group_xml, 1))
+    actual = rpptx.Presentation.from_bytes(patched)
+    group = actual.slides[0].shapes[0]
+    held = group.shapes[0]
+    assert held.shape_id == rectangle_id and (held.width, held.height) == (2 * unit, unit)
+    assert group.rotation == 30 and group.flip_h is True
+    # Exercise the reported public operation, rather than importing a pre-existing connector.
+    begin, end = (3 * unit // 10, unit // 5), (8 * unit // 5, 7 * unit // 10)
+    connector = group.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, *begin, *end)
+    connector.line.color.rgb = RGBColor(0, 0, 0)
+    connector.line.width = rpptx.Pt(4)
+    connector.theme_effect_index = 0
+    assert group.shape_id == 50 and held.shape_id == rectangle_id
+    assert [shape.shape_id for shape in group.shapes] == [rectangle_id, connector.shape_id]
+    assert (connector.begin_x, connector.begin_y, connector.end_x, connector.end_y) == (*begin, *end)
+    source = actual.to_bytes()
+    xml = _package_parts(source)["ppt/slides/slide1.xml"]
+    assert opaque.encode() in xml
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main", "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    root = etree.fromstring(xml)
+    xfrm = root.xpath("//p:grpSp[p:nvGrpSpPr/p:cNvPr/@id='50']/p:grpSpPr/a:xfrm", namespaces=ns)
+    assert len(xfrm) == 1
+    assert xfrm[0].get("rot") == "1800000" and xfrm[0].get("flipH") == "1"
+    assert xfrm[0].find("a:off", ns).attrib == {"x": "2286000", "y": "2286000"}
+    assert xfrm[0].find("a:ext", ns).attrib == {"cx": "3657600", "cy": str(extent_y)}
+    assert xfrm[0].find("a:chExt", ns).attrib == {"cx": "1828800", "cy": "914400"}
+    # Source-controlled mathematical oracle: scale child coordinates, reflect about
+    # the group frame center, then rotate clockwise, as the approved contract says.
+    # No product-resolved coordinates or emitted crop/transform values feed this map.
+    cosine, sine = math.cos(math.pi / 6), math.sin(math.pi / 6)
+    def mapped(point, wrong_order=False):
+        dx = point[0] * 2 - 2 * unit
+        dy = point[1] * extent_y / unit - extent_y / 2
+        if wrong_order:
+            x, y = -(cosine * dx - sine * dy), sine * dx + cosine * dy
+        else:
+            x, y = cosine * -dx - sine * dy, sine * -dx + cosine * dy
+        return ((2286000 + 2 * unit + x) / 12700, (2286000 + extent_y / 2 + y) / 12700)
+    painted = actual.render_slide_to_png(0, dpi=72.0)
+    image = Image.open(io.BytesIO(painted)).convert("RGB")
+    def samples(point):
+        x, y = map(round, point)
+        assert 2 <= x < image.width - 2 and 2 <= y < image.height - 2
+        return [image.getpixel((x + dx, y + dy)) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+    for fraction in (0.2, 0.4, 0.6, 0.8):
+        point = tuple(a + fraction * (b - a) for a, b in zip(begin, end))
+        assert any(max(pixel) <= 20 for pixel in samples(mapped(point))), "Issue323 grouped connector must paint at flip-before-rotate position"
+    for point in ((unit // 5, 4 * unit // 5), (9 * unit // 5, unit // 5)):
+        assert any(max(abs(a - b) for a, b in zip(pixel, (180, 30, 40))) <= 1 for pixel in samples(mapped(point))), "Issue323 resolvable rectangle sibling must remain painted"
+    assert any(not any(max(pixel) <= 20 for pixel in samples(mapped(tuple(a + fraction * (b - a) for a, b in zip(begin, end)), True))) for fraction in (0.2, 0.4, 0.6, 0.8)), "negative control must distinguish reversed transform order"
+    assert actual.to_bytes() == source and held.shape_id == rectangle_id
+    target = tmp_path / ("grouped-connector-" + str(extent_y) + ".pptx")
+    actual.save(target)
+    reopened = rpptx.Presentation(target)
+    assert reopened.render_slide_to_png(0, dpi=72.0) == painted
+    assert opaque.encode() in _package_parts(reopened.to_bytes())["ppt/slides/slide1.xml"]
+    assert [shape.shape_id for shape in reopened.slides[0].shapes[0].shapes] == [rectangle_id, connector.shape_id]
+
+def test_fx210_ppt_companions_and_frame_diagnostics_share_actual_output():
+    from pathlib import Path
+    from rpptx import Presentation
+
+    presentation = Presentation()
+    presentation.slides.add_slide(presentation.slide_layouts[6])
+    for index, family in enumerate(("Aptos", "Calibri")):
+        shape = presentation.slides[0].shapes.add_textbox(0, index * 914400, 4000000, 914400)
+        shape.text = "Actual contributing text"
+        shape = presentation.slides[0].shapes[index]
+        shape.text_frame.paragraphs[0].runs[0].font.name = family
+    source = (Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Carlito-Regular.ttf").read_bytes()
+    kwargs = {"fonts": [("Aptos", source)]}
+    pdf, facts = presentation.to_pdf_with_diagnostics(**kwargs)
+    assert pdf == presentation.to_pdf(**kwargs)
+    assert isinstance(facts, tuple) and all(isinstance(value, str) for value in facts)
+    assert sum("Font 'Aptos' is approximate" in value for value in facts) == 1
+    png, png_facts = presentation.render_slide_to_png_with_diagnostics(0, 72.0, **kwargs)
+    assert png == presentation.render_slide_to_png(0, 72.0, **kwargs)
+    assert png_facts == facts
+    all_pngs, all_facts = presentation.render_all_slides_with_diagnostics(72.0, **kwargs)
+    assert all_pngs == presentation.render_all_slides(72.0, **kwargs)
+    assert all_facts == facts
+    frames = presentation.text_layout(**kwargs)
+    assert len(frames) == 2
+    assert any("Aptos" in value and "approximate" in value for value in frames[0].diagnostics)
+    assert not any("Aptos" in value for value in frames[1].diagnostics)
+    assert presentation.text_layout(**kwargs) == frames
+
+    notes = _fx195_presentation("Aptos")
+    notes.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.name = "Calibri"
+    assert not any("Aptos" in value for value in notes.to_pdf_with_diagnostics(**kwargs)[1])
+    before_notes = notes.to_bytes()
+    notes_pdf, notes_facts = notes.to_notes_pdf_with_diagnostics(**kwargs)
+    assert notes_pdf == notes.to_notes_pdf(**kwargs)
+    assert isinstance(notes_facts, tuple)
+    assert sum("Font 'Aptos' is approximate" in value for value in notes_facts) == 1
+    notes_png, png_facts = notes.render_all_notes_with_diagnostics(72.0, **kwargs)
+    assert notes_png == notes.render_all_notes(72.0, **kwargs)
+    assert png_facts == notes_facts
+    assert notes_png and all(page.startswith(b"\x89PNG") for page in notes_png)
+    assert notes.to_notes_pdf_with_diagnostics(**kwargs) == (notes_pdf, notes_facts)
+    assert notes.to_bytes() == before_notes
+
+
+def test_fx206_picture_placeholder_opaque_empty_body_refuses_without_package_mutation():
+    import io
+    import rpptx
+    from PIL import Image
+    from lxml import etree
+
+    deck = rpptx.Presentation()
+    deck.slides.add_slide(deck.slide_layouts[8])
+    parts = _package_parts(deck.to_bytes())
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+    root = etree.fromstring(parts["ppt/slides/slide1.xml"])
+    owners = root.xpath("//p:sp[p:nvSpPr/p:nvPr/p:ph/@type='pic']", namespaces=ns)
+    assert len(owners) == 1
+    ident = int(owners[0].find("p:nvSpPr/p:cNvPr", ns).get("id"))
+    # Only replace this existing empty owner body, leaving all other members exact.
+    source = parts["ppt/slides/slide1.xml"].decode()
+    shape = next(s for s in _fx206_actual_slide_shapes(source, len(root.xpath("//p:sp", namespaces=ns)))
+                 if f'id="{ident}"' in s and 'type="pic"' in s)
+    import re
+    body = '<p:txBody xmlns:x="urn:producer" x:keep=\'&#65;\'><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>'
+    replacement, changed = re.subn(r"<p:txBody\b[^>]*>.*?</p:txBody>", body, shape, count=1, flags=re.DOTALL)
+    assert changed == 1
+    parts["ppt/slides/slide1.xml"] = source.replace(shape, replacement, 1).encode()
+    actual = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    before = actual.to_bytes()
+    before_parts = _package_parts(before)
+    assert b"x:keep='&#65;'" in before_parts["ppt/slides/slide1.xml"]
+    assert rpptx.Presentation.from_bytes(before).to_bytes() == before
+    slide = actual.slides[0]
+    owner = next(s for s in slide.shapes if s.shape_id == ident)
+    ids = [s.shape_id for s in slide.shapes]
+    image = io.BytesIO()
+    Image.new("RGB", (2, 2), (10, 20, 30)).save(image, format="PNG")
+    with pytest.raises(rpptx.RpptxError, match="picture placeholder text body contains source that a picture cannot retain"):
+        owner.insert_picture(image.getvalue())
+    assert actual.to_bytes() == before
+    assert _package_parts(actual.to_bytes()) == before_parts
+    assert [s.shape_id for s in slide.shapes] == ids
+    assert owner.shape_id == ident
+
+
+# F-X207 Base controls use existing public construction and measurement first.
+# The missing explicit operation is the deciding Base assertion, not save-time
+# mutation. The persisted-result assertions remain mandatory after adoption.
+def _fx207_fixture(tmp_path, text, mode):
+    from pathlib import Path
+    import rpptx
+
+    font_path = Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Carlito-Regular.ttf"
+    font = font_path.read_bytes()
+    assert font[:4] == b"\x00\x01\x00\x00"
+    presentation = _text_layout_deck(tmp_path, rpptx.Inches(4), text)
+    shape = presentation.slides[0].shapes[0]
+    frame = shape.text_frame
+    frame.word_wrap = True
+    frame.auto_size = mode
+    for paragraph in frame.paragraphs:
+        paragraph.font.name = "Carlito"
+        paragraph.font.size = rpptx.Pt(20)
+        for run in paragraph.runs:
+            run.font.name = "Carlito"
+            run.font.size = rpptx.Pt(20)
+    return presentation, [("Carlito", font)]
+
+
+def _fx207_slide_xml(presentation):
+    import xml.etree.ElementTree as ET
+
+    with zipfile.ZipFile(io.BytesIO(presentation.to_bytes())) as archive:
+        return ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+
+
+def _fx207_shape_xml(presentation, shape_id):
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+    for shape in _fx207_slide_xml(presentation).findall(".//p:sp", ns):
+        if shape.find("p:nvSpPr/p:cNvPr", ns).get("id") == str(shape_id):
+            return shape
+    raise AssertionError("F-X207 source-owned shape is absent")
+
+
+def _fx207_update(result, shape_id):
+    updates = [u for u in result.updates if u.owner_part == "/ppt/slides/slide1.xml"
+               and u.shape_id == shape_id and u.cell is None]
+    assert len(updates) == 1
+    return updates[0]
+
+
+def test_fx207_explicit_normal_refresh_persists_owned_scale_pair(tmp_path):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(
+        tmp_path, "First line\nSecond line\nThird line",
+        rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    )
+    shape = presentation.slides[0].shapes[0]
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    before = presentation.to_bytes()
+    normal = _fx207_shape_xml(presentation, shape.shape_id).find(".//a:normAutofit", ns)
+    assert normal is not None and normal.attrib == {}
+    (measured,) = presentation.text_layout(fonts=fonts)
+    assert measured.autofit == "normal" and measured.font_scale < 1.0
+    assert presentation.to_bytes() == before
+    refresh = getattr(presentation, "refresh_autofit", None)
+    assert callable(refresh), "F-X207 missing explicit normal refresh persistence"
+    result = refresh(fonts=fonts)
+    update = _fx207_update(result, shape.shape_id)
+    assert update.mode == "normal" and update.changed and result.changed
+    assert update.status == "updated"
+    pair = (update.font_scale, update.line_spacing_reduction)
+    assert pair in ((100000, 0), (100000, 10000), (92500, 0), (92500, 10000),
+                    (92500, 20000), (85000, 20000), (77500, 20000),
+                    (70000, 20000), (62500, 20000), (55000, 20000),
+                    (47500, 20000), (40000, 20000), (32500, 20000), (25000, 20000))
+    normal = _fx207_shape_xml(presentation, shape.shape_id).find(".//a:normAutofit", ns)
+    assert normal.attrib == {"fontScale": str(pair[0]), "lnSpcReduction": str(pair[1])}
+    saved = presentation.to_bytes()
+    assert saved != before
+    assert not presentation.text_layout(fonts=fonts)[0].overflow
+    assert presentation.to_bytes() == saved
+    assert not refresh(fonts=fonts).changed
+    assert presentation.to_bytes() == saved
+    reopened = rpptx.Presentation.from_bytes(saved)
+    assert _fx207_shape_xml(reopened, shape.shape_id).find(".//a:normAutofit", ns).attrib == normal.attrib
+
+
+def test_fx207_explicit_shape_refresh_persists_changed_bounds(tmp_path):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(
+        tmp_path, "First line\nSecond line\nThird line",
+        rpptx.MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT,
+    )
+    shape = presentation.slides[0].shapes[0]
+    old = (shape.left, shape.top, shape.width, shape.height)
+    before = presentation.to_bytes()
+    assert old[3] == rpptx.Pt(36)
+    (measured,) = presentation.text_layout(fonts=fonts)
+    assert measured.autofit == "shape" and measured.overflow
+    assert (shape.left, shape.top, shape.width, shape.height) == old
+    assert presentation.to_bytes() == before
+    refresh = getattr(presentation, "refresh_autofit", None)
+    assert callable(refresh), "F-X207 missing explicit shape refresh persistence"
+    result = refresh(fonts=fonts)
+    update = _fx207_update(result, shape.shape_id)
+    current = presentation.slides[0].shapes[0]
+    new = (current.left, current.top, current.width, current.height)
+    assert update.mode == "shape" and update.status == "updated"
+    assert update.old_bounds == old and update.new_bounds == new
+    assert new[:3] == old[:3] and new[3] > old[3]
+    assert update.changed and result.changed
+    saved = presentation.to_bytes()
+    assert not presentation.text_layout(fonts=fonts)[0].overflow
+    assert not refresh(fonts=fonts).changed
+    assert presentation.to_bytes() == saved
+    reopened = rpptx.Presentation.from_bytes(saved).slides[0].shapes[0]
+    assert (reopened.left, reopened.top, reopened.width, reopened.height) == new
+
+
+def test_fx207_fit_text_persists_uniform_size_without_autofit(tmp_path):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(
+        tmp_path, "First line\nSecond line\nThird line",
+        rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    )
+    frame = presentation.slides[0].shapes[0].text_frame
+    original = frame.text
+    before = presentation.to_bytes()
+    fit = getattr(frame, "fit_text", None)
+    assert callable(fit), "F-X207 missing explicit checked TextFrame.fit_text"
+    update = fit(font_family=None, max_size=12, fonts=fonts)
+    assert isinstance(update.diagnostics, tuple)
+    assert update.mode == "none" and update.status == "updated" and update.changed
+    assert isinstance(update.point_size, int) and 1 <= update.point_size <= 12
+    current = presentation.slides[0].shapes[0].text_frame
+    assert current.text == original and current.word_wrap is True
+    assert current.auto_size == rpptx.MSO_AUTO_SIZE.NONE
+    for paragraph in current.paragraphs:
+        for run in paragraph.runs:
+            assert run.font.name == "Carlito"
+            assert run.font.size == rpptx.Pt(update.point_size)
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    source = _fx207_shape_xml(presentation, update.shape_id)
+    assert len(source.findall(".//a:noAutofit", ns)) == 1
+    assert not source.findall(".//a:normAutofit", ns)
+    assert {r.get("sz") for r in source.findall(".//a:rPr", ns)} == {str(update.point_size * 100)}
+    saved = presentation.to_bytes()
+    assert saved != before
+    assert not presentation.text_layout(fonts=fonts)[0].overflow
+    reopened = rpptx.Presentation.from_bytes(saved)
+    assert reopened.slides[0].shapes[0].text_frame.text == original
+
+
+def test_fx207_refresh_accounts_for_flagged_empty_frames_and_is_explicit(tmp_path):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(
+        tmp_path, "Short text", rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    )
+    slide = presentation.slides[0]
+    first = slide.shapes[0]
+    first_id = first.shape_id
+    empty = slide.shapes.add_textbox(rpptx.Inches(1), rpptx.Inches(2), rpptx.Inches(4), rpptx.Pt(36))
+    empty.text_frame.auto_size = rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    before = presentation.to_bytes()
+    empty_before = _fx207_shape_xml(presentation, empty.shape_id)
+    import xml.etree.ElementTree as ET
+    empty_bytes = ET.tostring(empty_before)
+    assert len(presentation.text_layout(fonts=fonts)) == 1
+    assert presentation.to_bytes() == before
+    refresh = getattr(presentation, "refresh_autofit", None)
+    assert callable(refresh), "F-X207 missing explicit complete flagged-owner refresh"
+    result = refresh(fonts=fonts)
+    # The stock deck also has flagged master owners. Account for this slide
+    # without excluding the complete physical-owner inventory.
+    slide_updates = [u for u in result.updates if u.owner_part == "/ppt/slides/slide1.xml"]
+    assert len(slide_updates) == 2
+    assert [u.shape_id for u in slide_updates] == [first_id, empty.shape_id]
+    nonempty = _fx207_update(result, first_id)
+    assert (nonempty.font_scale, nonempty.line_spacing_reduction) == (100000, 0)
+    empty_update = _fx207_update(result, empty.shape_id)
+    assert empty_update.status == "empty" and not empty_update.changed
+    assert empty_update.font_scale is None and empty_update.point_size is None
+    assert ET.tostring(_fx207_shape_xml(presentation, empty.shape_id)) == empty_bytes
+    saved = presentation.to_bytes()
+    assert not refresh(fonts=fonts).changed
+    assert presentation.to_bytes() == saved
+
+
+@pytest.mark.parametrize("bad_size", [True, False, 0, -1, 1.5, 4001, 2**100])
+def test_fx207_fit_size_validation_is_strict_and_atomic(tmp_path, bad_size):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(tmp_path, "Strict size", rpptx.MSO_AUTO_SIZE.NONE)
+    frame = presentation.slides[0].shapes[0].text_frame
+    before = presentation.to_bytes()
+    expected = TypeError if isinstance(bad_size, bool) or isinstance(bad_size, float) else ValueError
+    with pytest.raises(expected, match="max_size"):
+        frame.fit_text(max_size=bad_size, fonts=fonts)
+    assert presentation.to_bytes() == before
+    assert frame.text == "Strict size"
+
+
+def test_fx207_snapshots_and_existing_handles_remain_owned_and_read_only(tmp_path):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(
+        tmp_path, "First line\nSecond line\nThird line", rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    )
+    slide = presentation.slides[0]
+    shape = slide.shapes[0]
+    frame = shape.text_frame
+    paragraph = frame.paragraphs[0]
+    run = paragraph.runs[0]
+    result = presentation.refresh_autofit(fonts=fonts)
+    update = _fx207_update(result, shape.shape_id)
+    assert isinstance(result.updates, tuple) and isinstance(result.diagnostics, tuple)
+    assert isinstance(update.diagnostics, tuple)
+    old_pair = (update.font_scale, update.line_spacing_reduction)
+    for owner, field, value in [(result, "changed", False), (update, "font_scale", 1),
+                                (update, "old_bounds", (0, 0, 1, 1))]:
+        with pytest.raises(AttributeError):
+            setattr(owner, field, value)
+    assert frame.text == "First line\nSecond line\nThird line"
+    assert paragraph.text == "First line" and run.text == "First line"
+    fitted = frame.fit_text(max_size=12, fonts=fonts)
+    assert fitted.mode == "none" and run.font.size == rpptx.Pt(fitted.point_size)
+    assert shape.shape_id == update.shape_id and slide.shapes[0].shape_id == shape.shape_id
+    assert (update.font_scale, update.line_spacing_reduction) == old_pair
+    assert not frame.fit_text(max_size=12, fonts=fonts).changed
+    assert frame.text == "First line\nSecond line\nThird line"
+
+
+def test_fx207_invalid_font_directory_and_late_unfit_preserve_the_complete_deck(tmp_path):
+    import rpptx
+
+    presentation, fonts = _fx207_fixture(
+        tmp_path, "First line\nSecond line\nThird line", rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    )
+    before = presentation.to_bytes()
+    missing = tmp_path / "missing-caller-directory"
+    with pytest.raises(OSError, match="missing-caller-directory"):
+        presentation.refresh_autofit(fonts=fonts, font_dirs=[missing])
+    assert presentation.to_bytes() == before
+    late = presentation.slides[0].shapes.add_textbox(
+        rpptx.Inches(1), rpptx.Inches(3), rpptx.Inches(4), rpptx.Pt(36),
+    )
+    late.text_frame.text = "Unfit line\n" * 500
+    late = presentation.slides[0].shapes[1]
+    late.text_frame.auto_size = rpptx.MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    before = presentation.to_bytes()
+    with pytest.raises(rpptx.RpptxError, match="slide1.xml.*floor"):
+        presentation.refresh_autofit(fonts=fonts)
+    assert presentation.to_bytes() == before
+    assert presentation.slides[0].shapes[0].text_frame.text == "First line\nSecond line\nThird line"
+
+
+def test_fx208_deck_footer_public_base(tmp_path):
+    from rpptx import Presentation
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[0])
+    prs.slides.add_slide(prs.slide_layouts[1])
+    path = tmp_path / "footer-positive.pptx"
+    prs.save(path)
+    assert len(Presentation(path).slides) == 2
+    prs.set_header_footer(slide_number=True, footer="F208 owned footer", date="fixed date")
+    assert prs.slides[1].header_footer.footer == "F208 owned footer"
+    assert prs.slides[0].header_footer.footer is None
+    hf = prs.slides[1].header_footer
+    assert hf.source == "slide" and hf.policy_source == "layout"
+    assert hf.footer_policy is True and hf.footer_present
+    before = prs.to_bytes()
+    prs.set_header_footer(slide_number=True, footer="F208 owned footer", date="fixed date")
+    assert prs.to_bytes() == before
+    reopened = Presentation.from_bytes(before)
+    assert reopened.slides[1].header_footer.date == "fixed date"
+    from rpptx import RpptxError
+    with pytest.raises(RpptxError):
+        prs.set_header_footer(footer="invalid\x00")
+    assert prs.to_bytes() == before
+    prs.set_header_footer(date="auto", date_cache="same", hide_on_title=False)
+    hf = prs.slides[1].header_footer
+    assert hf.date_mode == "automatic" and hf.date_cache == "same"
+    hf.date = "same"
+    assert hf.date_mode == "fixed" and hf.date_cache is None
+    assert Presentation.from_bytes(prs.to_bytes()).slides[1].header_footer.date_mode == "fixed"
+    before = prs.to_bytes()
+    hf.date = "same"
+    assert prs.to_bytes() == before
+
+
+def test_fx208_slide_footer_public_base():
+    from rpptx import Presentation
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[1])
+    assert len(prs.slides[0].shapes) >= 2
+    prs.slides[0].header_footer.footer = "F208 local"
+    assert prs.slides[0].header_footer.footer == "F208 local"
+    hf = prs.slides[0].header_footer
+    hf.date = "auto"
+    hf.date_format = "datetime13"
+    hf.slide_number = True
+    assert hf.footer == "F208 local" and hf.date_format == "datetime13"
+    before = prs.to_bytes()
+    from rpptx import RpptxError
+    with pytest.raises(RpptxError):
+        hf.date_format = "datetime14"
+    assert prs.to_bytes() == before
+    hf.footer = ""
+    assert hf.footer == "" and hf.footer_present
+    hf.footer = None
+    assert hf.footer is None and not hf.footer_present
+
+
+def test_fx208_transition_public_base():
+    from rpptx import Presentation
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[1])
+    assert len(prs.slides) == 1
+    prs.slides[0].transition.type = "split"
+    prs.slides[0].transition.direction = "horizontal-in"
+    assert prs.slides[0].transition.type == "split"
+    transition = prs.slides[0].transition
+    directions = {
+        "fade": [None], "cut": [None],
+        "push": [None, "left", "up", "right", "down"],
+        "wipe": [None, "left", "up", "right", "down"],
+        "cover": [None, "left", "up", "right", "down", "left-up", "right-up", "left-down", "right-down"],
+        "uncover": [None, "left", "up", "right", "down", "left-up", "right-up", "left-down", "right-down"],
+        "split": [None, "horizontal-in", "horizontal-out", "vertical-in", "vertical-out"],
+        "zoom": [None, "in", "out"],
+    }
+    for kind, allowed in directions.items():
+        transition.type = kind
+        for direction in allowed:
+            transition.direction = direction
+            transition.duration = 1.2349
+            transition.advance_after = 0.0009
+            transition.advance_on_click = False
+            assert transition.duration == 1.234
+            assert transition.advance_after == 0.0
+            assert transition.advance_on_click is False
+            reopened = Presentation.from_bytes(prs.to_bytes()).slides[0].transition
+            assert reopened.type == kind and reopened.direction == direction
+            assert reopened.duration == 1.234 and reopened.advance_after == 0.0
+            before = prs.to_bytes()
+            transition.duration = 1.2349
+            assert prs.to_bytes() == before
+    before = prs.to_bytes()
+    for invalid in [float("nan"), float("inf"), -0.01]:
+        with pytest.raises(ValueError):
+            transition.duration = invalid
+        assert prs.to_bytes() == before
+    with pytest.raises(ValueError):
+        transition.type = "unknown"
+    assert prs.to_bytes() == before
+    transition.type = None
+    assert transition.type is None and transition.duration is None
+    assert transition.advance_after is None and transition.advance_on_click is None
+
+
+def test_fx208_master_theme_public_base(tmp_path):
+    from rpptx import Presentation
+    prs = Presentation()
+    assert len(prs.slide_layouts) >= 2
+    master = prs.slide_masters[0]
+    assert len(master.theme.colors) == 12
+    assert master.theme.fonts.major.latin
+    assert set(master.theme.colors) == {"dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"}
+    assert len(master.slide_layouts) == len(prs.slide_layouts)
+    theme = master.theme
+    before = prs.to_bytes()
+    theme.name = "changed"
+    assert theme.name == master.theme.name == "changed"
+    after = prs.to_bytes()
+    original_parts, changed_parts = _package_parts(before), _package_parts(after)
+    assert original_parts.keys() == changed_parts.keys()
+    assert [name for name in original_parts if original_parts[name] != changed_parts[name]] == ["ppt/theme/theme1.xml"]
+    with pytest.raises(TypeError):
+        theme.name = 17
+    assert prs.to_bytes() == after and theme.name == "changed"
+    output = tmp_path / "named-theme.pptx"
+    prs.save(output)
+    assert Presentation(output).slide_masters[0].theme.name == "changed"
+    prs.slides.add_slide(prs.slide_layouts[1])
+    assert theme.name == master.theme.name
+
+
+def test_fx208_placeholder_metadata_public_base():
+    from rpptx import Presentation
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[0])
+    title = prs.slides[0].shapes.title
+    assert title is not None
+    assert title.is_placeholder
+    assert title.placeholder_format.idx == 0
+    assert int(title.placeholder_format.type) == 3
+    from rpptx import PP_PLACEHOLDER
+    assert title.placeholder_format.type == PP_PLACEHOLDER.CENTER_TITLE
+    metadata = title.placeholder_format
+    title.text = "New title"
+    assert metadata.idx == 0
+    assert metadata.type == PP_PLACEHOLDER.CENTER_TITLE
+
+
+def test_fx208_field_authoring_public_base():
+    from rpptx import Presentation
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    shape = prs.slides[0].shapes.add_textbox(914400, 914400, 3657600, 914400)
+    shape.text_frame.paragraphs[0].add_run("Page ")
+    paragraph = prs.slides[0].shapes[-1].text_frame.paragraphs[0]
+    assert paragraph.text == "Page "
+    paragraph.add_field("slidenum", "cached")
+    assert "cached" in prs.slides[0].shapes[-1].text_frame.paragraphs[0].text
+    import io
+    import zipfile
+    import xml.etree.ElementTree as ET
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    for kind, cache in [("datetime1", None), ("datetime13", "")]:
+        prs.slides[0].shapes[-1].text_frame.paragraphs[0].add_field(kind, cache)
+    with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as package:
+        fields = ET.fromstring(package.read("ppt/slides/slide1.xml")).findall(".//a:fld", ns)
+    assert len(fields) == 3 and len({field.get("id") for field in fields}) == 3
+    assert fields[1].find("a:t", ns) is None
+    assert fields[2].find("a:t", ns) is not None
+    before = prs.to_bytes()
+    from rpptx import RpptxError
+    with pytest.raises(RpptxError):
+        prs.slides[0].shapes[-1].text_frame.paragraphs[0].add_field("unknown")
+    assert prs.to_bytes() == before
+    assert Presentation.from_bytes(before).to_bytes() == before
+
+
+def test_fx208_number_start_public_base(tmp_path):
+    from rpptx import Presentation
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[1])
+    assert len(prs.slides) == 1
+    prs.slide_number_start = 0
+    path = tmp_path / "start-zero.pptx"
+    prs.save(path)
+    assert Presentation(path).slide_number_start == 0
+    before = prs.to_bytes()
+    prs.slide_number_start = 0
+    assert prs.to_bytes() == before
+    with pytest.raises((OverflowError, ValueError)):
+        prs.slide_number_start = -1
+    assert prs.to_bytes() == before
+    prs.slide_number_start = None
+    assert Presentation.from_bytes(prs.to_bytes()).slide_number_start is None
+
+
+def _fx205_text_owner():
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    frame = slide.shapes.add_textbox(0, 0, 1270000, 1270000).text_frame
+    paragraph = frame.paragraphs[0]
+    run = paragraph.add_run("F205 parity")
+    assert run.text == "F205 parity"
+    return prs, slide, frame.paragraphs[0], run
+
+
+@pytest.mark.parametrize("name,value", [("baseline", .25), ("spacing", 127), ("language", "ja-JP"), ("east_asian_name", "Arial"), ("complex_script_name", "Arial")])
+def test_fx205_extended_font_public_base(name, value):
+    from rpptx import Presentation
+    prs, _, _, run = _fx205_text_owner()
+    font = run.font
+    assert getattr(font, name) is None
+    setattr(font, name, value)
+    assert getattr(font, name) == value
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    actual = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+    assert getattr(actual, name) == value
+    setattr(font, name, None)
+    assert getattr(font, name) is None
+
+
+@pytest.mark.parametrize("name,value", [("auto_number", "arabicPeriod"), ("auto_number_start", 3), ("bullet_color", "336699"), ("bullet_font", "Arial"), ("bullet_size", 1.25)])
+def test_fx205_bullet_public_base(name, value):
+    prs, _, paragraph, _ = _fx205_text_owner()
+    getattr(paragraph, name)
+    if name == "auto_number_start":
+        paragraph.auto_number = "arabicPeriod"
+    setattr(paragraph, name, value)
+    actual = getattr(paragraph, name)
+    if name == "bullet_color":
+        assert str(actual) == value
+    else:
+        assert actual == value
+    before = prs.to_bytes()
+    setattr(paragraph, name, value)
+    assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("choice", ["gradient", "patterned", "picture", "transparency"])
+def test_fx205_fill_public_base(tmp_path, choice):
+    prs, slide, _, _ = _fx205_text_owner()
+    fill = slide.shapes[0].fill
+    if choice == "picture":
+        image = tmp_path / "owned.png"
+        _write_tiny_png(image)
+        fill.picture(image)
+    elif choice == "transparency":
+        fill.solid()
+        fill.fore_color.rgb = "336699"
+        fill.transparency = .25
+        assert fill.transparency == .25
+    elif choice == "gradient":
+        fill.gradient()
+        assert len(fill.gradient_stops) >= 2
+        fill.gradient_angle = 45.0
+        assert fill.gradient_angle == 45.0
+    else:
+        fill.patterned()
+        assert fill.type is not None
+    assert prs.to_bytes()
+
+
+@pytest.mark.parametrize("name", ["first_row", "last_row", "first_col", "last_col", "horz_banding", "vert_banding", "style_id"])
+def test_fx205_table_style_public_base(name):
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, 0, 0, 1270000, 1270000).table
+    assert len(table.rows) == 2 and len(table.columns) == 2
+    getattr(table, name)
+    value = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}" if name == "style_id" else True
+    setattr(table, name, value)
+    assert getattr(table, name) == value
+    assert Presentation.from_bytes(prs.to_bytes()).slides[0].shapes[0].table.cell(0, 0).text_frame is not None
+
+
+@pytest.mark.parametrize("owner", ["core_properties", "app_properties", "custom_properties"])
+def test_fx205_properties_public_base(owner):
+    prs, _, _, _ = _fx205_text_owner()
+    properties = getattr(prs, owner)
+    if owner == "core_properties":
+        properties.author = "F205 author"
+        assert properties.author == "F205 author"
+    elif owner == "app_properties":
+        properties.application = "F205 app"
+        assert properties.application == "F205 app"
+    else:
+        properties.set("F205", "value")
+        assert properties.get("F205").value == "value"
+    assert prs.to_bytes()
+
+
+def test_fx205_sections_public_base():
+    prs, _, _, _ = _fx205_text_owner()
+    assert prs.sections == ()
+    prs.set_sections([("F205 section", [0])])
+    assert prs.sections[0].name == "F205 section"
+
+
+def test_fx205_media_public_base(tmp_path):
+    prs, slide, _, _ = _fx205_text_owner()
+    import wave
+    path = tmp_path / "sound.wav"
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(8000)
+        stream.writeframes(b"\x00\x00" * 80)
+    movie = slide.shapes.add_movie(path, 0, 0, 1270000, 1270000, mime_type="audio/wav")
+    assert slide.media
+    assert slide.extract_media(movie.shape_id) == path.read_bytes()
+    slide.remove_media(movie.shape_id)
+    assert slide.media == ()
+
+
+@pytest.mark.parametrize("format", ["jpeg", "tiff", "pdfa", "handout", "odp"])
+def test_fx205_exports_public_base(format):
+    prs, _, _, _ = _fx205_text_owner()
+    if format in ("jpeg", "tiff"):
+        output = prs.render_slides(format=format, dpi=24.0)
+        if format == "jpeg":
+            assert len(output) == 1 and output[0].startswith(b"\xff\xd8")
+        else:
+            assert output.startswith((b"II*\x00", b"MM\x00*"))
+    elif format == "pdfa":
+        assert prs.to_pdfa(profile="pdfa-2b").startswith(b"%PDF")
+    elif format == "handout":
+        assert prs.to_handout_pdf(slides_per_page=2).startswith(b"%PDF")
+    else:
+        output, diagnostics = prs.to_odp()
+        assert output.startswith(b"PK") and isinstance(diagnostics, list)
+
+
+def test_fx205_existing_cell_and_notes_capabilities_are_real():
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(1, 1, 0, 0, 1270000, 1270000).table
+    table.cell(0, 0).text_frame.paragraphs[0].add_run("F205 existing cell")
+    assert table.cell(0, 0).text == "F205 existing cell"
+    assert prs.to_notes_pdf().startswith(b"%PDF")
+
+
+def test_fx205_fresh_all_layouts_match_native_widescreen_rectangles():
+    # Native baseline75261bde, actual PowerPoint16.113.3, retained projection.
+    import xml.etree.ElementTree as ET
+    from rpptx import Presentation
+    prs = Presentation()
+    assert prs.slide_width == 12192000 and prs.slide_height == 6858000
+    expected = {'Blank': [('dt', '10', None, None), ('ftr', '11', None, None), ('sldNum', '12', None, None)],
+ 'Comparison': [('title',
+                 '0',
+                 {'x': '839788', 'y': '365125'},
+                 {'cx': '10515600', 'cy': '1325563'}),
+                ('body',
+                 '1',
+                 {'x': '839788', 'y': '1681163'},
+                 {'cx': '5157787', 'cy': '823912'}),
+                ('obj',
+                 '2',
+                 {'x': '839788', 'y': '2505075'},
+                 {'cx': '5157787', 'cy': '3684588'}),
+                ('body',
+                 '3',
+                 {'x': '6172200', 'y': '1681163'},
+                 {'cx': '5183188', 'cy': '823912'}),
+                ('obj',
+                 '4',
+                 {'x': '6172200', 'y': '2505075'},
+                 {'cx': '5183188', 'cy': '3684588'}),
+                ('dt', '10', None, None),
+                ('ftr', '11', None, None),
+                ('sldNum', '12', None, None)],
+ 'Content with Caption': [('title',
+                           '0',
+                           {'x': '839788', 'y': '457200'},
+                           {'cx': '3932237', 'cy': '1600200'}),
+                          ('obj',
+                           '1',
+                           {'x': '5183188', 'y': '987425'},
+                           {'cx': '6172200', 'cy': '4873625'}),
+                          ('body',
+                           '2',
+                           {'x': '839788', 'y': '2057400'},
+                           {'cx': '3932237', 'cy': '3811588'}),
+                          ('dt', '10', None, None),
+                          ('ftr', '11', None, None),
+                          ('sldNum', '12', None, None)],
+ 'Picture with Caption': [('title',
+                           '0',
+                           {'x': '839788', 'y': '457200'},
+                           {'cx': '3932237', 'cy': '1600200'}),
+                          ('pic',
+                           '1',
+                           {'x': '5183188', 'y': '987425'},
+                           {'cx': '6172200', 'cy': '4873625'}),
+                          ('body',
+                           '2',
+                           {'x': '839788', 'y': '2057400'},
+                           {'cx': '3932237', 'cy': '3811588'}),
+                          ('dt', '10', None, None),
+                          ('ftr', '11', None, None),
+                          ('sldNum', '12', None, None)],
+ 'Section Header': [('title',
+                     '0',
+                     {'x': '831850', 'y': '1709738'},
+                     {'cx': '10515600', 'cy': '2852737'}),
+                    ('body',
+                     '1',
+                     {'x': '831850', 'y': '4589463'},
+                     {'cx': '10515600', 'cy': '1500187'}),
+                    ('dt', '10', None, None),
+                    ('ftr', '11', None, None),
+                    ('sldNum', '12', None, None)],
+ 'Title Only': [('title', '0', None, None),
+                ('dt', '10', None, None),
+                ('ftr', '11', None, None),
+                ('sldNum', '12', None, None)],
+ 'Title Slide': [('ctrTitle',
+                  '0',
+                  {'x': '1524000', 'y': '1122363'},
+                  {'cx': '9144000', 'cy': '2387600'}),
+                 ('subTitle',
+                  '1',
+                  {'x': '1524000', 'y': '3602038'},
+                  {'cx': '9144000', 'cy': '1655762'}),
+                 ('dt', '10', None, None),
+                 ('ftr', '11', None, None),
+                 ('sldNum', '12', None, None)],
+ 'Title and Content': [('title', '0', None, None),
+                       ('obj', '1', None, None),
+                       ('dt', '10', None, None),
+                       ('ftr', '11', None, None),
+                       ('sldNum', '12', None, None)],
+ 'Title and Vertical Text': [('title', '0', None, None),
+                             ('body', '1', None, None),
+                             ('dt', '10', None, None),
+                             ('ftr', '11', None, None),
+                             ('sldNum', '12', None, None)],
+ 'Two Content': [('title', '0', None, None),
+                 ('obj',
+                  '1',
+                  {'x': '838200', 'y': '1825625'},
+                  {'cx': '5181600', 'cy': '4351338'}),
+                 ('obj',
+                  '2',
+                  {'x': '6172200', 'y': '1825625'},
+                  {'cx': '5181600', 'cy': '4351338'}),
+                 ('dt', '10', None, None),
+                 ('ftr', '11', None, None),
+                 ('sldNum', '12', None, None)],
+ 'Vertical Title and Text': [('title',
+                              '0',
+                              {'x': '8724900', 'y': '365125'},
+                              {'cx': '2628900', 'cy': '5811838'}),
+                             ('body',
+                              '1',
+                              {'x': '838200', 'y': '365125'},
+                              {'cx': '7734300', 'cy': '5811838'}),
+                             ('dt', '10', None, None),
+                             ('ftr', '11', None, None),
+                             ('sldNum', '12', None, None)],
+ '__master__': [('title',
+                 '0',
+                 {'x': '838200', 'y': '365125'},
+                 {'cx': '10515600', 'cy': '1325563'}),
+                ('body',
+                 '1',
+                 {'x': '838200', 'y': '1825625'},
+                 {'cx': '10515600', 'cy': '4351338'}),
+                ('dt',
+                 '2',
+                 {'x': '838200', 'y': '6356350'},
+                 {'cx': '2743200', 'cy': '365125'}),
+                ('ftr',
+                 '3',
+                 {'x': '4038600', 'y': '6356350'},
+                 {'cx': '4114800', 'cy': '365125'}),
+                ('sldNum',
+                 '4',
+                 {'x': '8610600', 'y': '6356350'},
+                 {'cx': '2743200', 'cy': '365125'})]}
+    p = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+    a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    actual = {}
+    with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as package:
+        for part in package.namelist():
+            if not (part.startswith("ppt/slideLayouts/slideLayout") or part == "ppt/slideMasters/slideMaster1.xml") or not part.endswith(".xml"):
+                continue
+            root = ET.fromstring(package.read(part))
+            common = root.find(p + "cSld")
+            key = common.get("name") if "slideLayouts/" in part else "__master__"
+            owners = []
+            for shape in common.find(p + "spTree"):
+                placeholder = shape.find("./" + p + "nvSpPr/" + p + "nvPr/" + p + "ph")
+                if placeholder is None:
+                    continue
+                transform = shape.find("./" + p + "spPr/" + a + "xfrm")
+                offset = transform.find(a + "off") if transform is not None else None
+                extent = transform.find(a + "ext") if transform is not None else None
+                owners.append((placeholder.get("type", "obj"), placeholder.get("idx", "0"), dict(offset.attrib) if offset is not None else None, dict(extent.attrib) if extent is not None else None))
+            actual[key] = owners
+    assert len(actual) == 12
+    assert actual == expected
+
+
+@pytest.mark.parametrize("lexical,expected", [("1pt",12700), ("1in",914400), ("1cm",360000), ("1mm",36000), ("1pc",152400), ("1pi",152400), ("-1pt",-12700)])
+def test_fx205_imported_universal_spacing_remains_present(lexical, expected):
+    from rpptx import Presentation
+    import re
+    from rpptx.util import Pt
+    prs, _, _, authored_run = _fx205_text_owner()
+    authored_run.font.size = Pt(12)
+    parts = _package_parts(prs.to_bytes())
+    source = parts["ppt/slides/slide1.xml"].decode()
+    source, count = re.subn(r"<a:rPr([^>]*)/>", lambda match: '<a:rPr' + match.group(1) + ' spc="' + lexical + '"/>', source, count=1)
+    assert count == 1
+    parts["ppt/slides/slide1.xml"] = source.encode()
+    imported = Presentation.from_bytes(_package_bytes(parts))
+    run = imported.slides[0].shapes[0].text_frame.paragraphs[0].runs[0]
+    before = imported.to_bytes()
+    assert int(run.font.spacing) == expected
+    assert imported.to_bytes() == before
+    run.font.spacing = 127
+    assert int(run.font.spacing) == 127
+    reopened = Presentation.from_bytes(imported.to_bytes())
+    assert int(reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.spacing) == 127
+
+
+# F-X209 controls start on the claimed installed capability surface.
+@pytest.mark.parametrize("operation", [
+    "master-logo", "layout-logo", "layout-hide", "master-background",
+    "master-title-style", "layout-rename", "layout-duplicate", "layout-remove",
+    "layout-master", "layout-usage", "layout-follow-background", "slide-hide",
+    "theme-color", "theme-font", "apply-theme", "import-master",
+])
+def test_fx209_part_owned_authoring_capabilities_persist(operation):
+    from rpptx import Presentation, Inches
+    from rpptx.dml.color import RGBColor
+    prs = Presentation()
+    layout = prs.slide_layouts[0]
+    master = prs.slide_master
+    if operation == "master-logo":
+        master.shapes.add_picture(_tiny_png(), Inches(0.1), Inches(0.1))
+        assert len(master.shapes) > 0
+    elif operation == "layout-logo":
+        layout.shapes.add_picture(_tiny_png(), Inches(0.1), Inches(0.1))
+        assert len(layout.shapes) > 0
+    elif operation == "layout-hide":
+        layout.show_master_shapes = False
+        assert layout.show_master_shapes is False
+    elif operation == "master-background":
+        master.background.fill.solid()
+        master.background.fill.fore_color.rgb = RGBColor(17, 34, 51)
+        assert str(master.background.fill.fore_color.rgb) == "112233"
+    elif operation == "master-title-style":
+        master.text_styles.title.font.name = "Carlito"
+        assert master.text_styles.title.font.name == "Carlito"
+    elif operation == "layout-rename":
+        layout.name = "Owned layout"
+        assert layout.name == "Owned layout"
+    elif operation == "layout-duplicate":
+        count = len(prs.slide_layouts)
+        copied = prs.slide_layouts.duplicate(layout)
+        assert len(prs.slide_layouts) == count + 1
+        assert copied.name == prs.slide_layouts[0].name
+    elif operation == "layout-remove":
+        count = len(prs.slide_layouts)
+        prs.slide_layouts.remove(layout)
+        assert len(prs.slide_layouts) == count - 1
+    elif operation == "layout-master":
+        assert layout.slide_master == master
+    elif operation == "layout-usage":
+        prs.slides.add_slide(layout)
+        assert len(prs.slide_layouts[0].used_by_slides) == 1
+    elif operation == "layout-follow-background":
+        layout.follow_master_background = False
+        assert layout.follow_master_background is False
+    elif operation == "slide-hide":
+        slide = prs.slides.add_slide(layout)
+        slide.show_master_shapes = False
+        assert slide.show_master_shapes is False
+    elif operation == "theme-color":
+        master.theme.colors["accent1"] = RGBColor(17, 34, 51)
+        assert str(prs.slide_master.theme.colors["accent1"]) == "112233"
+    elif operation == "theme-font":
+        master.theme.fonts.major.latin = "Carlito"
+        assert prs.slide_master.theme.fonts.major.latin == "Carlito"
+    else:
+        source = Presentation()
+        source_bytes = source.to_bytes()
+        before = len(prs.slide_masters)
+        prs.apply_theme(source_bytes, import_masters=operation == "import-master")
+        assert len(prs.slide_masters) == before + int(operation == "import-master")
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    assert len(reopened.slide_masters) == len(prs.slide_masters)
+    if operation == "layout-rename":
+        assert reopened.slide_layouts[0].name == "Owned layout"
+    if operation == "theme-color":
+        assert str(reopened.slide_master.theme.colors["accent1"]) == "112233"
+    if operation == "theme-font":
+        assert reopened.slide_master.theme.fonts.major.latin == "Carlito"
+
+
+def test_fx209_layout_lifecycle_keeps_surviving_handles_and_refuses_used_owner():
+    from rpptx import Presentation, RpptxError, StaleElementError
+    prs = Presentation()
+    layouts = prs.slide_layouts
+    source = layouts[0]
+    survivor = layouts[1]
+    master = source.slide_master
+    source_name, survivor_name = source.name, survivor.name
+    copied = layouts.duplicate(source)
+    assert source.name == source_name and survivor.name == survivor_name
+    assert source.slide_master == master and copied.slide_master == master
+    assert len(prs.slide_layouts) == 12
+    prs.slide_layouts.remove(source)
+    with pytest.raises(StaleElementError, match="SlideLayoutCollection.remove"):
+        _ = source.name
+    assert survivor.name == survivor_name and prs.slide_layouts[0] == survivor
+    assert copied.slide_master == master
+    slide = prs.slides.add_slide(copied)
+    before = prs.to_bytes()
+    with pytest.raises(RpptxError, match="used|inbound"):
+        prs.slide_layouts.remove(copied)
+    assert prs.to_bytes() == before
+    assert slide.slide_layout == copied and copied.name == source_name
+    reopened = Presentation.from_bytes(before)
+    assert len(reopened.slide_layouts) == 11
+    assert reopened.slides[0].slide_layout.name == source_name
+
+
+@pytest.mark.parametrize("script", ["logos", "deck-theme", "brand-potx"])
+def test_fx209_original_three_branding_scripts_render_and_preserve_content(script, tmp_path):
+    from rpptx import Presentation, Pt
+    from rpptx.dml.color import RGBColor
+    prs = Presentation()
+    if script == "logos":
+        master = prs.slide_master
+        master.shapes.add_picture(_tiny_png(0x20, 0x80, 0xE0), Pt(20), Pt(20), Pt(40), Pt(40))
+        prs.slide_layouts[0].show_master_shapes = False
+        prs.slide_layouts[1].shapes.add_picture(_tiny_png(0xE0, 0x20, 0x40), Pt(100), Pt(20), Pt(40), Pt(40))
+        for index in [0, 6, 1]:
+            prs.slides.add_slide(prs.slide_layouts[index])
+        from PIL import Image
+        import io
+        pages = [Image.open(io.BytesIO(blob)).convert("RGB") for blob in prs.render_slides(dpi=72)]
+        assert len(pages) == 3
+        assert pages[0].getpixel((40, 40)) != (0x20, 0x80, 0xE0)
+        assert pages[1].getpixel((40, 40)) == (0x20, 0x80, 0xE0)
+        assert pages[2].getpixel((40, 40)) == (0x20, 0x80, 0xE0)
+        assert pages[2].getpixel((120, 40)) == (0xE0, 0x20, 0x40)
+    else:
+        slide = prs.slides.add_slide(prs.slide_layouts[0])
+        slide.shapes.title.text = "Retained branded heading"
+        if script == "deck-theme":
+            prs.slide_master.theme.colors["accent1"] = RGBColor(17, 34, 51)
+            prs.slide_master.theme.fonts.major.latin = "Carlito"
+        else:
+            brand = Presentation()
+            brand.slide_master.theme.colors["accent1"] = RGBColor(17, 34, 51)
+            brand.slide_master.theme.fonts.major.latin = "Carlito"
+            path = tmp_path / "brand.potx"
+            brand.save(path)
+            prs.apply_theme(path)
+        assert prs.slides[0].shapes.title.text == "Retained branded heading"
+        assert str(prs.slide_master.theme.colors["accent1"]) == "112233"
+        assert prs.slide_master.theme.fonts.major.latin == "Carlito"
+        assert len(prs.render_slides(dpi=72)) == 1
+    pdf = prs.to_pdf()
+    assert pdf.startswith(b"%PDF-") and len(pdf) > 1000
+    path = tmp_path / (script + ".pptx")
+    prs.save(path)
+    reopened = Presentation(path)
+    assert len(reopened.slides) == len(prs.slides)
+    if script != "logos":
+        assert reopened.slides[0].shapes.title.text == "Retained branded heading"
+        assert str(reopened.slide_master.theme.colors["accent1"]) == "112233"
+        assert reopened.slide_master.theme.fonts.major.latin == "Carlito"
+
+
+def test_fx209_master_style_fonts_bullets_levels_and_live_proxies_persist():
+    from rpptx import Presentation, Pt
+    from rpptx.dml.color import RGBColor
+    prs = Presentation()
+    master = prs.slide_master
+    styles = master.text_styles
+    title = styles.title[0]
+    font = title.font
+    font.name = "Carlito"
+    font.size = Pt(40)
+    font.color.rgb = RGBColor(17, 34, 51)
+    assert font.name == "Carlito" and font.size == Pt(40)
+    assert str(font.color.rgb) == "112233"
+    for level in range(1, 6):
+        paragraph = styles.body.level(level)
+        paragraph.font.name = "Carlito"
+        paragraph.font.size = Pt(28 - level)
+        paragraph.bullet = "•"
+        paragraph.bullet_color = RGBColor(51, 34, 17)
+        paragraph.left_indent = Pt(level * 12)
+        paragraph.first_line_indent = Pt(-6)
+    styles.other.font.name = "Carlito"
+    saved = prs.to_bytes()
+    font.name = "Carlito"
+    assert prs.to_bytes() == saved
+    for bad in [0, 10]:
+        with pytest.raises(ValueError, match="level"):
+            styles.body.level(bad)
+        assert prs.to_bytes() == saved
+    reopened = Presentation.from_bytes(saved)
+    assert reopened.slide_master.text_styles.title.font.name == "Carlito"
+    assert reopened.slide_master.text_styles.title.font.size == Pt(40)
+    for level in range(1, 6):
+        paragraph = reopened.slide_master.text_styles.body.level(level)
+        assert paragraph.bullet == "•"
+        assert str(paragraph.bullet_color) == "332211"
+        assert paragraph.font.size == Pt(28 - level)
+        assert paragraph.left_indent == Pt(level * 12) and paragraph.first_line_indent == Pt(-6)
+
+
+def test_fx209_master_layout_placeholders_share_physical_owner_and_persist():
+    from rpptx import Presentation
+    prs = Presentation()
+    owners = [prs.slide_master, prs.slide_layouts[0]]
+    for index, owner in enumerate(owners):
+        shape = next(shape for shape in owner.shapes if shape.is_placeholder)
+        idx = shape.placeholder_format.idx
+        placeholder = owner.placeholders[idx]
+        assert placeholder.shape_id == shape.shape_id
+        placeholder.text = f"Physical placeholder {index}"
+        assert next(shape for shape in owner.shapes if shape.shape_id == placeholder.shape_id).text == f"Physical placeholder {index}"
+        with pytest.raises(IndexError):
+            _ = owner.placeholders[999999]
+    saved = prs.to_bytes()
+    reopened = Presentation.from_bytes(saved)
+    for index, owner in enumerate([reopened.slide_master, reopened.slide_layouts[0]]):
+        shape = next(shape for shape in owner.shapes if shape.is_placeholder)
+        assert owner.placeholders[shape.placeholder_format.idx].text == f"Physical placeholder {index}"
+    assert reopened.to_bytes() == saved
+
+
+def test_fx204_batches_keep_counts_notes_rollback_and_noop_handles():
+    import rpptx
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 3000000, 800000)
+    shape.text = "A A"
+    prs.slides[0].notes_text = "A"
+    held = prs.slides[0].shapes[-1].text_frame.paragraphs[0].runs[0]
+    before = prs.to_bytes()
+    assert prs.replace_all([]) == ()
+    assert prs.replace_all([("missing", "x", 0)]) == (0,)
+    assert prs.replace_all([("A", "A", 3)]) == (3,)
+    assert held.text == "A A" and prs.to_bytes() == before
+    with pytest.raises(rpptx.ReplacementCountError) as raised:
+        prs.replace_all([("A", "B", 3), ("B", "C", 4)])
+    assert raised.value.index == 1 and raised.value.placeholder == "B"
+    assert raised.value.expected == 4 and raised.value.found == 3
+    assert prs.to_bytes() == before and held.text == "A A"
+    with pytest.raises(rpptx.RpptxError):
+        prs.replace_all([("A", "B"), ("", "C")])
+    assert prs.to_bytes() == before and held.text == "A A"
+    assert prs.replace_all([("A", "B", 3), ("B", "C", 3)]) == (3, 3)
+    reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+    assert reopened.slides[0].shapes[-1].text == "C C"
+    assert reopened.slides[0].notes_text == "C"
+    with pytest.raises(rpptx.StaleElementError):
+        _ = held.text
+
+
+def test_fx204_add_at_preserves_physical_survivors_and_refusals():
+    import rpptx
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_textbox(0, 0, 3000000, 800000).text = "survivor"
+    held = prs.slides[0].shapes[-1]
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.RpptxError):
+        prs.slides.add_slide_at(prs.slide_layouts[6], 2)
+    assert prs.to_bytes() == before and held.text == "survivor"
+    other = rpptx.Presentation()
+    with pytest.raises(ValueError):
+        prs.slides.add_slide_at(other.slide_layouts[6], 0)
+    assert prs.to_bytes() == before
+    new_slide = prs.slides.add_slide_at(prs.slide_layouts[6], 0)
+    assert len(prs.slides) == 2 and len(new_slide.shapes) == 0
+    assert held.text == "survivor" and prs.slides[1].shapes[-1].text == "survivor"
+    new_slide.shapes.add_textbox(0, 0, 3000000, 800000).text = "new"
+    reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+    assert reopened.slides[0].shapes[-1].text == "new"
+    assert reopened.slides[1].shapes[-1].text == "survivor"
+
+
+def test_fx204_fit_snapshots_and_notes_are_readonly_and_exact():
+    import rpptx
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_textbox(0, 0, 3000000, 800000).text = "short"
+    before = prs.to_bytes()
+    report = prs.fit_report()
+    assert isinstance(report, rpptx.FitReport)
+    assert isinstance(report.frames, tuple) and report.frames
+    assert isinstance(report.diagnostics, tuple)
+    frame = report.frames[0]
+    assert isinstance(frame, rpptx.FitFrameReport)
+    assert frame.update.owner_part and isinstance(frame.update.child_path, list)
+    assert not frame.overflow
+    assert frame.quantized_trial is None or isinstance(frame.quantized_trial, rpptx.FitTrial)
+    with pytest.raises(AttributeError):
+        frame.overflow = True
+    assert prs.to_bytes() == before
+    for text in ["first\r\nnext\n\n", "first\nnext", "first\rnext", "  π 日本語  ", ""]:
+        prs.slides[0].notes_text = text
+        reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
+        assert reopened.slides[0].notes_text == text
+
+
+@pytest.mark.parametrize("kind", ["shape", "table", "cell", "body", "paragraph", "run", "slide", "layout", "master"])
+def test_fx211b_element_nine_physical_owners_are_checked_atomic_and_reopened(kind):
+    from rpptx import Element, Presentation, RpptxError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    shape.text = "original"
+    table = slide.shapes.add_table(1, 1, 0, 0, 1000, 1000).table
+    cell = table.cell(0, 0)
+    cell.text = "cell original"
+    owner = {"shape": shape, "table": table, "cell": cell,
+             "body": shape.text_frame, "paragraph": shape.text_frame.paragraphs[0],
+             "run": shape.text_frame.paragraphs[0].runs[0], "slide": slide,
+             "layout": prs.slide_layouts[6], "master": prs.slide_masters[0]}[kind]
+    element = owner.element
+    assert isinstance(element, Element)
+    xml = element.xml
+    assert isinstance(xml, str)
+    before = prs.to_bytes()
+    element.replace_xml(xml)
+    assert prs.to_bytes() == before
+    assert element.xml == xml
+    for bad in ("<foreign/>", xml + "<extra/>", "<!DOCTYPE p [<!ENTITY x 'bad'>]>" + xml):
+        with pytest.raises(Exception):
+            element.replace_xml(bad)
+        assert prs.to_bytes() == before
+        assert element.xml == xml
+    if kind == "body":
+        held_run = shape.text_frame.paragraphs[0].runs[0]
+        held_cell_run = cell.text_frame.paragraphs[0].runs[0]
+        wrong_owner = '<q:txBody xmlns:q="http://schemas.microsoft.com/office/powerpoint/2018/8/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:bodyPr/><a:p/></q:txBody>'
+        for selected in (element, cell.text_frame.element):
+            with pytest.raises(RpptxError, match="expected one complete qualified owner root"):
+                selected.replace_xml(wrong_owner)
+            assert prs.to_bytes() == before
+            assert element.xml == xml
+            assert held_run.text == "original"
+            assert held_cell_run.text == "cell original"
+    if kind in ("layout", "master"):
+        def renamed(match):
+            opening = match.group(0)
+            if 'name="' in opening:
+                return re.sub(r'name="[^"]*"', 'name="xml edited"', opening, count=1)
+            return opening[:-1] + ' name="xml edited">'
+        changed = re.sub(r"<p:cSld\b[^>]*>", renamed, xml, count=1)
+    elif kind == "table":
+        changed = xml.replace("cell original", "cell edited")
+    elif kind == "cell":
+        changed = xml.replace("cell original", "cell edited")
+    else:
+        changed = xml.replace("original", "edited")
+    assert changed != xml
+    element.replace_xml(changed)
+    current = element.xml
+    assert "edited" in current
+    assert "original" not in current or kind == "slide"  # unrelated cell remains
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    reopened = Presentation.from_bytes(reopened.to_bytes())
+    if kind == "layout":
+        assert reopened.slide_layouts[6].name == "xml edited"
+    elif kind == "master":
+        assert 'name="xml edited"' in reopened.slide_masters[0].element.xml
+    elif kind in ("table", "cell"):
+        assert reopened.slides[0].shapes[1].table.cell(0, 0).text == "cell edited"
+    else:
+        assert reopened.slides[0].shapes[0].text == "edited"
+
+
+def test_fx211b_element_precisely_retires_replaced_children_and_preserves_unrelated_owners():
+    from rpptx import Presentation, StaleElementError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    shape.text = "first"
+    other = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    other.text = "unrelated"
+    frame = shape.text_frame
+    paragraph = frame.paragraphs[0]
+    run = paragraph.runs[0]
+    font = run.font
+    other_run = other.text_frame.paragraphs[0].runs[0]
+    selected = paragraph.element
+    before = prs.to_bytes()
+    selected.replace_xml(selected.xml)
+    assert prs.to_bytes() == before and font.bold is None
+    selected.replace_xml(selected.xml.replace("first", "second"))
+    assert paragraph.text == frame.text == shape.text == "second"
+    assert "second" in selected.xml
+    assert other_run.text == "unrelated"
+    for read in (lambda: run.text, lambda: font.bold):
+        with pytest.raises(StaleElementError, match="Element.replace_xml"):
+            read()
+    new_run = paragraph.runs[0]
+    new_font = new_run.font
+    new_run.element.replace_xml(new_run.element.xml.replace("second", "third"))
+    assert new_run.text == "third"
+    with pytest.raises(StaleElementError, match="Element.replace_xml"):
+        _ = new_font.bold
+    assert paragraph.text == "third"
+
+
+def test_fx211b_shape_xml_retires_same_value_properties_and_body_remove_recreate():
+    from rpptx import Presentation, StaleElementError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    shape.text = "kept"
+    fill = shape.fill
+    line = shape.line
+    body = shape.text_frame
+    old_paragraph = body.paragraphs[0]
+    original = shape.element.xml
+    changed = original.replace('name="TextBox 1"', 'name="renamed"')
+    if changed == original:
+        changed = re.sub(r'(name=")[^"]*', r'\1renamed', original, count=1)
+    shape.element.replace_xml(changed)
+    assert shape.text == "kept"
+    for read in (lambda: fill.type, lambda: line.width, lambda: body.text, lambda: old_paragraph.text):
+        with pytest.raises(StaleElementError, match="Element.replace_xml"):
+            read()
+    current_body = shape.text_frame
+    source = shape.element.xml
+    removed, count = re.subn(r"<p:txBody\b[^>]*>.*?</p:txBody>", "", source, count=1, flags=re.S)
+    assert count == 1
+    shape.element.replace_xml(removed)
+    assert not shape.has_text_frame
+    shape.element.replace_xml(source)
+    assert shape.text == "kept"
+    with pytest.raises(StaleElementError, match="Element.replace_xml"):
+        _ = current_body.text
+    assert shape.text_frame.text == "kept"
+
+
+def test_fx211b_table_xml_preserves_table_but_retires_cells_and_whole_shape_retires_table():
+    from rpptx import Presentation, StaleElementError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_table(1, 1, 0, 0, 1000, 1000)
+    table = shape.table
+    cell = table.cell(0, 0)
+    cell.text = "before"
+    frame = cell.text_frame
+    table.element.replace_xml(table.element.xml.replace("before", "after"))
+    assert table.cell(0, 0).text == "after"
+    for read in (lambda: cell.text, lambda: frame.text):
+        with pytest.raises(StaleElementError, match="Element.replace_xml"):
+            read()
+    xml = shape.element.xml
+    changed = re.sub(r'(name=")[^"]*', r'\1renamed table', xml, count=1)
+    shape.element.replace_xml(changed)
+    with pytest.raises(StaleElementError, match="Element.replace_xml"):
+        _ = table.cell(0, 0)
+    assert shape.table.cell(0, 0).text == "after"
+
+
+def test_fx211b_notes_edit_keeps_unrelated_physical_text_owners():
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    shape.text = "outside notes"
+    body = shape.text_frame
+    paragraph = body.paragraphs[0]
+    run = paragraph.runs[0]
+    font = run.font
+    element = paragraph.element
+    slide.notes_text = "new notes"
+    assert slide.notes_text == "new notes"
+    assert paragraph.text == run.text == body.text == shape.text == "outside notes"
+    assert font.bold is None
+    assert "outside notes" in element.xml
+
+
+@pytest.mark.parametrize("kind", ["shape", "table", "cell", "body", "paragraph", "run", "slide", "layout", "master"])
+def test_fx211b_element_qualified_alias_and_default_roots_preserve_actual_source(kind):
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    shape.text = "alias text"
+    table = slide.shapes.add_table(1, 1, 0, 0, 1000, 1000).table
+    cell = table.cell(0, 0)
+    cell.text = "cell text"
+    owner = {"shape": shape, "table": table, "cell": cell,
+             "body": shape.text_frame, "paragraph": shape.text_frame.paragraphs[0],
+             "run": shape.text_frame.paragraphs[0].runs[0], "slide": slide,
+             "layout": prs.slide_layouts[6], "master": prs.slide_masters[0]}[kind]
+    element = owner.element
+    fully_modeled = kind in ("body", "paragraph", "run", "cell")
+    xml = element.xml
+    opaque = '<corpus:keep xmlns:corpus="urn:fx211b:opaque" value="corpus:QName">&#65;</corpus:keep>'
+    if not fully_modeled:
+        head, closing = xml.rsplit("</", 1)
+        element.replace_xml(head + opaque + "</" + closing)
+        xml = element.xml
+        assert opaque in xml
+    root = re.search(r"<([ap]):(\w+)\b", xml)
+    assert root
+    prefix, local = root.groups()
+    uri = "http://schemas.openxmlformats.org/" + ("presentationml/2006/main" if prefix == "p" else "drawingml/2006/main")
+    # Change only the modeled root name. Its children retain their actual
+    # existing qualified namespace bindings and opaque lexical payloads.
+    alias = xml.replace(f"<{prefix}:{local}", f'<q:{local} xmlns:q="{uri}"', 1)
+    alias = alias.replace(f"</{prefix}:{local}>", f"</q:{local}>")
+    default = xml.replace(f"<{prefix}:{local}", f'<{local} xmlns="{uri}"', 1)
+    default = default.replace(f"</{prefix}:{local}>", f"</{local}>")
+    before = prs.to_bytes()
+    for incoming in (alias, default):
+        element.replace_xml(incoming)
+        if fully_modeled:
+            assert prs.to_bytes() == before
+            assert element.xml == xml
+        else:
+            # Unknown vocabulary conservatively declines equivalence. A
+            # qualified edit still preserves the actual source payloads.
+            assert "alias text" in prs.slides[0].shapes[0].text
+            assert prs.slides[0].shapes[1].table.cell(0, 0).text == "cell text"
+            assert opaque in element.xml
+            saved_parts = _package_parts(prs.to_bytes())
+            assert any(opaque.encode() in data for name, data in saved_parts.items() if name.endswith(".xml"))
+            reopened = Presentation.from_bytes(prs.to_bytes())
+            assert reopened.slides[0].shapes[0].text == "alias text"
+            assert reopened.slides[0].shapes[1].table.cell(0, 0).text == "cell text"
+    before = prs.to_bytes()
+    current = element.xml
+    element.replace_xml(current)
+    assert prs.to_bytes() == before
+    wrong = alias.replace(f'xmlns:q="{uri}"', 'xmlns:q="urn:foreign"', 1)
+    with pytest.raises(Exception):
+        element.replace_xml(wrong)
+    assert prs.to_bytes() == before and element.xml == current
+
+
+def test_fx211b_footer_replacement_retires_actual_changed_nodes_only():
+    from rpptx import Presentation, StaleElementError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    other = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    other.text = "unrelated footer owner"
+    prs.set_header_footer(slide_number=False, footer="footer first", hide_on_title=False)
+    actual = [shape for shape in slide.shapes if shape.has_text_frame and shape.text == "footer first"]
+    assert len(actual) == 1
+    old_body = actual[0].text_frame
+    old_paragraph = old_body.paragraphs[0]
+    old_runs = list(old_paragraph.runs)
+    other_run = other.text_frame.paragraphs[0].runs[0]
+    prs.set_header_footer(slide_number=False, footer="footer second", hide_on_title=False)
+    assert slide.header_footer.footer == "footer second"
+    assert other_run.text == "unrelated footer owner"
+    for read in [lambda: old_paragraph.text] + [lambda run=run: run.text for run in old_runs]:
+        with pytest.raises(StaleElementError, match="Presentation.set_header_footer"):
+            read()
+
+
+def test_fx211b_held_layout_element_tracks_actual_part_after_earlier_removal():
+    from rpptx import Presentation
+    prs = Presentation()
+    held = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(held)
+    element = held.element
+    xml = element.xml
+    name = held.name
+    prs.slide_layouts.remove(prs.slide_layouts[0])
+    assert held.name == name
+    assert element.xml == xml == held.element.xml
+    element.replace_xml(xml)
+    assert slide.slide_layout.name == name
+
+
+def test_fx211b_element_shape_matrix_preserves_five_kinds_and_retires_group_children():
+    from rpptx import Presentation, StaleElementError
+    from rpptx.enum.shapes import MSO_CONNECTOR
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    text = slide.shapes.add_textbox(0, 0, 1000, 1000)
+    text.text = "unrelated survivor"
+    picture = slide.shapes.add_picture(io.BytesIO(_tiny_png()), 0, 0, 1000, 1000)
+    connector = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, 0, 0, 1000, 1000)
+    table = slide.shapes.add_table(1, 1, 0, 0, 1000, 1000)
+    group = slide.shapes.add_group_shape()
+    child = group.shapes.add_textbox(0, 0, 1000, 1000)
+    child.text = "same group child"
+    for owner, root in ((text, "sp"), (picture, "pic"), (connector, "cxnSp"), (table, "graphicFrame"), (group, "grpSp")):
+        element = owner.element
+        xml = element.xml
+        assert re.search(rf"<p:{root}\b", xml)
+        before = prs.to_bytes()
+        element.replace_xml(xml)
+        assert prs.to_bytes() == before
+        wrong = re.sub(rf"<p:{root}\b", "<p:wrong", xml, count=1).replace(f"</p:{root}>", "</p:wrong>")
+        with pytest.raises(Exception):
+            element.replace_xml(wrong)
+        assert prs.to_bytes() == before
+        changed = re.sub(r'(name=")[^"]*', r'\1xml ' + root, xml, count=1)
+        assert changed != xml
+        element.replace_xml(changed)
+        assert owner.name == "xml " + root
+        assert re.search(rf"<p:{root}\b", element.xml)
+    with pytest.raises(StaleElementError, match="Element.replace_xml"):
+        _ = child.text
+    assert group.shapes[0].text == "same group child"
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    assert [shape.name for shape in reopened.slides[0].shapes] == ["xml sp", "xml pic", "xml cxnSp", "xml graphicFrame", "xml grpSp"]
+
+
+def test_fx211b_graphic_frame_payload_transition_is_named_and_atomic():
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_table(1, 1, 0, 0, 1000, 1000)
+    table = shape.table
+    cell = table.cell(0, 0)
+    cell.text = "retained"
+    xml = shape.element.xml
+    changed, count = re.subn(r"<a:graphicData\b[^>]*>.*?</a:graphicData>", '<a:graphicData uri="urn:fx211b:opaque"><payload xmlns="urn:fx211b:opaque"/></a:graphicData>', xml, count=1, flags=re.S)
+    assert count == 1
+    before = prs.to_bytes()
+    with pytest.raises(NotImplementedError, match="table payload presence"):
+        shape.element.replace_xml(changed)
+    assert prs.to_bytes() == before and cell.text == table.cell(0, 0).text == "retained"
+
+
+def test_fx211b_virtual_cell_and_inherited_style_elements_refuse_without_materializing():
+    from rpptx import Presentation
+    prs, _ = _f_x194_table()
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as source, zipfile.ZipFile(out, "w") as target:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "ppt/slides/slide1.xml":
+                data, count = re.subn(rb"<a:txBody\b[^>]*>.*?</a:txBody>", b"", data, count=1, flags=re.S)
+                assert count == 1
+            target.writestr(member, data)
+    prs = Presentation.from_bytes(out.getvalue())
+    cell = prs.slides[0].shapes[0].table.cell(0, 0)
+    frame = cell.text_frame
+    style = prs.slide_masters[0].text_styles.title.level(1)
+    prior_name = style.font.name
+    before = prs.to_bytes()
+    with pytest.raises(NotImplementedError, match="physical text body"):
+        _ = frame.element
+    with pytest.raises(NotImplementedError, match="physical XML owner"):
+        _ = style.element
+    assert prs.to_bytes() == before
+    with pytest.raises(ValueError, match="shape has no text frame"):
+        _ = frame.text
+    assert style.font.name == prior_name
+
+
+def test_fx220_ppt_python_font_graph_snapshots_inputs_and_removal(tmp_path):
+    from pathlib import Path
+    from rpptx import Presentation, EmbeddedFont, FontEmbeddingLicense
+
+    source = Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Selawik-Regular.ttf"
+    body = source.read_bytes()
+    license = FontEmbeddingLicense(authorized=True, identity="SIL Open Font License 1.1")
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    slide.shapes.add_textbox(0, 0, 1000000, 1000000).text = "font control"
+    held = deck.slides[0]
+    for kind, value in zip(("regular", "bold", "italic", "bold_italic"), (body, source, io.BytesIO(body), EmbeddedFont(body, "bold_italic", license=license))):
+        deck.embed_font("FX220 Python PPT", value, kind, license=license)
+    assert held.shapes[0].text == "font control"
+    fonts = deck.embedded_fonts
+    assert isinstance(fonts, tuple) and len(fonts) == 1 and fonts[0].typeface == "FX220 Python PPT"
+    assert tuple(face.kind for face in fonts[0].faces) == ("regular", "bold", "italic", "bold_italic")
+    for face in fonts[0].faces:
+        assert face.format == "eot" and face.data == body and face.stored_len > len(body)
+        assert face.part_name.startswith("/ppt/fonts/") and face.relationship_id
+        with pytest.raises(AttributeError):
+            face.format = "unknown"
+    saved = deck.to_bytes()
+    package = zipfile.ZipFile(io.BytesIO(saved))
+    assert len([name for name in package.namelist() if name.startswith("ppt/fonts/")]) == 4
+    reopened = Presentation.from_bytes(saved)
+    assert tuple(face.data for face in reopened.embedded_fonts[0].faces) == (body,) * 4
+    deck.embed_font("FX220 Python PPT", body, license=license)
+    assert deck.to_bytes() == saved and held.shapes[0].text == "font control"
+    assert deck.remove_embedded_font("FX220 Python PPT", "italic").data == body
+    assert deck.remove_embedded_font("FX220 Python PPT", "italic") is None
+    assert len(deck.remove_font("FX220 Python PPT").faces) == 3
+    assert deck.remove_font("FX220 Python PPT") is None
+    output = tmp_path / "removed.pptx"
+    deck.save(output)
+    assert Presentation(output).embedded_fonts == ()
+
+
+def test_fx220_ppt_python_license_flags_and_refusal_are_atomic():
+    from pathlib import Path
+    from rpptx import Presentation, FontEmbeddingLicense
+
+    body = (Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Selawik-Regular.ttf").read_bytes()
+    deck = Presentation()
+    deck.slides.add_slide(deck.slide_layouts[6])
+    # The bundled PowerPoint template explicitly enables subset saving.
+    for name, initial in (("embed_true_type_fonts", None), ("save_subset_fonts", True)):
+        assert getattr(deck, name) is initial
+        for value in (False, True, None):
+            setattr(deck, name, value)
+            assert getattr(deck, name) is value
+    baseline = deck.to_bytes()
+    held = deck.slides[0]
+    good = FontEmbeddingLicense(authorized=True, identity="OFL 1.1")
+    for value, kind, license in ((body, "regular", FontEmbeddingLicense(authorized=False, identity="OFL")), (body, "regular", FontEmbeddingLicense(authorized=True, identity=" ")), (b"not a font", "regular", good), (body, "unknown", good), (io.StringIO("not bytes"), "regular", good)):
+        with pytest.raises(Exception):
+            deck.embed_font("FX220 refusal", value, kind, license=license)
+        assert deck.to_bytes() == baseline and held.shapes is not None
+    class OversizedReader:
+        def read(self, size):
+            assert 0 < size <= 8192
+            return b"x" * (64 * 1024 * 1024 + 1)
+    with pytest.raises(ValueError):
+        deck.embed_font("FX220 refusal", OversizedReader(), license=good)
+    assert deck.to_bytes() == baseline and held.shapes is not None
+
+
+@pytest.mark.parametrize("mode", ["short_chunks", "later_type", "later_error", "cumulative_bound"])
+def test_fx220_rpptx_binary_readers_reach_real_eof_before_publication(mode):
+    from pathlib import Path
+    import rpptx
+
+    body = (Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Selawik-Regular.ttf").read_bytes()
+    value = rpptx.Presentation()
+    value.slides.add_slide(value.slide_layouts[6]).shapes.add_textbox(0, 0, 1000000, 1000000).text = "binary owner"
+    held = value.slides[0].shapes[0]
+    baseline = value.to_bytes()
+    license = rpptx.FontEmbeddingLicense(authorized=True, identity="OFL 1.1")
+    class Reader:
+        def __init__(self):
+            self.calls = 0
+            self.offset = 0
+        def read(self, size):
+            self.calls += 1
+            if mode == "short_chunks":
+                part = body[self.offset:self.offset + min(size, 8192)]
+                self.offset += len(part)
+                return part
+            if self.calls == 1:
+                return body
+            if mode == "later_type":
+                return "invalid later text"
+            if mode == "later_error":
+                raise OSError("later font read failed")
+            return b"x" * (1024 * 1024)
+    reader = Reader()
+    if mode == "short_chunks":
+        value.embed_font("FX220 binary stream", reader, license=license)
+        assert reader.calls > 2 and reader.offset == len(body)
+        assert value.embedded_fonts[0].faces[0].data == body
+        authored_reader = Reader()
+        authored = rpptx.EmbeddedFont(authored_reader, license=license)
+        assert authored.data == body and authored_reader.calls > 2
+        value.embed_font("FX220 authored stream", authored, license=license)
+        assert value.embedded_fonts[1].faces[0].data == body
+    else:
+        if mode == "later_error":
+            expected, match = OSError, "later font read failed"
+        elif mode == "later_type":
+            expected, match = TypeError, "reader must return bytes"
+        else:
+            expected, match = ValueError, "64 MiB"
+        with pytest.raises(expected, match=match):
+            value.embed_font("FX220 binary stream", reader, license=license)
+        assert reader.calls > 1
+        assert value.to_bytes() == baseline and held.text == "binary owner"
+
+        with pytest.raises(expected, match=match):
+            rpptx.EmbeddedFont(Reader(), license=license)
+        assert value.to_bytes() == baseline and held.text == "binary owner"
+
+@pytest.mark.parametrize("method", ["pdf", "png", "all_slides", "notes_pdf", "notes_png", "handout_pdf", "handout_png", "layout"])
+def test_fx220_ppt_embedded_faces_and_caller_override_reach_exports(method):
+    from pathlib import Path
+    from rpptx import Presentation, FontEmbeddingLicense
+    import xml.etree.ElementTree as ET
+
+    directory = Path(__file__).resolve().parents[2] / "oxml-layout/fonts"
+    kinds = ("regular", "bold", "italic", "bold_italic")
+    styles = ("Regular", "Bold", "Italic", "BoldItalic")
+    embedded = [(directory / f"Caladea-{style}.ttf").read_bytes() for style in styles]
+    caller = [(directory / f"LiberationMono-{style}.ttf").read_bytes() for style in styles]
+    name = "FX220 deterministic export face"
+    deck = _fx195_presentation(name)
+    for index in range(4):
+        if index == 0:
+            run = deck.slides[0].shapes[0].text_frame.paragraphs[0].runs[0]
+        else:
+            run = deck.slides[0].shapes[0].text_frame.paragraphs[0].add_run()
+        run.text = "iiiiWWWW route "
+        run.font.name = name
+        run.font.bold = bool(index & 1)
+        run.font.italic = bool(index & 2)
+    # Notes are independently source-authored with four actual styled runs.
+    parts = _package_parts(deck.to_bytes())
+    notes_part = next(part for part in parts if re.fullmatch(r"ppt/notesSlides/notesSlide\d+\.xml", part))
+    namespace = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    tree = ET.fromstring(parts[notes_part])
+    paragraph = next(parent for parent in tree.iter(namespace + "p") if any("FX195 NOTES" in (child.text or "") for child in parent.iter(namespace + "t")))
+    for child in list(paragraph):
+        if child.tag == namespace + "r": paragraph.remove(child)
+    for index in range(4):
+        run = ET.SubElement(paragraph, namespace + "r")
+        properties = ET.SubElement(run, namespace + "rPr", {"sz": "2000", "b": str(index & 1), "i": str((index >> 1) & 1)})
+        ET.SubElement(properties, namespace + "latin", {"typeface": name})
+        ET.SubElement(run, namespace + "t").text = "iiiiWWWW notes route "
+    parts[notes_part] = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as output:
+        for part, data in parts.items(): output.writestr(part, data)
+    deck = Presentation.from_bytes(buffer.getvalue())
+    license = FontEmbeddingLicense(authorized=True, identity="Apache License 2.0")
+    for kind, body in zip(kinds, embedded): deck.embed_font(name, body, kind, license=license)
+    source = deck.to_bytes()
+    held = deck.slides[0]
+    disabled = Presentation.from_bytes(source)
+    disabled.embed_true_type_fonts = False
+    missing = Presentation.from_bytes(source)
+    missing.remove_font(name)
+    reference = Presentation.from_bytes(missing.to_bytes())
+
+    def invoke(value, fonts):
+        if method == "pdf": return value.to_pdf(fonts=fonts)
+        if method == "png": return value.render_slide_to_png(0, dpi=72.0, fonts=fonts)
+        if method == "all_slides": return value.render_all_slides(dpi=72.0, fonts=fonts)
+        if method == "notes_pdf": return value.to_notes_pdf(fonts=fonts)
+        if method == "notes_png": return value.render_all_notes(dpi=72.0, fonts=fonts)
+        if method == "handout_pdf": return value.to_handout_pdf(slides_per_page=2, fonts=fonts)
+        if method == "handout_png": return value.render_all_handouts(slides_per_page=2, dpi=72.0, fonts=fonts)
+        return tuple(tuple((line.bounds.width, line.bounds.height) for line in frame.lines) for frame in value.text_layout(fonts=fonts))
+
+    positive = invoke(deck, [])
+    off = invoke(disabled, [])
+    absent = invoke(missing, [])
+    override = invoke(deck, list(zip([name] * 4, caller)))
+    expected = invoke(reference, list(zip([name] * 4, embedded)))
+    expected_override = invoke(reference, list(zip([name] * 4, caller)))
+    assert positive != off and positive != override
+    assert off == absent
+    if method.endswith("pdf") or method == "pdf":
+        assert positive.startswith(b"%PDF") and b"Caladea" in positive
+        assert b"LiberationMono" in override and b"Caladea" not in override
+        assert b"Caladea" not in off
+    else:
+        assert positive == expected and override == expected_override
+    assert deck.to_bytes() == source and held.shapes[0].text == "iiiiWWWW route " * 4
+
+
+@pytest.mark.parametrize("kind", [51, 65])
+def test_fx215_ppt_public_create_live_replace_and_atomic_noop(kind):
+    from rpptx import Presentation, CategoryChartData, Inches, GraphicFrame
+    data = CategoryChartData()
+    data.categories = ["East", "West"]
+    data.add_series("Sales", [11.0, 23.0])
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    frame = slide.shapes.add_chart(kind, Inches(1), Inches(1), Inches(4), Inches(2), data)
+    assert isinstance(frame, GraphicFrame) and frame.has_chart
+    chart = frame.chart
+    assert chart.chart_type == kind and chart.categories == ("East", "West")
+    assert chart.series[0].name == "Sales" and chart.series[0].values == [11.0, 23.0]
+    before = prs.to_bytes()
+    chart.replace_data(data)
+    assert prs.to_bytes() == before and frame.has_chart
+    bad = CategoryChartData(); bad.categories = ["East"]; bad.add_series("Bad", [float("inf")])
+    with pytest.raises(Exception): chart.replace_data(bad)
+    assert prs.to_bytes() == before and chart.categories == ("East", "West")
+    replacement = CategoryChartData(); replacement.categories = ["North", "South", "Central"]
+    replacement.add_series("Updated", [31.0, 47.0, 59.0])
+    chart.replace_data(replacement)
+    assert chart.categories == ("North", "South", "Central")
+    assert chart.series[0].values == [31.0, 47.0, 59.0]
+    output = prs.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(output)) as archive:
+        name = next(name for name in archive.namelist() if name.startswith("ppt/charts/chart") and name.endswith(".xml"))
+        assert b"Updated" in archive.read(name) and b"59" in archive.read(name)
+
+
+def test_fx215_shared_xy_refuses_heterogeneous_coordinates_before_publish():
+    from rpptx import Presentation, XyChartData, Inches
+    data = XyChartData(); a = data.add_series("A"); b = data.add_series("B")
+    for x, y in [(1.0, 3.0), (2.0, 5.0)]: a.add_data_point(x, y); b.add_data_point(x, y + 1)
+    prs = Presentation(); slide = prs.slides.add_slide(prs.slide_layouts[6])
+    frame = slide.shapes.add_chart(74, Inches(1), Inches(1), Inches(4), Inches(2), data)
+    assert frame.chart.categories == ("1", "2") or frame.chart.categories == ("1.0", "2.0")
+    before = prs.to_bytes()
+    b.add_data_point(3.0, 8.0)
+    with pytest.raises(ValueError, match="same x values"):
+        slide.shapes.add_chart(74, Inches(1), Inches(1), Inches(4), Inches(2), data)
+    assert prs.to_bytes() == before
+
+
+def test_fx215_ppt_live_chart_follows_grouped_owner_and_refuses_retired_owner():
+    from rpptx import Presentation, CategoryChartData, Inches, StaleElementError
+    data = CategoryChartData(); data.categories = ["A"]; data.add_series("Series", [7.0])
+    prs = Presentation(); slide = prs.slides.add_slide(prs.slide_layouts[6])
+    frame = slide.shapes.add_chart(51, Inches(1), Inches(1), Inches(4), Inches(2), data)
+    chart = frame.chart
+    group = slide.shapes.group([frame])
+    assert chart.categories == ("A",) and group.shapes[0].chart.categories == ("A",)
+    replacement = CategoryChartData(); replacement.categories = ["Updated"]; replacement.add_series("New", [19.0])
+    chart.replace_data(replacement)
+    assert chart.categories == ("Updated",) and group.shapes[0].chart.series[0].values == [19.0]
+    slide.shapes.remove(group)
+    before = prs.to_bytes()
+    with pytest.raises(StaleElementError): chart.replace_data(data)
+    assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("replacement", ["properties", "graphic_data"])
+def test_fx215_chart_xml_retires_old_view_and_data_edits_preserve_owned_graph(replacement):
+    import posixpath
+    import xml.etree.ElementTree as ET
+    from rpptx import CategoryChartData, Inches, Presentation, StaleElementError
+
+    def data(category, value):
+        result = CategoryChartData()
+        result.categories = [category]
+        result.add_series("Sales", [value])
+        return result
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    first = slide.shapes.add_chart(51, Inches(1), Inches(1), Inches(3), Inches(2), data("First", 11.0))
+    other = slide.shapes.add_chart(51, Inches(5), Inches(1), Inches(3), Inches(2), data("Other", 23.0))
+    held = first.chart
+    other_chart = other.chart
+    first_id = first.shape_id
+    other_xml = other.element.xml
+    c = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+    r = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    rel = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+    other_id = ET.fromstring(other_xml).find(".//" + c + "chart").get(r + "id")
+
+    def other_graph():
+        with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as package:
+            slide_rels = ET.fromstring(package.read("ppt/slides/_rels/slide1.xml.rels"))
+            target = next(node.get("Target") for node in slide_rels.findall(rel) if node.get("Id") == other_id)
+            chart_part = posixpath.normpath(posixpath.join("ppt/slides", target))
+            chart_rels = posixpath.join(posixpath.dirname(chart_part), "_rels", posixpath.basename(chart_part) + ".rels")
+            relationships = ET.fromstring(package.read(chart_rels))
+            workbook = next(node.get("Target") for node in relationships.findall(rel) if node.get("Type").endswith("/package"))
+            workbook_part = posixpath.normpath(posixpath.join(posixpath.dirname(chart_part), workbook))
+            return tuple(package.read(part) for part in (chart_part, chart_rels, workbook_part))
+
+    original_other_graph = other_graph()
+    xml = first.element.xml
+    expected = "First"
+    if replacement == "properties":
+        xml = re.sub(r'(name=")[^"]*', r'\1checked chart', xml, count=1)
+    else:
+        old_id = ET.fromstring(xml).find(".//" + c + "chart").get(r + "id")
+        assert old_id != other_id and f'r:id="{old_id}"' in xml
+        xml = xml.replace(f'r:id="{old_id}"', f'r:id="{other_id}"', 1)
+        expected = "Other"
+    first.element.replace_xml(xml)
+    assert first.has_chart and first.shape_id == first_id
+    before_refusal = prs.to_bytes()
+    with pytest.raises(StaleElementError, match="Element.replace_xml"):
+        _ = held.categories
+    with pytest.raises(StaleElementError, match="Element.replace_xml"):
+        held.replace_data(data("Refused", 99.0))
+    assert prs.to_bytes() == before_refusal
+
+    current = first.chart
+    assert current.categories == (expected,)
+    current.replace_data(data("Updated", 47.0))
+    assert current.categories == ("Updated",) and current.series[0].values == [47.0]
+    assert first.has_chart and first.shape_id == first_id
+    assert other_chart.categories == ("Other",) and other_chart.series[0].values == [23.0]
+    assert other.element.xml == other_xml and other_graph() == original_other_graph
+    saved = prs.to_bytes()
+    current.replace_data(data("Updated", 47.0))
+    assert prs.to_bytes() == saved and current.categories == ("Updated",)
+    reopened = Presentation.from_bytes(saved)
+    assert reopened.slides[0].shapes[0].chart.categories == ("Updated",)
+    assert reopened.slides[0].shapes[1].chart.categories == ("Other",)
+
+
+@pytest.mark.parametrize("format", ["html", "markdown"])
+def test_fx218_detached_semantic_export_and_atomic_publication(format, tmp_path):
+    import rpptx
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    held = slide.shapes.add_textbox(0, 0, 3000000, 800000)
+    held.text = "Visible & literal <text>"
+    slide.notes_text = "Private speaker note"
+    png = _tiny_png()
+    slide.shapes.add_picture(io.BytesIO(png), 0, 0)
+    slide.shapes.add_picture(io.BytesIO(png), 10000, 0)
+    before = prs.to_bytes()
+    to_text = getattr(prs, "to_" + format)
+    export = getattr(prs, "export_" + format)
+    save = getattr(prs, "save_" + format)
+    assert isinstance(to_text(), str)
+    result = export(include_notes=True, inline_images=False)
+    assert isinstance(result, rpptx.PresentationTextExport)
+    expected_text = "Visible &amp; literal &lt;text&gt;" if format == "html" else r"Visible \& literal \<text\>"
+    assert expected_text in result.text.replace("&#32;", " ")
+    assert "Private speaker note" in result.text.replace("&#32;", " ")
+    assert isinstance(result.assets, tuple) and len(result.assets) == 1
+    name, body = result.assets[0]
+    assert isinstance(name, str) and body == png and isinstance(body, bytes)
+    assert result.text.count(name) == 2
+    assert isinstance(result.diagnostics, tuple)
+    with pytest.raises(AttributeError):
+        result.text = "changed"
+    with pytest.raises(ValueError, match="retain image assets"):
+        to_text(inline_images=False)
+    output = tmp_path / ("result.html" if format == "html" else "result.md")
+    for bad in [1, "yes", object()]:
+        with pytest.raises(TypeError):
+            save(output, include_notes=bad)
+        assert not output.exists()
+    asset = tmp_path / name
+    asset.write_bytes(b"keep existing asset")
+    with pytest.raises(Exception):
+        save(output)
+    assert asset.read_bytes() == b"keep existing asset"
+    assert not output.exists()
+    asset.unlink()
+    assert isinstance(save(output, include_notes=True), tuple)
+    assert asset.read_bytes() == png
+    assert output.read_text() == result.text
+    published = output.read_bytes()
+    with pytest.raises(Exception):
+        save(output)
+    assert output.read_bytes() == published
+    assert prs.to_bytes() == before
+    assert held.text == "Visible & literal <text>"
+    assert rpptx.Presentation.from_bytes(before).slides[0].notes_text == "Private speaker note"
+
+
+@pytest.mark.parametrize("method", ["add", "add_at", "single", "diagnostics", "batch"])
+def test_fx216_foreign_layout_precedes_stale_collection_without_publication(method):
+    import rpptx
+
+    destination = rpptx.Presentation()
+    local_layout = destination.slide_layouts[6]
+    held = destination.slides
+    original = held.add_slide(local_layout)
+    source = rpptx.Presentation()
+    foreign_layout = source.slide_layouts[6]
+    source_slide = source.slides.add_slide(foreign_layout)
+    original_xml = original.element.xml
+    before = destination.to_bytes(), source.to_bytes()
+
+    def operation(layout):
+        if method == "add":
+            return held.add_slide(layout)
+        if method == "add_at":
+            return held.add_slide_at(layout, 0)
+        if method == "single":
+            return held.import_slide(source_slide, layout=layout)
+        if method == "diagnostics":
+            return held.import_slide_with_diagnostics(source_slide, layout=layout)
+        return held.import_slides(source, [0], layout=layout)
+
+    message = (
+        "layout belongs to a different presentation"
+        if method in ("add", "add_at")
+        else "layout is not a layout of this presentation"
+    )
+    with pytest.raises(ValueError, match=message):
+        operation(foreign_layout)
+    _assert_exact_stale(rpptx, lambda: operation(local_layout), "slide collection", 0, 1,
+                        "Re-fetch it with prs.slides.", "SlideCollection.add_slide")
+    assert (destination.to_bytes(), source.to_bytes()) == before
+    assert len(destination.slides) == len(source.slides) == 1
+    assert original.element.xml == original_xml and len(original.shapes) == 0
+    assert local_layout.name == destination.slide_layouts[6].name
+    assert foreign_layout.name == source.slide_layouts[6].name
+
+
+def test_fx216_batch_returns_live_ordered_owners_and_empty_selection_is_noop():
+    import rpptx
+
+    source = rpptx.Presentation()
+    source_layout = source.slide_layouts[6]
+    for text in ("first", "second", "third"):
+        slide = source.slides.add_slide(source_layout)
+        slide.shapes.add_textbox(0, 0, 914400, 914400).text = text
+    source_before = source.to_bytes()
+    destination = rpptx.Presentation()
+    layout = destination.slide_layouts[6]
+    existing = destination.slides.add_slide(layout)
+    existing.shapes.add_textbox(0, 0, 914400, 914400).text = "existing"
+    imported, diagnostics = destination.slides.import_slides(source, [2, 0], layout=layout, index=0)
+    assert diagnostics == ()
+    assert isinstance(imported, tuple) and len(imported) == 2
+    assert [slide.shapes[0].text for slide in imported] == ["third", "first"]
+    assert [slide.shapes[0].text for slide in destination.slides] == ["third", "first", "existing"]
+    assert existing.shapes[0].text == "existing"
+    held = destination.slides
+    before = destination.to_bytes()
+    assert held.import_slides(source, [], layout=layout) == ((), ())
+    assert len(held) == 3 and destination.to_bytes() == before
+    with pytest.raises(rpptx.RpptxError, match="duplicate selected source slide"):
+        held.import_slides(source, [0, 0], layout=layout)
+    with pytest.raises(IndexError):
+        held.import_slides(source, [0, 99], layout=layout)
+    assert len(held) == 3 and destination.to_bytes() == before
+    next_slide, next_diagnostics = held.import_slide_with_diagnostics(source.slides[1], layout=layout, index=0)
+    assert next_diagnostics == () and next_slide.shapes[0].text == "second"
+    assert [slide.shapes[0].text for slide in imported] == ["third", "first"]
+    assert existing.shapes[0].text == "existing"
+    assert source.to_bytes() == source_before
+    reopened = rpptx.Presentation.from_bytes(destination.to_bytes())
+    assert [slide.shapes[0].text for slide in reopened.slides] == ["second", "third", "first", "existing"]
+
+
+def test_fx211c_paragraph_text_preserves_its_owner_and_retires_replaced_runs():
+    from rpptx import Presentation, StaleElementError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1270000, 1270000)
+    paragraph = shape.text_frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = "old run"
+    paragraph = shape.text_frame.paragraphs[0]
+    old_run = paragraph.runs[0]
+    paragraph.text = "replacement"
+    paragraph.level = 1
+    paragraph.font.bold = True
+    assert paragraph.text == "replacement"
+    before = prs.to_bytes()
+    with pytest.raises(StaleElementError, match="Paragraph.text"):
+        old_run.text = "unsafe"
+    assert prs.to_bytes() == before
+    reopened = Presentation.from_bytes(before)
+    actual = reopened.slides[0].shapes[0].text_frame.paragraphs[0]
+    assert actual.text == "replacement" and actual.level == 1 and actual.font.bold is True
+
+
+def test_fx211c_row_cells_are_checked_live_grid_views():
+    from rpptx import Presentation, StaleElementError
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, 0, 0, 1270000, 1270000).table
+    row = table.rows[0]
+    cells = row.cells
+    assert isinstance(cells, tuple) and len(cells) == 2
+    cells[0].text = "first"
+    cells[1].text = "second"
+    assert tuple(cell.text for cell in row.cells) == ("first", "second")
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    assert tuple(cell.text for cell in reopened.slides[0].shapes[0].table.rows[0].cells) == ("first", "second")
+    table.rows.add_row()
+    before = prs.to_bytes()
+    with pytest.raises(StaleElementError):
+        _ = row.cells
+    with pytest.raises(StaleElementError):
+        cells[0].text = "unsafe"
+    assert prs.to_bytes() == before
+
+
+def test_fx211c_theme_name_is_live_and_preserves_source_parts():
+    from rpptx import Presentation
+    prs = Presentation()
+    master = prs.slide_masters[0]
+    theme = master.theme
+    prs.slides.add_slide(prs.slide_layouts[6])
+    before = zipfile.ZipFile(io.BytesIO(prs.to_bytes()))
+    before_parts = {name: before.read(name) for name in before.namelist()}
+    theme.name = 'Held & "quoted" theme'
+    assert theme.name == master.theme.name == 'Held & "quoted" theme'
+    saved = prs.to_bytes()
+    after = zipfile.ZipFile(io.BytesIO(saved))
+    changed = {name for name in before_parts if before_parts[name] != after.read(name)}
+    assert len(changed) == 1 and next(iter(changed)).startswith("ppt/theme/")
+    stable = prs.to_bytes()
+    theme.name = theme.name
+    assert prs.to_bytes() == stable
+    assert Presentation.from_bytes(saved).slide_masters[0].theme.name == theme.name
+
+
+def test_fx211c_alt_text_and_highlight_alias_reach_saved_native_properties():
+    from rpptx import Presentation
+    import xml.etree.ElementTree as ET
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(0, 0, 1270000, 1270000)
+    shape.alt_text = 'Description & "quotes"'
+    assert shape.alt_text == 'Description & "quotes"'
+    shape.alt_title = "Title"
+    shape.decorative = True
+    assert shape.alt_title == "Title" and shape.decorative is True
+    run = shape.text_frame.paragraphs[0].add_run()
+    run.text = "highlight"
+    run.font.highlight_color = "FFFF00"
+    assert str(run.font.highlight_color.rgb) == "FFFF00"
+    saved = prs.to_bytes()
+    root = ET.fromstring(zipfile.ZipFile(io.BytesIO(saved)).read("ppt/slides/slide1.xml"))
+    ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main", "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    owners = [node for node in root.findall("./p:cSld/p:spTree/p:sp/p:nvSpPr/p:cNvPr", ns) if node.get("id") == str(shape.shape_id)]
+    assert len(owners) == 1
+    nonvisual = owners[0]
+    assert nonvisual.get("descr") == shape.alt_text
+    assert nonvisual.get("title") == "Title"
+    assert root.find("./p:cSld/p:spTree/p:nvGrpSpPr/p:cNvPr", ns).get("descr") is None
+    assert root.find(".//a:rPr/a:highlight/a:srgbClr", ns).get("val") == "FFFF00"
+    reopened = Presentation.from_bytes(saved)
+    assert reopened.slides[0].shapes[0].alt_text == shape.alt_text
+    assert reopened.slides[0].shapes[0].alt_title == "Title"
+    assert reopened.slides[0].shapes[0].decorative is True
+    before = prs.to_bytes()
+    with pytest.raises((ValueError, TypeError)):
+        run.font.highlight_color = "invalid"
+    assert prs.to_bytes() == before
+    run.font.highlight_color = None
+    assert run.font.highlight_color.rgb is None
+
+
+def test_fx211c_arrangement_aliases_and_foreign_refusals_are_atomic():
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shapes = slide.shapes
+    a = shapes.add_textbox(0, 0, 127000, 127000)
+    b = shapes.add_textbox(254000, 254000, 127000, 127000)
+    c = shapes.add_textbox(508000, 508000, 127000, 127000)
+    shapes.align([a, b], "left", relative_to="selection")
+    assert a.left == b.left == 0
+    shapes.distribute([a, b, c], "horizontal", relative_to="selection")
+    assert b.left == 254000
+    before = prs.to_bytes()
+    with pytest.raises(ValueError, match="disagree"):
+        shapes.align([a, b], "left", "slide", relative_to="selection")
+    with pytest.raises(ValueError, match="disagree"):
+        shapes.distribute([a, b, c], "horizontal", "slide", relative_to="selection")
+    assert prs.to_bytes() == before
+    foreign = Presentation()
+    other = foreign.slides.add_slide(foreign.slide_layouts[6])
+    other_before = foreign.to_bytes()
+    with pytest.raises(ValueError, match="owner|presentation"):
+        other.shapes.group([a])
+    assert foreign.to_bytes() == other_before and prs.to_bytes() == before
+
+
+def test_fx211c_absent_core_author_retains_none_and_roundtrips():
+    from rpptx import Presentation
+    prs = Presentation()
+    properties = prs.core_properties
+    assert properties.author is None
+    before = prs.to_bytes()
+    properties.author = None
+    assert prs.to_bytes() == before
+    properties.author = "Author"
+    assert properties.author == "Author"
+    assert Presentation.from_bytes(prs.to_bytes()).core_properties.author == "Author"
+    properties.author = ""
+    assert properties.author is None
+    assert Presentation.from_bytes(prs.to_bytes()).core_properties.author is None
+
+
+def test_fx211c_autofit_approximation_facts_are_owned_and_deduplicated():
+    from rpptx import Presentation
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    selected_ids = []
+    for index in range(2):
+        shape = slide.shapes.add_textbox(0, index * 914400, 4000000, 914400)
+        shape.text = "Actual contributing text"
+        paragraph = shape.text_frame.paragraphs[0]
+        paragraph.runs[0].font.name = "Aptos"
+        shape.text_frame.auto_size = 2
+        selected_ids.append(shape.shape_id)
+    updated = prs.refresh_autofit()
+    facts = [value for value in updated.diagnostics if "Font 'Aptos' is approximate" in value]
+    assert len(facts) == 1 and "Carlito" in facts[0]
+    selected = [update for update in updated.updates if update.owner_part == "/ppt/slides/slide1.xml" and update.shape_id in selected_ids]
+    assert len(selected) == 2
+    assert all(any("Font 'Aptos' is approximate" in value for value in update.diagnostics) for update in selected)
+    again = prs.refresh_autofit()
+    assert again.diagnostics == updated.diagnostics
+    assert not again.changed
+    report = prs.fit_report()
+    assert sum("Font 'Aptos' is approximate" in value for value in report.diagnostics) == 1
+
+
+
+def test_fx211c_bullet_char_alias_qualifies_numbering_four_families_and_render(tmp_path):
+    from pathlib import Path
+    import xml.etree.ElementTree as ET
+    from rpptx import Presentation
+    from rpptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shapes = slide.shapes
+    numbered = shapes.add_textbox(0, 0, Inches(3), Inches(1)).text_frame.paragraphs[0]
+    numbered.text = "Numbered"
+    numbered.auto_number = "arabicPeriod"
+    numbered.auto_number_start = 3
+    numbered.bullet_color = "112233"
+    numbered.bullet_size = 1.25
+    numbered.bullet_font = "Arial"
+    assert numbered.bullet_char is True
+    assert numbered.auto_number == "arabicPeriod" and numbered.auto_number_start == 3
+    assert str(numbered.bullet_color) == "112233"
+    assert numbered.bullet_size == 1.25 and numbered.bullet_font == "Arial"
+
+    pairs = [("Symbol", "\uf0b7"), ("Wingdings", "\uf0a7"), ("Arial", "\uf0a7"), ("Wingdings", "\uf0ff")]
+    held = []
+    for index, (family, character) in enumerate(pairs):
+        paragraph = shapes.add_textbox(0, Inches((index + 1) * .45), Inches(3), Inches(.4)).text_frame.paragraphs[0]
+        paragraph.text = family + " control"
+        paragraph.bullet_font = family
+        paragraph.bullet_color = "336699"
+        paragraph.bullet_size = 1.1
+        paragraph.bullet_char = character
+        assert paragraph.bullet_char == paragraph.bullet == character
+        assert paragraph.bullet_font == family and str(paragraph.bullet_color) == "336699"
+        assert paragraph.bullet_size == 1.1
+        held.append(paragraph)
+    before = prs.to_bytes()
+    for paragraph, (_, character) in zip(held, pairs):
+        paragraph.bullet_char = character
+    assert prs.to_bytes() == before
+    # Bundled caller bytes keep this regression independent of Office installation.
+    font = (Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Carlito-Regular.ttf").read_bytes()
+    pdf, diagnostics = prs.to_pdf_with_diagnostics(fonts=[("Arial", font), ("Calibri", font)])
+    assert pdf.startswith(b"%PDF-") and len(re.findall(rb"/Type\s*/Page\b", pdf)) == 1
+    assert isinstance(diagnostics, tuple)
+    assert any("Wingdings" in value and ("missing" in value.lower() or "unknown" in value.lower()) for value in diagnostics)
+    assert prs.to_bytes() == before
+    (tmp_path / "four-family-bullets.pdf").write_bytes(pdf)
+    reopened = Presentation.from_bytes(before)
+    actual = [shape.text_frame.paragraphs[0] for shape in reopened.slides[0].shapes]
+    assert actual[0].auto_number == "arabicPeriod" and actual[0].auto_number_start == 3
+    assert str(actual[0].bullet_color) == "112233" and actual[0].bullet_size == 1.25 and actual[0].bullet_font == "Arial"
+    assert [(paragraph.bullet_font, paragraph.bullet_char) for paragraph in actual[1:]] == pairs
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    tree = ET.fromstring(zipfile.ZipFile(io.BytesIO(before)).read("ppt/slides/slide1.xml"))
+    properties = tree.findall(".//a:pPr", ns)
+    assert properties[0].find("a:buAutoNum", ns).get("startAt") == "3"
+    assert [(node.find("a:buFont", ns).get("typeface"), node.find("a:buChar", ns).get("char")) for node in properties[1:]] == pairs
+    assert numbered.text == "Numbered" and all(paragraph.text.endswith(" control") for paragraph in held)
+
+
+@pytest.mark.parametrize("invalid", ["", True, 17])
+def test_fx211c_bullet_char_invalid_alias_is_atomic_with_live_owners(invalid):
+    prs, _, paragraph, run = _fx205_text_owner()
+    paragraph.bullet_char = "•"
+    paragraph.bullet_font = "Arial"
+    before = prs.to_bytes()
+    with pytest.raises((TypeError, ValueError)):
+        paragraph.bullet_char = invalid
+    assert prs.to_bytes() == before
+    assert paragraph.bullet_char == paragraph.bullet == "•"
+    assert run.text == "F205 parity" and paragraph.bullet_font == "Arial"
+    paragraph.bullet_char = False
+    assert paragraph.bullet is False and paragraph.bullet_char is False
+    paragraph.bullet_char = None
+    assert paragraph.bullet is None and paragraph.bullet_char is None
+    before = prs.to_bytes()
+    paragraph.bullet_char = None
+    assert prs.to_bytes() == before and run.text == "F205 parity"
+
+
+@pytest.mark.parametrize("method,count,reference,explanation", [
+    ("align", 1, "selection", "selection reference requires at least 2, got 1"),
+    ("distribute", 1, "selection", "selection reference requires at least 3, got 1"),
+    ("distribute", 2, "selection", "selection reference requires at least 3, got 2"),
+    ("align", 0, "slide", "no shapes were given"),
+    ("distribute", 0, "slide", "no shapes were given"),
+])
+def test_fx211c_arrangement_minimum_refusal_keeps_bytes_and_held_owners(method, count, reference, explanation):
+    from rpptx import Presentation, RpptxError
+    prs = Presentation()
+    shapes = prs.slides.add_slide(prs.slide_layouts[6]).shapes
+    selected = [shapes.add_textbox(index * 254000, 0, 127000, 127000) for index in range(3)]
+    for index, shape in enumerate(selected):
+        shape.text = str(index)
+    before = prs.to_bytes()
+    direction = "left" if method == "align" else "horizontal"
+    with pytest.raises(RpptxError) as error:
+        getattr(shapes, method)(selected[:count], direction, relative_to=reference)
+    assert explanation in str(error.value)
+    if count:
+        assert "too few selected shapes" in str(error.value)
+    assert prs.to_bytes() == before
+    assert [shape.text for shape in selected] == ["0", "1", "2"]
+    # Each slide-reference operation still accepts its distinct one-shape minimum.
+    getattr(shapes, method)(selected[:1], direction, relative_to="slide")
+    assert selected[0].text == "0"
+    shapes.distribute(selected, "horizontal", relative_to="selection")
+    reopened = Presentation.from_bytes(prs.to_bytes())
+    assert [shape.left for shape in reopened.slides[0].shapes] == [shape.left for shape in selected]
+
+
+@pytest.mark.parametrize("first_axis", ["rows", "columns"])
+def test_fx211c_table_collections_keep_owner_authority_and_retire_indexed_grid_views(first_axis, tmp_path):
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    from rpptx import Presentation, StaleElementError
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table_shape = slide.shapes.add_table(2, 2, 0, 0, 4000000, 2000000)
+    table = table_shape.table
+    table.cell(0, 0).text = "retained first cell"
+    other = slide.shapes.add_textbox(0, 2500000, 1000000, 500000)
+    other.text = "unrelated sibling"
+    other_xml = other.element.xml
+    rows, columns = table.rows, table.columns
+    foreign = Presentation()
+    foreign_slide = foreign.slides.add_slide(foreign.slide_layouts[6])
+    foreign_table = foreign_slide.shapes.add_table(2, 2, 0, 0, 1000, 1000).table
+    cell, row, column = table.cell(0, 0), rows[0], columns[0]
+    stable = prs.to_bytes()
+    for collection, foreign_member in ((rows, foreign_table.rows[0]), (columns, foreign_table.columns[0])):
+        with pytest.raises(ValueError, match="not in this collection"):
+            collection.remove(foreign_member)
+        assert prs.to_bytes() == stable
+    for collection, operation in ((rows, "add_row"), (columns, "add_column")):
+        with pytest.raises(IndexError):
+            getattr(collection, operation)(99)
+        assert prs.to_bytes() == stable
+    row.height = row.height
+    column.width = column.width
+    assert prs.to_bytes() == stable
+    assert cell.text == "retained first cell"
+    assert (len(rows), len(columns)) == (2, 2)
+
+    second_axis = "columns" if first_axis == "rows" else "rows"
+    for axis in (first_axis, second_axis):
+        collection = rows if axis == "rows" else columns
+        add = "add_row" if axis == "rows" else "add_column"
+        label = "RowCollection" if axis == "rows" else "ColumnCollection"
+        for operation in (add, "remove"):
+            old_row, old_column, old_cell = rows[0], columns[0], table.cell(0, 0)
+            if operation == add:
+                added = getattr(collection, operation)()
+                assert (added.height if axis == "rows" else added.width) == (
+                    rows[-1].height if axis == "rows" else columns[-1].width
+                )
+            else:
+                collection.remove(collection[-1])
+            count = 3 if operation == add else 2
+            assert (len(rows), len(columns)) == ((count, 2) if axis == "rows" else (2, count))
+            assert table_shape.has_table and table.cell(0, 0).text == "retained first cell"
+            assert other.text == "unrelated sibling" and other.element.xml == other_xml
+            stable = prs.to_bytes()
+            for view, attribute, value in ((old_row, "height", 1), (old_column, "width", 1), (old_cell, "text", "unsafe")):
+                with pytest.raises(StaleElementError) as error:
+                    setattr(view, attribute, value)
+                assert f"First invalidated by {label}.{operation} " in str(error.value)
+                assert prs.to_bytes() == stable
+            stage = tmp_path / f"collection-grid-{first_axis}-{axis}-{operation}.pptx"
+            prs.save(stage)
+            assert prs.to_bytes() == stable
+            saved = Presentation(stage)
+            saved_table = saved.slides[0].shapes[0].table
+            assert (len(saved_table.rows), len(saved_table.columns)) == (len(rows), len(columns))
+            assert saved_table.cell(0, 0).text == "retained first cell"
+            assert saved.slides[0].shapes[1].text == "unrelated sibling"
+            with zipfile.ZipFile(stage) as package:
+                source = ET.fromstring(package.read("ppt/slides/slide1.xml"))
+            namespace = "http://schemas.openxmlformats.org/drawingml/2006/main"
+            assert len(source.findall(f".//{{{namespace}}}tblGrid/{{{namespace}}}gridCol")) == len(columns)
+            assert len(source.findall(f".//{{{namespace}}}tbl/{{{namespace}}}tr")) == len(rows)
+
+    target = tmp_path / f"collection-ancestors-{first_axis}.pptx"
+    prs.save(target)
+    assert prs.to_bytes() == stable
+    reopened = Presentation(target)
+    saved_table = reopened.slides[0].shapes[0].table
+    assert (len(saved_table.rows), len(saved_table.columns)) == (2, 2)
+    assert saved_table.cell(0, 0).text == "retained first cell"
+    assert reopened.slides[0].shapes[1].text == "unrelated sibling"
+    slide.shapes.remove(table_shape)
+    stable = prs.to_bytes()
+    for action in (lambda: len(rows), lambda: len(columns), lambda: table.cell(0, 0), lambda: table_shape.has_table,
+                   lambda: rows.add_row(), lambda: columns.add_column()):
+        with pytest.raises(StaleElementError) as error:
+            action()
+        assert "First invalidated by ShapeCollection.remove " in str(error.value)
+        assert prs.to_bytes() == stable
+    assert other.text == "unrelated sibling" and other.element.xml == other_xml

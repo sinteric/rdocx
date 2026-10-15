@@ -136,7 +136,7 @@ pub enum ColorTransform {
 }
 
 impl ColorTransform {
-    fn from_xml(element: &BytesStart<'_>) -> Result<Option<Self>> {
+    pub(crate) fn from_xml(element: &BytesStart<'_>) -> Result<Option<Self>> {
         let qualified_name = element.name();
         let name = local_name(qualified_name.as_ref());
         let transform = match name {
@@ -463,7 +463,7 @@ impl ColorChoice {
         Self::from_parts(start, Vec::new(), OrderedRawChildren::default())
     }
 
-    fn from_parts(
+    pub(crate) fn from_parts(
         start: &BytesStart<'_>,
         transforms: Vec<ColorTransform>,
         raw_children: OrderedRawChildren,

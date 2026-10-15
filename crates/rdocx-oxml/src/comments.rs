@@ -47,6 +47,7 @@ impl CT_Comments {
 
     /// Parse a complete comments part.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
         let mut comments = Vec::new();
@@ -112,6 +113,11 @@ impl CT_Comments {
 
     /// Serialize with fixed WordprocessingML prefixes and schema child order.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
+        for comment in &self.comments {
+            for paragraph in &comment.paragraphs {
+                paragraph.validate_resource_limits()?;
+            }
+        }
         let mut writer = Writer::new(Vec::new());
         writer.write_event(Event::Decl(BytesDecl::new(
             "1.0",

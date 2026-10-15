@@ -337,6 +337,7 @@ impl CT_DocPart {
 
 impl CT_GlossaryDocument {
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        crate::document::admit_word_xml(xml, &["w".to_owned()], None)?;
         validate_document_declarations_and_doctype(xml)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(false);
@@ -530,7 +531,18 @@ impl CT_GlossaryDocument {
         Ok(span.start + part.body_span.start..span.start + part.body_span.end)
     }
 
+    /// Validate all stored owner models before cloning or serialization.
+    #[doc(hidden)]
+    pub fn validate_resource_limits(&self) -> Result<()> {
+        for part in &self.doc_parts {
+            part.body.validate_resource_limits()?;
+            part.original_body.validate_resource_limits()?;
+        }
+        Ok(())
+    }
+
     pub fn to_xml(&self) -> Result<Vec<u8>> {
+        self.validate_resource_limits()?;
         let (container, empty) = doc_parts_close(&self.raw_xml)?;
         if empty {
             if self.doc_parts.is_empty() {

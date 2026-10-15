@@ -105,6 +105,7 @@ defended.
 | S88 | X | 1 | 1 | 0 | 3 | 1 | Repaired the unified release inventory and prepared PowerPoint 0.13.1 beside Word 0.15.0 after the immutable failed PowerPoint tag. The full gate passed with 49 matching hashes, 140 policy tests with two expected skips, exact 22-crate dry run and clean sprint review pass 1. Hosted CI run 37192110554 passed all jobs, including Docs, Release regressions and fidelity. Build-only run 37192115737 passed all 14 wheel and source distribution jobs, and both exact seven-file artifact contracts passed. Issue 266 remains open until both separately approved releases are published and verified. No stories carried |
 | S89 | M24, X | 5 | 5 | 0 | 21 | 2 | Completed note policy, cross-story ranges, deterministic fragment remapping and public glossary lifecycle, plus Changjoon's PR 269 fontdb feature-unification fix. Full verification passed with 49 unchanged hashes, 140 policy tests with two expected skips, 22 verified packages below 10 MiB and clean sprint review pass 1. M24 continues through S94. No stories carried |
 | S90 | M24, X | 20 | 18 | 2 | 55 | 3 | Completed 18 stories. The reconstructed 55-day estimate comprises 50 estimated days recorded for completed features plus F-X178 at 1 day and the chosen 4-day lower bound for F-283. Actual days are the three elapsed working dates from 2026-10-07 through 2026-10-09 inclusive, not person-days. F-X178 and F-283 carry to S91. F-X178 needs a separate scope decision and Issue264 remains excluded. New F-X192 owns the remaining bibliography catalogue in S91, and Issue281 remains open. Word0.16.0 and shared/PowerPoint0.14.0 are prepared for separately approved publication after close |
+| S91 | M24, X | 39 | 29 | 10 | 130 | 7 | Completed 29 top-level stories and four F-X211 delivery children. Child records are not counted twice. The reconstructed 130-day lower bound comprises 97 days for completed scope and 33 for carries, using S1/M2/L4. Actual days are seven worked dates, 2026-10-09 through 2026-10-15, including weekend work, not person-days. The frozen scope contains 40 issues and 30 PRs. Discussions264 and281 stay open. Bibliography, navigation and standalone authoring carry to S92. Local full verification and sprint review pass3 are clean. The exact reviewed-source build-only rehearsal38659673259 passed all27 build jobs, both seven-file Python sets and twelve CLI archives. Fresh hosted-wheel installs passed78 priority cases on each of Python3.9 and3.12 plus strict typing and stub checks. Word0.16.1 and shared/PowerPoint0.14.1 are prepared for publication after close |
 
 ## Completed features
 
@@ -684,10 +685,13 @@ five working days.
 | S88 | 1 | 1 | 5.00 |
 | S89 | 5 | 2 | 12.50 |
 | S90 | 18 | 3 | 30.00 |
+| S91 | 29 | 7 | 20.71 |
 
 S90 velocity measures calendar throughput for a parallel team. It does not
 measure person effort or establish a sustainable single-developer forecast.
 Later per-feature effort was not recorded, and those actuals remain unchanged.
+
+S91 counts29 completed top-level contracts once. Four completed F-X211 delivery children remain separate records and add neither stories nor estimates to that total. Seven actual dates include worked Saturday10 and Sunday11 October. The20.71 stories per week measures calendar throughput for parallel work. Per-feature actual effort remains unrecorded.
 
 ## Escalation record
 
@@ -779,6 +783,7 @@ was done about it. Empty is the expected state.
 | 2026-10-04 | Sprint estimate variance exceeded 30 percent | S88 | Record 1 elapsed workday against 3 estimated for the focused release repair. The failed tag had isolated the package inventory cause, and established release checks were reused. The resulting 5.00 stories per week is a short repair result, so retain the dependency-defined S89 boundary |
 | 2026-10-05 | Sprint estimate variance exceeded 30 percent | S89 | Record 2 elapsed workdays against 21 estimated. Dependency waves reused the completed related-story and package foundations, and PR 269 supplied a focused reproducer and fix. The resulting 12.50 stories per week is not a sustainable forecast, so retain the dependency-defined S90 boundary |
 | 2026-10-09 | Sprint estimate variance exceeded 30 percent | S90 | Record 3 elapsed working dates against the reconstructed 55-day planning estimate, including 50 estimated days for completed features. Nominal variance is 94.55 percent against 55 or 94.00 percent against 50. Parallel assistance, contribution reuse and exclusive implementation waves make elapsed time different from person effort. The resulting 30.00 stories per week is calendar throughput, not a sustainable forecast. Retain the S91 navigation and bibliography boundaries and recalibrate with measured effort |
+| 2026-10-15 | Sprint estimate and velocity variance exceeded30 percent | S91 | Record seven worked dates against the reconstructed130-day lower bound, comprising97 days for completed scope and33 carried. Nominal variance is94.62 percent against130 or92.78 percent against97. Throughput is20.71 stories per week,30.95 percent below S90. Rolling contributions and parallel workers make calendar dates different from person effort. Retain the ten S92 carries and recalibrate with measured effort |
 
 ## S79 contribution reconciliation
 
@@ -863,3 +868,134 @@ or changing the reviewed release boundary. Keep Issue281 open for F-184.
 | F-282 | S90 | L | 4 | not recorded | 2026-10-09 | Revised measured native bibliography contract, ALL pass4 clean, qualified native4160/all1340 APA and current layout320/Python178/CLI66, verified22 packages, hash49 unchanged. Full catalogue F-X192 and navigation F-283 in S91 |
 
 | F-X189 | S90 | L | 4 | not recorded | 2026-10-09 | Word0.16.0 and shared/PowerPoint0.14.0 local preparation, ALL pass3 clean, actual22crate archives, full native5708 and installed Word178/PPT77 per interpreter, WASM/npm/size and golden7 passed, hash49 match. Final HEAD review, hosted rehearsal, close and publication remain separate |
+
+## Next sprint replan, 2026-10-09
+
+Insert S91 before the template and form programme. F-X192 and F-283 retain
+their S91 carryover destination. F-X193 through F-X197 cover PR294 and
+Issues295 through300, bringing the new boundary to seven pending stories and
+20 to 25 estimated developer-days. Issues264 and281 remain excluded. F-X178's
+next eligible planning target becomes S92 with its separate scope decision.
+Issue281 remains open for F-184 at S96.
+
+The previous S91 through S104 roadmap shifts to S92 through S105. Historical
+S90 estimates, delivered rows and contribution reconciliation remain unchanged.
+The S90 summary's original F-X178 destination is superseded by this replan.
+No S91 completion, measured velocity, contribution closure or release is
+recorded by planning. AS_BUILT.md remains the append-only delivered record.
+
+S91 contribution intake stays open at the user's instruction. Refresh issues
+and PRs at design, implementation/resume checkpoints, integration and final
+verification/close. Attach later contributor PRs to their existing issue's
+F-ID, inspect updated heads before duplicating implementation, and reuse
+accepted work against the full contract. Update the canonical plan, backlog,
+HLD14 and active sprint record for added scope. Issues264 and281 stay excluded.
+The rolling intake procedure is defined in SPRINT_PLAN.md under S91.
+
+At S91 opening, the rolling refresh adds hadim Issue301 through F-X198. The
+scope is eight pending stories, estimated at 22 to 28 developer-days. No
+implementation or acceptance is claimed by this intake.
+
+| F-X196 | S91 | S | 1 | not recorded | 2026-10-09 | Dependency-prefix completion, private qualified CLI scan, ALL pass2 clean,4unit/67integration and141policy passes, hash49 unchanged, exact integrated source congruence. Final sprint gate remains due |
+
+| F-X198 | S91 | M | 2 | not recorded | 2026-10-09 | Dependency-prefix completion, qualified paired-box/cell atomic refusal,40native/106installed controls, clean production/integration reviews, recovered unchanged consumer and remaining targets, hash49 unchanged, final actual archives/source bytes. Full sprint gate remains due |
+
+| F-X193 | S91 | S | 1 | not recorded | 2026-10-10 | Scoped completion, PR294 semantic mark inheritance, clean production/integration reviews, 11HTML/514library/364integration controls across qualified retries/2331regression/2doctests, policy terminal141 with unavailable tool exit, hash49 unchanged, current F-X198 archives/source congruence. Full sprint gate remains due |
+
+| F-X199 | S91 | S | 1 | not recorded | 2026-10-10 | Scoped prerequisite completion, PR302 qualified empty margins,54table/public21cell/639OXML/515library/2325regression/2doctest controls and qualified consumer recovery, policy141 and22patched publication dry-runs, clean independent integration review, hash49 unchanged and actual combined archives. Full sprint gate remains due |
+
+| F-X194 | S91 | M | 2 | not recorded | 2026-10-10 | Scoped prerequisite completion, editable cell text and signed indentation, installed199/86 plus11 focused controls, native and typing gates, WASM, verified22 packages, policy141 with2 publication-dependent skips, five clean reviews, exact source congruence and hash49 unchanged. Full sprint gate remains due |
+
+| F-X212 | S91 | M | 2 | not recorded | 2026-10-10 | Scoped prerequisite completion, qualified native/CLI visibility and field caches, clean independent reviews, OXML647/Word521/regression2331/doc2/CLI3+68 and qualified365 integration coverage, integrated focused9 and observed49 match, reviewed3-key delta, verified3 affected packages and policy141 with2 publication-dependent skips. Full sprint gate remains due |
+
+| F-X197 | S91 | L | 4 | not recorded | 2026-10-10 | Scoped prerequisite completion, shared RGB validation/live colour/theme/brightness, installed652 and typing/stubs, actual Word354 R14 reuse and fresh PPT583, native4/support7/WASM, unchanged49 and verified22 packages, policy141 with2 publication-dependent skips, clean reviews. Integrated seven-command prefix passed with ROOT authentication. Full sprint gate remains due |
+
+## S91 scope reduction, user decision
+
+The user parks bibliography F-X192 and navigation F-283 at S92 and keeps all
+frozen issue and PR repairs in S91. Twenty active stories remain, seven done,
+three in progress and ten approved pending. Nineteen PRs and twenty-six
+included issues retain their existing acceptance owners. Issues264 and281
+remain excluded and open. No new contribution intake is authorized.
+Preserve the dirty F-X192 worker branch, worktree and required evidence.
+No completion, velocity, issue closure or release is recorded by this replan.
+The earlier S91 carryover destination and rolling-intake instructions above
+are historical and superseded by this decision and the existing intake freeze.
+S92 is the planned next sprint and is not opened by this scope change.
+
+## S91 rolling intake reopened, latest user decision
+
+The user reopened issue and PR intake while retaining F-X192 and F-283 at
+S92. The authenticated inventory has thirty open issues and twenty-one PRs,
+with twenty-eight included issues after264 and281 are excluded. New339/342
+story-text work extends existing F-X203. New340/341 TOC topology repair is
+being designed separately from the parked full navigation contract. Assess
+immutable source once before adoption, and reconcile later arrivals through
+final close. No completion or contribution closure is recorded by intake.
+The prior freeze instructions are superseded by this explicit user decision.
+
+### S91 new contribution ownership, 2026-10-11
+
+The reopened inventory contains28 included issues and21 PRs. New
+Issue339/PR342 extend F-X203. New Issue340/PR341 form approved F-X213,
+a bounded TOC repair separate from parked F-283. S91 has21 active stories,
+seven complete, three running and eleven approved pending implementation.
+Full immutable source has been assessed, with preservation gaps recorded
+for correction and local acceptance. No new contribution is marked complete.
+Issues264 and281 remain excluded and open.
+
+| F-X195 | S91 | L | 4 | not recorded | 2026-10-11 | Scoped prerequisite completion, caller-font and variable-style rendering, installed104/caller19/eight SVG owners, declared risk gates and clean reviews. Integrated native6 and typing/provenance5 passed, unchanged49 and nine exact archive inventories. Historical source and ignore qualifications retained. Full sprint gate remains due |
+
+| F-X210 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped prerequisite completion, approved font and symbol assets with bounded compatibility and same-render diagnostics. Worker native/installed/typing/paint/package gates qualified. Integrated seven checks and49 matching hashes pass, final package measurement within64 bytes, reviews29/30 clean. Full sprint gate remains due |
+
+| F-X213 | S91 | M | 2 | not recorded | 2026-10-12 | Scoped completion, entry-owned TOC boundaries and exact opaque preservation. Native21 and full affected suites, installed2 and typing, policy141, verified22 archives and clean integration review17. Composed TOC2 and Word/CLI checks pass on completed F-X210 prefix. Full sprint gate remains due |
+
+| F-X206 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, shape authoring and causal live handles, native affine and source-preserving XML. Current11-crate checks, installed8, typing, verified8 archives, policy successors and49 hashes pass. Integrated source exact and reviews53 to59 clean. Full sprint gate remains due |
+
+| F-X200 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, Word formatting and list parity, genuine Base and scoped current gates, clean independent reviews, exact source/archive composition and seven actual integrated checks including49 approved hashes. Full sprint gate remains due |
+
+| F-X207 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, PowerPoint explicit autofit and fit_text, genuine Base and scoped current gates, clean independent reviews, exact source/archive composition and seven actual integrated checks including49 approved hashes. Full sprint gate remains due |
+
+| F-X208 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, legal footer/field/theme/transition authoring, genuine Base and qualified native/installed/archive gates, clean integration review14, nine actual integrated checks including49 approved hashes. Original stalled attempts remain failed. Full sprint gate remains due |
+
+| F-X201 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, live section stories and checked page authoring, native Word and LibreOffice evidence, clean integration review23, integrated11 regressions and49 matching hashes. Composite policy139 passes and2 existing skips. Full sprint gate remains due |
+
+| F-X205 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, PowerPoint parity and exports,40 installed controls, seven verified archives, clean integration review20 and10 integrated rows including49 matching hashes. Original failures retained. Full sprint gate remains due |
+
+| F-X203 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, shared Word operations and issue repairs, installed31 composite and typing, native367 integration, verified four archives and clean integration review17. Composed native/binding checks, exact chart paint and49 hashes pass. Policy139 qualified with2 existing skips and21 README cases compiled. Original failures retained. Full sprint gate remains due |
+
+| F-X209 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, physical master/layout/theme editing, explicit native and public composites, current installed logo and typing, three verified archives and clean independent integration review30. Composed six-crate check and49 matching hashes pass. Original failures retained. Full sprint gate remains due |
+
+| F-X202 | S91 | L | 4 | not recorded | 2026-10-12 | Scoped completion, tables and physical pictures, supported heading owners and synchronized alternate copies. Current79 public controls and typing, native Office acceptance, two verified archives and policy139 qualified passes with2 existing skips. Integrated product exact, review14 clean, six-crate check and49 hashes pass. Full sprint gate remains due |
+
+| F-X214 | S91 | L | not recorded | not recorded | 2026-10-12 | Scoped completion, shared depth32 parsing and iterative traversal, exact opaque source and atomic refusal. Native956 qualified passes and34 existing ignores, installed controls and typing, native PowerPoint acceptance, four verified archives and policy139 passes with2 existing skips. Product exact, integration review5 zero defects and smells, six-crate check and49 hashes pass. Full sprint gate remains due |
+
+| F-X204 | S91 | L | not recorded | not recorded | 2026-10-12 | Scoped prerequisite completion, ordered counted maps, complete native and Python field reports, strict timestamps and atomic CLI publication. Native2396 regression passes, installed allocation-failure rollback and typing, four unattended LibreOffice controls, five verified archive dry runs and exact policy successors. Three clean reviews, eight integrated checks and49 unchanged hashes. Full sprint gate remains due |
+
+| F-X222 | S91 | M | not recorded | not recorded | 2026-10-12 | Scoped completion of Issue362 and PR363, operation-owned inventory and preserved qualified empty owners. Native567 library and371 integration controls,2396 regressions, four unattended LibreOffice successors, fresh Word wheel and CLI, typing, WASM, verified archive and policy141. Independent full review clean, six integrated checks and49 unchanged hashes. Full sprint gate remains due |
+
+| F-X217 | S91 | L | not recorded | not recorded | 2026-10-13 | Scoped completion of Issues350/351 and PR359, HTML/CommonMark import through native, installed Python and CLI. Source-qualified gates, exact parser approval, clean reviews and49 unchanged hashes. Both native Word combined/template open/save/normal-reopen/local-render cases pass.3211 integrated source files checked, product exact. Final full sprint gate remains due |
+
+| F-X211b | S91 | L | not recorded | not recorded | 2026-10-13 | Scoped PowerPoint XML child completion, nine checked physical owners,24 native and31 installed controls, clean whole/composition/integration reviews, five verified composed archives and actual integrated compile/release-owner/hash49/prose checkpoint. Original debug abort and historical absent oracles retained. Parent211 and final full sprint gate remain due |
+
+| F-X220 | S91 | L | not recorded | not recorded | 2026-10-13 | Scoped licensed font embedding across native, Python and CLI families. Native ten-case evidence retains approved Word limit/F223 carryover, current62 installed tests plus typing/fullstubs, eight verified archives, both WASM and49 unchanged hashes. Independent integration and metadata reviews clean. Original failures retained. Full sprint gate remains due |
+
+
+| F-X211a | S91 | L | not recorded | not recorded | 2026-10-13 | Scoped dependency-prefix completion. Five Word checked XML owners and concrete source-qualified publication, bounded ordinary-stack parser lifecycle, opaque namespace preservation and owner-local child retirement. Prepared returned Paragraph capture composes with chart creation, imports and fonts. Parent/c and final full sprint gates remain due |
+
+
+| F-X215 | S91 | L | not recorded | not recorded | 2026-10-13 | Scoped dependency-prefix completion. Both-family Python chart creation and preservation-aware data replacement retain actual cache/workbook graphs, styles and owned relationships. Shared targets use copy-on-write. Chart views retire after checked frame XML replacement, and Word returned Paragraph allocation uses prepared owner authority. Native chart source/render acceptance remains attributed to its actual inputs. Parent/c and final full sprint gates remain due |
+
+
+| F-X218 | S91 | L | not recorded | not recorded | 2026-10-13 | Scoped dependency-prefix completion. PowerPoint semantic HTML/Markdown export preserves supported source order, list/style/link/table/image/notes/hidden-slide semantics with immutable detached diagnostics/assets. Native atomic publication and one bounded image validator back Python and CLI. Two native source cycles qualify source semantics separately from HTML pixel parity. Parent/c and final full sprint gates remain due |
+
+| F-X216 | S91 | L | not recorded | not recorded | 2026-10-14 | Scoped dependency-prefix completion. Complete slide graphs, source formatting and deck merge with admitted native source comparisons, graph survival and save/reopen acceptance. Independent integration review clean. Four historical oracle assets uncredited in S92. Final union gates remain due |
+
+
+| F-X211d | S91 | L | not recorded | not recorded | 2026-10-14 | Scoped Word compatibility dependency completion. Installed32 and typing, ordinary2MiB12, pinned native complements, verified22 archives, full141 policy and README qualified. Independent completion and integration reviews clean. Parent unchanged100 and final sprint gates remain due |
+
+| F-X211c | S91 | L | not recorded | not recorded | 2026-10-14 | Scoped completion,95 qualified files from unchanged100, all42hard51native gates and24documentation cases, five no-credit divergences. Paired controls, nine raster and native Word morphology, verified22 archives, policy154pass2skip and clean whole/integration reviews. Final full sprint gate remains due |
+
+| F-X211 | S91 | L | not recorded | not recorded | 2026-10-14 | Aggregate completion of a/b/c/d. Original Base17/100 and admitted final95/100 remain distinct. All42 hard gates,51 native clauses and24 documentation examples qualify. Independent aggregate review clean. Release preparation and final sprint gates remain due |
+
+| F-X221 | S91 | L | not recorded | not recorded | 2026-10-15 | Prepared Word0.16.1 and shared/PowerPoint0.14.1. Final local full gate passes: stable native core, Python778/854, font104/native-eight, policy158pass2skip,22 archives, README and deny. Admitted95of100 retains42hard51native/24documentation and five no-credit cases. Component reviews clean. Subsequent bare-wheel routing amendment passes exact37/41 priority runtime and policy159pass2skip with four strengthened controls. Final integrated successor review, hosted rehearsal, close, both publications and humanized remote reconciliation remain separate gates |

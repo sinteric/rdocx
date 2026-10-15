@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 
 use oxml_core::OxmlError;
@@ -495,6 +496,181 @@ impl CommentList {
     pub fn move_comment(&mut self, from: usize, to: usize) -> Result<()> {
         move_item(&mut self.comments, from, to, "comment")
     }
+
+    /// Returns schema-owned author references, including assigned task authors.
+    pub fn referenced_author_ids(&self) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        for comment in &self.comments {
+            ids.push(comment.author_id.clone());
+            ids.extend(comment.replies.iter().map(|reply| reply.author_id.clone()));
+            ids.extend(assigned_author_ids(&comment.raw_attributes)?);
+        }
+        Ok(ids)
+    }
+
+    /// Rebinds a copy of this list to a copied slide.
+    ///
+    /// Comment and reply ids found in `ids`, and author ids found in
+    /// `author_ids`, take their mapped value. Every anchor names `slide_id`,
+    /// and its drawing monikers take the shape ids of `shape_ids`.
+    pub fn remap_for_copied_slide(
+        &mut self,
+        ids: &HashMap<String, String>,
+        author_ids: &HashMap<String, String>,
+        slide_id: u32,
+        shape_ids: &HashMap<u32, u32>,
+    ) -> Result<()> {
+        fn rename(id: &mut String, map: &HashMap<String, String>) {
+            if let Some(mapped) = map.get(id.as_str()) {
+                id.clone_from(mapped);
+            }
+        }
+        for id in &mut self.original_comment_ids {
+            rename(id, ids);
+        }
+        for comment in &mut self.comments {
+            rename(&mut comment.id, ids);
+            rename(&mut comment.author_id, author_ids);
+            comment.raw_attributes = remap_assigned_authors(&comment.raw_attributes, author_ids)?;
+            for id in &mut comment.original_reply_ids {
+                rename(id, ids);
+            }
+            for reply in &mut comment.replies {
+                rename(&mut reply.id, ids);
+                rename(&mut reply.author_id, author_ids);
+            }
+            comment.anchor = remap_anchor(&comment.anchor, slide_id, shape_ids)?;
+        }
+        Ok(())
+    }
+}
+
+fn assigned_author_ids(attributes: &[u8]) -> Result<Vec<String>> {
+    let xml = [b"<record".as_slice(), attributes, b"/>"].concat();
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let Event::Empty(start) = reader.read_event()? else {
+        return Err(invalid("invalid comment attributes".into()));
+    };
+    let mut result = Vec::new();
+    for (name, value) in all_attributes(&start)? {
+        if name == "assignedTo" {
+            for id in value.split_whitespace() {
+                validate_guid("assigned comment author", id)?;
+                result.push(id.to_owned());
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn remap_assigned_authors(attributes: &[u8], authors: &HashMap<String, String>) -> Result<Vec<u8>> {
+    let xml = [b"<record".as_slice(), attributes, b"/>"].concat();
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let Event::Empty(start) = reader.read_event()? else {
+        return Err(invalid("invalid comment attributes".into()));
+    };
+    let mut changes = Vec::new();
+    for attribute in start.attributes() {
+        let attribute = attribute?;
+        if attribute.key.as_ref() == b"assignedTo" {
+            let value = attribute.decoded_and_normalized_value(
+                quick_xml::XmlVersion::Implicit1_0,
+                reader.decoder(),
+            )?;
+            let ids = value
+                .split_whitespace()
+                .map(|id| {
+                    authors.get(id).cloned().ok_or_else(|| {
+                        invalid(format!("assigned comment author {id} was not mapped"))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mapped = ids.join(" ");
+            if mapped != value {
+                let begin = (attribute.value.as_ptr() as usize)
+                    .checked_sub(xml.as_ptr() as usize)
+                    .ok_or_else(|| invalid("assigned author attribute outside input".into()))?;
+                changes.push((begin..begin + attribute.value.len(), mapped.into_bytes()));
+            }
+        }
+    }
+    let rewritten = classic_apply(&xml, changes)?;
+    Ok(rewritten[b"<record".len()..rewritten.len() - 2].to_vec())
+}
+
+/// Rewrites the slide id of `pc:sldMk` and the shape ids of drawing monikers.
+fn remap_anchor(anchor: &[u8], slide_id: u32, shape_ids: &HashMap<u32, u32>) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(anchor);
+    let mut scopes = vec![NamespaceBindings::default()];
+    let mut changes = Vec::new();
+    loop {
+        let event = reader.read_event()?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let scope = scopes
+                    .last()
+                    .ok_or_else(|| {
+                        OxmlError::InvalidValue("missing anchor namespace scope".into())
+                    })?
+                    .with_start(&start)?;
+                let key = match (
+                    scope.element_uri(start.name().as_ref()),
+                    local_name(start.name().as_ref()),
+                ) {
+                    (Some(POWERPOINT_COMMAND_NS), b"sldMk") => Some(b"sldId".as_slice()),
+                    (
+                        Some(DRAWING_COMMAND_NS),
+                        b"spMk" | b"grpSpMk" | b"graphicFrameMk" | b"cxnSpMk" | b"picMk",
+                    ) => Some(b"id".as_slice()),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    for attribute in start.attributes() {
+                        let attribute = attribute?;
+                        if attribute.key.as_ref() != key {
+                            continue;
+                        }
+                        let value = attribute.decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Implicit1_0,
+                            reader.decoder(),
+                        )?;
+                        let replacement = if key == b"sldId" {
+                            Some(slide_id)
+                        } else {
+                            value
+                                .parse::<u32>()
+                                .ok()
+                                .and_then(|old| shape_ids.get(&old).copied())
+                        };
+                        if let Some(replacement) = replacement {
+                            let begin = (attribute.value.as_ptr() as usize)
+                                .checked_sub(anchor.as_ptr() as usize)
+                                .ok_or_else(|| invalid("anchor attribute outside input".into()))?;
+                            let end = begin
+                                .checked_add(attribute.value.len())
+                                .filter(|end| *end <= anchor.len())
+                                .ok_or_else(|| invalid("anchor attribute outside input".into()))?;
+                            changes.push((begin, end, replacement.to_string()));
+                        }
+                    }
+                }
+                if !empty {
+                    scopes.push(scope);
+                }
+            }
+            Event::End(_) => {
+                scopes.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let mut result = anchor.to_vec();
+    for (start, end, value) in changes.into_iter().rev() {
+        result.splice(start..end, value.bytes());
+    }
+    Ok(result)
 }
 
 fn parse_author(xml: &[u8], inherited: &NamespaceBindings) -> Result<CommentAuthor> {
@@ -696,8 +872,13 @@ fn parse_comment_children(
                     && text_body.is_none()
                 {
                     text_body_attributes = text_body_root_attributes(&child, &raw)?;
-                    text_body =
-                        Some(CT_TextBody::from_xml_as(&raw, b"txBody").map_err(text_error)?);
+                    text_body = Some(
+                        CT_TextBody::from_xml_with_inherited_namespaces(
+                            &raw,
+                            &namespaces.entries(),
+                        )
+                        .map_err(text_error)?,
+                    );
                     text_body_raw = Some(raw);
                     boundary = 4;
                 } else if local == b"extLst" && uri == Some(P_NS) {
@@ -848,8 +1029,11 @@ fn parse_reply(xml: &[u8], inherited: &NamespaceBindings) -> Result<CommentReply
                             {
                                 text_body_attributes = text_body_root_attributes(&child, &raw)?;
                                 text_body = Some(
-                                    CT_TextBody::from_xml_as(&raw, b"txBody")
-                                        .map_err(text_error)?,
+                                    CT_TextBody::from_xml_with_inherited_namespaces(
+                                        &raw,
+                                        &child_ns.entries(),
+                                    )
+                                    .map_err(text_error)?,
                                 );
                                 text_body_raw = Some(raw);
                                 boundary = 1;
@@ -1704,4 +1888,517 @@ fn missing(name: &str) -> OxmlError {
 
 fn invalid(message: String) -> OxmlError {
     OxmlError::InvalidValue(message)
+}
+
+const P15_NS: &str = "http://schemas.microsoft.com/office/powerpoint/2012/main";
+
+#[derive(Clone)]
+struct ClassicElement {
+    start: usize,
+    end: usize,
+    attributes: HashMap<String, (String, std::ops::Range<usize>)>,
+    namespaces: NamespaceBindings,
+}
+
+struct ClassicList {
+    elements: Vec<ClassicElement>,
+    insert_at: usize,
+}
+
+#[derive(Eq, PartialEq)]
+struct ClassicIdentity {
+    attributes: Vec<(String, String)>,
+    namespaces: Vec<(String, String)>,
+    payload: Vec<u8>,
+}
+
+/// One required parent comment with its original relationship scope.
+pub struct ClassicCommentDependency {
+    pub source_part: String,
+    pub xml: Vec<u8>,
+}
+
+/// Resolves parent-comment closure without importing unrelated slides or comments.
+pub fn classic_comment_dependencies(
+    selected: &[(String, Vec<u8>)],
+    all_parts: &[(String, Vec<u8>)],
+) -> Result<HashMap<String, Vec<ClassicCommentDependency>>> {
+    let mut placed = std::collections::HashSet::new();
+    let mut queues = Vec::new();
+    for (part, xml) in selected {
+        for comment in classic_list(xml, b"cmLst", b"cm")?.elements {
+            placed.insert((
+                classic_number(&comment, "authorId")?,
+                classic_number(&comment, "idx")?,
+            ));
+        }
+        let parents = classic_parent_references(xml)?
+            .into_iter()
+            .map(|parent| classic_parent_identity(&parent))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        queues.push((part, parents));
+    }
+    if queues.iter().all(|(_, parents)| parents.is_empty()) {
+        return Ok(HashMap::new());
+    }
+    let mut available = HashMap::new();
+    for (part, xml) in all_parts {
+        for comment in classic_list(xml, b"cmLst", b"cm")?.elements {
+            let key = (
+                classic_number(&comment, "authorId")?,
+                classic_number(&comment, "idx")?,
+            );
+            if available.insert(key, (part, xml, comment)).is_some() {
+                return Err(invalid("duplicate source classic parent identity".into()));
+            }
+        }
+    }
+    let mut output = HashMap::new();
+    for (part, parents) in queues {
+        let mut pending = std::collections::VecDeque::from(parents);
+        let mut added = Vec::new();
+        while let Some(key) = pending.pop_front() {
+            if !placed.insert(key) {
+                continue;
+            }
+            let (origin, xml, comment) = available.get(&key).ok_or_else(|| {
+                invalid(format!(
+                    "classic parent comment {},{} is absent",
+                    key.0, key.1
+                ))
+            })?;
+            let raw = close_classic_element(&xml[comment.start..comment.end], &comment.namespaces)?;
+            // A single comment is wrapped only to reuse the exact schema-path reader.
+            let wrapped = [
+                format!("<p:cmLst xmlns:p=\"{P_NS}\">").as_bytes(),
+                raw.as_slice(),
+                b"</p:cmLst>",
+            ]
+            .concat();
+            for parent in classic_parent_references(&wrapped)? {
+                if let Some(key) = classic_parent_identity(&parent)? {
+                    pending.push_back(key);
+                }
+            }
+            added.push(ClassicCommentDependency {
+                source_part: (*origin).clone(),
+                xml: raw,
+            });
+        }
+        if !added.is_empty() {
+            output.insert((*part).clone(), added);
+        }
+    }
+    Ok(output)
+}
+
+/// Appends an already closed and relationship-rebound parent fragment.
+pub fn append_classic_comment_dependency(xml: &[u8], dependency: &[u8]) -> Result<Vec<u8>> {
+    let list = classic_list(xml, b"cmLst", b"cm")?;
+    classic_apply(
+        xml,
+        vec![(list.insert_at..list.insert_at, dependency.to_vec())],
+    )
+}
+
+fn close_classic_element(xml: &[u8], namespaces: &NamespaceBindings) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml);
+    let start = match reader.read_event()? {
+        Event::Start(start) | Event::Empty(start) => start,
+        _ => return Err(invalid("classic element root missing".into())),
+    };
+    let declared = all_attributes(&start)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<std::collections::HashSet<_>>();
+    let end = reader.buffer_position() as usize;
+    let position = end
+        - if xml.get(end - 2) == Some(&b'/') {
+            2
+        } else {
+            1
+        };
+    let mut declarations = String::new();
+    for (prefix, uri) in namespaces.entries() {
+        let name = if prefix.is_empty() {
+            "xmlns".to_owned()
+        } else {
+            format!("xmlns:{prefix}")
+        };
+        if !declared.contains(&name) {
+            declarations.push_str(&format!(" {name}=\"{}\"", quick_xml::escape::escape(&uri)));
+        }
+    }
+    classic_apply(xml, vec![(position..position, declarations.into_bytes())])
+}
+
+/// Prepared classic batch payloads, published together by the caller.
+pub struct ClassicCommentImport {
+    pub authors_xml: Vec<u8>,
+    pub comment_parts: HashMap<String, Vec<u8>>,
+}
+
+/// Prepares classic authors and numeric comment references for one selected batch.
+/// Only PresentationML comment identities and p15 parent references are rewritten.
+/// Foreign extension payload remains byte-identical.
+pub fn import_classic_comments(
+    source_authors: &[u8],
+    destination_authors: Option<&[u8]>,
+    source_parts: &[(String, Vec<u8>)],
+    destination_parts: &[Vec<u8>],
+) -> Result<ClassicCommentImport> {
+    let empty = format!(r#"<p:cmAuthorLst xmlns:p="{P_NS}"></p:cmAuthorLst>"#).into_bytes();
+    let destination = destination_authors.unwrap_or(&empty);
+    let source = classic_list(source_authors, b"cmAuthorLst", b"cmAuthor")?;
+    let existing = classic_list(destination, b"cmAuthorLst", b"cmAuthor")?;
+    let mut used = std::collections::HashSet::new();
+    let mut high_water = HashMap::<u32, u32>::new();
+    for author in &existing.elements {
+        let id = classic_number(author, "id")?;
+        if !used.insert(id) {
+            return Err(invalid("duplicate classic author id".into()));
+        }
+        high_water.insert(id, classic_number(author, "lastIdx")?);
+    }
+    for xml in destination_parts {
+        for comment in classic_list(xml, b"cmLst", b"cm")?.elements {
+            let id = classic_number(&comment, "authorId")?;
+            let index = classic_number(&comment, "idx")?;
+            let high = high_water
+                .get_mut(&id)
+                .ok_or_else(|| invalid("classic comment has no author".into()))?;
+            *high = (*high).max(index);
+        }
+    }
+    let mut author_ids = HashMap::new();
+    let mut new_authors = Vec::new();
+    for author in &source.elements {
+        let old = classic_number(author, "id")?;
+        if author_ids.contains_key(&old) {
+            return Err(invalid("duplicate source classic author id".into()));
+        }
+        let identity = classic_identity(source_authors, author)?;
+        let mut matched = None;
+        for target in &existing.elements {
+            if classic_identity(destination, target)? == identity {
+                matched = Some(classic_number(target, "id")?);
+                break;
+            }
+        }
+        let id = if let Some(id) = matched {
+            id
+        } else {
+            let id = (0..=u32::MAX)
+                .find(|id| !used.contains(id))
+                .ok_or_else(|| invalid("classic author ids exhausted".into()))?;
+            used.insert(id);
+            high_water.insert(id, 0);
+            new_authors.push((author, id));
+            id
+        };
+        author_ids.insert(old, id);
+    }
+    let mut comments = HashMap::new();
+    let mut parsed = Vec::new();
+    for (part, xml) in source_parts {
+        let list = classic_list(xml, b"cmLst", b"cm")?;
+        for comment in &list.elements {
+            let old = classic_number(comment, "authorId")?;
+            let old_index = classic_number(comment, "idx")?;
+            let id = *author_ids
+                .get(&old)
+                .ok_or_else(|| invalid("source classic comment has no author".into()))?;
+            if comments.contains_key(&(old, old_index)) {
+                return Err(invalid("duplicate source classic comment identity".into()));
+            }
+            let high = high_water
+                .get_mut(&id)
+                .expect("every mapped author has a counter");
+            *high = high
+                .checked_add(1)
+                .ok_or_else(|| invalid("classic comment indices exhausted".into()))?;
+            comments.insert((old, old_index), (id, *high));
+        }
+        parsed.push((part, xml, list));
+    }
+    let mut output = HashMap::new();
+    for (part, xml, list) in parsed {
+        let mut changes = Vec::new();
+        for comment in &list.elements {
+            let key = (
+                classic_number(comment, "authorId")?,
+                classic_number(comment, "idx")?,
+            );
+            let &(author, index) = comments
+                .get(&key)
+                .expect("every selected comment was allocated");
+            classic_change(comment, "authorId", author, &mut changes)?;
+            classic_change(comment, "idx", index, &mut changes)?;
+        }
+        for parent in classic_parent_references(xml)? {
+            let Some(key) = classic_parent_identity(&parent)? else {
+                continue;
+            };
+            let &(author, index) = comments.get(&key).ok_or_else(|| {
+                invalid(format!(
+                    "classic parent comment {},{} is outside the selected comment graph",
+                    key.0, key.1
+                ))
+            })?;
+            classic_change(&parent, "authorId", author, &mut changes)?;
+            classic_change(&parent, "idx", index, &mut changes)?;
+        }
+        output.insert(part.clone(), classic_apply(xml, changes)?);
+    }
+    let mut changes = Vec::new();
+    for author in &existing.elements {
+        let id = classic_number(author, "id")?;
+        classic_change(author, "lastIdx", high_water[&id], &mut changes)?;
+    }
+    let mut added = Vec::new();
+    for (author, id) in new_authors {
+        let mut local = Vec::new();
+        classic_change(author, "id", id, &mut local)?;
+        classic_change(author, "lastIdx", high_water[&id], &mut local)?;
+        let mut raw = classic_apply(
+            &source_authors[author.start..author.end],
+            local
+                .into_iter()
+                .map(|(range, value)| {
+                    (
+                        (range.start - author.start)..(range.end - author.start),
+                        value,
+                    )
+                })
+                .collect(),
+        )?;
+        raw = close_classic_element(&raw, &author.namespaces)?;
+        added.extend(raw);
+    }
+    changes.push((existing.insert_at..existing.insert_at, added));
+    Ok(ClassicCommentImport {
+        authors_xml: classic_apply(destination, changes)?,
+        comment_parts: output,
+    })
+}
+
+fn classic_parent_identity(parent: &ClassicElement) -> Result<Option<(u32, u32)>> {
+    match (
+        parent.attributes.contains_key("authorId"),
+        parent.attributes.contains_key("idx"),
+    ) {
+        (false, false) => Ok(None),
+        (true, true) => Ok(Some((
+            classic_number(parent, "authorId")?,
+            classic_number(parent, "idx")?,
+        ))),
+        _ => Err(invalid("incomplete classic parent identity".into())),
+    }
+}
+
+fn classic_number(element: &ClassicElement, name: &str) -> Result<u32> {
+    element
+        .attributes
+        .get(name)
+        .ok_or_else(|| invalid(format!("classic {name} missing")))?
+        .0
+        .parse()
+        .map_err(|_| invalid(format!("classic {name} is not an unsigned integer")))
+}
+
+fn classic_change(
+    element: &ClassicElement,
+    name: &str,
+    value: u32,
+    changes: &mut Vec<(std::ops::Range<usize>, Vec<u8>)>,
+) -> Result<()> {
+    let (_, range) = element
+        .attributes
+        .get(name)
+        .ok_or_else(|| invalid(format!("classic {name} missing")))?;
+    changes.push((range.clone(), value.to_string().into_bytes()));
+    Ok(())
+}
+
+fn classic_apply(
+    xml: &[u8],
+    mut changes: Vec<(std::ops::Range<usize>, Vec<u8>)>,
+) -> Result<Vec<u8>> {
+    changes.sort_by_key(|(range, _)| range.start);
+    let mut end = 0;
+    for (range, _) in &changes {
+        if range.start < end || range.start > range.end || range.end > xml.len() {
+            return Err(invalid("overlapping classic XML edit".into()));
+        }
+        end = range.end;
+    }
+    let mut output = xml.to_vec();
+    for (range, value) in changes.into_iter().rev() {
+        output.splice(range, value);
+    }
+    Ok(output)
+}
+
+fn classic_identity(xml: &[u8], element: &ClassicElement) -> Result<ClassicIdentity> {
+    let mut attributes = element
+        .attributes
+        .iter()
+        .filter(|(name, _)| {
+            !matches!(name.as_str(), "id" | "lastIdx") && !name.starts_with("xmlns")
+        })
+        .map(|(name, (value, _))| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    attributes.sort();
+    let raw = &xml[element.start..element.end];
+    let mut reader = Reader::from_reader(raw);
+    reader.read_event()?;
+    Ok(ClassicIdentity {
+        attributes,
+        namespaces: element.namespaces.entries(),
+        payload: raw[reader.buffer_position() as usize..].to_vec(),
+    })
+}
+
+fn classic_list(xml: &[u8], root: &[u8], child: &[u8]) -> Result<ClassicList> {
+    classic_elements(xml, Some(root), P_NS, child, true)
+}
+
+fn classic_parent_references(xml: &[u8]) -> Result<Vec<ClassicElement>> {
+    Ok(classic_elements(xml, Some(b"cmLst"), P15_NS, b"parentCm", false)?.elements)
+}
+
+fn classic_elements(
+    xml: &[u8],
+    root: Option<&[u8]>,
+    uri: &str,
+    child: &[u8],
+    direct: bool,
+) -> Result<ClassicList> {
+    let mut reader = Reader::from_reader(xml);
+    let mut scopes = vec![NamespaceBindings::default()];
+    let mut elements = Vec::new();
+    let mut pending = Vec::new();
+    let mut path: Vec<(Option<String>, Vec<u8>, Option<String>)> = Vec::new();
+    let mut insert_at = 0;
+    let mut seen_root = false;
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader.read_event()?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let scope = scopes
+                    .last()
+                    .ok_or_else(|| invalid("classic namespace scope missing".into()))?
+                    .with_start(&start)?;
+                if scopes.len() == 1 {
+                    if seen_root
+                        || root.is_some_and(|root| local_name(start.name().as_ref()) != root)
+                        || scope.element_uri(start.name().as_ref()) != Some(P_NS)
+                        || empty
+                    {
+                        return Err(invalid("invalid classic comment list root".into()));
+                    }
+                    seen_root = true;
+                    insert_at = reader.buffer_position() as usize;
+                }
+                let parent_path = path.len() == 5
+                    && path[0].0.as_deref() == Some(P_NS)
+                    && path[0].1 == b"cmLst"
+                    && path[1].0.as_deref() == Some(P_NS)
+                    && path[1].1 == b"cm"
+                    && path[2].0.as_deref() == Some(P_NS)
+                    && path[2].1 == b"extLst"
+                    && path[3].0.as_deref() == Some(P_NS)
+                    && path[3].1 == b"ext"
+                    && path[3].2.as_deref().is_some_and(|uri: &str| {
+                        uri.eq_ignore_ascii_case("{C676402C-5697-4E1C-873F-D02D1690AC5C}")
+                    })
+                    && path[4].0.as_deref() == Some(P15_NS)
+                    && path[4].1 == b"threadingInfo";
+                let owned = (if direct {
+                    scopes.len() == 2
+                } else {
+                    parent_path
+                }) && local_name(start.name().as_ref()) == child
+                    && scope.element_uri(start.name().as_ref()) == Some(uri);
+                if owned {
+                    let mut attributes = HashMap::new();
+                    for attribute in start.attributes() {
+                        let attribute = attribute?;
+                        let begin = (attribute.value.as_ptr() as usize)
+                            .checked_sub(xml.as_ptr() as usize)
+                            .ok_or_else(|| invalid("classic XML attribute outside input".into()))?;
+                        let end = begin
+                            .checked_add(attribute.value.len())
+                            .filter(|end| *end <= xml.len())
+                            .ok_or_else(|| invalid("classic XML attribute outside input".into()))?;
+                        let name = std::str::from_utf8(attribute.key.as_ref())?.to_owned();
+                        let value = attribute
+                            .decoded_and_normalized_value(
+                                quick_xml::XmlVersion::Implicit1_0,
+                                reader.decoder(),
+                            )?
+                            .into_owned();
+                        if attributes.insert(name, (value, begin..end)).is_some() {
+                            return Err(invalid("duplicate classic attribute".into()));
+                        }
+                    }
+                    let element = ClassicElement {
+                        start: before,
+                        end: reader.buffer_position() as usize,
+                        attributes,
+                        namespaces: scope.clone(),
+                    };
+                    if empty {
+                        if direct {
+                            insert_at = element.end;
+                        }
+                        elements.push(element);
+                    } else {
+                        pending.push((scopes.len(), element));
+                    }
+                }
+                if !empty {
+                    let extension = all_attributes(&start)?
+                        .into_iter()
+                        .find(|(name, _)| name == "uri")
+                        .map(|(_, value)| value);
+                    path.push((
+                        scope.element_uri(start.name().as_ref()).map(str::to_owned),
+                        local_name(start.name().as_ref()).to_vec(),
+                        extension,
+                    ));
+                    scopes.push(scope);
+                }
+            }
+            Event::End(_) => {
+                scopes.pop();
+                path.pop();
+                if pending
+                    .last()
+                    .is_some_and(|(depth, _)| *depth == scopes.len())
+                {
+                    let (_, mut element) = pending.pop().expect("checked pending element");
+                    element.end = reader.buffer_position() as usize;
+                    if direct {
+                        insert_at = element.end;
+                    }
+                    elements.push(element);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if !seen_root || scopes.len() != 1 || !pending.is_empty() {
+        return Err(invalid("incomplete classic comment list".into()));
+    }
+    Ok(ClassicList {
+        elements,
+        insert_at,
+    })
 }
