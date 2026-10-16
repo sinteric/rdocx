@@ -32,6 +32,21 @@ pub enum RevisionView {
     Tracked,
 }
 
+/// How the tracked view marks revisions. The accepted view shows none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RevisionStyle {
+    /// Insertions underlined, deletions struck through, change bars black,
+    /// all in the text colour of the run.
+    #[default]
+    Plain,
+    /// The colours of legal comparison tools: insertions blue with a double
+    /// underline, deletions red and struck through, moved text green, struck
+    /// through where it moved from and double underlined where it moved to.
+    /// A change bar takes the colour of its change, black for a property
+    /// change.
+    Legal,
+}
+
 /// Image data keyed by relationship/embed ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageData {
@@ -196,6 +211,8 @@ pub struct LayoutInput {
     pub note_defaults: [Option<CT_NoteProperties>; 2],
     /// The tracked-revision projection to lay out.
     pub revision_view: RevisionView,
+    /// How the tracked view marks revisions.
+    pub revision_style: RevisionStyle,
     /// Style definitions.
     pub styles: CT_Styles,
     /// Numbering definitions (optional).

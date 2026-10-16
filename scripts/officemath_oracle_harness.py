@@ -7,7 +7,9 @@ import argparse
 import hashlib
 import json
 import math
+import plistlib
 import re
+import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -41,20 +43,61 @@ DOCUMENT = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body><w:p><w:r><w:t>OfficeMath oracle</w:t></w:r></w:p><w:p><m:oMathPara><m:oMathParaPr><m:jc m:val="center"/></m:oMathParaPr><m:oMath><m:r><m:t>x</m:t></m:r><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f><m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>i</m:t></m:r></m:sub></m:sSub><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup><m:sSubSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>i</m:t></m:r></m:sub><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSubSup><m:sPre><m:sub><m:r><m:t>a</m:t></m:r></m:sub><m:sup><m:r><m:t>b</m:t></m:r></m:sup><m:e><m:r><m:t>X</m:t></m:r></m:e></m:sPre><m:rad><m:radPr><m:degHide m:val="0"/></m:radPr><m:deg><m:r><m:t>3</m:t></m:r></m:deg><m:e><m:r><m:t>x</m:t></m:r></m:e></m:rad><m:m><m:mr><m:e><m:r><m:t>a</m:t></m:r></m:e><m:e><m:r><m:t>b</m:t></m:r></m:e></m:mr><m:mr><m:e><m:r><m:t>c</m:t></m:r></m:e><m:e><m:r><m:t>d</m:t></m:r></m:e></m:mr></m:m><m:limLow><m:e><m:r><m:t>lim</m:t></m:r></m:e><m:lim><m:r><m:t>0</m:t></m:r></m:lim></m:limLow><m:limUpp><m:e><m:r><m:t>max</m:t></m:r></m:e><m:lim><m:r><m:t>n</m:t></m:r></m:lim></m:limUpp><m:nary><m:naryPr><m:chr m:val="&#x2211;"/><m:limLoc m:val="undOvr"/><m:subHide m:val="0"/><m:supHide m:val="0"/></m:naryPr><m:sub><m:r><m:t>i=0</m:t></m:r></m:sub><m:sup><m:r><m:t>n</m:t></m:r></m:sup><m:e><m:r><m:t>x</m:t></m:r></m:e></m:nary><m:d><m:dPr><m:begChr m:val="("/><m:sepChr m:val="|"/><m:endChr m:val=")"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e><m:e><m:r><m:t>y</m:t></m:r></m:e></m:d><m:acc><m:accPr><m:chr m:val="&#x302;"/></m:accPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc></m:oMath></m:oMathPara></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"""
 
 
+
+def fx235_documents() -> dict[str, bytes]:
+    """Isolate each geometry family beside the exact F-X234 supported tree."""
+    def run_text(text: str, normal: bool = False) -> str:
+        from xml.sax.saxutils import escape
+        properties = '<m:rPr><m:nor m:val="1"/></m:rPr>' if normal else ''
+        return f'<m:r>{properties}<m:t>{escape(text)}</m:t></m:r>'
+
+    def superscript(base: str, script: str) -> str:
+        return f'<m:sSup><m:e>{base}</m:e><m:sup>{script}</m:sup></m:sSup>'
+
+    def fraction(numerator: str, denominator: str) -> str:
+        return f'<m:f><m:num>{numerator}</m:num><m:den>{denominator}</m:den></m:f>'
+
+    def radical(base: str) -> str:
+        return f'<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/>' + f'<m:e>{base}</m:e></m:rad>'
+
+    scripts = superscript(run_text('T'), run_text('2')) + run_text('+') + superscript(run_text('C'), run_text('2'))
+    rad = radical(scripts)
+    integral = '<m:nary><m:naryPr><m:chr m:val="∫"/><m:limLoc m:val="subSup"/><m:subHide m:val="0"/><m:supHide m:val="0"/></m:naryPr>' + '<m:sub>' + run_text('a') + '</m:sub><m:sup>' + run_text('b') + '</m:sup><m:e>' + superscript(run_text('e'), run_text('iπK')) + '</m:e></m:nary>'
+    limit = '<m:sSub><m:e>' + run_text('lim', True) + '</m:e><m:sub>' + run_text('x→∞') + '</m:sub></m:sSub>'
+    expressions = {
+        'exact-formula': integral + run_text('\u2009dx=') + limit + fraction(run_text('S'), rad),
+        'fraction': run_text('x=') + fraction(run_text('S'), run_text('T')) + run_text('+y'),
+        'nested-fraction': run_text('x=') + fraction(run_text('S'), fraction(run_text('T'), run_text('C'))) + run_text('+y'),
+        'integral': integral + run_text('\u2009dx'),
+        'radical': run_text('x=') + rad + run_text('+y'),
+        'scripts-limit': superscript(run_text('e'), run_text('iπK')) + run_text('=') + limit,
+    }
+    start = DOCUMENT.index(b'<m:oMath>') + len(b'<m:oMath>')
+    end = DOCUMENT.index(b'</m:oMath>')
+    return {name: DOCUMENT[:start] + expression.encode() + DOCUMENT[end:] for name, expression in expressions.items()}
+
+
 def load_manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
-def source_docx_bytes() -> bytes:
+def source_docx_bytes(
+    document: bytes = DOCUMENT, *, text_font: str = "Caladea", math_font: str = "Caladea", explicit_spacing: bool = False
+) -> bytes:
+    settings = SETTINGS.replace(b"Caladea", math_font.encode())
+    styles = STYLES.replace(b"Caladea", text_font.encode())
+    if explicit_spacing:
+        settings = settings.replace(b"</m:mathPr>", b'<m:preSp m:val="0"/><m:postSp m:val="0"/></m:mathPr>')
+        styles = styles.replace(b"</w:docDefaults>", b'<w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>')
     with tempfile.SpooledTemporaryFile() as stream:
         with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
             for name, data in (
                 ("[Content_Types].xml", CONTENT_TYPES),
                 ("_rels/.rels", ROOT_RELS),
                 ("word/_rels/document.xml.rels", DOCUMENT_RELS),
-                ("word/document.xml", DOCUMENT),
-                ("word/settings.xml", SETTINGS),
-                ("word/styles.xml", STYLES),
+                ("word/document.xml", document),
+                ("word/settings.xml", settings),
+                ("word/styles.xml", styles),
             ):
                 info = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
@@ -92,13 +135,16 @@ def pdf_tokens(pdf: Path) -> list[str]:
     return text.split()
 
 
-def pdf_math_word_boxes(pdf: Path) -> list[tuple[float, float, float, float]]:
+def pdf_math_word_boxes(pdf: Path, *, fixture_header: bool = False) -> list[tuple[float, float, float, float]]:
     document = ElementTree.fromstring(run(["pdftotext", "-bbox-layout", str(pdf), "-"]))
-    words = [
-        word
-        for word in document.findall(".//{http://www.w3.org/1999/xhtml}word")
-        if float(word.attrib["yMin"]) > 90.0
-    ]
+    all_words = document.findall(".//{http://www.w3.org/1999/xhtml}word")
+    if fixture_header:
+        header = [word for word in all_words if word.text in ("OfficeMath", "oracle")]
+        if len(header) != 2:
+            raise SystemExit("F-X235 fixture header inventory differs")
+        words = [word for word in all_words if word not in header]
+    else:
+        words = [word for word in all_words if float(word.attrib["yMin"]) > 90.0]
     if not words:
         raise SystemExit("Word PDF contains no equation word boxes")
     return [
@@ -131,8 +177,8 @@ def geometry_matches(
     return all(abs(word_value - rust_value) <= tolerance for word_value, rust_value in zip(word, rust))
 
 
-def pdf_math_bbox(pdf: Path) -> tuple[float, float, float, float]:
-    boxes = pdf_math_word_boxes(pdf)
+def pdf_math_bbox(pdf: Path, *, fixture_header: bool = False) -> tuple[float, float, float, float]:
+    boxes = pdf_math_word_boxes(pdf, fixture_header=fixture_header)
     return (
         min(box[0] for box in boxes),
         min(box[1] for box in boxes),
@@ -287,6 +333,90 @@ def verify_word_pdf(pdf: Path, word_identity: str, rust_pdf: Path | None) -> Non
                 raise SystemExit(f"luminance SSIM {score:.9f} is below the manifest floor")
 
 
+def verify_fx235(directory: Path, word_identity: str, product_suffix: str, fixture_key: str) -> None:
+    """Compare independently exported native files with caller-font product files."""
+    manifest = load_manifest()
+    fixture = manifest[fixture_key]
+    info_path = Path(fixture["word_application"]["info_plist"])
+    application = plistlib.loads(info_path.read_bytes())
+    if any(application.get(key) != value for key, value in fixture["word_application"]["identity"].items()):
+        raise SystemExit("F-X235 installed Word application identity mismatch")
+    if word_identity != fixture["word_identity"]:
+        raise SystemExit("F-X235 Word identity mismatch")
+    identity = run(["pdftoppm", "-v"]).strip().splitlines()[0]
+    if identity != fixture["poppler_identity"]:
+        raise SystemExit("F-X235 Poppler identity mismatch")
+    for path, expected in {**fixture["font_files"], **fixture["tools"]}.items():
+        if hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected["sha256"]:
+            raise SystemExit(f"F-X235 authentic font/tool digest mismatch: {path}")
+    for path in fixture["tools"]:
+        actual = shutil.which(Path(path).name)
+        if actual is None or Path(actual).resolve() != Path(path).resolve():
+            raise SystemExit(f"F-X235 tool resolution mismatch: {path}")
+    reopened = fixture.get("native_save_reopen")
+    if reopened and hashlib.sha256(Path(reopened["path"]).read_bytes()).hexdigest() != reopened["sha256"]:
+        raise SystemExit("F-X235 native save/reopen digest mismatch")
+    if fixture["status"] != "native exports captured":
+        raise SystemExit("F-X235 independent native receipts are pending")
+    results = {}
+    errors = []
+    for name, document in fx235_documents().items():
+        source = source_docx_bytes(document, text_font="Cambria", math_font="Cambria Math", explicit_spacing=fixture["explicit_spacing"])
+        if hashlib.sha256(source).hexdigest() != fixture["source_sha256"][name]:
+            raise SystemExit(f"F-X235 source recipe drift: {name}")
+        prefix = directory / f'{name}-{fixture["source_suffix"]}'
+        if prefix.with_suffix(".docx").read_bytes() != source:
+            raise SystemExit(f"F-X235 actual source drift: {name}")
+        word_pdf = Path(f"{prefix}-word.pdf")
+        product_pdf = Path(f"{prefix}-{product_suffix}.pdf")
+        if hashlib.sha256(word_pdf.read_bytes()).hexdigest() != fixture["native_pdf_sha256"][name]:
+            raise SystemExit(f"F-X235 native PDF digest mismatch: {name}")
+        word_box = pdf_math_bbox(word_pdf, fixture_header=True)
+        product_box = pdf_math_bbox(product_pdf, fixture_header=True)
+        pdf_geometry_pass = all(abs(a - b) <= manifest["geometry_tolerance_pt"] for a, b in zip(word_box, product_box)) and geometry_matches(comparable_geometry(word_box), comparable_geometry(product_box), manifest["geometry_tolerance_pt"])
+        expressions = {}
+        if name == "exact-formula" and "exact_expression_glyph_indices" in fixture:
+            native_boxes = pdf_math_word_boxes(word_pdf, fixture_header=True)
+            actual_boxes = pdf_math_word_boxes(product_pdf, fixture_header=True)
+            if len(native_boxes) != fixture["exact_word_box_count"] or len(actual_boxes) != len(native_boxes):
+                raise SystemExit("F-X235 exact expression extraction inventory differs")
+            for label, indices in fixture["exact_expression_glyph_indices"].items():
+                native = union_boxes(native_boxes, indices)
+                actual = union_boxes(actual_boxes, indices)
+                matches = all(abs(a - b) <= manifest["geometry_tolerance_pt"] for a, b in zip(native, actual)) and geometry_matches(comparable_geometry(native), comparable_geometry(actual), manifest["geometry_tolerance_pt"])
+                expressions[label] = {"native_bbox_pt": native, "product_bbox_pt": actual, "passed": matches}
+                pdf_geometry_pass = pdf_geometry_pass and matches
+        with tempfile.TemporaryDirectory(prefix="fx235-raster-") as temporary:
+            rasters = []
+            for label, pdf in [("word", word_pdf), ("product", product_pdf)]:
+                raster = Path(temporary) / label
+                run(["pdftoppm", "-f", "1", "-singlefile", "-r", str(manifest["dpi"]), str(pdf), str(raster)])
+                rasters.append(read_ppm(raster.with_suffix(".ppm")))
+            ww, wh, wp = rasters[0]
+            pw, ph, pp = rasters[1]
+            if (ww, wh) != (pw, ph):
+                raise SystemExit(f"F-X235 raster dimensions differ: {name}")
+            word_ink = raster_box(wp, ww, wh, manifest["dpi"], fixture["raster_math_window_pt"])
+            product_ink = raster_box(pp, pw, ph, manifest["dpi"], fixture["raster_math_window_pt"])
+            raster_geometry_pass = all(abs(a - b) <= manifest["geometry_tolerance_pt"] for a, b in zip(word_ink, product_ink)) and geometry_matches(comparable_geometry(word_ink), comparable_geometry(product_ink), manifest["geometry_tolerance_pt"])
+            score = luminance_ssim(wp, pp, ww, wh)
+        passed = pdf_geometry_pass and raster_geometry_pass and score >= manifest["luminance_ssim_floor"]
+        results[name] = {
+            "word_pdf_sha256": hashlib.sha256(word_pdf.read_bytes()).hexdigest(),
+            "product_pdf_sha256": hashlib.sha256(product_pdf.read_bytes()).hexdigest(),
+            "word_pdf_bbox_pt": word_box, "product_pdf_bbox_pt": product_box,
+            "word_ink_bbox_pt": word_ink, "product_ink_bbox_pt": product_ink,
+            "pdf_geometry_pass": pdf_geometry_pass, "raster_geometry_pass": raster_geometry_pass,
+            "exact_expression_geometry": expressions,
+            "luminance_ssim": score, "passed": passed,
+        }
+        if not passed:
+            errors.append(name)
+    print(json.dumps({"fixture": fixture["fixture"], "product_suffix": product_suffix, "results": results}, indent=2))
+    if errors:
+        raise SystemExit("F-X235 native comparison failed: " + ", ".join(errors))
+
+
 def self_check() -> None:
     manifest = load_manifest()
     if manifest["word_identity"] != WORD_IDENTITY:
@@ -317,6 +447,18 @@ def self_check() -> None:
         raise SystemExit("manifest Rust expression extraction drift")
     if len(manifest["raster_expression_windows_pt"]) != 2:
         raise SystemExit("manifest raster expression extraction drift")
+    for key in ("fx235", "fx235_v2"):
+        fixture = manifest[key]
+        expected_sources = {
+            name: hashlib.sha256(source_docx_bytes(document, text_font="Cambria", math_font="Cambria Math", explicit_spacing=fixture["explicit_spacing"])).hexdigest()
+            for name, document in fx235_documents().items()
+        }
+        if fixture["source_sha256"] != expected_sources:
+            raise SystemExit(f"{key} exact source recipe drift")
+        if fixture["word_identity"] != "Microsoft Word 16.113.2 build 16.113.26092012" or fixture["poppler_identity"] != "pdftoppm version 26.09.0":
+            raise SystemExit(f"{key} new producer identity drift")
+    if manifest["luminance_ssim_floor"] != 0.99:
+        raise SystemExit("manifest SSIM threshold drift")
     print(f"officemath oracle self-check: source {source_sha256()}, thresholds valid")
 
 
@@ -325,7 +467,12 @@ def main() -> None:
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--print-source-sha", action="store_true")
     parser.add_argument("--build-source", type=Path)
+    parser.add_argument("--build-fx235-sources", type=Path)
+    parser.add_argument("--build-fx235-v2-sources", type=Path)
+    parser.add_argument("--fx235-fixture", choices=["fx235", "fx235_v2"], default="fx235_v2")
     parser.add_argument("--word-pdf", type=Path)
+    parser.add_argument("--verify-fx235", type=Path)
+    parser.add_argument("--fx235-product-suffix", default="product")
     parser.add_argument("--word-identity")
     parser.add_argument("--rust-pdf", type=Path)
     args = parser.parse_args()
@@ -333,13 +480,26 @@ def main() -> None:
         print(source_sha256())
     if args.build_source is not None:
         args.build_source.write_bytes(source_docx_bytes())
+    for directory, explicit in [(args.build_fx235_sources, False), (args.build_fx235_v2_sources, True)]:
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
+            for name, document in fx235_documents().items():
+                data = source_docx_bytes(document, text_font="Cambria", math_font="Cambria Math", explicit_spacing=explicit)
+                suffix = "cambria-explicit" if explicit else "cambria"
+                path = directory / f"{name}-{suffix}.docx"
+                path.write_bytes(data)
+                print(f"{path}: {hashlib.sha256(data).hexdigest()}")
     if args.self_check:
         self_check()
+    if args.verify_fx235 is not None:
+        if args.word_identity is None:
+            parser.error("--verify-fx235 requires --word-identity")
+        verify_fx235(args.verify_fx235, args.word_identity, args.fx235_product_suffix, args.fx235_fixture)
     if args.word_pdf is not None:
         if args.word_identity is None:
             parser.error("--word-pdf requires --word-identity")
         verify_word_pdf(args.word_pdf, args.word_identity, args.rust_pdf)
-    if not any((args.self_check, args.print_source_sha, args.build_source, args.word_pdf)):
+    if not any((args.self_check, args.print_source_sha, args.build_source, args.build_fx235_sources, args.build_fx235_v2_sources, args.word_pdf, args.verify_fx235)):
         parser.error("choose --self-check, --print-source-sha, --build-source, or --word-pdf")
 
 

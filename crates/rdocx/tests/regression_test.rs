@@ -15574,6 +15574,7 @@ fn both_revision_views_render_and_accepted_matches_resolved_document() {
             150.0,
             RenderOptions {
                 revision_view: RevisionView::Accepted,
+                revision_style: rdocx_layout::RevisionStyle::Plain,
             },
         )
         .unwrap()
@@ -15584,6 +15585,7 @@ fn both_revision_views_render_and_accepted_matches_resolved_document() {
             150.0,
             RenderOptions {
                 revision_view: RevisionView::Tracked,
+                revision_style: rdocx_layout::RevisionStyle::Plain,
             },
         )
         .unwrap()
@@ -15719,6 +15721,7 @@ fn caller_font_layout_options_select_the_tracked_revision_projection() {
             &[(family, bytes)],
             RenderOptions {
                 revision_view: RevisionView::Tracked,
+                revision_style: rdocx_layout::RevisionStyle::Plain,
             },
         )
         .expect("tracked caller-font layout should succeed");
@@ -29767,6 +29770,7 @@ fn comparison_preserves_word_source_paths_in_every_revision_view() {
         let result = document
             .layout_with_options(RenderOptions {
                 revision_view: view,
+                revision_style: rdocx::RevisionStyle::Plain,
             })
             .expect("layout revision source view");
         let mut header_sources = 0usize;
@@ -30142,6 +30146,7 @@ fn empty_story_layout_input() -> rdocx_layout::LayoutInput {
         fonts: Vec::new(),
         embedded_fonts: Vec::new(),
         revision_view: rdocx_layout::RevisionView::Accepted,
+        revision_style: rdocx_layout::RevisionStyle::Plain,
     }
 }
 
@@ -42475,6 +42480,7 @@ mod advanced_table_geometry_regressions {
             fonts: Vec::new(),
             embedded_fonts: Vec::new(),
             revision_view: rdocx_layout::RevisionView::Accepted,
+            revision_style: rdocx_layout::RevisionStyle::Plain,
         }
     }
 
@@ -44210,6 +44216,7 @@ mod f266c_character_grid_and_vertical_text_regressions {
             let result = document
                 .layout_deterministic_with_options(rdocx::RenderOptions {
                     revision_view: rdocx_layout::RevisionView::Tracked,
+                    revision_style: rdocx_layout::RevisionStyle::Plain,
                 })
                 .expect("deterministic tracked layout");
             let mut bars = 0usize;
@@ -403767,4 +403774,276 @@ fn fx202_split_retains_each_continuation_owner_without_cloning_payloads() {
     assert_eq!(document.to_bytes().unwrap(), before);
     let mut reopened = Document::from_bytes(&before).unwrap();
     assert_eq!(document_xml(&mut reopened), output);
+}
+
+#[test]
+fn fx232_legal_revision_paint_preserves_stored_formatting() {
+    use oxml_layout::{Color, PositionedElement};
+    use rdocx::RevisionStyle;
+
+    const BLUE: [u8; 3] = [0, 0, 0xFF];
+    const RED: [u8; 3] = [0xFF, 0, 0];
+    const GREEN: [u8; 3] = [0, 0xA0, 0];
+    const ORANGE: [u8; 3] = [0xFF, 0x80, 0];
+    let run =
+        |text: &str| format!(r#"<w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>{text}</w:t></w:r>"#);
+    let deleted = r#"<w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:delText>deleted</w:delText></w:r>"#;
+    let xml = wrap_word_body(&format!(
+        r#"<w:p>{}<w:ins w:id="1" w:author="Ada">{}</w:ins></w:p><w:p>{}<w:del w:id="2" w:author="Ben">{deleted}</w:del></w:p><w:p><w:moveFrom w:id="3" w:author="Cy">{}</w:moveFrom></w:p><w:p><w:moveTo w:id="4" w:author="Cy">{}</w:moveTo></w:p><w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="5" w:author="Dee"><w:pPr/></w:pPrChange></w:pPr>{}</w:p>"#,
+        run("kept "),
+        run("inserted").replace("<w:sz", r#"<w:color w:val="FF8000"/><w:sz"#),
+        run("kept "),
+        run("moved"),
+        run("moved"),
+        run("centred"),
+    ));
+    let mut document = document_with_content_controls(&xml);
+    let stored = document.to_bytes().unwrap();
+    let options = |revision_style| RenderOptions {
+        revision_view: RevisionView::Tracked,
+        revision_style,
+    };
+
+    // The layout gives each change its colour, the insertion and the move
+    // destination a double underline, and each change bar the colour of its
+    // change, black for the property change.
+    let layout = document
+        .layout_deterministic_with_options(options(RevisionStyle::Legal))
+        .unwrap();
+    let rgb =
+        |color: &Color| [color.r, color.g, color.b].map(|value| (value * 255.0).round() as u8);
+    let mut bars = Vec::new();
+    let mut strokes = Vec::new();
+    oxml_layout::walk(&layout.layout.pages[0].elements, &mut |element, _| {
+        if let PositionedElement::Line {
+            start, end, color, ..
+        } = element
+        {
+            if start.x == end.x {
+                bars.push((start.y, rgb(color)));
+            } else {
+                strokes.push(rgb(color));
+            }
+        }
+    });
+    bars.sort_by(|left, right| left.0.total_cmp(&right.0));
+    assert_eq!(
+        bars.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
+        [BLUE, RED, GREEN, GREEN, [0, 0, 0]]
+    );
+    for (color, count) in [(BLUE, 2), (RED, 1), (GREEN, 3)] {
+        assert_eq!(
+            strokes.iter().filter(|line| **line == color).count(),
+            count,
+            "{color:?}: a double underline is two strokes, a strike one"
+        );
+    }
+
+    // The rendered page shows those colours over the colour of the run, and
+    // the plain style none of them.
+    let pixels = |revision_style| {
+        let png = document
+            .render_page_to_png_deterministic_with_options(0, 150.0, options(revision_style))
+            .unwrap()
+            .expect("tracked page");
+        resvg::tiny_skia::Pixmap::decode_png(&png).unwrap()
+    };
+    let count = |pixmap: &resvg::tiny_skia::Pixmap, target: [u8; 3]| {
+        pixmap
+            .pixels()
+            .iter()
+            .filter(|pixel| {
+                let pixel = pixel.demultiply();
+                [pixel.red(), pixel.green(), pixel.blue()]
+                    .iter()
+                    .zip(target)
+                    .all(|(channel, wanted)| channel.abs_diff(wanted) <= 40)
+            })
+            .count()
+    };
+    let legal = pixels(RevisionStyle::Legal);
+    let plain = pixels(RevisionStyle::Plain);
+    for target in [BLUE, RED, GREEN] {
+        assert!(
+            count(&legal, target) > 200,
+            "{target:?} in the legal render"
+        );
+        assert_eq!(count(&plain, target), 0, "{target:?} in the plain render");
+    }
+    assert_eq!(count(&legal, ORANGE), 0);
+    assert!(count(&plain, ORANGE) > 200);
+    assert_eq!(document.to_bytes().unwrap(), stored);
+    if let Some(directory) = std::env::var_os("RDOCX_FX232_ARTIFACTS") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("revisions.docx"), &stored).unwrap();
+        std::fs::write(
+            directory.join("legal-product.pdf"),
+            document
+                .to_pdf_deterministic_with_options(options(RevisionStyle::Legal))
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("legal-product.png"),
+            legal.encode_png().unwrap(),
+        )
+        .unwrap();
+        // Native paint input is authored directly, independently of tracked
+        // projection and its formatting transformation.
+        let reference = wrap_word_body(
+            r#"<w:p><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t xml:space="preserve">kept </w:t></w:r><w:r><w:rPr><w:color w:val="0000FF"/><w:sz w:val="48"/><w:u w:val="double"/></w:rPr><w:t>inserted</w:t></w:r></w:p><w:p><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t xml:space="preserve">kept </w:t></w:r><w:r><w:rPr><w:strike/><w:color w:val="FF0000"/><w:sz w:val="48"/></w:rPr><w:t>deleted</w:t></w:r></w:p><w:p><w:r><w:rPr><w:strike/><w:color w:val="00A000"/><w:sz w:val="48"/></w:rPr><w:t>moved</w:t></w:r></w:p><w:p><w:r><w:rPr><w:color w:val="00A000"/><w:sz w:val="48"/><w:u w:val="double"/></w:rPr><w:t>moved</w:t></w:r></w:p><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>centred</w:t></w:r></w:p>"#,
+        );
+        std::fs::write(
+            directory.join("native-static-paint.docx"),
+            document_with_content_controls(&reference)
+                .to_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn fx232_render_style_participates_in_every_cache_identity() {
+    use rdocx::RevisionStyle;
+    let xml = wrap_word_body(
+        r#"<w:p><w:ins w:id="1" w:author="A"><w:r><w:t>inserted</w:t></w:r></w:ins></w:p><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:del w:id="2" w:author="B"><w:r><w:delText>deleted cell</w:delText></w:r></w:del></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    let mut document = document_with_content_controls(&xml);
+    let accepted = document.layout_deterministic().unwrap();
+    let caller_bytes = include_bytes!("../../oxml-layout/fonts/Selawik-Regular.ttf").as_slice();
+    let caller_fonts = [("Calibri", caller_bytes)];
+    let mut outputs = Vec::new();
+    for style in [
+        RevisionStyle::Plain,
+        RevisionStyle::Legal,
+        RevisionStyle::Plain,
+        RevisionStyle::Legal,
+    ] {
+        let options = RenderOptions {
+            revision_view: RevisionView::Tracked,
+            revision_style: style,
+        };
+        // Bundled fallback uses a retained engine, unlike fresh deterministic layout.
+        let warm = document
+            .layout_with_fonts_and_bundled_fallback_and_options(&caller_fonts, options)
+            .unwrap();
+        let cold = document_with_content_controls(&xml)
+            .layout_with_fonts_and_bundled_fallback_and_options(&caller_fonts, options)
+            .unwrap();
+        assert!(
+            warm.layout
+                .fonts
+                .iter()
+                .any(|font| font.data.as_ref() == caller_bytes)
+        );
+        assert_eq!(
+            format!("{:?}", warm.layout.pages),
+            format!("{:?}", cold.layout.pages)
+        );
+        assert_eq!(format!("{:?}", warm), format!("{:?}", cold));
+        outputs.push(format!("{:?}", warm.layout.pages));
+    }
+    assert_ne!(outputs[0], outputs[1]);
+    assert_eq!(outputs[0], outputs[2]);
+    assert_eq!(outputs[1], outputs[3]);
+    assert!(std::sync::Arc::ptr_eq(
+        &accepted,
+        &document.layout_deterministic().unwrap()
+    ));
+    let invalid = RenderOptions {
+        revision_view: RevisionView::Accepted,
+        revision_style: RevisionStyle::Legal,
+    };
+    assert!(document.layout_deterministic_with_options(invalid).is_err());
+    assert!(
+        document
+            .layout_with_fonts_and_bundled_fallback_and_options(&[], invalid)
+            .is_err()
+    );
+    document.add_paragraph("mutation witness");
+    assert!(!std::sync::Arc::ptr_eq(
+        &accepted,
+        &document.layout_deterministic().unwrap()
+    ));
+    let bytes = document.to_bytes().unwrap();
+    for style in [RevisionStyle::Legal, RevisionStyle::Plain] {
+        let options = RenderOptions {
+            revision_view: RevisionView::Tracked,
+            revision_style: style,
+        };
+        let warm = document
+            .layout_with_fonts_and_bundled_fallback_and_options(&caller_fonts, options)
+            .unwrap();
+        let cold = Document::from_bytes(&bytes)
+            .unwrap()
+            .layout_with_fonts_and_bundled_fallback_and_options(&caller_fonts, options)
+            .unwrap();
+        assert!(
+            warm.layout
+                .fonts
+                .iter()
+                .any(|font| font.data.as_ref() == caller_bytes)
+        );
+        assert_eq!(
+            format!("{:?}", warm.layout.pages),
+            format!("{:?}", cold.layout.pages)
+        );
+    }
+}
+
+#[test]
+fn fx232_double_underline_scales_across_font_sizes() {
+    use oxml_layout::PositionedElement;
+    let body = [12, 24, 36].into_iter().map(|points| format!(r#"<w:p><w:r><w:rPr><w:color w:val="0000FF"/><w:sz w:val="{}"/><w:u w:val="double"/></w:rPr><w:t>Double underline {points} point</w:t></w:r></w:p>"#, points * 2)).collect::<String>();
+    let document = document_with_content_controls(&wrap_word_body(&body));
+    let layout = document.layout_deterministic().unwrap();
+    let mut strokes = Vec::new();
+    oxml_layout::walk(&layout.layout.pages[0].elements, &mut |element, _| {
+        if let PositionedElement::Line {
+            start, end, width, ..
+        } = element
+            && start.y == end.y
+        {
+            strokes.push((start.y, *width));
+        }
+    });
+    // Each word can have its own adjacent decoration segment. Native geometry
+    // compares horizontal bands, not the number of shaped text segments.
+    strokes.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.total_cmp(&right.1)));
+    strokes
+        .dedup_by(|left, right| (left.0 - right.0).abs() < 1e-9 && (left.1 - right.1).abs() < 1e-9);
+    assert_eq!(strokes.len(), 6);
+    // Independently exported by Microsoft Word 16.113.2 build
+    // 16.113.26092012. Frozen source SHA-256 52c35e24f7670ed6b9ae70ccb663216f89aa66ba8d5dc8d128ff82b65dd4669f,
+    // PDF 8af352f574fdc9c0d0c647de376af2f05812356c8248cd09d6013ebb2177c2f9.
+    // The 0.36 point bound allows Word's 0.24 point print quantization and
+    // font-derived stroke thickness, while rejecting the previous gap rules.
+    for (pair, (native_width, native_centres)) in
+        strokes
+            .chunks_exact(2)
+            .zip([(0.48, 1.44), (0.96, 1.92), (1.20, 3.12)])
+    {
+        assert_eq!(pair[0].1, pair[1].1);
+        assert!((pair[0].1 - native_width).abs() <= 0.36);
+        assert!((pair[1].0 - pair[0].0 - native_centres).abs() <= 0.36);
+        assert!(pair[1].0 - pair[0].0 > pair[0].1);
+    }
+    if let Some(directory) = std::env::var_os("RDOCX_FX232_ARTIFACTS") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::write(
+            directory.join("double-scale-product.pdf"),
+            document.to_pdf_deterministic().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("double-scale-product.png"),
+            document
+                .render_page_to_png_deterministic(0, 150.0)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+    }
 }

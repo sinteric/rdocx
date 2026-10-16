@@ -2524,6 +2524,46 @@ impl PyChart {
             presentation.checked_shape_id(&self.path)?,
         ))
     }
+    fn legend(&self, py: Python<'_>) -> PyResult<rpptx::LegendSettings> {
+        let (slide, id) = self.owner(py)?;
+        self.presentation
+            .borrow(py)
+            .inner
+            .chart_legend(slide, id)
+            .map_err(|e| rpptx_to_pyerr(py, e))
+    }
+    fn set_legend(
+        &self,
+        py: Python<'_>,
+        visible: Option<bool>,
+        position: Option<rpptx::LegendPosition>,
+        overlay: Option<bool>,
+    ) -> PyResult<()> {
+        let (slide, id) = self.owner(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .set_chart_legend(slide, id, visible, position, overlay)
+            .map_err(|e| rpptx_to_pyerr(py, e))?;
+        if candidate.to_bytes().map_err(|e| rpptx_to_pyerr(py, e))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|e| rpptx_to_pyerr(py, e))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.unchanged_owners()?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Chart legend",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)
+    }
     fn data(&self, py: Python<'_>) -> PyResult<(rpptx::ChartKind, rpptx::ChartData)> {
         let (slide, id) = self.owner(py)?;
         self.presentation
@@ -2536,6 +2576,38 @@ impl PyChart {
 
 #[pymethods]
 impl PyChart {
+    #[getter]
+    fn has_legend(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.legend(py)?.visible)
+    }
+    #[setter]
+    fn set_has_legend(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !value.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyTypeError::new_err("has_legend requires bool"));
+        }
+        self.set_legend(py, Some(value.extract()?), None, None)
+    }
+    #[getter]
+    fn legend_position(&self, py: Python<'_>) -> PyResult<&'static str> {
+        Ok(self.legend(py)?.position.as_str())
+    }
+    #[setter]
+    fn set_legend_position(&self, py: Python<'_>, value: &str) -> PyResult<()> {
+        let value = rpptx::LegendPosition::parse(value)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.set_legend(py, None, Some(value), None)
+    }
+    #[getter]
+    fn legend_overlay(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.legend(py)?.overlay)
+    }
+    #[setter]
+    fn set_legend_overlay(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !value.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyTypeError::new_err("legend_overlay requires bool"));
+        }
+        self.set_legend(py, None, None, Some(value.extract()?))
+    }
     #[getter]
     fn chart_type(&self, py: Python<'_>) -> PyResult<i64> {
         let kind = self.data(py)?.0;

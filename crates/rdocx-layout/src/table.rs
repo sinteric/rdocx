@@ -1746,6 +1746,7 @@ fn layout_cell_content(
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    border_group_before: false,
                     source_node: source,
                     structure_id: None,
                     reflow_direction,
@@ -1792,6 +1793,22 @@ fn layout_cell_content(
                 &mut blocks,
                 &mut semantics,
             )?,
+        }
+    }
+    let paragraphs = blocks
+        .iter()
+        .map(|block| match block {
+            CellBlock::Paragraph(paragraph) => Some(paragraph),
+            CellBlock::Table(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let groups = crate::block::paragraph_border_groups(&paragraphs);
+    for ((block, semantics), (top, bottom)) in blocks.iter_mut().zip(&mut semantics).zip(groups) {
+        if let CellBlockSemantics::Paragraph(semantics) = semantics {
+            semantics.border_group_before = top;
+        }
+        if let CellBlock::Paragraph(paragraph) = block {
+            paragraph.remove_group_border_edges(top, bottom);
         }
     }
     // Two consecutive paragraphs of a cell are one flow, so Word keeps the
@@ -1856,6 +1873,7 @@ fn layout_control_cell_content(
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    border_group_before: false,
                     source_node: source,
                     structure_id: None,
                     reflow_direction,
@@ -2370,6 +2388,7 @@ mod tests {
         let input = LayoutInput {
             sequence_snapshot: None,
             revision_view: crate::input::RevisionView::Accepted,
+            revision_style: crate::input::RevisionStyle::Plain,
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
@@ -2747,6 +2766,7 @@ mod tests {
         let input = crate::input::LayoutInput {
             sequence_snapshot: None,
             revision_view: crate::input::RevisionView::Accepted,
+            revision_style: crate::input::RevisionStyle::Plain,
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,

@@ -1732,9 +1732,25 @@ control remain raw and do not enter accepted or tracked layout. The
 same projection applies to body, table, header, footer, footnote, and endnote
 paragraphs. Accepted layout includes insertions and move
 destinations and omits deletions and move sources. Tracked layout includes both
-sides. It forces single underline on insertion and move destination text and
-single strike on deletion and move source text while retaining the remaining
-resolved formatting.
+sides. `LayoutInput::revision_style` defaults to `RevisionStyle::Plain`, which
+forces single underline on insertion and move destination text and single
+strike on deletion and move source text while retaining other resolved
+formatting. `RevisionStyle::Legal` requires the tracked view. It paints
+insertions blue (`0000FF`) with double underline, deletions red (`FF0000`)
+with strike, and moves green (`00A000`) with strike for the source and double
+underline for the destination. Nested revision text takes the innermost colour
+while retaining inherited decorations. This paint never changes stored XML.
+
+A legal paragraph change bar takes the first visible revision colour, then a
+revised paragraph mark, with property-only changes using black. Empty revision
+runs do not choose the bar. `ParagraphBlock::change_bar` stores its optional
+colour. `NoteLayout::revision_ranges` retains range and colour pairs through
+note continuation splitting. Render-context, paragraph, table and field
+substitution identities include the style, so plain and legal warm results
+match fresh layout across body and related stories and caller font paths.
+Double underline uses two strokes of width `font_size / 24`, with centre
+offset `max(font_size / 12, 1.5)` in points. Body, notes and annotation text
+share this geometry.
 
 In the accepted view, a body paragraph whose mark is deleted or moved away
 joins the next direct body paragraph when no section break or intervening
@@ -1831,6 +1847,25 @@ measure for the whole section, so a section with tracks of different widths
 breaks its later tracks to the first one's measure. Word's column balancing at
 a continuous section break is not implemented, and both are named follow-ups in
 `docs/hld/14-development-backlog.md`.
+
+Paragraph frames retain `w:sz` eighth-point stroke widths. A double border
+occupies three stroke widths. Each edge measures its `w:space` clearance to
+the inner band, and horizontal paragraph bounds include a1.5point allowance
+before side clearance. Corresponding double bands meet at corners, with
+horizontal edges owning corner paint. Top and bottom bands consume paragraph
+flow through the existing line metrics, including fit, keep, split, table and
+note measurements. Glyph and highlight geometry uses the content band below
+the top padding. Wrap reservations use that same content origin on every
+re-break and restore frame padding once. Page-border geometry stays separate.
+
+Adjacent identical frames with matching indents and no between edge form one
+outer frame. Transient layout clones remove the facing bands while retained
+cache blocks preserve complete borders. Ordinary paragraph spacing keeps its
+maximum or compatibility-additive policy. Private group metadata bridges the
+vertical sides across the priced gap in body, cell, header, footer and note
+paths. Split frames draw the top on the first fragment, verticals on every
+fragment and the bottom on the last. Group bridges do not cross page starts.
+Stored source and opaque border properties remain unchanged by rendering.
 
 `w:pgBorders` draws through the shared border-edge renderer. With
 `w:offsetFrom="text"` the rectangle is the margin box and each edge's
@@ -2289,6 +2324,17 @@ sources on a TOC boundary paragraph concatenate only accepted runs outside the
 owned old-result range, so the displayed title and generated bookmark cover
 the same post-end content.
 
+## Shared chart legend geometry
+
+Word and Presentation chart groups consume the same measured legend layout.
+Right, left, top, bottom and top-right positions reserve exterior plot space
+when overlay is false. Overlay true retains the full plot and intentionally
+allows overlap. Hidden or absent legends reserve no space. Shaped advances,
+font-relative keys and row spacing determine the bounds before marks and axes
+are laid out. Horizontal legends wrap within chart width. The renderer refuses
+unbounded or insufficient layouts rather than painting labels outside the
+chart. All backends consume the resulting group without separate legend logic.
+
 ## Word chart pagination
 
 The Word layout input owns document-scoped parsed chart targets, the effective
@@ -2330,6 +2376,18 @@ The approved deterministic fallback is bundled Caladea. Supported constructs
 lower only to shared text, line, path, and group primitives. Visible unsupported
 content emits one stable source-path diagnostic, while the untouched typed tree
 continues to own its retained XML.
+
+Fonts with an OpenType MATH table supply the actual math axis, fraction rule
+and independent numerator/denominator clearances, script shifts and sizes,
+italic corrections, radical gaps and prepared vertical glyph variants. Private
+font reads honor the selected face index. Display frames measure actual glyph
+ink with MathLeading and retain RadicalExtraAscender above radical ink.
+Integral side limits attach independently rather than accumulating widths.
+First and second script sizes are relative to the root style size, with size
+and optical alternate depth saturated at the second level. A radical degree
+uses the second level. Covered mathematical italic glyphs and ssty alternates
+change paint while the stored logical text remains intact. Missing MATH data
+uses the bounded historical fallback. No external process participates in layout.
 
 `InlineItem::Group` and `LineItem::Group` carry `baseline: Option<f64>`.
 Finite values are normalized to the group height before line conversion. The

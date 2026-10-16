@@ -25,7 +25,7 @@ and produces fixed or flow output without an Office host.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 98,001 compressed bytes, 452,334 member bytes, 8 members | 0.16.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
+| Crates.io archive: rdocx-cli | 98,929 compressed bytes, 457,596 member bytes, 8 members | 0.16.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
 
 ## Use it when
 
@@ -50,6 +50,7 @@ rdocx layout report.docx --json
 rdocx replace template.docx -p TOKEN -v ready --expect 1 -o report.docx
 rdocx convert report.docx --to pdf -o report.pdf
 rdocx convert redline.docx --to pdf --revision-view tracked -o redline.pdf
+rdocx render redline.docx --revision-view tracked --revision-style legal
 rdocx diff before.docx after.docx
 rdocx diff before.docx after.docx --exit-code --json
 rdocx validate report.docx
@@ -150,7 +151,10 @@ body, one section per part under a bold label. They leave comments out,
 because comments annotate a document rather than belong to it.
 
 `convert` to PDF or images and `render` use the accepted revision view by
-default. `--revision-view tracked` shows both sides of tracked changes.
+default. `--revision-view tracked` shows both sides of tracked changes, and
+`--revision-style legal` colours them as legal comparison tools do: insertions
+blue with a double underline, deletions red and struck through, moved text
+green. `--revision-style` needs `--revision-view tracked`.
 Unknown view names are usage errors. HTML and Markdown conversion refuse
 the tracked view before creating output.
 

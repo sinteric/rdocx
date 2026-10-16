@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::rel_types;
-use rdocx::{Document, RenderOptions, RevisionView, WordPackageClass};
+use rdocx::{Document, RenderOptions, RevisionStyle, RevisionView, WordPackageClass};
 use serde_json::{Value, json};
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -2807,6 +2807,7 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
     let tracked_pdf = opened
         .to_pdf_with_options(RenderOptions {
             revision_view: RevisionView::Tracked,
+            revision_style: RevisionStyle::Plain,
         })
         .unwrap();
     assert_ne!(accepted_pdf, tracked_pdf);
@@ -2858,6 +2859,7 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
             24.0,
             RenderOptions {
                 revision_view: RevisionView::Tracked,
+                revision_style: RevisionStyle::Plain,
             },
         )
         .unwrap()
@@ -2877,6 +2879,113 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
     assert_eq!(
         fs::read(rendered.join("redline_page1.png")).unwrap(),
         tracked_png
+    );
+}
+
+#[test]
+fn cli_revision_style_colours_the_tracked_view_only() {
+    let temp = TempWorkspace::new("revision-style");
+    let input = temp.path.join("redline.docx");
+    let mut document = fixture_document(&["Keep OLDWORD here."]);
+    document
+        .compare(
+            &fixture_document(&["Keep NEWWORD here."]),
+            "Reviewer",
+            "2026-09-30T12:00:00Z",
+        )
+        .unwrap();
+    document.save(&input).unwrap();
+    let opened = Document::open(&input).unwrap();
+    let legal = RenderOptions {
+        revision_view: RevisionView::Tracked,
+        revision_style: RevisionStyle::Legal,
+    };
+    let legal_pdf = opened.to_pdf_with_options(legal).unwrap();
+    assert_ne!(
+        legal_pdf,
+        opened
+            .to_pdf_with_options(RenderOptions {
+                revision_style: RevisionStyle::Plain,
+                ..legal
+            })
+            .unwrap()
+    );
+    let output = temp.path.join("legal.pdf");
+    let result = cli(&[
+        "convert",
+        path_text(&input),
+        "--to",
+        "pdf",
+        "-o",
+        path_text(&output),
+        "--revision-view",
+        "tracked",
+        "--revision-style",
+        "legal",
+    ]);
+    assert_success(&result, "legal convert");
+    assert_eq!(fs::read(&output).unwrap(), legal_pdf);
+
+    let legal_png = opened
+        .render_page_to_png_deterministic_with_options(0, 24.0, legal)
+        .unwrap()
+        .unwrap();
+    let rendered = temp.path.join("rendered");
+    let result = cli(&[
+        "render",
+        path_text(&input),
+        "--dpi",
+        "24",
+        "--output-dir",
+        path_text(&rendered),
+        "--revision-view",
+        "tracked",
+        "--revision-style",
+        "legal",
+    ]);
+    assert_success(&result, "legal render");
+    assert_eq!(
+        fs::read(rendered.join("redline_page1.png")).unwrap(),
+        legal_png
+    );
+
+    // A style outside the tracked view, or an unknown one, is refused.
+    let refused = temp.path.join("refused.pdf");
+    for (style, view, code) in [("legal", "accepted", 1), ("color", "tracked", 2)] {
+        for command in [
+            vec![
+                "convert",
+                path_text(&input),
+                "--to",
+                "pdf",
+                "-o",
+                path_text(&refused),
+            ],
+            vec![
+                "render",
+                path_text(&input),
+                "--output-dir",
+                path_text(&refused),
+            ],
+        ] {
+            let mut args = command;
+            args.extend(["--revision-view", view, "--revision-style", style]);
+            let result = cli(&args);
+            assert_eq!(result.status.code(), Some(code), "{args:?}");
+            assert!(!refused.exists());
+        }
+    }
+    let result = cli(&[
+        "render",
+        path_text(&input),
+        "--output-dir",
+        path_text(&refused),
+        "--revision-style",
+        "legal",
+    ]);
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("--revision-style applies only with --revision-view tracked")
     );
 }
 

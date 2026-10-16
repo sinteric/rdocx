@@ -2551,7 +2551,8 @@ Issue378 was explicitly added during execution on2026-10-15. F-X237 repairs the 
 #### Sprint S93, Rendering and remaining issue repairs
 
 **Goal**: finish the remaining issue acceptance with independent rendering and
-conversion evidence. Five stories total 13 to 16 developer-days.
+conversion evidence, preserve chart-data revisions and repair chart legend
+placement. Seven stories total 21 to 27 developer-days.
 
 | F-ID | Title | Size |
 |------|-------|------|
@@ -2560,12 +2561,15 @@ conversion evidence. Five stories total 13 to 16 developer-days.
 | F-X234 | Preserve supported LaTeX conversion structure | M |
 | F-X235 | Qualify equation layout against native Word | L |
 | F-X236 | Measure public setter inlining before changing policy | S |
+| F-X245 | Preserve chart data changes in Word comparison | L |
+| F-X246 | Honor chart legend position and overlay during rendering | L |
 
 F-X232 assesses PR375 for Issue373. Reuse delivered namespace and checked-XML
 providers, then qualify the exact header/footer repros. Legal revision colours
 and double underline remain uncovered. Review public rendering-type changes
 as compatibility decisions before implementation. F-X233 diagnoses Issue366
-from its exact border input before selecting a fix. F-X234 and then F-X235
+with the user-approved inferred 15 point sz120 and raw15 sz15 controls while
+retaining the missing-original limitation. F-X234 and then F-X235
 resolve Issue365's conversion and layout halves. F-X236 resolves Issue367
 through a measured cross-crate decision, with selective changes only if useful.
 
@@ -2573,8 +2577,8 @@ Legal revision and border painting share paginator resources and integrate
 serially. Conversion completion precedes equation layout acceptance. Only one
 story may own the deterministic baseline in each wave. Expected product and
 independent raster changes require separate attribution and review. These
-estimates are developer effort, not elapsed-time promises. Split an expanded
-contract into a later sprint instead of weakening gates or enlarging this wave.
+estimates are developer effort, not elapsed-time promises. Split any further expanded
+contract rather than weakening its gates.
 
 ##### Repair intake, coverage and closure gates
 
@@ -2587,7 +2591,7 @@ The ten new issues map as follows. A merged related PR alone closes none.
 |---|---|---|
 | Issue364 | F-X178 | Set, clear and save/reopen width-scale and position. Explicit false and no-rPr-on-None controls for the full existing setter contract |
 | Issue365 | F-X234, F-X235 | Exact supplied formula structure, symbol and spacing loss diagnostics, independent native geometry and raster controls |
-| Issue366 | F-X233 | Reproduce the exact border values, inspect saved size/space and isolate clipping, clearance or join errors before fixing |
+| Issue366 | F-X233 | Inspect saved size/space and independently qualify width, clearance, flow and joins using the approved inferred 15 point sz120 and raw15 sz15 controls. Original input remains unavailable, so exact-original reproduction is unclaimed |
 | Issue367 | F-X236 | Cross-crate non-LTO benchmark and compiler evidence supporting selective inline annotations or a documented disposition |
 | Issues368,369,370,371, PR374 correctness | F-X229 | Hyperlink paragraph insertion/deletion, edits adjacent to tables, empty paragraph properties and trailing or line-break-only deletion. Accept-all/reject-all reconstruction and save/reopen |
 | Issue372, PR374 grouping | F-X230 | Readable word/character groups without crossing fields, opaque XML, comments, bookmarks, hyperlinks or formatting boundaries |
@@ -2654,11 +2658,41 @@ from S97 to S99. The benchmark sprint moves from S98 to S100 with F-313
 through F-318 intact. The conditional Excel programme moves from S99 through
 S108 to S101 through S110, and Issue281's go/no-go is F-184 at S101.
 
+##### Issue382 and Issue383 intake, 2026-10-15
+
+The user requested that new work without a current or future sprint owner join
+S93. A live GitHub check found 12 open issues and one open PR. The only
+unassigned reports are [Issue382](https://github.com/tensorbee/rdocx/issues/382)
+and [Issue383](https://github.com/tensorbee/rdocx/issues/383), with no follow-up
+comments at intake. Both are now included as pending L stories. The existing
+five S93 contracts and all future sprint assignments remain in place.
+
+| Issue | Acceptance owner | Required evidence |
+|---|---|---|
+| Issue382 | F-X245 | Chart-only changes at word and run granularity, chart-plus-text changes and unchanged-chart controls. Save/reopen, accept-all and reject-all reproduce the correct chart parts, embedded workbook and surrounding text |
+| Issue383 | F-X246 | Word and PowerPoint default, bottom and left renders differ with no legend/plot overlap for absent or false overlay. Qualify right, left, top, bottom and top-right positions, true overlay and hidden legends against independent native evidence |
+
+F-X245 follows completed F-X229 and F-X230 and preserves their reconstruction
+and grouping controls. F-X246 leases shared chart model and rendering carriers
+across both formats. Keep baseline ownership exclusive and attribute chart
+raster changes separately from revision, paragraph and equation changes.
+Design both stories before implementation. The expanded seven-story wave is
+estimated at 21 to 27 developer-days, not an elapsed-time promise.
+
+PR375 is already owned by F-X232. Issues365,366,367 and373 are already in S93.
+Issues379,380 and381 retain S94 and S96 owners. Issue281 retains the F-184
+spreadsheet decision at S101, Issue377 retains S100 benchmark work, and
+Issue264 remains an open requirements discussion with its delivered F-X170
+subset and existing broader style contracts. No duplicate story or automatic
+closure is created for these records.
+
 #### Sprint S94, Python and CLI parity
 
 **Goal**: let first-draft python-docx and python-pptx scripts and the Rust-only
-signing and form surfaces work from Python and the CLI, without new Rust
-document semantics. Four stories total about 12 developer-days.
+signing and form surfaces work from Python and the CLI, and complete the
+finite 73 input LaTeX conversion follow-up to Issue365. The four parity stories
+reuse existing native document semantics. F-X247 separately designs any bounded
+conversion representation change. Five stories total 14 to 19 developer-days.
 
 | F-ID | Title | Size |
 |------|-------|------|
@@ -2666,6 +2700,7 @@ document semantics. Four stories total about 12 developer-days.
 | F-X239 | python-pptx notes names and refusal of silent zero values | M |
 | F-X240 | Python and CLI signing and signature verification | M |
 | F-X241 | Python and CLI form reading and filling | M |
+| F-X247 | Preserve the common LaTeX inputs reported in Issue365 | L |
 
 | Issue | Acceptance owner | Remaining work and required evidence |
 |---|---|---|
@@ -2673,12 +2708,16 @@ document semantics. Four stories total about 12 developer-days.
 | Issue379 PowerPoint names and unit refusals | F-X239 | Notes slide names, `MSO_THEME_COLOR_INDEX` and the five assignments that now save zero raise before they change the document, naming the unit to use |
 | Issue380 signing | F-X240 | Python and CLI sign and verify for docx and pptx. A changed part fails verification by name. Wheels and CLI builds enable `digital-signatures` with dependency, licence and size gates |
 | Issue380 forms | F-X241 | Python form reading and filling and `rdocx fill --values`. Every control type and a legacy text field read back after save and reopen |
+| Issue365 broader conversion follow-up | F-X247 | Preserve the exact 73 input matrix and original observer diagnostics, with a separately corrected summary label. Prove normalized structure, actual pinned Pandoc comparison, save/reopen and independently qualified new render semantics. The issue remains open for this scope |
 
 F-X238 and F-X239 share the Python binding sources and integrate serially.
 F-X240 and F-X241 wrap existing Rust functions and may proceed in parallel
 with them once binding entrypoints are leased. Enabling `digital-signatures`
 in published artefacts is a packaging decision reviewed at design, not a
-default change for the Rust crates.
+default change for the Rust crates. F-X247 follows the completed S93 bounded
+conversion/layout repairs and shares Word facade, binding test and oracle
+carriers only through explicit leases. Its pending follow-up does not expand
+S93 acceptance or add work to the eleven-story S95 capacity split.
 
 #### Sprint S95, Bibliography and navigation carryovers, templates and forms
 

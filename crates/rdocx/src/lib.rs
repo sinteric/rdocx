@@ -101,7 +101,7 @@ pub use math::{
     equation_to_latex, equation_to_mathml,
 };
 pub use odt::{OdtDiagnostic, OdtReadResult, OdtWriteResult};
-pub use oxml_chart::{ChartData, ChartKind, RgbColor};
+pub use oxml_chart::{ChartData, ChartKind, LegendPosition, LegendSettings, RgbColor};
 pub use oxml_core::app_properties::AppProperties;
 pub use oxml_core::core_properties::CoreProperties;
 pub use oxml_core::custom_properties::{CustomProperty, CustomPropertyValue};
@@ -119,7 +119,7 @@ pub use paragraph::{
     ParagraphMark, ParagraphMarkRef, ParagraphRef, ParagraphTextAlignment, ParagraphTextDirection,
     SectionBreak, TabAlignment, TabLeader, TabStopRef, TextboxTightWrap,
 };
-pub use rdocx_layout::RevisionView;
+pub use rdocx_layout::{RevisionStyle, RevisionView};
 pub use rdocx_oxml::document::{CT_DocGrid, ST_DocGrid};
 pub use rdocx_oxml::header_footer::HdrFtrType;
 pub use rdocx_oxml::math::{

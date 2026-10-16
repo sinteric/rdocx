@@ -140,6 +140,9 @@ enum Command {
         /// Revision view for PDF and image output
         #[arg(long, value_parser = commands::parse_revision_view)]
         revision_view: Option<rdocx::RevisionView>,
+        /// Paint tracked changes using plain or legal styling
+        #[arg(long, value_parser = commands::parse_revision_style)]
+        revision_style: Option<rdocx::RevisionStyle>,
         /// One-based page range for image output, such as 1,3-5
         #[arg(long)]
         pages: Option<String>,
@@ -240,6 +243,10 @@ enum Command {
         /// Revision view to render
         #[arg(long, default_value = "accepted", value_parser = commands::parse_revision_view)]
         revision_view: rdocx::RevisionView,
+        /// How the tracked view marks revisions: plain, or legal for blue
+        /// insertions, red deletions and green moves
+        #[arg(long, default_value = "plain", value_parser = commands::parse_revision_style)]
+        revision_style: rdocx::RevisionStyle,
         /// JPEG quality from 1 through 100
         #[arg(long, default_value = "90")]
         quality: u8,
@@ -760,6 +767,7 @@ fn run_cli() {
             dpi,
             font_dir,
             revision_view,
+            revision_style,
             pages,
             quality,
             transparent,
@@ -769,6 +777,7 @@ fn run_cli() {
             template.as_deref(),
             dpi.is_some()
                 || revision_view.is_some()
+                || revision_style.is_some()
                 || quality.is_some()
                 || pages.is_some()
                 || transparent
@@ -778,6 +787,7 @@ fn run_cli() {
             dpi.unwrap_or(150),
             font_dir.as_deref(),
             revision_view.unwrap_or(rdocx::RevisionView::Accepted),
+            revision_style.unwrap_or(rdocx::RevisionStyle::Plain),
             commands::ImageOptions {
                 pages: pages.as_deref(),
                 quality: quality.unwrap_or(90),
@@ -822,6 +832,7 @@ fn run_cli() {
             pages,
             format,
             revision_view,
+            revision_style,
             quality,
             transparent,
         } => commands::render(
@@ -835,6 +846,7 @@ fn run_cli() {
                 pages: pages.as_deref(),
                 format: &format,
                 revision_view,
+                revision_style,
                 quality,
                 transparent,
             },

@@ -9175,7 +9175,52 @@ impl CT_P {
     pub fn from_xml_fragment_checked(xml: &[u8]) -> Result<Self> {
         crate::document::admit_word_xml(xml, &[], None)?;
         validate_word_owner_fragment(xml, b"p", true)?;
-        Self::from_xml_fragment_admitted(xml)
+        let mut paragraph = Self::from_xml_fragment_admitted(xml)?;
+        // Checked replacement regenerates the paragraph root. Move only its
+        // disappearing declarations onto preserved drawing owners. Ordinary
+        // source snapshots must retain their original physical byte identity.
+        let mut reader = Reader::from_reader(xml);
+        let root = loop {
+            match reader.read_event()? {
+                Event::Start(root) | Event::Empty(root) => break root,
+                Event::Eof => return Err(OxmlError::MissingElement("w:p root".into())),
+                _ => {}
+            }
+        };
+        let prefixes = word_prefixes_at(&root, &[])?;
+        let bindings = bindings_outside_retained_root(
+            &raw_namespace_declarations(&root)?,
+            Some(&root),
+            &prefixes,
+        )?;
+        for run in &mut paragraph.runs {
+            let (retained_root, _) = run_xml_root(run, None, &mut Vec::new())?;
+            let retained_bindings = raw_namespace_declarations(&retained_root)?;
+            let bindings = bindings
+                .iter()
+                .filter(|binding| !retained_bindings.contains(binding))
+                .cloned()
+                .collect::<Vec<_>>();
+            for drawing in run.content.iter_mut().filter_map(|content| match content {
+                RunContent::Drawing(drawing) => Some(drawing),
+                _ => None,
+            }) {
+                for raw in drawing
+                    .inline
+                    .iter_mut()
+                    .filter_map(|inline| inline.raw_xml.as_mut())
+                    .chain(
+                        drawing
+                            .anchor
+                            .iter_mut()
+                            .filter_map(|anchor| anchor.raw_xml.as_mut()),
+                    )
+                {
+                    *raw = raw_with_external_bindings(raw, &bindings)?;
+                }
+            }
+        }
+        Ok(paragraph)
     }
 
     /// Return exact source bytes for complex fields admitted by the typed paragraph parser.
@@ -21834,5 +21879,92 @@ mod tests {
             failures.is_empty(),
             "independent raw references were lost: {failures:?}"
         );
+    }
+    #[test]
+    fn fx232_picture_payload_keeps_paragraph_ancestor_namespace_after_reopen() {
+        const SVG: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
+        for owner in ["inline", "anchor"] {
+            for declaration_owner in ["paragraph", "run", "drawing", "payload"] {
+                let declaration = format!(r#" xmlns:asvg="{SVG}""#);
+                let payload = format!(
+                    r#"<a:extLst><a:ext uri='producer'><asvg:svgBlip{} r:embed='rId2'/><foreign:opaque xmlns:foreign='urn:foreign' literal='keep &amp; exact'/><asvg:scope xmlns:asvg='urn:shadow'><asvg:svgBlip literal='foreign same local'/></asvg:scope></a:ext></a:extLst>"#,
+                    if declaration_owner == "payload" {
+                        declaration.as_str()
+                    } else {
+                        ""
+                    }
+                );
+                let source = format!(
+                    r#"<w:p xmlns:w="{}" xmlns:wp="{WP_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{R_NS}"{}><w:r{}><w:drawing{}><wp:{owner}><wp:extent cx="100" cy="100"/><wp:docPr id="1"/><a:graphic><a:graphicData uri="urn:picture"><a:blip r:embed="rId1">{payload}</a:blip></a:graphicData></a:graphic></wp:{owner}></w:drawing></w:r></w:p>"#,
+                    crate::namespace::W_NS,
+                    if declaration_owner == "paragraph" {
+                        declaration.as_str()
+                    } else {
+                        ""
+                    },
+                    if declaration_owner == "run" {
+                        declaration.as_str()
+                    } else {
+                        ""
+                    },
+                    if declaration_owner == "drawing" {
+                        declaration.as_str()
+                    } else {
+                        ""
+                    }
+                );
+                let paragraph = CT_P::from_xml_fragment_checked(source.as_bytes()).unwrap();
+                let mut writer = Writer::new(Vec::new());
+                paragraph.to_xml(&mut writer).unwrap();
+                let output = writer.into_inner();
+                assert!(
+                    output
+                        .windows(payload.len())
+                        .any(|window| window == payload.as_bytes()),
+                    "interior opaque payload changed"
+                );
+                let closed = raw_with_external_bindings(
+                    &output,
+                    &[
+                        ("w".into(), crate::namespace::W_NS.into()),
+                        ("r".into(), R_NS.into()),
+                        ("wp".into(), WP_NS.into()),
+                    ],
+                )
+                .unwrap();
+                let mut qualified = NsReader::from_reader(closed.as_slice());
+                let mut count = 0;
+                loop {
+                    let (namespace, event) = qualified.read_resolved_event().unwrap();
+                    match event {
+                        Event::Start(ref element) | Event::Empty(ref element) => {
+                            assert!(
+                                !matches!(namespace, ResolveResult::Unknown(_)),
+                                "{owner}/{declaration_owner}: {}",
+                                String::from_utf8_lossy(&closed)
+                            );
+                            if element.local_name().as_ref() == b"svgBlip" {
+                                match namespace {
+                                    ResolveResult::Bound(uri) if uri.as_ref() == SVG.as_bytes() => {
+                                        count += 1
+                                    }
+                                    ResolveResult::Bound(uri) => {
+                                        assert_eq!(uri.as_ref(), b"urn:shadow")
+                                    }
+                                    _ => panic!("bound SVG or foreign shadow"),
+                                }
+                            }
+                        }
+                        Event::Eof => break,
+                        _ => {}
+                    }
+                }
+                assert_eq!(count, 1);
+                let reopened = CT_P::from_xml_fragment_checked(&closed).unwrap();
+                let mut again = Writer::new(Vec::new());
+                reopened.to_xml(&mut again).unwrap();
+                assert_eq!(output, again.into_inner(), "namespace closure is stable");
+            }
+        }
     }
 }

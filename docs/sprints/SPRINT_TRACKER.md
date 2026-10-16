@@ -108,6 +108,7 @@ defended.
 | S91 | M24, X | 39 | 29 | 10 | 130 | 7 | Completed 29 top-level stories and four F-X211 delivery children. Child records are not counted twice. The reconstructed 130-day lower bound comprises 97 days for completed scope and 33 for carries, using S1/M2/L4. Actual days are seven worked dates, 2026-10-09 through 2026-10-15, including weekend work, not person-days. The frozen scope contains 40 issues and 30 PRs. Discussions264 and281 stay open. Bibliography, navigation and standalone authoring carry to S92. Local full verification and sprint review pass3 are clean. The exact reviewed-source build-only rehearsal38659673259 passed all27 build jobs, both seven-file Python sets and twelve CLI archives. Fresh hosted-wheel installs passed78 priority cases on each of Python3.9 and3.12 plus strict typing and stub checks. Word0.16.1 and shared/PowerPoint0.14.1 are prepared for publication after close |
 | S91.1 | M24, X | 4 | 4 | 0 | 10 | 1 | Four corrective stories completed with clean integrated review and actual final reviewed-commit full verification. Corrected primary CI38708235000 passed, separate owner CI38702668217 qualifies95/100 with42 hard gates,51 native clauses and five no-credit cases. All49 product hashes unchanged. Actual days count the single worked date2026-10-15, not person-effort. Exact-main verification, both prepared publications and acceptance-aware contributor reconciliation follow close. Future planning is preserved separately |
 | S92 | M24, X | 6 | 6 | 0 | 15 to 18 | 1 | Six repair stories completed, including explicit Issue378 intake. Actual days count the single worked date2026-10-15, not person-effort. Final full verification at133ce33b passed all14 checks,49 unchanged hashes and22 verified archives. Independent review pass2 is clean. User accepted240-cell fill3.304061s with strict open/edit and linear-work gates retained. Future parity/forms planning is included without delivery credit. M24 continues to S99. No release prepared |
+| S93 | M24, X | 7 | 7 | 0 | 21 to 27 | 2 | Seven issue-repair contracts completed. Actual days count worked dates2026-10-15and2026-10-16, not person-effort. Fresh final full verification at55122db6 passes15checks,49hashes,7pixel checks and22verified archives. Native and1666installed Python members have explicit unchanged-input successor authentication. Reviewed18net unique hash changes and4pixel buffers are intentional. Independent review pass2 is clean after the HLD SVG wording correction. Issue365 stays open for pending F-X247/S94. M24 continues to S99. No release prepared |
 
 ## Completed features
 
@@ -690,6 +691,7 @@ five working days.
 | S91 | 29 | 7 | 20.71 |
 | S91.1 | 4 | 1 | 20.00 |
 | S92 | 6 | 1 | 30.00 |
+| S93 | 7 | 2 | 17.50 |
 
 S90 velocity measures calendar throughput for a parallel team. It does not
 measure person effort or establish a sustainable single-developer forecast.
@@ -705,6 +707,8 @@ calendar throughput, not a sustainable single-developer forecast. The last
 three sprint windows, S91, S91.1 and S92, total39 stories over9 worked-date
 units, or21.67 stories per week. Shared calendar dates are not person-days.
 
+S93 records two worked dates,2026-10-15and2026-10-16. Its17.50 stories per week measures parallel calendar throughput. The last three windows, S91.1, S92 and S93, total17stories over4worked-date units, or21.25stories per week. Shared dates are not person-days, and per-feature actual effort remains unrecorded. The41.67percent decrease from S92 exceeds the30percent escalation trigger. Retain developer-effort estimates and dependency gates. Split the eleven-story S95 plan before opening it rather than treating parallel throughput as a sustainable forecast.
+
 ## Escalation record
 
 Logged when an escalation trigger from `.claude/WORKFLOW.md` fires, with what
@@ -712,6 +716,7 @@ was done about it. Empty is the expected state.
 
 | Date | Trigger | F-ID or sprint | Response |
 |------|---------|----------------|----------|
+| 2026-10-16 | Sprint throughput variance exceeds30percent | S93 | Record17.50stories/week,41.67percent below S92, as parallel calendar throughput. The last three windows yield21.25stories/week, above the2story/week planning assumption. Preserve effort estimates and require the existing S95 capacity split before opening that sprint |
 | 2026-10-15 | Three-sprint throughput differs from the2-stories/week assumption by983percent | S91, S91.1, S92 | Record21.67 stories/week as parallel calendar throughput. Retain dependency-defined roadmap boundaries and developer-effort estimates. Do not convert this observation into elapsed delivery promises or invent person-effort actuals |
 | 2026-07-30 | Three-sprint velocity variance exceeded 30 percent | S01 to S03 | Reforecast 366 remaining estimated days to 45 to 50 active weeks, retain dependency-defined boundaries, and recalibrate after S06 |
 | 2026-07-31 | Sprint estimate variance exceeded 30 percent | S05 | Record 4 actual days against 8 estimated, retain the 45 to 50 active week reforecast, and recalibrate after S06 |
@@ -1068,3 +1073,19 @@ recorded by planning.
 | F-X231 | S92 | M | 2 to 3 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |
 
 | F-X237 | S92 | L | 4 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |
+
+| F-X234 | S93 | M | 2 to 3 | not recorded | 2026-10-15 | Scoped native640/380/2418/2, policy182with2expected skips, pinned Pandoc3.11, clean independent reviews and focused prefix integration pass. Worker49hashes unchanged. Final full sprint gate and review remain due |
+| F-X232 | S93 | L | 4 to 5 | not recorded | 2026-10-16 | Legal paint/cache/native-CLI-Python and exact checked XML qualification, approved Rust source changes, clean feature/metadata review. Two reviewed underline hashes overlap border union. Native/Python accepted at16f1fc1, full Rust accepted at16f1fc1, sprint review pending |
+| F-X233 | S93 | M | 2 to 3 | not recorded | 2026-10-16 | Native component-qualified border frame/flow/wrap repair on inferred inputs, missing original retained. Reviewed18entry union and4pixel buffers, D1 warm-cache12point gap repaired, regression RED then layout352+1doctest, independent cache pass2clean and original external3pairs equal. Native/Python accepted at16f1fc1, full Rust accepted at16f1fc1, sprint review pending |
+| F-X235 | S93 | L | 4 to 5 | not recorded | 2026-10-16 | Six matching-font native equation controls, unchanged1point/.99bounds, composite mutation rejects5of6. Historical identities and49worker hashes retained. Clean source/metadata/integration reviews. Native/Python accepted at16f1fc1, full Rust accepted at16f1fc1, sprint review pending |
+| F-X236 | S93 | S | 1 | not recorded | 2026-10-16 | Six selective Run inline annotations supported by real non-LTO nine-pair benchmark, assembly and ten-case saved/reopened semantic controls. No end-to-end speedup claim, clean reviews,49worker hashes unchanged. Native/Python accepted at16f1fc1, full Rust accepted at16f1fc1, sprint review pending |
+| F-X245 | S93 | L | 4 to 5 | not recorded | 2026-10-16 | Relationship-resolved chart/workbook accept/reject reconstruction, original fixed-member observer retained separately, shared/cycle/bound/atomicity controls and clean reviews.49worker hashes unchanged. Native/Python accepted at16f1fc1, full Rust accepted at16f1fc1, sprint review pending |
+| F-X246 | S93 | L | 4 to 5 | not recorded | 2026-10-16 | Both-family legend rendering and Python APIs, native component-only qualification, ownership/opaque/atomicity controls and clean reviews.49worker hashes unchanged. Native/Python accepted at16f1fc1, full Rust accepted at16f1fc1, sprint review pending |
+
+## S93 close evidence
+
+The reviewed sprint HEAD is55122db683aa62991a345db855c477947416c1a6. Its fresh full-gate receipt is /private/tmp/S93-full-closure/receipt.json, SHA256 2092ffc87cef3de035546d2b614739b682091ec4559d4c27d015489365f7986a. Native successor authentication is /private/tmp/S93-native-final/final-head-native-closure-55122db683aa62991a345db855c477947416c1a6.json, SHA256 5c2a07594268b36a9b71de595991f6c4fbc411b00fc830687e524c7d909bbdb8. Installed Python successor authentication is /private/tmp/S93-python-final-head-closure/run-55122db683aa62991a345db855c477947416c1a6/receipt.json, SHA256 2d250640fba42924fe2ae7bb6c5b658c28f31bf31ef9bfc7dc84d4c05fe2ad14. These closures retain native/Word actual source16f1fc1 and PowerPoint actual source12fa271, not fresh external execution at the documentation successor. The final Rust gate is fresh at the reviewed HEAD.
+
+The close workflow adds only this tracker summary, velocity and evidence record after preflight. Its commit and the main merge/tree comparison are recorded in the local close receipt. No product source, harness, dependency, public surface or acceptance contract changes in that close-only step. All seven clean worker directories were removed after integration and their branches are retained until the main and s93 pushes succeed. Dirty, carried and unrelated worktrees remain protected. Docker inventory contains no rdocx stack or matching volume. Cache retirement preserves source, native proof artifacts and required binaries, with an observed130.526GiB free-space increase from the two audited canonical incremental directories.
+
+The issue and PR reconciliation follows the successful main push. PR375 is superseded by the qualified F-X232 integration. Issues373,366,367,382and383 have their bounded evidence and stated limits. Issue365 retains pending F-X247 in S94 for its broader73input conversion matrix. Actual remote comment URLs and open/closed decisions are recorded after posting in the close receipt, rather than claimed in advance here. No release tag or publication is prepared by S93.

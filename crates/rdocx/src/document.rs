@@ -75,6 +75,8 @@ use crate::table::{Table, TableRef, row_cell_ranges, validate_table_topology};
 pub struct RenderOptions {
     /// The tracked-revision view to render.
     pub revision_view: rdocx_layout::RevisionView,
+    /// How the tracked view marks revisions.
+    pub revision_style: rdocx_layout::RevisionStyle,
 }
 
 /// Which of Word's independent note streams a policy governs.
@@ -17575,6 +17577,13 @@ impl Document {
         options: RenderOptions,
         deterministic: bool,
     ) -> Result<Arc<rdocx_layout::WordLayoutResult>> {
+        if options.revision_style != rdocx_layout::RevisionStyle::Plain
+            && options.revision_view != rdocx_layout::RevisionView::Tracked
+        {
+            return Err(Error::Other(
+                "revision style applies only with tracked view".to_owned(),
+            ));
+        }
         if options.revision_view == rdocx_layout::RevisionView::Accepted {
             return if deterministic {
                 self.cached_deterministic_layout()
@@ -17585,6 +17594,7 @@ impl Document {
 
         let mut input = self.build_layout_input()?;
         input.revision_view = options.revision_view;
+        input.revision_style = options.revision_style;
         #[cfg(test)]
         record_layout_invocation();
         let layout = if deterministic {
@@ -22127,9 +22137,11 @@ impl Document {
             selected.xml(),
             xml.as_bytes(),
         )?;
+        let mut replacement = Vec::new();
+        paragraph.to_xml(&mut Writer::new(&mut replacement))?;
         let fragment = ContentFragment {
             kind: StoryItemKind::Paragraph,
-            xml: xml.as_bytes().to_vec(),
+            xml: replacement,
             namespace_scope: BTreeMap::new(),
             source_part_name: Some(location.story.part_name.clone()),
             source_story_kind: Some(location.story.kind),
@@ -25690,6 +25702,167 @@ impl Document {
             .content
             .push(BodyContent::Paragraph(p));
         candidate.invalidate_layout();
+        self.commit_staged_mutation(candidate);
+        Ok(())
+    }
+
+    fn chart_legend_owner(
+        &self,
+        paragraph: usize,
+    ) -> Result<(ContentLocation, Vec<u8>, WordChartReference, String)> {
+        if self.content_index_of_paragraph(paragraph).is_none() {
+            return Err(Error::Other(
+                "chart legend requires a direct body paragraph".into(),
+            ));
+        }
+        let location = self
+            .paragraph_story_location(paragraph)?
+            .ok_or_else(|| Error::Other("chart paragraph is absent".into()))?;
+        let xml = self.paragraph_element_xml(&location)?;
+        let references = word_chart_references(&xml)?
+            .into_iter()
+            .filter(|reference| reference.owned)
+            .collect::<Vec<_>>();
+        let [reference] = references.as_slice() else {
+            return Err(Error::Other(
+                "chart paragraph requires exactly one owned chart".into(),
+            ));
+        };
+        let id = &reference.relationship_id;
+        if self
+            .package
+            .get_part_rels(&self.doc_part_name)
+            .map_or(0, |rels| rels.items.iter().filter(|r| r.id == *id).count())
+            != 1
+        {
+            return Err(Error::Other(
+                "chart relationship is missing or ambiguous".into(),
+            ));
+        }
+        let relationship = self
+            .package
+            .get_part_rels(&self.doc_part_name)
+            .and_then(|r| r.get_by_id(id))
+            .filter(|r| r.rel_type == rel_types::CHART && relationship_is_internal(r))
+            .ok_or_else(|| {
+                Error::Other("chart relationship is missing, external or invalid".into())
+            })?;
+        let part = OpcPackage::resolve_rel_target(&self.doc_part_name, &relationship.target);
+        if self.package.content_types.content_type_for(&part) != Some(content_types::CHART)
+            || self.package.get_part(&part).is_none()
+        {
+            return Err(Error::Other(
+                "chart target is missing or has invalid content type".into(),
+            ));
+        }
+        if let Some(rels) = self.package.get_part_rels(&part) {
+            for rel in &rels.items {
+                if relationship_is_internal(rel)
+                    && self
+                        .package
+                        .get_part(&OpcPackage::resolve_rel_target(&part, &rel.target))
+                        .is_none()
+                {
+                    return Err(Error::Other("chart related part is missing".into()));
+                }
+            }
+        }
+        Ok((location, xml, reference.clone(), part))
+    }
+
+    /// Read effective legend settings from exactly one owned direct-body chart.
+    pub fn chart_legend(&self, paragraph: usize) -> Result<oxml_chart::LegendSettings> {
+        let (_, _, _, part) = self.chart_legend_owner(paragraph)?;
+        oxml_chart::chart_legend_settings(
+            self.package
+                .get_part(&part)
+                .ok_or_else(|| Error::Other("chart part disappeared".into()))?,
+        )
+        .map_err(|e| Error::Other(format!("invalid chart legend: {e}")))
+    }
+
+    /// Atomically edit one chart legend, isolating any shared ChartML part.
+    pub fn set_chart_legend(
+        &mut self,
+        paragraph: usize,
+        visible: Option<bool>,
+        position: Option<oxml_chart::LegendPosition>,
+        overlay: Option<bool>,
+    ) -> Result<()> {
+        let (location, xml, reference, part) = self.chart_legend_owner(paragraph)?;
+        let id = &reference.relationship_id;
+        let source = self
+            .package
+            .get_part(&part)
+            .ok_or_else(|| Error::Other("chart part disappeared".into()))?;
+        let updated = oxml_chart::set_chart_legend(source, visible, position, overlay)
+            .map_err(|e| Error::Other(format!("invalid chart legend: {e}")))?;
+        if updated == source {
+            return Ok(());
+        }
+        let references = word_chart_references(&self.document.to_xml()?)?;
+        let shared = references
+            .iter()
+            .filter(|r| &r.relationship_id == id)
+            .count()
+            > 1
+            || self
+                .package
+                .part_rels
+                .iter()
+                .flat_map(|(owner, rels)| rels.items.iter().map(move |r| (owner, r)))
+                .filter(|(owner, r)| {
+                    relationship_is_internal(r)
+                        && OpcPackage::resolve_rel_target(owner, &r.target)
+                            .eq_ignore_ascii_case(&part)
+                })
+                .count()
+                > 1;
+        let mut candidate = self.clone_for_staging();
+        candidate
+            .identifiers
+            .observe_package_graph(&candidate.package)?;
+        let target = if shared {
+            candidate
+                .identifiers
+                .reserve_part_name("/word/charts", "chart", "xml")?
+        } else {
+            part.clone()
+        };
+        if shared {
+            if let Some(mut rels) = candidate.package.get_part_rels(&part).cloned() {
+                for rel in &mut rels.items {
+                    if relationship_is_internal(rel) {
+                        let dest = OpcPackage::resolve_rel_target(&part, &rel.target);
+                        if candidate.package.get_part(&dest).is_none() {
+                            return Err(Error::Other("chart related part is missing".into()));
+                        }
+                        rel.target = relative_target(&target, &dest);
+                    }
+                }
+                candidate.package.set_part_rels(&target, rels);
+            }
+            let owner = candidate.doc_part_name.clone();
+            let isolated = candidate.add_relative_internal_relationship_checked(
+                &owner,
+                rel_types::CHART,
+                &target,
+            )?;
+            let mut rewritten = xml;
+            rewritten.splice(reference.value_span, isolated.bytes());
+            let rewritten =
+                std::str::from_utf8(&rewritten).map_err(|e| Error::Other(e.to_string()))?;
+            candidate.package.set_part(&target, updated);
+            candidate
+                .package
+                .content_types
+                .add_override(&target, content_types::CHART);
+            candidate.replace_paragraph_xml(&location, rewritten)?;
+        } else {
+            candidate.package.set_part(&target, updated);
+        }
+        candidate.invalidate_layout();
+        let candidate = candidate.prepare_and_reopen_staged()?;
         self.commit_staged_mutation(candidate);
         Ok(())
     }
@@ -34667,8 +34840,16 @@ impl Document {
         font_files: &[(&str, &[u8])],
         options: RenderOptions,
     ) -> Result<rdocx_layout::LayoutInput> {
+        if options.revision_style != rdocx_layout::RevisionStyle::Plain
+            && options.revision_view != rdocx_layout::RevisionView::Tracked
+        {
+            return Err(Error::Other(
+                "revision style applies only with tracked view".to_owned(),
+            ));
+        }
         let mut input = self.build_layout_input()?;
         input.revision_view = options.revision_view;
+        input.revision_style = options.revision_style;
         input.fonts.extend(
             font_files
                 .iter()
@@ -35573,6 +35754,7 @@ impl Document {
         Ok(LayoutInput {
             sequence_snapshot: None,
             revision_view: rdocx_layout::RevisionView::Accepted,
+            revision_style: rdocx_layout::RevisionStyle::Plain,
             document,
             automatic_hyphenation: self
                 .settings
@@ -36012,6 +36194,86 @@ fn next_toc_bookmark_suffix(occupied: &HashSet<u64>, after: u64) -> Option<u64> 
         .checked_add(1)
         .filter(|candidate| !occupied.contains(candidate))
         .or_else(|| (1..=u64::MAX).find(|candidate| !occupied.contains(candidate)))
+}
+
+#[derive(Clone)]
+struct WordChartReference {
+    relationship_id: String,
+    value_span: Range<usize>,
+    owned: bool,
+}
+
+fn word_chart_references(xml: &[u8]) -> Result<Vec<WordChartReference>> {
+    let mut reader = NsReader::from_reader(xml);
+    let mut references = Vec::new();
+    let mut parents: Vec<(Vec<u8>, Vec<u8>, bool)> = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|e| Error::Other(e.to_string()))?;
+        let namespace = match namespace {
+            ResolveResult::Bound(Namespace(uri)) => uri.to_vec(),
+            _ => Vec::new(),
+        };
+        let after = reader.buffer_position() as usize;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let local = element.local_name().as_ref().to_vec();
+                // Only the supported direct paragraph/run/drawing owner grants
+                // authority. A qualified lookalike under any opaque ancestor does not.
+                let owned = namespace == oxml_chart::C_NS.as_bytes()
+                    && local == b"chart"
+                    && parents.len() == 6
+                    && parents[0].0 == W_NS.as_bytes()
+                    && parents[0].1 == b"p"
+                    && parents[1].0 == W_NS.as_bytes()
+                    && parents[1].1 == b"r"
+                    && parents[2].0 == W_NS.as_bytes()
+                    && parents[2].1 == b"drawing"
+                    && parents[3].0 == drawing_ns::WP.as_bytes()
+                    && matches!(parents[3].1.as_slice(), b"inline" | b"anchor")
+                    && parents[4].0 == oxml_chart::A_NS.as_bytes()
+                    && parents[4].1 == b"graphic"
+                    && parents[5].0 == oxml_chart::A_NS.as_bytes()
+                    && parents[5].1 == b"graphicData"
+                    && parents[5].2;
+                let mut chart_data = false;
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|e| Error::Other(e.to_string()))?;
+                    let value = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                        .map_err(|e| Error::Other(e.to_string()))?;
+                    if attribute.key.as_ref() == b"uri" && value == oxml_chart::C_NS {
+                        chart_data = true;
+                    }
+                    let (ns, name) = reader.resolver().resolve_attribute(attribute.key);
+                    if matches!(ns,ResolveResult::Bound(Namespace(uri)) if uri==rdocx_oxml::namespace::R_NS.as_bytes())
+                    {
+                        let (start, end) =
+                            story_attribute_value_span(&xml[before..after], attribute.key.as_ref())
+                                .ok_or_else(|| {
+                                    Error::Other("chart relationship source span is absent".into())
+                                })?;
+                        references.push(WordChartReference {
+                            relationship_id: value.into_owned(),
+                            value_span: before + start..before + end,
+                            owned: owned && name.as_ref() == b"id",
+                        });
+                    }
+                }
+                if !empty {
+                    parents.push((namespace, local, chart_data));
+                }
+            }
+            Event::End(_) => {
+                parents.pop();
+            }
+            Event::Eof => return Ok(references),
+            _ => {}
+        }
+    }
 }
 
 fn chart_with_workbook_relationship(
@@ -43410,6 +43672,7 @@ mod tests {
             RenderOptions::default(),
             RenderOptions {
                 revision_view: rdocx_layout::RevisionView::Tracked,
+                revision_style: rdocx_layout::RevisionStyle::Plain,
             },
         ] {
             reset_layout_invocations();
@@ -43698,6 +43961,7 @@ mod tests {
         doc.add_paragraph("tracked view");
         let options = RenderOptions {
             revision_view: rdocx_layout::RevisionView::Tracked,
+            revision_style: rdocx_layout::RevisionStyle::Plain,
         };
 
         reset_layout_invocations();
@@ -44564,6 +44828,7 @@ mod tests {
         doc.add_paragraph("revision cache separation");
         let tracked = RenderOptions {
             revision_view: rdocx_layout::RevisionView::Tracked,
+            revision_style: rdocx_layout::RevisionStyle::Plain,
         };
 
         reset_layout_invocations();
@@ -44604,6 +44869,7 @@ mod tests {
         doc.add_paragraph("tracked engine reuse");
         let tracked = RenderOptions {
             revision_view: rdocx_layout::RevisionView::Tracked,
+            revision_style: rdocx_layout::RevisionStyle::Plain,
         };
 
         let first = doc

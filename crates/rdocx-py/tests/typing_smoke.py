@@ -137,6 +137,10 @@ def exercise_rdocx_types(path: Path) -> None:
     pdf_bytes: bytes = opened.to_pdf()
     tracked_pdf: bytes = opened.to_pdf(revision_view="tracked")
     tracked_pages: list[bytes] | bytes = opened.render_pages(revision_view="tracked")
+    legal_pdf: bytes = opened.to_pdf(revision_view="tracked", revision_style="legal")
+    legal_pages: list[bytes] | bytes = opened.render_pages(
+        revision_view="tracked", revision_style="legal"
+    )
     pages: list[bytes] = opened.render_all_pages()
     maybe_page: bytes | None = opened.render_page_to_png(0)
     font_pdf: bytes = opened.to_pdf(fonts=[("Carlito", b"font")], font_dir=path)
@@ -527,6 +531,8 @@ def fx215_chart_typing() -> None:
     document = Document()
     paragraph = document.add_chart(XL_CHART_TYPE.LINE, data, Inches(4), Inches(2))
     assert_type(paragraph, Paragraph)
+    assert_type(document.chart_legend(paragraph), dict[str, bool | str])
+    document.set_chart_legend(paragraph, visible=True, position="b", overlay=False)
 
 
 def fx211a_checked_word_element_types(document: Document) -> None:

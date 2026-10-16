@@ -6714,7 +6714,7 @@ impl PyDocument {
         Ok(boundary)
     }
 
-    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
     fn to_pdf<'py>(
         &self,
         py: Python<'py>,
@@ -6722,8 +6722,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -6739,7 +6740,7 @@ impl PyDocument {
         .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (*, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
     fn to_pdf_with_diagnostics<'py>(
         &self,
         py: Python<'py>,
@@ -6747,8 +6748,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyTuple>)> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -6783,7 +6785,7 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (page_index, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (page_index, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
     #[allow(clippy::too_many_arguments)]
     fn render_page_to_png<'py>(
         &self,
@@ -6794,8 +6796,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -6815,7 +6818,7 @@ impl PyDocument {
         .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (page_index, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (page_index, dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
     #[allow(clippy::too_many_arguments)]
     fn render_page_to_png_with_diagnostics<'py>(
         &self,
@@ -6826,8 +6829,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<(Option<Bound<'py, PyBytes>>, Bound<'py, PyTuple>)> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -6884,7 +6888,8 @@ impl PyDocument {
         }))
     }
 
-    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
+    #[allow(clippy::too_many_arguments)] // Explicit public rendering keyword operands.
     fn render_all_pages<'py>(
         &self,
         py: Python<'py>,
@@ -6893,8 +6898,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<Bound<'py, PyList>> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -6913,7 +6919,8 @@ impl PyDocument {
         PyList::new(py, pages.iter().map(|page| PyBytes::new(py, page)))
     }
 
-    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
+    #[allow(clippy::too_many_arguments)] // Explicit public rendering keyword operands.
     fn render_all_pages_with_diagnostics<'py>(
         &self,
         py: Python<'py>,
@@ -6922,8 +6929,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<(Bound<'py, PyList>, Bound<'py, PyTuple>)> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -6944,7 +6952,7 @@ impl PyDocument {
             messages,
         ))
     }
-    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
     #[allow(clippy::too_many_arguments)]
     fn render_pages<'py>(
         &self,
@@ -6958,8 +6966,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<Py<PyAny>> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -7009,7 +7018,7 @@ impl PyDocument {
         }
     }
 
-    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted"))]
+    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, fonts = None, font_dir = None, font_dirs = None, revision_view = "accepted", revision_style = "plain"))]
     #[allow(clippy::too_many_arguments)]
     fn render_pages_with_diagnostics<'py>(
         &self,
@@ -7023,8 +7032,9 @@ impl PyDocument {
         font_dir: Option<PathBuf>,
         font_dirs: Option<Bound<'py, PyAny>>,
         revision_view: &str,
+        revision_style: &str,
     ) -> PyResult<(Py<PyAny>, Bound<'py, PyTuple>)> {
-        let options = parse_render_options(revision_view)?;
+        let options = parse_render_options(revision_view, revision_style)?;
         let caller_fonts = collect_caller_fonts(py, fonts, font_dir, font_dirs)?;
         let font_refs = caller_fonts.as_ref().map(|files| {
             files
@@ -7924,6 +7934,88 @@ impl PyDocument {
         self.inner
             .add_numbering_instance(definition_id, &overrides)
             .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    /// Effective legend properties of the live direct-body chart paragraph.
+    fn chart_legend(
+        slf: Py<Self>,
+        py: Python<'_>,
+        paragraph: PyRef<'_, PyParagraph>,
+    ) -> PyResult<Py<PyDict>> {
+        if !paragraph.belongs_to(py, &slf) {
+            return Err(PyValueError::new_err(
+                "paragraph belongs to a different document",
+            ));
+        }
+        let ParagraphLocation::Body(index) = paragraph.validate(py)? else {
+            return Err(PyValueError::new_err(
+                "chart legend requires a direct body paragraph",
+            ));
+        };
+        let settings = slf
+            .borrow(py)
+            .inner
+            .chart_legend(index)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let result = PyDict::new(py);
+        result.set_item("visible", settings.visible)?;
+        result.set_item("position", settings.position.as_str())?;
+        result.set_item("overlay", settings.overlay)?;
+        Ok(result.unbind())
+    }
+
+    /// None leaves a property unchanged. Hidden legends discard their settings.
+    #[pyo3(signature=(paragraph, *, visible=None, position=None, overlay=None))]
+    fn set_chart_legend(
+        slf: Py<Self>,
+        py: Python<'_>,
+        paragraph: PyRef<'_, PyParagraph>,
+        visible: Option<&Bound<'_, PyAny>>,
+        position: Option<&str>,
+        overlay: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let checked_bool = |value: Option<&Bound<'_, PyAny>>| -> PyResult<Option<bool>> {
+            value
+                .map(|v| {
+                    if !v.is_instance_of::<PyBool>() {
+                        return Err(PyTypeError::new_err(
+                            "legend visibility and overlay require bool",
+                        ));
+                    }
+                    v.extract()
+                })
+                .transpose()
+        };
+        let visible = checked_bool(visible)?;
+        let overlay = checked_bool(overlay)?;
+        let position = position
+            .map(rdocx::LegendPosition::parse)
+            .transpose()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if !paragraph.belongs_to(py, &slf) {
+            return Err(PyValueError::new_err(
+                "paragraph belongs to a different document",
+            ));
+        }
+        let ParagraphLocation::Body(index) = paragraph.validate(py)? else {
+            return Err(PyValueError::new_err(
+                "chart legend requires a direct body paragraph",
+            ));
+        };
+        let location = ParagraphLocation::Body(index)
+            .native(&slf.borrow(py).inner)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        let mut document = slf.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        candidate
+            .set_chart_legend(index, visible, position, overlay)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        document.publish_owner_candidate(
+            py,
+            candidate,
+            "Document.set_chart_legend",
+            WordPublication::ElementXml(WordOwnerLocation::Paragraph(location)),
+        )
     }
 
     #[pyo3(signature = (chart_type, chart_data, width, height, *, after=None))]
@@ -9732,7 +9824,10 @@ impl PyDocument {
     }
 }
 
-fn parse_render_options(revision_view: &str) -> PyResult<rdocx::RenderOptions> {
+fn parse_render_options(
+    revision_view: &str,
+    revision_style: &str,
+) -> PyResult<rdocx::RenderOptions> {
     let revision_view = match revision_view {
         "accepted" => rdocx::RevisionView::Accepted,
         "tracked" => rdocx::RevisionView::Tracked,
@@ -9742,7 +9837,26 @@ fn parse_render_options(revision_view: &str) -> PyResult<rdocx::RenderOptions> {
             )));
         }
     };
-    Ok(rdocx::RenderOptions { revision_view })
+    let revision_style = match revision_style {
+        "plain" => rdocx::RevisionStyle::Plain,
+        "legal" => rdocx::RevisionStyle::Legal,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown revision style {other:?}, expected plain or legal"
+            )));
+        }
+    };
+    if revision_style != rdocx::RevisionStyle::Plain
+        && revision_view != rdocx::RevisionView::Tracked
+    {
+        return Err(PyValueError::new_err(
+            "revision_style applies only with revision_view=\"tracked\"",
+        ));
+    }
+    Ok(rdocx::RenderOptions {
+        revision_view,
+        revision_style,
+    })
 }
 
 fn parse_raster_format(

@@ -625,7 +625,21 @@ selected SEQ and TC fields, the separator, and the end marker inside accepted
 revision and content-control owners. They require the total nested position to
 retain sources before the result while excluding sources inside it. Tracked
 layout tests compose revision and inline control wrappers in both orders and
-require exact visible text plus one paragraph change bar. Outer-coordinate
+require exact visible text plus one paragraph change bar. Legal-paint controls
+assert all four revision kinds, innermost nested colours, first visible bar
+selection and unchanged source formatting. Plain/legal cache alternation uses
+actual nonempty caller font bytes and related headers, footers, footnotes and
+endnotes, compares retained results with fresh engines after mutation, and
+requires every visible fragment of a split note to retain its bar colour.
+Checked XML cases cover inline and anchored drawings with namespace bindings
+on paragraph, run, drawing and payload roots, local shadows and foreign
+lookalikes, exact opaque interiors, reopen stability and atomic refusal.
+Double-underline tests aggregate segmented line primitives into physical
+stroke bands at 12, 24 and 36 points. Independent static Word colour and
+geometry evidence qualifies those paint components, with a 0.36 point native
+metric bound. It does not establish native legal-bar selection or full-page
+font-contour parity. Mutating either prior double-gap rule, legal colour or
+ancestor namespace closure must fail its matching control. Outer-coordinate
 cases place revision and control owners after preserved raw paragraph children
 and put a TOC in a terminal hyperlink revision. A hyperlink-retained simple
 field before the TOC proves raw child shapes do not advance typed run
@@ -1113,6 +1127,19 @@ reconstruction controls remain active.
 A bounded unit matrix checks coverage, deterministic output and retained segment
 identity without timing thresholds or an additional alignment algorithm.
 
+Chart comparison regressions cover chart-only Word and Run granularity, adjacent
+text edits and an unchanged-chart control. Saved and reopened resolutions follow
+the surviving drawing relationships and independently check exact ChartML,
+embedded workbook bytes and worksheet cells. Workbook-only edits, repeated drawn
+roots, collision-safe names, opaque sidecars, cyclic and external edges, invalid
+closures and aggregate limits retain their own controls. The sorted DFS depth
+negative includes shortcut edges so shortest-path discovery cannot mask the reused
+copier's actual recursion depth. Existing rich-fragment callers retain distinct
+preallocated destinations for case-alias sources. The exact Issue382 script is
+executed unchanged and its fixed chart1.xml observer output is recorded separately
+from a corrected relationship observer with every original case and expectation
+retained. Installed-wheel ZIP/XML inspection supplements native reconstruction.
+
 The source-built external differential pins Microsoft Word 16.104 build
 16.104.25121423 and locale `en-US`. Its 24 normalized records cover every
 supported story, move, field owner, and property revision, and calibrated
@@ -1226,6 +1253,31 @@ with Poppler 26.01.0, while LibreOffice 26.2.5.2 provides the portable reopen
 and visual inspection. The Word 16.112.4 structure record is reviewed
 statically when GUI automation is unavailable. No sample opts into the new
 options, so all 49 hash entries remain unchanged.
+
+Paragraph-border controls distinguish inferred15point sz120 input from raw
+sz15 input and retain the missing-original limitation. Normally opened frozen
+controls exported by actual Word16.113.2 build16.113.26092012 qualify width,
+clearance, corner bounds, outer groups and first-top/last-bottom split topology.
+The independent component bounds are0.36points for stroke thickness and
+0.60points for frame positions and flow extents. Poppler26.01.0 rasterizes
+inspection crops. Native receipts bind input and output digests. A foreign
+opaque property fixture refused by Word remains separate from the minimal
+normally opened size controls. Dashed pattern and glyph-contour parity are
+not claimed, and existing raster thresholds remain unchanged.
+
+Focused controls cover repeated wrap reservations, short drawings crossing
+only the border-shifted first text band, empty and keep chains, cache neighbor
+changes and cold/warm equality. Nonzero maximum and additive group-spacing
+cases reach body, table, header, footer and note paint, with continuous sides
+and no bridge above a new page. Cacheable typed direct and nested table cells
+retain their grouping metadata through source rebinding. Actual cache-hit
+counts and full page geometry must match a fresh engine, including provenance
+after insertion before the table. Semantic mutations of frame bands, horizontal
+allowance, split topology, group normalization, group bridging and wrap-origin
+accounting must fail their matching assertions. A genuine Base comparison
+removes only paragraph borders from an invoice, retains table borders and
+requires byte-identical deterministic PDF and PNG output. Intentional sample
+baseline changes require exact entry attribution to paragraph-border owners.
 
 The M24 section page-semantics gate is
 `section_page_semantics_match_pinned_libreoffice_render`. It source-builds one
@@ -1417,6 +1469,18 @@ The median of each build's per-edit medians must be no worse than 1.25 times
 the immutable v0.11.1 release and at most 0.75 times pinned commit `0582da0`.
 Wall-clock thresholds do not run in the normal unit-test pass.
 
+Public setter qualification uses a separate native consumer with explicit
+non-LTO optimization. Archived baseline and selective candidate executables run
+in alternating order with retained raw samples, compiler/profile/source identity,
+assembly and executable sizes. Initialized setters, actual first-use owner paths
+and a consumed authoring loop remain separate observations. Independent ZIP/XML
+inspection checks bold, italic, complex-script twins, sizes and unrelated colour
+through save/reopen on fresh and initialized runs. Clearing fresh absent values
+must leave the run-property element absent. A microbenchmark improvement does not
+establish an end-to-end authoring improvement, and already-inlined paragraph-mark
+controls do not justify extra annotations. Existing native regression suites
+remain the semantic gate alongside this focused qualification.
+
 The incremental-layout scale gate builds 1,000 one-page paragraphs through the
 public deterministic bundled-fallback facade, edits paragraph 500, and compares
 the warm result with a fresh layout. It requires exactly 1,000 pages, at most
@@ -1507,6 +1571,21 @@ uses 64 by 64 pixel block luminance with a 0.99 SSIM floor. A 1.01 point
 rendered-group perturbation proves the geometry and raster path is
 mutation-sensitive. The source DOCX digest and tool identities live in the
 text manifest, while both PDF outputs remain untracked.
+
+The same OfficeMath harness separately qualifies the exact Issue365 formula
+and five single-construct controls against Word16.113.2 build16.113.26092012
+and Poppler26.09.0. Explicit paragraph and math spacing defaults bind source
+geometry. Source digests, native PDFs, native normal save/reopen, authentic
+Word-bundled Cambria/Cambria Math caller bytes and tool hashes are pinned in
+its existing manifest. Absolute aggregate and six exact-expression PDF bounds,
+widths and150DPI ink bounds retain1.0point tolerance, with complete-page
+64by64 luminance blocks retaining0.99SSIM. A rendered1.01point group translation
+is rejected by the composite gate. Signed native residuals can cancel that
+shift for one control, so rejection is not claimed for every case or for SSIM
+alone. Constructed font tables distinguish root-relative first/second script
+sizes, deep saturation, degree depth and optical alternates. The original
+Caladea-request fallback mismatch and implicit-spacing sources remain separate
+diagnostics, preserving all historical sources, identities and outcomes.
 
 The general native field construction gate reopens explicit simple and complex
 fields with identical instruction semantics and ordered cached content. Tests
@@ -1613,9 +1692,11 @@ the first differing sample precisely. Reviewed updates use `--update --reason
 <text>`, and an empty reason is rejected.
 
 The gate deliberately compares pixels rather than PDF bytes. The reviewed
-Poppler 26.01.0 baseline includes the intended paragraph-spacing, cell-margin,
-and horizontal-table-border layout for `contract`, `invoice`, and `quote`.
-The other four samples remain exact. This is a baseline, not a tolerance, so
+Poppler 26.01.0 baseline includes paragraph-spacing, cell-margin,
+horizontal-table-border and paragraph-frame geometry and owned flow. The
+paragraph-frame record changes `contract`, `invoice`, `proposal` and `quote`
+with unchanged dimensions. The other three page-one buffers remain exact.
+This is a baseline, not a tolerance, so
 check mode still requires exact equality for all seven buffers. The regression
 proof runs `--check
 --inject-one-pixel <sample>`, copies that generated PNG to a temporary
@@ -2972,6 +3053,20 @@ cover the cases that matter now.
   post-script followed by a run, its insertion of explicit n-ary `\limits`,
   and its removal of explicit delimiter scope are asserted as intentional
   divergences.
+- `fx234_issue365_preserves_symbols_limits_and_thin_space` compares the exact
+  reported formula against an independently authored normalized tree, including
+  integral bounds, pi, upright lim, arrow, infinity, explicit thin spacing,
+  fraction, radical and attached scripts. A related mass-formula control proves
+  pi squared and a cubed retain their separate bases. Conversion and public DOCX
+  save/reopen controls compare normalized supported structure while separately
+  retaining an opaque XML sibling byte for byte. Unsupported spacing, variant,
+  width, function-marker context and resource caps have focused controls.
+- `fx234_issue365_matches_actual_pinned_pandoc_3_11` independently pins Pandoc
+  3.11 for this exact formula in both directions. Its expected tree retains
+  upright lim and meaningful spacing. The display and semantics wrappers and
+  explicit n-ary limits remain diagnosed, while the exact supported invisible
+  function-application marker normalizes to its implicit typed equivalent.
+  The historical 3.10 gate and evidence identity remain separate.
 
 Agile encryption has a source-encoded Microsoft Word 16.104 oracle package so
 the regression gate does not depend on an opaque binary fixture. The gate opens
@@ -4214,6 +4309,35 @@ creation API. Fresh paired source-matched wheels require explicit node
 membership, strict mypy and complete stubtest. Native Word/PowerPoint opens,
 PowerPoint Edit Data, normal save/reopen and deterministic value-specific
 renders remain separate required acceptance, including stale-value negatives.
+
+## Chart legend qualification
+
+The exact default, bottom and left Issue383 packages remain frozen in both
+formats. Deterministic renders must differ by position. Shared tests cover all
+five positions, overlay, absent state, wrapped long labels and bounded refusal.
+Installed APIs cover ownership, exact no-op bytes, hidden-state behavior,
+source-preserved namespace lookalikes, malformed document refusal and shared
+chart isolation without workbook changes. Negative controls use the actual
+prior renderer and prior installed wheels, including opaque Word ancestors and
+foreign relationship owners.
+
+Independent Word and PowerPoint exports retain source and output hashes and
+producer receipts. Geometry uses a1point bound and paint uses150DPI with the
+existing0.99 block-luminance SSIM threshold. Original font mismatches remain
+explicit diagnostics. Separate controls request9point Aptos and pass the actual
+native font bytes through the existing deterministic caller-font route. Their
+translation-only80by120pixel legend component crops contain every key and label
+plus at least2.5points of padding. Absolute key, label and adjacent right plot
+edge bounds are checked separately. This qualifies legend components, not an
+outer chart frame or whole-chart raster. Original100pixel failed crops remain
+retained because Word's unrelated outer frame enters that region. The old
+renderer also fails the corrected component observer.
+
+Native Word's empty legend shell overlays the plot, unlike the explicit
+product missing-overlay default false. This original discrepancy stays
+recorded. Explicit right/false controls qualify non-overlay placement alongside
+bottom and left controls. Shared49hash entries and seven page-one pixel buffers
+remain unchanged because those samples carry bitmap chart images.
 
 ## Presentation semantic export qualification
 

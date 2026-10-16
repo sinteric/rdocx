@@ -541,6 +541,15 @@ fn chart_source_nodes(xml: &[u8]) -> Result<Vec<ChartSourceNode>> {
                     .ok_or_else(|| invalid_authoring_value("unbalanced chart source"))?;
                 nodes[index].end = end;
             }
+            Event::Text(text) if stack.is_empty() && !text.iter().all(u8::is_ascii_whitespace) => {
+                return Err(invalid_authoring_value("text outside chart XML root"));
+            }
+            Event::CData(_) | Event::GeneralRef(_) if stack.is_empty() => {
+                return Err(invalid_authoring_value("content outside chart XML root"));
+            }
+            Event::Decl(_) if start != 0 && !(start == 3 && xml.starts_with(b"\xef\xbb\xbf")) => {
+                return Err(invalid_authoring_value("misplaced chart XML declaration"));
+            }
             Event::DocType(_) => {
                 return Err(invalid_authoring_value(
                     "DOCTYPE is unsupported in chart source",
@@ -1153,13 +1162,22 @@ pub fn render_chart(
     color_map: &ColorMap,
     fonts: &mut FontManager,
 ) -> Result<GroupElement> {
-    let plot_bounds = geometry_plot_bounds(bounds)?;
     let plots = chart.plot_area.plots()?;
     let plot = plots
         .first()
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
     let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
+    let legend_layout = layout_legend(chart, plot, bounds, fonts)?;
+    let legend_colours = if chart.legend.is_some() {
+        legend_entries(plot, &colours)?
+            .into_iter()
+            .map(|(_, colour)| colour)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let plot_bounds = legend_layout.plot;
     let axes = chart.plot_area.axes()?;
     let options = geometry_options(plot, &axes, chart.disp_blanks_as)?;
     let plot_children =
@@ -1183,14 +1201,11 @@ pub fn render_chart(
         &mut chart_annotations.labels,
     )?;
     render_legend(
-        chart,
-        plot,
-        plot_bounds,
-        fonts,
-        &colours,
+        legend_layout,
+        &legend_colours,
         &mut annotations,
         &mut chart_annotations.labels,
-    )?;
+    );
 
     validate_geometry_coordinates(&chart_annotations.gridlines)?;
     validate_geometry_coordinates(&plot_children)?;
@@ -3245,64 +3260,205 @@ fn resolved_layout_colour(colour: ResolvedColor) -> Color {
     }
 }
 
-fn render_legend(
+struct LegendLayout {
+    plot: Rect,
+    labels: Vec<GlyphRun>,
+    keys: Vec<Rect>,
+}
+
+fn layout_legend(
     chart: &CT_Chart,
     plot: &Plot,
     bounds: Rect,
     fonts: &mut FontManager,
-    colours: &PlotColours,
-    paths: &mut Vec<PositionedElement>,
-    labels: &mut Vec<PositionedElement>,
-) -> Result<()> {
-    if chart.legend.is_none() {
-        return Ok(());
+) -> Result<LegendLayout> {
+    let full_plot = geometry_plot_bounds(bounds)?;
+    let Some(legend) = &chart.legend else {
+        return Ok(LegendLayout {
+            plot: full_plot,
+            labels: Vec::new(),
+            keys: Vec::new(),
+        });
+    };
+    let settings = legend.settings;
+    let horizontal = matches!(
+        settings.position,
+        LegendPosition::Top | LegendPosition::Bottom
+    );
+    let entries = legend_entry_names(plot)?;
+    if entries.len() > MAX_CATEGORY_ANNOTATIONS {
+        return Err(invalid_authoring_value("legend entry limit"));
     }
-    let x = bounds.x + bounds.width - 58.0;
-    let entries = if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
-        let mut entries = Vec::new();
-        if let Some(series) = plot_series(plot).first() {
-            let categories = series_categories(series, None)?
+    let mut labels = entries
+        .iter()
+        .map(|name| shape_label(fonts, name, Point { x: 0.0, y: 0.0 }))
+        .collect::<Result<Vec<_>>>()?;
+    let available = if settings.overlay { full_plot } else { bounds };
+    let capacity = available.width - 12.0;
+    // Frozen native Word/PowerPoint 9 point legend controls qualify these
+    // nominal-font metrics within 1 point and the unchanged cropped paint gate.
+    let row_height = labels.first().map_or(0.0, |label| label.font_size * 1.875);
+    let mut positions = Vec::with_capacity(labels.len());
+    let mut width: f64 = 0.0;
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for label in &labels {
+        let entry_width = label.advances.iter().sum::<f64>() + label.font_size * 7.0 / 9.0 + 4.0;
+        if !entry_width.is_finite() || entry_width > capacity {
+            return Err(invalid_authoring_value("legend label exceeds chart width"));
+        }
+        if horizontal && x > 0.0 && x + entry_width > capacity {
+            x = 0.0;
+            y += row_height;
+        }
+        positions.push(Point { x, y });
+        width = width.max(x + entry_width);
+        if horizontal {
+            x += entry_width + 4.0;
+        } else {
+            y += row_height;
+        }
+    }
+    let height = if labels.is_empty() {
+        0.0
+    } else if horizontal {
+        y + row_height
+    } else {
+        y
+    };
+    if height > available.height - 12.0 {
+        return Err(invalid_authoring_value(
+            "legend entries exceed chart height",
+        ));
+    }
+    let mut content = bounds;
+    if !settings.overlay && !labels.is_empty() {
+        match settings.position {
+            LegendPosition::Right | LegendPosition::TopRight => content.width -= width + 10.0,
+            LegendPosition::Left => {
+                content.x += width + 10.0;
+                content.width -= width + 10.0;
+            }
+            LegendPosition::Top => {
+                content.y += height + 10.0;
+                content.height -= height + 10.0;
+            }
+            LegendPosition::Bottom => content.height -= height + 10.0,
+        }
+    }
+    let plot_bounds = geometry_plot_bounds(content)?;
+    let area = if settings.overlay {
+        plot_bounds
+    } else {
+        bounds
+    };
+    let origin = match settings.position {
+        LegendPosition::Right => Point {
+            x: area.x + area.width - width - 6.0,
+            y: area.y + (area.height - height) / 2.0,
+        },
+        LegendPosition::TopRight => Point {
+            x: area.x + area.width - width - 6.0,
+            y: area.y + 6.0,
+        },
+        LegendPosition::Left => Point {
+            x: area.x + 6.0,
+            y: area.y + (area.height - height) / 2.0,
+        },
+        LegendPosition::Top => Point {
+            x: area.x + (area.width - width) / 2.0,
+            y: area.y + 6.0,
+        },
+        LegendPosition::Bottom => Point {
+            x: area.x + (area.width - width) / 2.0,
+            y: area.y + area.height - height - 6.0,
+        },
+    };
+    let mut keys = Vec::with_capacity(labels.len());
+    for (label, offset) in labels.iter_mut().zip(positions) {
+        let x = origin.x + offset.x;
+        let y = origin.y + offset.y;
+        keys.push(Rect {
+            x,
+            y: y + (row_height - label.font_size * 5.0 / 9.0) / 2.0,
+            width: label.font_size * 5.0 / 9.0,
+            height: label.font_size * 5.0 / 9.0,
+        });
+        label.origin = Point {
+            x: x + label.font_size * 7.0 / 9.0,
+            y: y + label.font_size * 7.0 / 6.0,
+        };
+    }
+    Ok(LegendLayout {
+        plot: plot_bounds,
+        labels,
+        keys,
+    })
+}
+
+/// Legend entries in paint order. Varied pie and doughnut plots list their
+/// categories with per-point colours; other plots list one entry per series.
+fn legend_entries(plot: &Plot, colours: &PlotColours) -> Result<Vec<(String, Color)>> {
+    let names = legend_entry_names(plot)?;
+    if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        let indices = match plot_series(plot).first() {
+            Some(series) => logical_numeric_values(&series.values)?
+                .1
                 .into_iter()
-                .collect::<BTreeMap<_, _>>();
-            let (_, values) = logical_numeric_values(&series.values)?;
-            for (index, _) in values {
-                let name = categories
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        return names
+            .into_iter()
+            .zip(indices)
+            .map(|(name, index)| Ok((name, colours.pie_point(0, index)?)))
+            .collect();
+    }
+    Ok(names
+        .into_iter()
+        .zip(colours.series.iter().copied())
+        .collect())
+}
+
+/// Legend entry names. Pie and doughnut plots list the first series'
+/// categories (by cached point index); other plots list one entry per series.
+fn legend_entry_names(plot: &Plot) -> Result<Vec<String>> {
+    if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        let Some(series) = plot_series(plot).first() else {
+            return Ok(Vec::new());
+        };
+        let categories = series_categories(series, None)?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let (_, values) = logical_numeric_values(&series.values)?;
+        return Ok(values
+            .into_iter()
+            .map(|(index, _)| {
+                categories
                     .get(&index)
                     .cloned()
-                    .unwrap_or_else(|| (index + 1).to_string());
-                entries.push((name, colours.pie_point(0, index)?));
-            }
-        }
-        entries
-    } else {
-        plot_series(plot)
-            .iter()
-            .zip(&colours.series)
-            .enumerate()
-            .map(|(index, (series, colour))| (series_name(series, index), *colour))
-            .collect()
-    };
-    for (index, (name, colour)) in entries.iter().enumerate() {
-        let y = bounds.y + 6.0 + index as f64 * 13.0;
-        paths.push(filled_path(
-            Path::rect(Rect {
-                x,
-                y,
-                width: 7.0,
-                height: 7.0,
-            }),
-            *colour,
-        ));
-        labels.push(PositionedElement::Text(shape_label(
-            fonts,
-            name,
-            Point {
-                x: x + 10.0,
-                y: y + 7.0,
-            },
-        )?));
+                    .unwrap_or_else(|| (index + 1).to_string())
+            })
+            .collect());
     }
-    Ok(())
+    Ok(plot_series(plot)
+        .iter()
+        .enumerate()
+        .map(|(index, series)| series_name(series, index))
+        .collect())
+}
+
+fn render_legend(
+    layout: LegendLayout,
+    series_colours: &[Color],
+    paths: &mut Vec<PositionedElement>,
+    labels: &mut Vec<PositionedElement>,
+) {
+    for (key, colour) in layout.keys.into_iter().zip(series_colours) {
+        paths.push(filled_path(Path::rect(key), *colour));
+    }
+    labels.extend(layout.labels.into_iter().map(PositionedElement::Text));
 }
 
 fn validate_geometry_coordinates(elements: &[PositionedElement]) -> Result<()> {
@@ -7475,9 +7631,291 @@ pub struct CT_PlotArea {
     axes: Vec<Axis>,
 }
 
-/// A chart legend shell whose current children remain opaque.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// The five ChartML legend positions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LegendPosition {
+    #[default]
+    Right,
+    Left,
+    Top,
+    Bottom,
+    TopRight,
+}
+
+impl LegendPosition {
+    /// The ChartML lexical value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Right => "r",
+            Self::Left => "l",
+            Self::Top => "t",
+            Self::Bottom => "b",
+            Self::TopRight => "tr",
+        }
+    }
+    /// Parse one of the five supported lexical values.
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "r" => Ok(Self::Right),
+            "l" => Ok(Self::Left),
+            "t" => Ok(Self::Top),
+            "b" => Ok(Self::Bottom),
+            "tr" => Ok(Self::TopRight),
+            _ => Err(invalid_authoring_value(format!(
+                "unknown legend position {value}"
+            ))),
+        }
+    }
+}
+
+/// Effective legend settings. An absent legend has right/false defaults.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LegendSettings {
+    pub visible: bool,
+    pub position: LegendPosition,
+    pub overlay: bool,
+}
+
+fn legend_scalar_value(xml: &[u8], node: &ChartSourceNode) -> Result<String> {
+    let mut reader = Reader::from_reader(&xml[node.start..node.end]);
+    let value = match reader.read_event().map_err(OxmlError::from)? {
+        Event::Start(element) | Event::Empty(element) => attribute_value(&element, b"val")?
+            .unwrap_or_else(|| {
+                if node.local == b"legendPos" {
+                    "r".into()
+                } else {
+                    "1".into()
+                }
+            }),
+        _ => return Err(invalid_authoring_value("legend scalar root")),
+    };
+    loop {
+        match reader.read_event().map_err(OxmlError::from)? {
+            Event::End(_) | Event::Comment(_) | Event::PI(_) => {}
+            Event::Text(text) if text.iter().all(u8::is_ascii_whitespace) => {}
+            Event::Eof => return Ok(value),
+            _ => {
+                return Err(invalid_authoring_value(
+                    "legend scalar has non-scalar content",
+                ));
+            }
+        }
+    }
+}
+
+fn legend_settings_at(
+    xml: &[u8],
+    nodes: &[ChartSourceNode],
+    legend: usize,
+) -> Result<LegendSettings> {
+    let mut settings = LegendSettings {
+        visible: true,
+        ..LegendSettings::default()
+    };
+    let mut position = None;
+    let mut overlay = None;
+    for (index, node) in nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.parent == Some(legend) && n.qualified)
+    {
+        if node.local != b"legendPos" && node.local != b"overlay" {
+            continue;
+        }
+        if nodes.iter().any(|child| child.parent == Some(index)) {
+            return Err(invalid_authoring_value("legend scalar has child elements"));
+        }
+        let value = legend_scalar_value(xml, node)?;
+        if node.local == b"legendPos" {
+            set_once(&mut position, LegendPosition::parse(&value)?, "c:legendPos")?;
+        } else {
+            set_once(
+                &mut overlay,
+                parse_bool_lexical("c:overlay", "val", &value)?,
+                "c:overlay",
+            )?;
+        }
+    }
+    settings.position = position.unwrap_or_default();
+    settings.overlay = overlay.unwrap_or(false);
+    Ok(settings)
+}
+
+/// Read only the namespace-owned legend without rewriting producer bytes.
+pub fn chart_legend_settings(xml: &[u8]) -> Result<LegendSettings> {
+    oxml_core::xml::validate_strict_xml_1_0(xml)
+        .map_err(|error| invalid_authoring_value(format!("invalid chart XML: {error:?}")))?;
+    let nodes = chart_source_nodes(xml)?;
+    if !nodes
+        .first()
+        .is_some_and(|n| n.qualified && n.local == b"chartSpace")
+        || nodes.iter().filter(|n| n.parent.is_none()).count() != 1
+    {
+        return Err(invalid_authoring_value("owned chartSpace required"));
+    }
+    let chart = chart_child_node(&nodes, 0, b"chart")?;
+    let legends = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.parent == Some(chart) && n.qualified && n.local == b"legend")
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    match legends.as_slice() {
+        [] => Ok(LegendSettings::default()),
+        [index] => legend_settings_at(xml, &nodes, *index),
+        _ => Err(ChartError::DuplicateElement("c:legend".into())),
+    }
+}
+
+fn legend_child_rank(local: &[u8]) -> Option<u8> {
+    match local {
+        b"legendPos" => Some(0),
+        b"legendEntry" => Some(1),
+        b"layout" => Some(2),
+        b"overlay" => Some(3),
+        b"spPr" => Some(4),
+        b"txPr" => Some(5),
+        b"extLst" => Some(6),
+        _ => None,
+    }
+}
+
+fn insert_chart_child(
+    xml: &[u8],
+    node: &ChartSourceNode,
+    position: usize,
+    bytes: &[u8],
+) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(&xml[node.start..node.end]);
+    let event = reader.read_event().map_err(OxmlError::from)?;
+    let mut result = xml.to_vec();
+    if let Event::Empty(element) = event {
+        let end = node.start + reader.buffer_position() as usize;
+        let name = element_name(&element);
+        let mut replacement = xml[node.start..end - 2].to_vec();
+        replacement.push(b'>');
+        replacement.extend_from_slice(bytes);
+        replacement.extend_from_slice(format!("</{name}>").as_bytes());
+        result.splice(node.start..node.end, replacement);
+    } else {
+        result.splice(position..position, bytes.iter().copied());
+    }
+    Ok(result)
+}
+
+/// Stage a legend edit, preserving all other source bytes. None leaves a property unchanged.
+/// Position and overlay edits of an absent legend are no-ops. Hiding drops its settings.
+pub fn set_chart_legend(
+    xml: &[u8],
+    visible: Option<bool>,
+    position: Option<LegendPosition>,
+    overlay: Option<bool>,
+) -> Result<Vec<u8>> {
+    let current = chart_legend_settings(xml)?;
+    if visible == Some(false) {
+        if !current.visible {
+            return Ok(xml.to_vec());
+        }
+        let nodes = chart_source_nodes(xml)?;
+        let chart = chart_child_node(&nodes, 0, b"chart")?;
+        let legend = chart_child_node(&nodes, chart, b"legend")?;
+        let mut result = xml.to_vec();
+        result.drain(nodes[legend].start..nodes[legend].end);
+        return Ok(result);
+    }
+    if !current.visible && visible != Some(true) {
+        return Ok(xml.to_vec());
+    }
+    if !current.visible {
+        let nodes = chart_source_nodes(xml)?;
+        let chart = chart_child_node(&nodes, 0, b"chart")?;
+        let after = chart_child_node(&nodes, chart, b"plotArea")?;
+        let bytes = format!(
+            "<c:legend xmlns:c=\"{C_NS}\"><c:legendPos val=\"{}\"/><c:overlay val=\"{}\"/></c:legend>",
+            position.unwrap_or_default().as_str(),
+            u8::from(overlay.unwrap_or(false))
+        );
+        return insert_chart_child(xml, &nodes[chart], nodes[after].end, bytes.as_bytes());
+    }
+    let mut result = xml.to_vec();
+    for (local, value, changed) in [
+        (
+            "legendPos",
+            position.unwrap_or(current.position).as_str().to_owned(),
+            position.is_some_and(|v| v != current.position),
+        ),
+        (
+            "overlay",
+            u8::from(overlay.unwrap_or(current.overlay)).to_string(),
+            overlay.is_some_and(|v| v != current.overlay),
+        ),
+    ] {
+        if !changed {
+            continue;
+        }
+        let nodes = chart_source_nodes(&result)?;
+        let chart = chart_child_node(&nodes, 0, b"chart")?;
+        let legend = chart_child_node(&nodes, chart, b"legend")?;
+        if let Some(node) = nodes
+            .iter()
+            .find(|n| n.parent == Some(legend) && n.qualified && n.local == local.as_bytes())
+        {
+            let mut reader = Reader::from_reader(&result[node.start..node.end]);
+            let event = reader.read_event().map_err(OxmlError::from)?;
+            let end = node.start + reader.buffer_position() as usize;
+            let mut writer = Writer::new(Vec::new());
+            match event {
+                Event::Start(element) | Event::Empty(element) => {
+                    let mut start = BytesStart::new(element_name(&element));
+                    push_attributes(&mut start, &capture_attributes_except(&element, b"val")?);
+                    start.push_attribute(("val", value.as_str()));
+                    writer
+                        .write_event(if result[end - 2..end] == *b"/>" {
+                            Event::Empty(start)
+                        } else {
+                            Event::Start(start)
+                        })
+                        .map_err(OxmlError::from)?;
+                }
+                _ => return Err(invalid_authoring_value("legend scalar root")),
+            }
+            result.splice(node.start..end, writer.into_inner());
+        } else {
+            let rank = legend_child_rank(local.as_bytes()).expect("owned legend scalar");
+            let insert = nodes
+                .iter()
+                .find(|n| {
+                    n.parent == Some(legend)
+                        && n.qualified
+                        && legend_child_rank(&n.local).is_some_and(|r| r > rank)
+                })
+                .map(|n| n.start)
+                .unwrap_or_else(|| {
+                    result[..nodes[legend].end]
+                        .iter()
+                        .rposition(|v| *v == b'<')
+                        .unwrap_or(nodes[legend].start)
+                });
+            let bytes = format!("<c:{local} xmlns:c=\"{C_NS}\" val=\"{value}\"/>");
+            result = insert_chart_child(&result, &nodes[legend], insert, bytes.as_bytes())?;
+        }
+    }
+    let expected = LegendSettings {
+        visible: true,
+        position: position.unwrap_or(current.position),
+        overlay: overlay.unwrap_or(current.overlay),
+    };
+    if chart_legend_settings(&result)? != expected {
+        return Err(invalid_authoring_value("legend edit projection mismatch"));
+    }
+    Ok(result)
+}
+
+/// A legend retaining opaque children and their effective projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CT_Legend {
+    root_name: String,
+    settings: LegendSettings,
     raw_attributes: Vec<(String, String)>,
     raw_children: OrderedRawChildren,
 }
@@ -10853,17 +11291,77 @@ fn is_supported_series_plot(local: &[u8]) -> bool {
     )
 }
 
+impl Default for CT_Legend {
+    fn default() -> Self {
+        Self {
+            root_name: "c:legend".into(),
+            settings: LegendSettings {
+                visible: true,
+                ..LegendSettings::default()
+            },
+            raw_attributes: Vec::new(),
+            raw_children: OrderedRawChildren::default(),
+        }
+    }
+}
+
 impl CT_Legend {
-    fn from_xml(xml: &[u8]) -> Result<Self> {
+    fn from_xml_with_namespaces(xml: &[u8], namespaces: &NamespaceBindings) -> Result<Self> {
+        let mut wrapper = BytesStart::new("scope");
+        for (prefix, uri) in namespaces {
+            let name = if prefix.is_empty() {
+                "xmlns".to_owned()
+            } else {
+                format!("xmlns:{}", String::from_utf8_lossy(prefix))
+            };
+            wrapper.push_attribute((name.as_str(), uri.as_str()));
+        }
+        let mut writer = Writer::new(Vec::new());
+        writer
+            .write_event(Event::Start(wrapper))
+            .map_err(OxmlError::from)?;
+        writer.get_mut().extend_from_slice(xml);
+        writer
+            .write_event(Event::End(BytesEnd::new("scope")))
+            .map_err(OxmlError::from)?;
+        let wrapped = writer.into_inner();
+        let nodes = chart_source_nodes(&wrapped)?;
+        let legend = chart_child_node(&nodes, 0, b"legend")?;
+        let settings = legend_settings_at(&wrapped, &nodes, legend)?;
         let (raw_attributes, raw_children) = parse_raw_shell(xml, b"legend", "c:legend")?;
+        let mut reader = Reader::from_reader(xml);
+        let root_name = loop {
+            match reader.read_event().map_err(OxmlError::from)? {
+                Event::Start(e) | Event::Empty(e) => break element_name(&e),
+                Event::Eof => return Err(missing_end("legend")),
+                _ => {}
+            }
+        };
+        // Preserve a producer root alias only when a foreign c binding must
+        // remain in scope for opaque descendants. Otherwise retain fixed c output.
+        let root_name = if raw_attributes
+            .iter()
+            .any(|(name, uri)| name == "xmlns:c" && uri != C_NS)
+        {
+            root_name
+        } else {
+            "c:legend".to_owned()
+        };
         Ok(Self {
+            root_name,
+            settings,
             raw_attributes,
             raw_children,
         })
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        write_raw_shell(writer, "c:legend", &self.raw_attributes, &self.raw_children)
+        write_raw_shell(
+            writer,
+            &self.root_name,
+            &self.raw_attributes,
+            &self.raw_children,
+        )
     }
 
     pub fn raw_children(&self) -> &OrderedRawChildren {
@@ -10884,7 +11382,9 @@ fn parse_raw_shell(
             .map_err(OxmlError::from)?
         {
             Event::Start(element) if matches_local_name(element.name().as_ref(), local) => {
-                reject_conflicting_prefix(&element, b"c", C_NS)?;
+                if local != b"legend" {
+                    reject_conflicting_prefix(&element, b"c", C_NS)?;
+                }
                 let raw_attributes = capture_attributes(&element)?;
                 let mut raw_children = OrderedRawChildren::default();
                 let mut child_buffer = Vec::new();
@@ -10913,7 +11413,9 @@ fn parse_raw_shell(
                 return Ok((raw_attributes, raw_children));
             }
             Event::Empty(element) if matches_local_name(element.name().as_ref(), local) => {
-                reject_conflicting_prefix(&element, b"c", C_NS)?;
+                if local != b"legend" {
+                    reject_conflicting_prefix(&element, b"c", C_NS)?;
+                }
                 return Ok((capture_attributes(&element)?, OrderedRawChildren::default()));
             }
             Event::Start(element) | Event::Empty(element) => {
@@ -11148,7 +11650,11 @@ impl ChartParseState {
                 self.boundary = self.boundary.max(8);
             }
             b"legend" => {
-                set_once(&mut self.legend, CT_Legend::from_xml(&raw)?, "c:legend")?;
+                set_once(
+                    &mut self.legend,
+                    CT_Legend::from_xml_with_namespaces(&raw, namespaces)?,
+                    "c:legend",
+                )?;
                 self.boundary = self.boundary.max(9);
             }
             b"plotVisOnly" => {
@@ -17981,5 +18487,267 @@ mod tests {
         let error = replace_chart_data(external.as_bytes(), &book, &changed).unwrap_err();
         assert!(error.to_string().contains("external workbook formula"));
         assert_eq!(book, book_source);
+    }
+    #[test]
+    fn fx246_legend_position_reserves_measured_plot_space() {
+        let mut outputs = Vec::new();
+        for position in ["r", "b", "l"] {
+            let xml = chart_with_plot(&bar_plot("")).replace(
+                "</q:plotArea></q:chart>",
+                &format!("</q:plotArea><q:legend><q:legendPos val=\"{position}\"/><q:overlay val=\"0\"/></q:legend></q:chart>"),
+            );
+            let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+            let mut fonts = FontManager::new_deterministic().unwrap();
+            outputs.push(format!(
+                "{:?}",
+                render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap()
+            ));
+        }
+        assert_ne!(
+            outputs[0], outputs[1],
+            "right and bottom legends must differ"
+        );
+        assert_ne!(outputs[0], outputs[2], "right and left legends must differ");
+    }
+
+    #[test]
+    fn fx246_legend_mutation_preserves_opaque_source_and_order() {
+        let base = chart_with_plot(&bar_plot(""));
+        let payload = "<x:legendPos xmlns:x='urn:foreign' val='unknown'/><!--keep exact--><x:opaque xmlns:x='urn:foreign' literal='a &amp; b'/>";
+        let xml=base.replace("</q:plotArea></q:chart>",&format!("</q:plotArea><q:legend xmlns:c='urn:foreign' producer='keep'>{payload}<q:layout/><q:overlay val='false' untouched='yes'/><q:extLst/></q:legend></q:chart>"));
+        let settings = super::chart_legend_settings(xml.as_bytes()).unwrap();
+        assert_eq!(
+            settings,
+            super::LegendSettings {
+                visible: true,
+                ..Default::default()
+            }
+        );
+        let parsed = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(parsed.chart.legend.as_ref().unwrap().settings, settings);
+        assert_eq!(
+            super::set_chart_legend(
+                xml.as_bytes(),
+                None,
+                Some(super::LegendPosition::Right),
+                Some(false)
+            )
+            .unwrap(),
+            xml.as_bytes()
+        );
+        let changed = super::set_chart_legend(
+            xml.as_bytes(),
+            None,
+            Some(super::LegendPosition::Bottom),
+            Some(true),
+        )
+        .unwrap();
+        let text = String::from_utf8(changed.clone()).unwrap();
+        assert!(text.contains(payload));
+        assert!(text.contains("untouched=\"yes\""));
+        assert!(text.find("<c:legendPos").unwrap() < text.find("<q:layout").unwrap());
+        assert!(text.find("<q:overlay").unwrap() < text.find("<q:extLst").unwrap());
+        assert_eq!(
+            super::chart_legend_settings(&changed).unwrap(),
+            super::LegendSettings {
+                visible: true,
+                position: super::LegendPosition::Bottom,
+                overlay: true
+            }
+        );
+        assert!(
+            super::chart_legend_settings(
+                xml.replace(
+                    "<q:layout/>",
+                    "<q:legendPos val='l'/><q:legendPos val='r'/>"
+                )
+                .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            super::chart_legend_settings(xml.replace("val='false'", "val='maybe'").as_bytes())
+                .is_err()
+        );
+        let hidden = super::set_chart_legend(&changed, Some(false), None, None).unwrap();
+        assert!(!super::chart_legend_settings(&hidden).unwrap().visible);
+        assert_eq!(
+            super::set_chart_legend(&hidden, None, Some(super::LegendPosition::Left), Some(true))
+                .unwrap(),
+            hidden
+        );
+        let shown = super::set_chart_legend(
+            &hidden,
+            Some(true),
+            Some(super::LegendPosition::Top),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(
+            super::chart_legend_settings(&shown).unwrap(),
+            super::LegendSettings {
+                visible: true,
+                position: super::LegendPosition::Top,
+                overlay: true
+            }
+        );
+    }
+
+    #[test]
+    fn fx246_overlay_and_absent_legends_keep_the_correct_plot() {
+        use super::{CT_Legend, LegendPosition as P, LegendSettings};
+        let mut chart = labelled_bar_chart();
+        let bounds = chart_bounds();
+        let full = super::geometry_plot_bounds(bounds).unwrap();
+        let plot = chart.chart.plot_area.plots().unwrap()[0].clone();
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        for position in [P::Right, P::Left, P::Top, P::Bottom, P::TopRight] {
+            chart.chart.legend = Some(CT_Legend {
+                settings: LegendSettings {
+                    visible: true,
+                    position,
+                    overlay: false,
+                },
+                ..Default::default()
+            });
+            let layout = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+            for (key, label) in layout.keys.iter().zip(&layout.labels) {
+                let right = label.origin.x + label.advances.iter().sum::<f64>();
+                assert!(key.x >= bounds.x && right <= bounds.x + bounds.width);
+                let outside = key.x + key.width <= layout.plot.x
+                    || key.x >= layout.plot.x + layout.plot.width
+                    || key.y + key.height <= layout.plot.y
+                    || key.y >= layout.plot.y + layout.plot.height;
+                assert!(outside, "non-overlay {position:?}");
+                assert!(label.origin.y >= bounds.y && label.origin.y <= bounds.y + bounds.height);
+            }
+            chart.chart.legend.as_mut().unwrap().settings.overlay = true;
+            let overlay = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+            assert_eq!(overlay.plot, full);
+            assert!(
+                overlay.keys.iter().any(|key| key.x < full.x + full.width
+                    && key.x + key.width > full.x
+                    && key.y < full.y + full.height
+                    && key.y + key.height > full.y),
+                "negative control moved inside the plot must be rejected by the non-overlap observer"
+            );
+        }
+        chart.chart.legend = None;
+        let absent = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+        assert_eq!(absent.plot, full);
+        assert!(absent.keys.is_empty());
+    }
+
+    #[test]
+    fn fx246_legend_labels_fit_bounded_chart_geometry() {
+        let mut chart = labelled_bar_chart();
+        if let Plot::Bar { series, .. } = &mut chart.chart.plot_area.plots_mut().unwrap()[0] {
+            series[0].name.as_mut().unwrap().values[0] =
+                "A legend considerably wider than fifty eight points".into();
+        }
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        assert!(
+            render_chart(&chart.chart, chart_bounds(), &mut fonts).is_err(),
+            "a chart too narrow for its label refuses explicitly"
+        );
+        let wide = Rect {
+            width: 600.0,
+            ..chart_bounds()
+        };
+        let group = render_chart(&chart.chart, wide, &mut fonts).unwrap();
+        assert!(format!("{group:?}").contains("considerably wider"));
+    }
+    #[test]
+    fn fx246_legend_scalar_defaults_and_local_shadows_are_qualified() {
+        let base = chart_with_plot(&bar_plot(""));
+        for (children, overlay) in [
+            ("<q:legendPos/><q:overlay/>", true),
+            (
+                "<q:legendPos xmlns:q='urn:foreign' val='not owned'/><q:overlay val='0'/>",
+                false,
+            ),
+            (
+                "<c:legendPos xmlns:c='urn:foreign' val='not owned'/>",
+                false,
+            ),
+        ] {
+            let xml = base.replace(
+                "</q:plotArea></q:chart>",
+                &format!("</q:plotArea><q:legend>{children}</q:legend></q:chart>"),
+            );
+            let settings = super::chart_legend_settings(xml.as_bytes()).unwrap();
+            assert_eq!(settings.position, super::LegendPosition::Right);
+            assert_eq!(settings.overlay, overlay);
+            assert_eq!(
+                CT_ChartSpace::from_xml(xml.as_bytes())
+                    .unwrap()
+                    .chart
+                    .legend
+                    .unwrap()
+                    .settings,
+                settings
+            );
+        }
+    }
+    #[test]
+    fn fx246_legend_entrypoints_require_one_well_formed_xml_document() {
+        let source = chart_with_plot(&bar_plot(""));
+        for invalid in [
+            format!("{source}NOT_XML_DOCUMENT_CONTENT"),
+            format!("NOT_XML_DOCUMENT_CONTENT{source}"),
+            format!("{source}<![CDATA[tail]]>"),
+            format!("{source}&amp;"),
+            format!("{source}{source}"),
+            format!("<!--prefix--><?xml version='1.0'?>{source}"),
+            source.replace("</q:chartSpace>", "<u:opaque/></q:chartSpace>"),
+            source.replace(
+                "</q:chartSpace>",
+                "<x:opaque xmlns:z='urn:producer' x:a='1' z:a='2'/></q:chartSpace>",
+            ),
+        ] {
+            assert!(
+                super::chart_legend_settings(invalid.as_bytes()).is_err(),
+                "getter admitted {invalid}"
+            );
+            assert!(
+                super::set_chart_legend(
+                    invalid.as_bytes(),
+                    Some(true),
+                    Some(super::LegendPosition::Left),
+                    None
+                )
+                .is_err(),
+                "setter admitted {invalid}"
+            );
+        }
+        let valid = format!(
+            "<?xml version='1.0'?><!--prolog-->{source}\n<!--tail--><?producer preserved?>"
+        );
+        assert_eq!(
+            super::set_chart_legend(valid.as_bytes(), None, None, None).unwrap(),
+            valid.as_bytes()
+        );
+    }
+
+    #[test]
+    fn fx246_nominal_legend_metrics_match_independent_native_components() {
+        let chart = labelled_bar_chart();
+        let plot = &chart.chart.plot_area.plots().unwrap()[0];
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let layout = super::layout_legend(&chart.chart, plot, chart_bounds(), &mut fonts).unwrap();
+        // Frozen Word16.113.2 and PowerPoint16.113.4, explicit Aptos9pt
+        // legend controls. Absolute position and cropped paint are separately
+        // qualified from actual PDFs with the same one-point bound.
+        assert!((layout.keys[0].width - 4.9433).abs() <= 1.0);
+        assert!((layout.labels[0].origin.x - layout.keys[0].x - 7.0399).abs() <= 1.0);
+        assert!((layout.keys[0].height - 4.9433).abs() <= 1.0);
+        let mut multiple = four_series_bar_chart();
+        multiple.chart.legend = Some(super::CT_Legend::default());
+        let plot = &multiple.chart.plot_area.plots().unwrap()[0];
+        let layout =
+            super::layout_legend(&multiple.chart, plot, chart_bounds(), &mut fonts).unwrap();
+        for pair in layout.keys.windows(2) {
+            assert!((pair[1].y - pair[0].y - 16.875).abs() <= 1.0);
+        }
     }
 }

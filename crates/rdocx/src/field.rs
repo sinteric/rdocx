@@ -5098,19 +5098,29 @@ pub(crate) fn patch_relationship_ids(
     Ok(updated)
 }
 
-fn copy_fragment_part(
+pub(crate) fn copy_fragment_part(
     source: &OpcPackage,
     destination: &mut Document,
     source_part: &str,
     part_map: &BTreeMap<String, String>,
     copied: &mut HashSet<String>,
 ) -> Result<String> {
-    let destination_part = part_map.get(source_part).cloned().ok_or_else(|| {
-        Error::Other(format!(
-            "rich mail merge fragment part {source_part} was not preallocated"
-        ))
-    })?;
-    if !copied.insert(source_part.to_owned()) {
+    let destination_part = part_map
+        .get(source_part)
+        .or_else(|| {
+            part_map.iter().find_map(|(source, destination)| {
+                source
+                    .eq_ignore_ascii_case(source_part)
+                    .then_some(destination)
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "rich mail merge fragment part {source_part} was not preallocated"
+            ))
+        })?;
+    if !copied.insert(destination_part.to_ascii_lowercase()) {
         return Ok(destination_part);
     }
     let bytes = source.get_part(source_part).ok_or_else(|| {

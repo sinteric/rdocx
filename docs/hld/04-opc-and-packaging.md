@@ -720,6 +720,16 @@ stable attributes, ordered children, and explicit `mo` fences. `mfenced` is
 accepted only on input. Unsupported safe content is diagnosed, and descendants
 are retained only at the declared transparent `semantics` boundary.
 
+The bounded LaTeX subset preserves `\pi`, `\to` and `\rightarrow`, `\infty`,
+upright `\lim`, and explicit `\,` thin spacing. Ordinary characters are single
+TeX atoms, so scripts bind to their original base before compatible runs merge.
+The supported inline `lim` uses the existing subscript expression. MathML `mathvariant` accepts
+`normal`, and `mspace` accepts exactly `0.167em` or `thinmathspace`. The writer
+preserves supported upright formatting and meaningful U+2009 spacing. Unsupported
+variants, widths, and LaTeX spacing commands retain ordered loss diagnostics.
+An invisible U+2061 function application operator normalizes only directly after
+the supported upright `lim` token, with other operators retained.
+
 Logical owner identity includes exact normalized raw marker multiplicity and
 the resolved namespace facts of owner-dependent element and attribute uses.
 A same-URI declaration already local to a retained subtree remains independent

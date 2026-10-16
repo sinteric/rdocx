@@ -19,7 +19,7 @@ use rdocx::{
     BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, CoreProperties,
     CustomProperty, CustomPropertyValue, Document, FieldDateTime, FieldEvaluationContext,
     HdrFtrType, HeaderFooterKind, PictureOccurrence, RasterFormat, RasterOptions, RasterOutput,
-    RevisionKind, RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
+    RevisionKind, RevisionStyle, RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
 };
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
@@ -44,6 +44,7 @@ pub struct RenderOptions<'a> {
     pub quality: u8,
     pub transparent: bool,
     pub revision_view: RevisionView,
+    pub revision_style: RevisionStyle,
 }
 
 #[derive(Clone, Copy)]
@@ -700,6 +701,7 @@ pub fn convert_input(
     dpi: u32,
     font_dir: Option<&Path>,
     revision_view: RevisionView,
+    revision_style: RevisionStyle,
     image: ImageOptions<'_>,
 ) -> Result<()> {
     let extension = file
@@ -719,6 +721,7 @@ pub fn convert_input(
             dpi,
             font_dir,
             revision_view,
+            revision_style,
             image,
         );
     }
@@ -772,10 +775,15 @@ pub fn convert(
     dpi: u32,
     font_dir: Option<&Path>,
     revision_view: RevisionView,
+    revision_style: RevisionStyle,
     image: ImageOptions<'_>,
 ) -> Result<()> {
+    check_revision_style(revision_view, revision_style)?;
     let doc = Document::open(file)?;
-    let render_options = rdocx::RenderOptions { revision_view };
+    let render_options = rdocx::RenderOptions {
+        revision_view,
+        revision_style,
+    };
 
     let default_ext = match to {
         "pdf" => "pdf",
@@ -1803,6 +1811,25 @@ pub fn parse_revision_view(name: &str) -> std::result::Result<RevisionView, Stri
     }
 }
 
+pub fn parse_revision_style(name: &str) -> std::result::Result<RevisionStyle, String> {
+    match name {
+        "plain" => Ok(RevisionStyle::Plain),
+        "legal" => Ok(RevisionStyle::Legal),
+        _ => Err(format!(
+            "unknown revision style {name:?}, expected plain or legal"
+        )),
+    }
+}
+
+/// Refuse a revision style other than plain outside the tracked view, which
+/// alone marks revisions.
+fn check_revision_style(view: RevisionView, style: RevisionStyle) -> Result<()> {
+    if style != RevisionStyle::Plain && view != RevisionView::Tracked {
+        return Err("--revision-style applies only with --revision-view tracked".into());
+    }
+    Ok(())
+}
+
 /// Parse one `--ignore-story` value.
 pub fn parse_comparison_story(name: &str) -> std::result::Result<ComparisonStoryKind, String> {
     COMPARISON_STORIES
@@ -2136,6 +2163,7 @@ pub fn render(
     options: RenderOptions<'_>,
 ) -> Result<()> {
     validate_dpi(dpi)?;
+    check_revision_style(options.revision_view, options.revision_style)?;
     let doc = Document::open(file)?;
     let out_dir = output_dir.unwrap_or_else(|| Path::new("."));
     let (format, extension) =
@@ -2153,6 +2181,7 @@ pub fn render(
         &font_refs,
         rdocx::RenderOptions {
             revision_view: options.revision_view,
+            revision_style: options.revision_style,
         },
     )?;
     let selected = selected_render_pages(layout.layout.pages.len(), options.page, options.pages)?;
@@ -3367,6 +3396,7 @@ mod tests {
             96,
             None,
             RevisionView::Accepted,
+            RevisionStyle::Plain,
             ImageOptions {
                 pages: None,
                 quality: 90,

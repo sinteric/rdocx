@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 24 | 0 | 30 |
-| X, Cross-cutting | 258 | 239 | 0 | 15 |
-| **Total** | **589** | **513** | **0** | **72** |
+| X, Cross-cutting | 261 | 246 | 0 | 11 |
+| **Total** | **592** | **520** | **0** | **68** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -800,11 +800,11 @@ HLD14 contract before adopting contributor changes.
 | F-X229 | Repair comparison reconstruction correctness | S92 | L | done |
 | F-X230 | Group comparison changes for readable revisions | S92 | M | done |
 | F-X231 | Preserve PowerPoint HTML import whitespace | S92 | M | done |
-| F-X232 | Render legal revisions and qualify checked XML repros | S93 | L | pending |
-| F-X233 | Repair paragraph border geometry | S93 | M | pending |
-| F-X234 | Preserve supported LaTeX conversion structure | S93 | M | pending |
-| F-X235 | Qualify equation layout against native Word | S93 | L | pending |
-| F-X236 | Measure public setter inlining before changing policy | S93 | S | pending |
+| F-X232 | Render legal revisions and qualify checked XML repros | S93 | L | done |
+| F-X233 | Repair paragraph border geometry | S93 | M | done |
+| F-X234 | Preserve supported LaTeX conversion structure | S93 | M | done |
+| F-X235 | Qualify equation layout against native Word | S93 | L | done |
+| F-X236 | Measure public setter inlining before changing policy | S93 | S | done |
 | F-X237 | Restore linear Python table owner inventory | S92 | L | done |
 | F-X238 | Restore python-docx Word names from the first-draft corpus | S94 | L | pending |
 | F-X239 | python-pptx notes names and refusal of silent zero values | S94 | M | pending |
@@ -813,4 +813,7 @@ HLD14 contract before adopting contributor changes.
 | F-X242 | Form control geometry and AcroForm field model | S96 | L | pending |
 | F-X243 | Field appearance streams, full-font resources and conformance | S96 | L | pending |
 | F-X244 | Signature field, bindings and CLI option | S96 | M | pending |
+| F-X245 | Preserve chart data changes in Word comparison | S93 | L | done |
+| F-X246 | Honor chart legend position and overlay during rendering | S93 | L | done |
+| F-X247 | Preserve the common LaTeX inputs reported in Issue365 | S94 | L | pending |
 <!-- AUTOGEN:backlog-MX END -->

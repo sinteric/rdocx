@@ -12984,6 +12984,7 @@ fn save_pdf_to_file() {
         &tracked_path,
         rdocx::RenderOptions {
             revision_view: rdocx::RevisionView::Tracked,
+            revision_style: rdocx::RevisionStyle::Plain,
         },
     );
     if result.is_ok() {
@@ -19630,6 +19631,7 @@ mod advanced_table_authoring_and_geometry {
             fonts: Vec::new(),
             embedded_fonts: Vec::new(),
             revision_view: rdocx_layout::RevisionView::Accepted,
+            revision_style: rdocx_layout::RevisionStyle::Plain,
         }
     }
 
@@ -25526,4 +25528,170 @@ fn run_width_scale_and_position_can_restore_inheritance_after_reopen() {
     let mut reopened = Document::from_bytes(&bytes).unwrap();
     let xml = document_xml(&mut reopened);
     assert!(!std::str::from_utf8(&xml).unwrap().contains("<w:rPr"));
+}
+
+#[test]
+fn fx246_word_legend_roundtrip_noops_and_shared_owners() {
+    use rdocx::{ChartData, ChartKind, LegendPosition as P};
+    let mut document = Document::new();
+    let data = ChartData {
+        categories: vec!["Q1".into(), "Q2".into()],
+        series: vec![
+            ("North".into(), vec![12.0, 14.0]),
+            ("South".into(), vec![9.0, 11.0]),
+        ],
+        ..Default::default()
+    };
+    document
+        .add_chart(
+            ChartKind::Bar,
+            Length::inches(6.0),
+            Length::inches(2.6),
+            &data,
+        )
+        .unwrap();
+    let original = document.to_bytes().unwrap();
+    document
+        .set_chart_legend(0, None, Some(P::Right), Some(false))
+        .unwrap();
+    assert_eq!(document.to_bytes().unwrap(), original);
+    for position in [P::Right, P::Left, P::Top, P::Bottom, P::TopRight] {
+        document
+            .set_chart_legend(0, None, Some(position), Some(true))
+            .unwrap();
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.chart_legend(0).unwrap().position, position);
+        assert!(reopened.chart_legend(0).unwrap().overlay);
+    }
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(original)).unwrap();
+    let body = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let start = body.find("<w:p>").unwrap();
+    let end = start + body[start..].find("</w:p>").unwrap() + 6;
+    let doubled = body.replacen("</w:body>", &format!("{}</w:body>", &body[start..end]), 1);
+    package.set_part("/word/document.xml", doubled.into_bytes());
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut cursor).unwrap();
+    let mut shared = Document::from_bytes(&cursor.into_inner()).unwrap();
+    shared
+        .set_chart_legend(0, None, Some(P::Bottom), Some(true))
+        .unwrap();
+    assert_eq!(shared.chart_legend(0).unwrap().position, P::Bottom);
+    assert_eq!(shared.chart_legend(1).unwrap().position, P::Right);
+    shared.set_chart_legend(0, Some(false), None, None).unwrap();
+    let hidden = shared.to_bytes().unwrap();
+    shared
+        .set_chart_legend(0, None, Some(P::Left), Some(true))
+        .unwrap();
+    assert_eq!(shared.to_bytes().unwrap(), hidden);
+    shared.set_chart_legend(0, Some(true), None, None).unwrap();
+    assert_eq!(shared.chart_legend(0).unwrap().position, P::Right);
+    assert!(!shared.chart_legend(0).unwrap().overlay);
+    let before = shared.to_bytes().unwrap();
+    assert!(
+        shared
+            .set_chart_legend(999, None, Some(P::Left), None)
+            .is_err()
+    );
+    assert_eq!(shared.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn fx246_both_formats_render_three_distinct_legend_positions() {
+    use rdocx::{ChartData, ChartKind, LegendPosition as P};
+    let data = ChartData {
+        categories: vec!["Q1".into(), "Q2".into(), "Q3".into()],
+        series: vec![
+            ("North".into(), vec![12.0, 14.0, 15.0]),
+            ("South".into(), vec![9.0, 11.0, 10.0]),
+            ("West".into(), vec![7.0, 8.0, 13.0]),
+        ],
+        ..Default::default()
+    };
+    let mut word = Document::new();
+    word.add_paragraph("Quarterly volume by region.");
+    word.add_chart(
+        ChartKind::Bar,
+        Length::inches(6.0),
+        Length::inches(2.6),
+        &data,
+    )
+    .unwrap();
+    let mut ppt = rpptx::Presentation::new().unwrap();
+    ppt.add_slide(6).unwrap();
+    let id = ppt
+        .add_chart(
+            0,
+            ChartKind::Bar,
+            Length::inches(0.5).as_emu(),
+            Length::inches(1.0).as_emu(),
+            Length::inches(6.0).as_emu(),
+            Length::inches(2.6).as_emu(),
+            &data,
+        )
+        .unwrap()
+        .non_visual_id()
+        .unwrap();
+    let mut word_renders = Vec::new();
+    let mut ppt_renders = Vec::new();
+    for position in [P::Right, P::Bottom, P::Left] {
+        word.set_chart_legend(1, None, Some(position), Some(false))
+            .unwrap();
+        ppt.set_chart_legend(0, id, None, Some(position), Some(false))
+            .unwrap();
+        word_renders.push(
+            word.render_page_to_png_deterministic(0, 150.0)
+                .unwrap()
+                .unwrap(),
+        );
+        ppt_renders.push(ppt.slide_png_deterministic(0, 150.0).unwrap().unwrap());
+    }
+    for renders in [word_renders, ppt_renders] {
+        assert_ne!(renders[0], renders[1]);
+        assert_ne!(renders[0], renders[2]);
+        assert_ne!(renders[1], renders[2]);
+    }
+    // The external native exports use these exact unmodified Issue383 packages.
+    // Export their deterministic product counterparts when qualifying the oracle.
+    if let Some(root) = std::env::var_os("RDOCX_FX246_NATIVE_INPUTS") {
+        let root = std::path::PathBuf::from(root);
+        for name in ["default", "bottom", "left", "right-explicit"] {
+            let document = Document::open(root.join(format!("legend-{name}.docx"))).unwrap();
+            std::fs::write(
+                root.join(format!("legend-{name}-docx-deterministic.pdf")),
+                document.to_pdf_deterministic().unwrap(),
+            )
+            .unwrap();
+            let deck = rpptx::Presentation::from_bytes(
+                &std::fs::read(root.join(format!("legend-{name}.pptx"))).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join(format!("legend-{name}-pptx-deterministic.pdf")),
+                deck.to_pdf_deterministic().unwrap(),
+            )
+            .unwrap();
+        }
+        if let Some(font) = std::env::var_os("RDOCX_FX246_NATIVE_FONT") {
+            let bytes = std::fs::read(font).unwrap();
+            let fonts = [("Carlito", bytes.as_slice())];
+            let document = Document::open(root.join("legend-right-fontmatched.docx")).unwrap();
+            std::fs::write(
+                root.join("legend-right-fontmatched-docx-deterministic.pdf"),
+                document
+                    .to_pdf_with_fonts_deterministic_and_options(
+                        &fonts,
+                        rdocx::RenderOptions::default(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            let deck =
+                rpptx::Presentation::open(root.join("legend-right-fontmatched.pptx")).unwrap();
+            std::fs::write(
+                root.join("legend-right-fontmatched-pptx-deterministic.pdf"),
+                deck.to_pdf_deterministic_with_fonts(&fonts).unwrap(),
+            )
+            .unwrap();
+        }
+    }
 }

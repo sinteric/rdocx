@@ -21,7 +21,7 @@ use std::path::Path;
 #[cfg(feature = "render")]
 use diagram::{DiagramResources, ScopedDiagramResources};
 use oxml_chart::CT_ChartSpace;
-pub use oxml_chart::{ChartData, ChartKind, RgbColor};
+pub use oxml_chart::{ChartData, ChartKind, LegendPosition, LegendSettings, RgbColor};
 use oxml_core::OxmlError;
 pub use oxml_core::app_properties::AppProperties;
 pub use oxml_core::core_properties::CoreProperties;
@@ -12079,6 +12079,32 @@ impl Presentation {
         ))
     }
 
+    /// Read effective settings of one uniquely owned chart.
+    pub fn chart_legend(&self, slide_index: usize, shape_id: u32) -> Result<LegendSettings> {
+        let (_, _, chart, _, _) = self.chart_owner(slide_index, shape_id, "read chart legend")?;
+        oxml_chart::chart_legend_settings(required_part(&self.package, &chart)?)
+            .map_err(|e| invalid_chart_mutation("read chart legend", e.to_string()))
+    }
+
+    /// Edit one legend without changing its workbook or other chart owners.
+    pub fn set_chart_legend(
+        &mut self,
+        slide_index: usize,
+        shape_id: u32,
+        visible: Option<bool>,
+        position: Option<LegendPosition>,
+        overlay: Option<bool>,
+    ) -> Result<()> {
+        let (_, _, chart, _, _) = self.chart_owner(slide_index, shape_id, "set chart legend")?;
+        let bytes = required_part(&self.package, &chart)?;
+        let candidate = oxml_chart::set_chart_legend(bytes, visible, position, overlay)
+            .map_err(|e| invalid_chart_mutation("set chart legend", e.to_string()))?;
+        if candidate == bytes {
+            return Ok(());
+        }
+        self.publish_chart_parts(slide_index, shape_id, candidate, None)
+    }
+
     /// Replaces one live chart's data and workbook together, isolating shared owners.
     pub fn replace_chart_data(
         &mut self,
@@ -12087,7 +12113,7 @@ impl Presentation {
         data: &ChartData,
     ) -> Result<()> {
         const OPERATION: &str = "replace chart data";
-        let (path, relationship_id, old_chart, workbook_id, old_workbook) =
+        let (_, _, old_chart, _, old_workbook) =
             self.chart_owner(slide_index, shape_id, OPERATION)?;
         let chart_bytes = required_part(&self.package, &old_chart)?;
         let workbook_bytes = required_part(&self.package, &old_workbook)?;
@@ -12097,6 +12123,24 @@ impl Presentation {
         if chart_candidate == chart_bytes && workbook_candidate == workbook_bytes {
             return Ok(());
         }
+        self.publish_chart_parts(
+            slide_index,
+            shape_id,
+            chart_candidate,
+            Some(workbook_candidate),
+        )
+    }
+
+    fn publish_chart_parts(
+        &mut self,
+        slide_index: usize,
+        shape_id: u32,
+        chart_candidate: Vec<u8>,
+        workbook_candidate: Option<Vec<u8>>,
+    ) -> Result<()> {
+        const OPERATION: &str = "publish chart parts";
+        let (path, relationship_id, old_chart, workbook_id, old_workbook) =
+            self.chart_owner(slide_index, shape_id, OPERATION)?;
         let owner = ShapeOwner::Slide(slide_index);
         let slide_part = self.owner_part_name(owner)?.to_owned();
         let source_xml = self.slides[slide_index]
@@ -12109,7 +12153,8 @@ impl Presentation {
             .filter(|id| *id == relationship_id)
             .count();
         let shared_chart = relationship_uses > 1 || chart_part_users(&self.package, &old_chart) > 1;
-        let shared_workbook = shared_chart || chart_part_users(&self.package, &old_workbook) > 1;
+        let shared_workbook = workbook_candidate.is_some()
+            && (shared_chart || chart_part_users(&self.package, &old_workbook) > 1);
         let mut staged = self.clone();
         let chart_part = if shared_chart {
             chart_unused_part(&staged.package, "/ppt/charts/chart", ".xml")
@@ -12186,7 +12231,9 @@ impl Presentation {
             chart_relationships_candidate(&original_slide_relationships, &relationships)?;
         staged.package.set_part_rels(&slide_part, relationships);
         staged.package.set_part(&chart_part, chart_candidate);
-        staged.package.set_part(&workbook_part, workbook_candidate);
+        if let Some(bytes) = workbook_candidate {
+            staged.package.set_part(&workbook_part, bytes);
+        }
         staged
             .package
             .set_part_rels(&chart_part, chart_relationships);
@@ -29515,6 +29562,69 @@ mod write_tests {
         assert_ne!(selected.4, retained.4);
         assert_eq!(deck.package.get_part(&chart).unwrap(), old_chart);
         assert_eq!(deck.package.get_part(&workbook).unwrap(), old_workbook);
+    }
+
+    #[test]
+    fn fx246_native_shared_chart_keeps_workbook_and_opaque_relationships() {
+        let (mut deck, id, _) = fx215_native_deck();
+        let (_, _, chart, _, workbook) = deck.chart_owner(0, id, "test").unwrap();
+        let sidecar = "/ppt/custom/legend-opaque.xml";
+        deck.package.set_part(
+            sidecar,
+            b"<opaque xmlns='urn:producer' exact='yes'/>".to_vec(),
+        );
+        deck.package
+            .content_types
+            .add_override(sidecar, "application/xml");
+        deck.package.get_or_create_part_rels(&chart).add(
+            "urn:producer:legend",
+            &relative_part_target(&chart, sidecar),
+        );
+        deck.add_slide(6).unwrap();
+        let owner = deck.slides[1].part_name.clone();
+        let rid = deck
+            .package
+            .get_or_create_part_rels(&owner)
+            .add(rel_types::CHART, &relative_part_target(&owner, &chart));
+        let other = fx215_second_frame(&mut deck, 1, &rid);
+        let original_chart = deck.package.get_part(&chart).unwrap().to_vec();
+        let original_book = deck.package.get_part(&workbook).unwrap().to_vec();
+        let original_rels = deck.package.get_part_rels(&chart).unwrap().clone();
+        deck.set_chart_legend(0, id, Some(true), Some(LegendPosition::Bottom), Some(true))
+            .unwrap();
+        let selected = deck.chart_owner(0, id, "test").unwrap();
+        let retained = deck.chart_owner(1, other, "test").unwrap();
+        assert_ne!(selected.2, retained.2);
+        assert_eq!(selected.4, workbook);
+        assert_eq!(retained.4, workbook);
+        assert_eq!(deck.package.get_part(&chart).unwrap(), original_chart);
+        assert_eq!(deck.package.get_part(&workbook).unwrap(), original_book);
+        assert_eq!(
+            deck.package
+                .get_part_rels(&chart)
+                .unwrap()
+                .to_xml()
+                .unwrap(),
+            original_rels.to_xml().unwrap()
+        );
+        let copied = deck
+            .package
+            .get_part_rels(&selected.2)
+            .unwrap()
+            .get_by_type("urn:producer:legend")
+            .unwrap();
+        assert_eq!(
+            OpcPackage::resolve_rel_target(&selected.2, &copied.target),
+            sidecar
+        );
+        assert_eq!(
+            deck.chart_legend(0, id).unwrap().position,
+            LegendPosition::Bottom
+        );
+        assert_eq!(
+            deck.chart_legend(1, other).unwrap().position,
+            LegendPosition::Right
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use oxml_layout::{
-    Color, Diagnostic, FontManager, GlyphRun, GroupElement, Point, PositionedElement, Result,
-    Transform,
+    Color, Diagnostic, FontManager, GlyphRun, GroupElement, Point, PositionedElement, Rect, Result,
+    Transform, walk,
 };
 use rdocx_oxml::math::{
     FractionType, LimitLocation, MathAccent, MathArgument, MathDelimiter, MathExpression,
@@ -25,12 +25,64 @@ const NARY_UPPER_GAP_EM: f64 = 0.482;
 const NARY_LOWER_GAP_EM: f64 = 0.3;
 const DEFAULT_DISPLAY_PRE_SPACING: f64 = 8.36;
 
+#[derive(Debug, Clone, Copy)]
+struct MathLayoutStyle {
+    font_size: f64,
+    root_size: f64,
+    display: bool,
+    cramped: bool,
+    script_level: u8,
+}
+
+impl MathLayoutStyle {
+    fn new(font_size: f64, display: bool) -> Self {
+        Self {
+            font_size,
+            root_size: font_size,
+            display,
+            cramped: false,
+            script_level: 0,
+        }
+    }
+
+    fn argument(self) -> Self {
+        Self {
+            display: false,
+            ..self
+        }
+    }
+    fn cramped(self) -> Self {
+        Self {
+            display: false,
+            cramped: true,
+            ..self
+        }
+    }
+    fn with_size(self, font_size: f64) -> Self {
+        Self {
+            font_size,
+            display: false,
+            ..self
+        }
+    }
+    fn script(self, scale: f64) -> Self {
+        Self {
+            font_size: self.font_size * scale,
+            display: false,
+            script_level: self.script_level.saturating_add(1).min(2),
+            ..self
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MeasuredMath {
     pub(crate) width: f64,
     pub(crate) ascent: f64,
     pub(crate) descent: f64,
     pub(crate) group: GroupElement,
+    // Font-requested white space above ink, retained when a box owns the row top.
+    top_padding: f64,
 }
 
 impl MeasuredMath {
@@ -44,6 +96,7 @@ impl MeasuredMath {
             ascent: 0.0,
             descent: 0.0,
             group: group(Vec::new()),
+            top_padding: 0.0,
         }
     }
 
@@ -89,7 +142,7 @@ pub(crate) fn layout_officemath(
                 &value.expressions,
                 fm,
                 font_family,
-                size,
+                MathLayoutStyle::new(size, false),
                 color,
                 size * EQUATION_SPACING_EM,
                 source_path,
@@ -104,7 +157,7 @@ pub(crate) fn layout_officemath(
                     &equation.expressions,
                     fm,
                     font_family,
-                    size,
+                    MathLayoutStyle::new(size, true),
                     color,
                     size * EQUATION_SPACING_EM,
                     &format!("{source_path}/equation/{index}"),
@@ -114,7 +167,25 @@ pub(crate) fn layout_officemath(
             let inter_spacing = math_properties
                 .and_then(|properties| properties.inter_spacing)
                 .map_or(0.0, twips_to_points);
-            let measured = layout_spaced_sequence(equations, inter_spacing);
+            let mut measured = layout_spaced_sequence(equations, inter_spacing);
+            let font_id = fm.resolve_font_for_text(font_family, false, false, "x")?;
+            let data = fm.font_data(font_id)?;
+            if let Some(leading) = ttf_parser::Face::parse(&data.data, data.face_index)
+                .ok()
+                .and_then(|face| {
+                    Some(
+                        f64::from(face.tables().math?.constants?.math_leading().value) * size
+                            / f64::from(face.units_per_em()),
+                    )
+                })
+            {
+                // A display frame starts above its ink by MathLeading. Face
+                // ascenders include blank space and differ across constructs.
+                let shift = leading.max(0.0) + measured.top_padding - ink_bounds(&measured, fm).y;
+                let shift = shift.clamp(-measured.ascent, size * MAX_DELIMITER_SCALE);
+                measured.group.transform.f += shift;
+                measured.ascent += shift;
+            }
             let left_margin = math_properties
                 .and_then(|properties| properties.left_margin)
                 .map_or(0.0, twips_to_points);
@@ -148,6 +219,7 @@ pub(crate) fn layout_officemath(
             let width = available_width.max(measured.width);
             Ok((
                 MeasuredMath {
+                    top_padding: 0.0,
                     width,
                     ascent: measured.ascent + pre_spacing,
                     descent: measured.descent + post_spacing,
@@ -157,6 +229,383 @@ pub(crate) fn layout_officemath(
             ))
         }
     }
+}
+
+fn ink_bounds(value: &MeasuredMath, fm: &FontManager) -> Rect {
+    fn include(bounds: &mut Option<Rect>, rect: Rect) {
+        *bounds = Some(match *bounds {
+            None => rect,
+            Some(old) => {
+                let x = old.x.min(rect.x);
+                let y = old.y.min(rect.y);
+                Rect {
+                    x,
+                    y,
+                    width: (old.x + old.width).max(rect.x + rect.width) - x,
+                    height: (old.y + old.height).max(rect.y + rect.height) - y,
+                }
+            }
+        });
+    }
+    let mut bounds = None;
+    let mut complete = true;
+    walk(&value.group.children, &mut |element, transform| {
+        let transform = transform.then(value.group.transform);
+        match element {
+            PositionedElement::Text(run) => {
+                let Ok(data) = fm.font_data(run.font_id) else {
+                    complete = false;
+                    return;
+                };
+                let Ok(mut face) = ttf_parser::Face::parse(&data.data, data.face_index) else {
+                    complete = false;
+                    return;
+                };
+                for (tag, coordinate) in &data.variations {
+                    if face
+                        .set_variation(ttf_parser::Tag::from_bytes(tag), *coordinate)
+                        .is_none()
+                    {
+                        complete = false;
+                        return;
+                    }
+                }
+                let scale = run.font_size / f64::from(face.units_per_em());
+                let mut pen = run.origin.x;
+                for (index, glyph) in run.glyph_ids.iter().enumerate() {
+                    if let Some(ink) = face.glyph_bounding_box(ttf_parser::GlyphId(*glyph)) {
+                        let mut rect = Rect {
+                            x: pen + f64::from(ink.x_min) * scale,
+                            y: run.origin.y - f64::from(ink.y_max) * scale,
+                            width: (f64::from(ink.x_max) - f64::from(ink.x_min)) * scale,
+                            height: (f64::from(ink.y_max) - f64::from(ink.y_min)) * scale,
+                        };
+                        if data.synthetic_italic {
+                            let top = (run.origin.y - rect.y) * 12.0_f64.to_radians().tan();
+                            let bottom =
+                                (run.origin.y - rect.y - rect.height) * 12.0_f64.to_radians().tan();
+                            rect.x += top.min(bottom);
+                            rect.width += (top - bottom).abs();
+                        }
+                        if data.synthetic_bold {
+                            let half_stroke = run.font_size / 48.0;
+                            rect.x -= half_stroke;
+                            rect.y -= half_stroke;
+                            rect.width += 2.0 * half_stroke;
+                            rect.height += 2.0 * half_stroke;
+                        }
+                        include(&mut bounds, transform.transform_rect_bbox(rect));
+                    }
+                    pen += run.advances.get(index).copied().unwrap_or(0.0);
+                }
+            }
+            PositionedElement::Line {
+                start, end, width, ..
+            } => {
+                let half = width / 2.0;
+                include(
+                    &mut bounds,
+                    transform.transform_rect_bbox(Rect {
+                        x: start.x.min(end.x) - half,
+                        y: start.y.min(end.y) - half,
+                        width: (start.x - end.x).abs() + width,
+                        height: (start.y - end.y).abs() + width,
+                    }),
+                );
+            }
+            _ => {}
+        }
+    });
+    if complete {
+        bounds.unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        })
+    } else {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: value.width,
+            height: value.height(),
+        }
+    }
+}
+
+fn math_script_context(
+    fm: &mut FontManager,
+    family: Option<&str>,
+    context: MathLayoutStyle,
+    levels: u8,
+) -> Result<MathLayoutStyle> {
+    let font_id = fm.resolve_font_for_text(family, false, false, "x")?;
+    let data = fm.font_data(font_id)?;
+    let level = context.script_level.saturating_add(levels).min(2);
+    let ratio = ttf_parser::Face::parse(&data.data, data.face_index)
+        .ok()
+        .and_then(|face| face.tables().math)
+        .and_then(|math| math.constants)
+        .map(|c| {
+            f64::from(if level == 1 {
+                c.script_percent_scale_down()
+            } else {
+                c.script_script_percent_scale_down()
+            }) / 100.0
+        })
+        .filter(|ratio| *ratio > 0.0 && *ratio <= 1.0);
+    if let Some(ratio) = ratio {
+        Ok(MathLayoutStyle {
+            font_size: context.root_size * ratio,
+            display: false,
+            script_level: level,
+            ..context
+        })
+    } else {
+        // Fonts without MATH keep the historical recursive fallback size.
+        Ok((0..levels).fold(context, |style, _| style.script(SCRIPT_SCALE)))
+    }
+}
+
+fn space_after_script(fm: &mut FontManager, family: Option<&str>, size: f64) -> Result<f64> {
+    let font_id = fm.resolve_font_for_text(family, false, false, "x")?;
+    let data = fm.font_data(font_id)?;
+    Ok(ttf_parser::Face::parse(&data.data, data.face_index)
+        .ok()
+        .and_then(|face| {
+            let value = face.tables().math?.constants?.space_after_script().value;
+            Some((f64::from(value) * size / f64::from(face.units_per_em())).clamp(0.0, size))
+        })
+        .unwrap_or(0.0))
+}
+
+fn script_shifts(
+    base: &MeasuredMath,
+    subscript: &MeasuredMath,
+    superscript: &MeasuredMath,
+    fm: &mut FontManager,
+    family: Option<&str>,
+    context: MathLayoutStyle,
+) -> Result<(f64, f64)> {
+    let font_size = context.font_size;
+    let font_id = fm.resolve_font_for_text(family, false, false, "x")?;
+    let data = fm.font_data(font_id)?;
+    let face = ttf_parser::Face::parse(&data.data, data.face_index).ok();
+    let Some((face, c)) = face
+        .as_ref()
+        .and_then(|face| Some((face, face.tables().math?.constants?)))
+    else {
+        return Ok((
+            font_size * SUBSCRIPT_SHIFT_EM,
+            font_size * SUPERSCRIPT_SHIFT_EM,
+        ));
+    };
+    let em = font_size / f64::from(face.units_per_em());
+    let base_ink = ink_bounds(base, fm);
+    let sub_ink = ink_bounds(subscript, fm);
+    let sup_ink = ink_bounds(superscript, fm);
+    let simple = single_math_run(base)
+        .filter(|run| run.glyph_ids.len() == 1)
+        .is_some_and(|run| {
+            !face
+                .tables()
+                .math
+                .and_then(|m| m.glyph_info)
+                .and_then(|i| i.extended_shapes)
+                .is_some_and(|coverage| {
+                    coverage
+                        .get(ttf_parser::GlyphId(run.glyph_ids[0]))
+                        .is_some()
+                })
+        });
+    let initial_down = if simple {
+        f64::from(c.subscript_shift_down().value) * em
+    } else {
+        base_ink.y + base_ink.height - base.ascent
+            + f64::from(c.subscript_baseline_drop_min().value) * em
+    };
+    let initial_up = if simple {
+        f64::from(if context.cramped {
+            c.superscript_shift_up_cramped().value
+        } else {
+            c.superscript_shift_up().value
+        }) * em
+    } else {
+        base.ascent - base_ink.y - f64::from(c.superscript_baseline_drop_max().value) * em
+    };
+    let mut down = initial_down
+        .max(subscript.ascent - sub_ink.y - f64::from(c.subscript_top_max().value) * em);
+    let up = initial_up.max(
+        sup_ink.y + sup_ink.height - superscript.ascent
+            + f64::from(c.superscript_bottom_min().value) * em,
+    );
+    if subscript.width > 0.0 && superscript.width > 0.0 {
+        let actual_gap = down + sub_ink.y
+            - subscript.ascent
+            - (-up + sup_ink.y + sup_ink.height - superscript.ascent);
+        down += (f64::from(c.sub_superscript_gap_min().value) * em - actual_gap).max(0.0);
+    }
+    Ok((down.max(0.0), up.max(0.0)))
+}
+
+fn apply_script_alternates(face: &ttf_parser::Face<'_>, level: u8, glyphs: &mut [u16]) {
+    if level == 0 {
+        return;
+    }
+    let Some(gsub) = face.tables().gsub else {
+        return;
+    };
+    let Some(feature) = gsub.features.find(ttf_parser::Tag::from_bytes(b"ssty")) else {
+        return;
+    };
+    for lookup_index in feature.lookup_indices {
+        let Some(lookup) = gsub.lookups.get(lookup_index) else {
+            continue;
+        };
+        for glyph in glyphs.iter_mut() {
+            for subtable in lookup
+                .subtables
+                .into_iter::<ttf_parser::gsub::SubstitutionSubtable<'_>>()
+            {
+                let id = ttf_parser::GlyphId(*glyph);
+                let replacement = match subtable {
+                    ttf_parser::gsub::SubstitutionSubtable::Single(
+                        ttf_parser::gsub::SingleSubstitution::Format1 { coverage, delta },
+                    ) => coverage
+                        .get(id)
+                        .map(|_| ttf_parser::GlyphId(glyph.wrapping_add_signed(delta))),
+                    ttf_parser::gsub::SubstitutionSubtable::Single(
+                        ttf_parser::gsub::SingleSubstitution::Format2 {
+                            coverage,
+                            substitutes,
+                        },
+                    ) => coverage.get(id).and_then(|i| substitutes.get(i)),
+                    ttf_parser::gsub::SubstitutionSubtable::Alternate(table) => table
+                        .coverage
+                        .get(id)
+                        .and_then(|i| table.alternate_sets.get(i))
+                        .and_then(|set| {
+                            set.alternates
+                                .get(u16::from(level - 1))
+                                .or_else(|| set.alternates.get(0))
+                        }),
+                    _ => None,
+                };
+                if let Some(replacement) = replacement.filter(|id| id.0 < face.number_of_glyphs()) {
+                    *glyph = replacement.0;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn single_math_run(value: &MeasuredMath) -> Option<&GlyphRun> {
+    let mut children = value.group.children.as_slice();
+    loop {
+        match children {
+            [PositionedElement::Text(run)] => return Some(run),
+            [PositionedElement::Group(group)] => children = &group.children,
+            _ => return None,
+        }
+    }
+}
+
+fn italic_correction(value: &MeasuredMath, fm: &FontManager) -> Option<f64> {
+    let run = single_math_run(value)?;
+    let data = fm.font_data(run.font_id).ok()?;
+    let face = ttf_parser::Face::parse(&data.data, data.face_index).ok()?;
+    let math = face.tables().math?;
+    let glyph = ttf_parser::GlyphId(*run.glyph_ids.last()?);
+    let correction = math
+        .glyph_info
+        .and_then(|info| info.italic_corrections)
+        .and_then(|corrections| corrections.get(glyph))
+        .map_or(0, |value| value.value);
+    Some(
+        (f64::from(correction) * run.font_size / f64::from(face.units_per_em()))
+            .clamp(0.0, run.font_size * MAX_DELIMITER_SCALE),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_math_variant(
+    text: &str,
+    fm: &mut FontManager,
+    family: Option<&str>,
+    context: MathLayoutStyle,
+    color: Color,
+    target_height: Option<f64>,
+    source_path: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Option<MeasuredMath>> {
+    let font_size = context.font_size;
+    let font_id = fm.resolve_font_for_text(family, false, false, text)?;
+    let data = fm.font_data(font_id)?;
+    let Ok(face) = ttf_parser::Face::parse(&data.data, data.face_index) else {
+        return Ok(None);
+    };
+    let Some(math) = face.tables().math else {
+        return Ok(None);
+    };
+    let Some(glyph) = text
+        .chars()
+        .next()
+        .and_then(|character| face.glyph_index(character))
+    else {
+        return Ok(None);
+    };
+    let Some(construction) = math
+        .variants
+        .and_then(|variants| variants.vertical_constructions.get(glyph))
+    else {
+        return Ok(None);
+    };
+    let em = font_size / f64::from(face.units_per_em());
+    let target = target_height
+        .unwrap_or_else(|| {
+            math.constants.map_or(font_size, |c| {
+                f64::from(
+                    c.delimited_sub_formula_min_height()
+                        .max(c.display_operator_min_height()),
+                ) * em
+            })
+        })
+        .clamp(0.0, font_size * MAX_DELIMITER_SCALE);
+    let mut selected = None;
+    for variant in construction.variants {
+        selected = Some(variant.variant_glyph);
+        if f64::from(variant.advance_measurement) * em >= target {
+            break;
+        }
+    }
+    let Some(glyph) = selected else {
+        return Ok(None);
+    };
+    let Some(ink) = face.glyph_bounding_box(glyph) else {
+        return Ok(None);
+    };
+    let mut measured = layout_text(
+        text,
+        fm,
+        family,
+        context,
+        color,
+        false,
+        false,
+        source_path,
+        diagnostics,
+    )?;
+    let width = f64::from(face.glyph_hor_advance(glyph).unwrap_or(0)) * em;
+    measured.width = width;
+    measured.ascent = measured.ascent.max(f64::from(ink.y_max) * em);
+    measured.descent = measured.descent.max(-f64::from(ink.y_min) * em);
+    if let Some(PositionedElement::Text(run)) = measured.group.children.first_mut() {
+        run.glyph_ids = vec![glyph.0];
+        run.advances = vec![width];
+        run.origin.y = measured.ascent;
+    }
+    Ok(Some(measured))
 }
 
 fn twips_to_points(value: u32) -> f64 {
@@ -250,23 +699,47 @@ fn layout_expressions(
     expressions: &[MathExpression],
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     spacing: f64,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
+    let font_id = fm.resolve_font_for_text(font_family, false, false, "x")?;
+    let data = fm.font_data(font_id)?;
+    let has_math = ttf_parser::Face::parse(&data.data, data.face_index)
+        .ok()
+        .is_some_and(|face| face.tables().math.is_some());
+    let spacing = if has_math { 0.0 } else { spacing };
     let mut measured = Vec::with_capacity(expressions.len());
     for (index, expression) in expressions.iter().enumerate() {
         measured.push(layout_expression(
             expression,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             &format!("{source_path}/expression/{index}"),
             diagnostics,
         )?);
+        if has_math
+            && (matches!(
+                expression,
+                MathExpression::Nary(_)
+                    | MathExpression::LowerLimit(_)
+                    | MathExpression::UpperLimit(_)
+            ) || matches!(expression, MathExpression::Subscript(script)
+                    if matches!(script.base.expressions.as_slice(), [MathExpression::Run(run)]
+                        if run.properties.normal == Some(true) && run.text == "lim")))
+            && index + 1 < expressions.len()
+        {
+            let next_is_operator = matches!(&expressions[index + 1], MathExpression::Run(run)
+                if run.text.starts_with(['+', '−', '=']));
+            if !next_is_operator && let Some(last) = measured.last_mut() {
+                last.width += font_size * 3.0 / 18.0;
+            }
+        }
     }
     Ok(layout_spaced_sequence(measured, spacing))
 }
@@ -275,7 +748,7 @@ fn layout_argument(
     argument: &MathArgument,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
@@ -284,7 +757,7 @@ fn layout_argument(
         &argument.expressions,
         fm,
         font_family,
-        font_size,
+        context.argument(),
         color,
         0.0,
         source_path,
@@ -296,7 +769,7 @@ fn layout_expression(
     expression: &MathExpression,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
@@ -306,7 +779,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -315,7 +788,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -325,7 +798,7 @@ fn layout_expression(
             false,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -335,7 +808,7 @@ fn layout_expression(
             true,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -345,7 +818,7 @@ fn layout_expression(
             false,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -354,7 +827,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -363,7 +836,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -372,7 +845,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -382,7 +855,7 @@ fn layout_expression(
             false,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -392,7 +865,7 @@ fn layout_expression(
             true,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -401,7 +874,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -410,7 +883,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -419,7 +892,7 @@ fn layout_expression(
             value,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             source_path,
             diagnostics,
@@ -431,11 +904,12 @@ fn layout_run(
     run: &MathRun,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
     let style = if run.properties.normal == Some(true) || run.properties.literal == Some(true) {
         MathStyle::Plain
     } else {
@@ -443,11 +917,61 @@ fn layout_run(
     };
     let bold = matches!(style, MathStyle::Bold | MathStyle::BoldItalic);
     let italic = matches!(style, MathStyle::Italic | MathStyle::BoldItalic);
+    // Mathematical alphabets are glyph choices, not synthetic font slant. Use
+    // them only when the requested physical face covers the complete run.
+    if italic
+        && !bold
+        && run
+            .text
+            .chars()
+            .all(|c| !c.is_alphabetic() || c.is_ascii_alphabetic() || c == 'π')
+    {
+        let mapped: String = run
+            .text
+            .chars()
+            .map(|character| match character {
+                'h' => 'ℎ',
+                'A'..='Z' => {
+                    char::from_u32(0x1d434 + character as u32 - 'A' as u32).unwrap_or(character)
+                }
+                'a'..='z' => {
+                    char::from_u32(0x1d44e + character as u32 - 'a' as u32).unwrap_or(character)
+                }
+                'π' => '𝜋',
+                _ => character,
+            })
+            .collect();
+        {
+            let font_id = fm.resolve_font_for_text(font_family, false, false, &run.text)?;
+            let shaped = fm.shape_text(font_id, &mapped, font_size)?;
+            let data = fm.font_data(font_id)?;
+            let has_math = ttf_parser::Face::parse(&data.data, data.face_index)
+                .ok()
+                .is_some_and(|face| face.tables().math.is_some());
+            if has_math && !shaped.glyph_ids.contains(&0) {
+                let mut measured = layout_text(
+                    &mapped,
+                    fm,
+                    font_family,
+                    context,
+                    color,
+                    false,
+                    false,
+                    source_path,
+                    diagnostics,
+                )?;
+                if let Some(PositionedElement::Text(glyphs)) = measured.group.children.first_mut() {
+                    glyphs.text.clone_from(&run.text);
+                }
+                return Ok(measured);
+            }
+        }
+    }
     layout_text(
         &run.text,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         bold,
         italic,
@@ -461,19 +985,63 @@ fn layout_text(
     text: &str,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     bold: bool,
     italic: bool,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
     let family = font_family
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_MATH_FONT);
     let font_id = fm.resolve_font_for_text(Some(family), bold, italic, text)?;
-    let shaped = fm.shape_text(font_id, text, font_size)?;
+    let mut shaped = fm.shape_text(font_id, text, font_size)?;
     let metrics = fm.metrics(font_id, font_size)?;
+    let data = fm.font_data(font_id)?;
+    let math_alphabet_covered = ttf_parser::Face::parse(&data.data, data.face_index)
+        .ok()
+        .is_some_and(|face| face.tables().math.is_some());
+    if context.script_level > 0
+        && let Ok(face) = ttf_parser::Face::parse(&data.data, data.face_index)
+    {
+        let original = shaped.glyph_ids.clone();
+        apply_script_alternates(&face, context.script_level, &mut shaped.glyph_ids);
+        let em = font_size / f64::from(face.units_per_em());
+        for (index, (old, new)) in original.iter().zip(&shaped.glyph_ids).enumerate() {
+            let difference = (f64::from(
+                face.glyph_hor_advance(ttf_parser::GlyphId(*new))
+                    .unwrap_or(0),
+            ) - f64::from(
+                face.glyph_hor_advance(ttf_parser::GlyphId(*old))
+                    .unwrap_or(0),
+            )) * em;
+            if let Some(advance) = shaped.advances.get_mut(index) {
+                *advance += difference;
+                shaped.width += difference;
+            }
+        }
+    }
+    let mut leading_space = 0.0;
+    if math_alphabet_covered && text.chars().count() == shaped.advances.len() {
+        // Math atom glue uses the conventional medium and thick mu spaces.
+        // It belongs to operator layout, not to the stored logical string.
+        for (index, character) in text.chars().enumerate() {
+            let gap = match character {
+                '+' | '−' => font_size * 4.0 / 18.0,
+                '=' => font_size * 5.0 / 18.0,
+                _ => 0.0,
+            };
+            if index == 0 {
+                leading_space += gap;
+            } else {
+                shaped.advances[index - 1] += gap;
+            }
+            shaped.advances[index] += gap;
+            shaped.width += 2.0 * gap;
+        }
+    }
     if shaped.glyph_ids.contains(&0) {
         diagnostics.push(Diagnostic {
             message: format!("OfficeMath text at {source_path} contains an unavailable glyph"),
@@ -481,12 +1049,13 @@ fn layout_text(
     }
     Ok(horizontally_scaled(
         MeasuredMath {
+            top_padding: 0.0,
             width: shaped.width.max(0.0),
             ascent: metrics.ascent.max(0.0),
             descent: metrics.descent.max(0.0),
             group: group(vec![PositionedElement::Text(GlyphRun {
                 origin: Point {
-                    x: 0.0,
+                    x: leading_space,
                     y: metrics.ascent.max(0.0),
                 },
                 font_id,
@@ -505,7 +1074,11 @@ fn layout_text(
                 tab_aligned: None,
             })]),
         },
-        MATH_TEXT_X_SCALE,
+        if math_alphabet_covered {
+            1.0
+        } else {
+            MATH_TEXT_X_SCALE
+        },
     ))
 }
 
@@ -514,17 +1087,28 @@ fn layout_fraction(
     value: &MathFraction,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
+    let font_id = fm.resolve_font_for_text(font_family, false, false, "+")?;
+    let font_data = fm.font_data(font_id)?;
+    let face = ttf_parser::Face::parse(&font_data.data, font_data.face_index).ok();
+    let constants = face
+        .as_ref()
+        .and_then(|face| face.tables().math)
+        .and_then(|math| math.constants);
+    let em = face
+        .as_ref()
+        .map_or(0.0, |face| font_size / f64::from(face.units_per_em()));
     let child_size = font_size;
     let numerator = layout_argument(
         &value.numerator,
         fm,
         font_family,
-        child_size,
+        context.with_size(child_size),
         color,
         &format!("{source_path}/numerator"),
         diagnostics,
@@ -533,7 +1117,7 @@ fn layout_fraction(
         &value.denominator,
         fm,
         font_family,
-        child_size,
+        context.with_size(child_size).cramped(),
         color,
         &format!("{source_path}/denominator"),
         diagnostics,
@@ -546,7 +1130,7 @@ fn layout_fraction(
             "/",
             fm,
             font_family,
-            font_size,
+            context,
             color,
             false,
             false,
@@ -555,28 +1139,89 @@ fn layout_fraction(
         )?;
         return Ok(layout_sequence(vec![numerator, slash, denominator]));
     }
-    let gap = font_size * 0.55;
-    let rule = font_size * RULE_EM;
     let padding = font_size * 0.06;
     let width = numerator.width.max(denominator.width) + padding * 2.0;
-    let ascent = numerator.height() + gap + rule / 2.0;
     let numerator_x = (width - numerator.width) / 2.0;
     let denominator_x = (width - denominator.width) / 2.0;
-    let denominator_y = ascent - font_size * 0.36;
-    let descent = (denominator_y + denominator.height() - ascent).max(0.0);
+    let (rule, rule_y, ascent, descent, numerator_y, denominator_y) = if let Some(c) = constants {
+        let rule = if value.fraction_type == FractionType::NoBar {
+            0.0
+        } else {
+            f64::from(c.fraction_rule_thickness().value).max(0.0) * em
+        };
+        let axis = f64::from(c.axis_height().value) * em;
+        let numerator_ink = ink_bounds(&numerator, fm);
+        let denominator_ink = ink_bounds(&denominator, fm);
+        let (up, down, num_gap, den_gap) = if context.display {
+            (
+                c.fraction_numerator_display_style_shift_up().value,
+                c.fraction_denominator_display_style_shift_down().value,
+                c.fraction_num_display_style_gap_min().value,
+                c.fraction_denom_display_style_gap_min().value,
+            )
+        } else {
+            (
+                c.fraction_numerator_shift_up().value,
+                c.fraction_denominator_shift_down().value,
+                c.fraction_numerator_gap_min().value,
+                c.fraction_denominator_gap_min().value,
+            )
+        };
+        let up = (f64::from(up) * em).max(
+            numerator_ink.y + numerator_ink.height - numerator.ascent
+                + axis
+                + rule / 2.0
+                + f64::from(num_gap).max(0.0) * em,
+        );
+        let down = (f64::from(down) * em).max(
+            -axis + rule / 2.0 + f64::from(den_gap).max(0.0) * em - denominator_ink.y
+                + denominator.ascent,
+        );
+        let ascent = (up + numerator.ascent).max(axis + rule / 2.0).max(0.0);
+        let descent = (down + denominator.descent).max(0.0);
+        (
+            rule,
+            ascent - axis,
+            ascent,
+            descent,
+            ascent - up - numerator.ascent,
+            ascent + down - denominator.ascent,
+        )
+    } else {
+        // Preserve legacy non-MATH baselines while clearing measured ink. Full
+        // face metrics contain empty space, so they are not clearance boxes.
+        let gap = font_size * GAP_EM;
+        let rule = font_size * RULE_EM;
+        let numerator_ink = ink_bounds(&numerator, fm);
+        let denominator_ink = ink_bounds(&denominator, fm);
+        let axis = font_size * 0.25;
+        let ascent = (numerator.height() + font_size * 0.55 + rule / 2.0)
+            .max(numerator_ink.y + numerator_ink.height + gap + rule / 2.0 + axis);
+        let rule_y = ascent - axis;
+        let denominator_y =
+            (ascent - font_size * 0.36).max(rule_y + rule / 2.0 + gap - denominator_ink.y);
+        (
+            rule,
+            rule_y,
+            ascent,
+            (denominator_y + denominator.height() - ascent).max(0.0),
+            0.0,
+            denominator_y,
+        )
+    };
     let mut children = vec![
-        translated(numerator.group, numerator_x, 0.0),
+        translated(numerator.group, numerator_x, numerator_y),
         translated(denominator.group, denominator_x, denominator_y),
     ];
     if value.fraction_type != FractionType::NoBar {
         children.push(PositionedElement::Line {
             start: Point {
                 x: padding / 2.0,
-                y: ascent,
+                y: rule_y,
             },
             end: Point {
                 x: width - padding / 2.0,
-                y: ascent,
+                y: rule_y,
             },
             width: rule,
             color,
@@ -584,6 +1229,7 @@ fn layout_fraction(
         });
     }
     Ok(MeasuredMath {
+        top_padding: numerator.top_padding,
         width,
         ascent,
         descent,
@@ -597,16 +1243,17 @@ fn layout_script(
     superscript: bool,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let script_context = math_script_context(fm, font_family, context, 1)?;
     let base = layout_argument(
         &value.base,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         &format!("{source_path}/base"),
         diagnostics,
@@ -615,26 +1262,34 @@ fn layout_script(
         &value.script,
         fm,
         font_family,
-        font_size * SCRIPT_SCALE,
+        if superscript {
+            script_context
+        } else {
+            script_context.cramped()
+        },
         color,
         &format!("{source_path}/script"),
         diagnostics,
     )?;
-    layout_script_pair(base, script, superscript, font_size)
+    layout_script_pair(base, script, superscript, context, fm, font_family)
 }
 
 fn layout_script_pair(
     base: MeasuredMath,
     script: MeasuredMath,
     superscript: bool,
-    font_size: f64,
+    context: MathLayoutStyle,
+    fm: &mut FontManager,
+    font_family: Option<&str>,
 ) -> Result<MeasuredMath> {
-    let shift = font_size
-        * if superscript {
-            SUPERSCRIPT_SHIFT_EM
-        } else {
-            SUBSCRIPT_SHIFT_EM
-        };
+    let font_size = context.font_size;
+    let empty = MeasuredMath::empty();
+    let (down, up) = if superscript {
+        script_shifts(&base, &empty, &script, fm, font_family, context)?
+    } else {
+        script_shifts(&base, &script, &empty, fm, font_family, context)?
+    };
+    let shift = if superscript { up } else { down };
     let (ascent, descent, script_baseline) = if superscript {
         (
             base.ascent.max(shift + script.ascent),
@@ -650,9 +1305,20 @@ fn layout_script_pair(
     };
     let base_y = ascent - base.ascent;
     let script_y = ascent + script_baseline - script.ascent;
-    let gap = font_size * GAP_EM / 2.0;
+    let correction = italic_correction(&base, fm);
+    let gap = if superscript {
+        correction.unwrap_or(font_size * GAP_EM / 2.0)
+    } else {
+        correction.map_or(font_size * GAP_EM / 2.0, |_| 0.0)
+    };
+    let after = space_after_script(fm, font_family, font_size)?;
     Ok(MeasuredMath {
-        width: base.width + gap + script.width,
+        top_padding: if script_y < base_y {
+            script.top_padding
+        } else {
+            base.top_padding
+        },
+        width: base.width + gap + script.width + after,
         ascent,
         descent,
         group: group(vec![
@@ -668,7 +1334,7 @@ fn layout_sub_superscript(
     pre: bool,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
@@ -680,7 +1346,7 @@ fn layout_sub_superscript(
         pre,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         source_path,
         diagnostics,
@@ -692,7 +1358,7 @@ fn layout_pre_sub_superscript(
     value: &MathPreSubSuperscript,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
@@ -704,7 +1370,7 @@ fn layout_pre_sub_superscript(
         true,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         source_path,
         diagnostics,
@@ -719,16 +1385,17 @@ fn layout_three_part_script(
     pre: bool,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let script_context = math_script_context(fm, font_family, context, 1)?;
     let base = layout_argument(
         base_value,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         &format!("{source_path}/base"),
         diagnostics,
@@ -737,7 +1404,7 @@ fn layout_three_part_script(
         subscript_value,
         fm,
         font_family,
-        font_size * SCRIPT_SCALE,
+        script_context,
         color,
         &format!("{source_path}/subscript"),
         diagnostics,
@@ -746,23 +1413,56 @@ fn layout_three_part_script(
         superscript_value,
         fm,
         font_family,
-        font_size * SCRIPT_SCALE,
+        script_context,
         color,
         &format!("{source_path}/superscript"),
         diagnostics,
     )?;
-    let superscript_shift = font_size * SUPERSCRIPT_SHIFT_EM;
-    let subscript_shift = font_size * SUBSCRIPT_SHIFT_EM;
+    let shifts = script_shifts(&base, &subscript, &superscript, fm, font_family, context)?;
+    let correction = italic_correction(&base, fm);
+    let after = space_after_script(fm, font_family, context.font_size)?;
+    let mut measured = layout_measured_scripts(
+        base,
+        subscript,
+        superscript,
+        pre,
+        context,
+        shifts,
+        correction,
+    );
+    measured.width += after;
+    Ok(measured)
+}
+
+fn layout_measured_scripts(
+    base: MeasuredMath,
+    subscript: MeasuredMath,
+    superscript: MeasuredMath,
+    pre: bool,
+    context: MathLayoutStyle,
+    shifts: (f64, f64),
+    correction: Option<f64>,
+) -> MeasuredMath {
+    let font_size = context.font_size;
+    let (subscript_shift, superscript_shift) = shifts;
     let ascent = base.ascent.max(superscript_shift + superscript.ascent);
     let descent = base.descent.max(subscript_shift + subscript.descent);
-    let script_width = subscript.width.max(superscript.width);
-    let gap = font_size * GAP_EM / 2.0;
+    let script_width = subscript
+        .width
+        .max(superscript.width + correction.unwrap_or(0.0));
+    let gap = correction.map_or(font_size * GAP_EM / 2.0, |_| 0.0);
+    let upper_correction = correction.unwrap_or(0.0);
     let (script_x, base_x) = if pre {
         (0.0, script_width + gap)
     } else {
         (base.width + gap, 0.0)
     };
-    Ok(MeasuredMath {
+    MeasuredMath {
+        top_padding: if superscript_shift + superscript.ascent > base.ascent {
+            superscript.top_padding
+        } else {
+            base.top_padding
+        },
         width: base.width + gap + script_width,
         ascent,
         descent,
@@ -770,7 +1470,7 @@ fn layout_three_part_script(
             translated(base.group, base_x, ascent - base.ascent),
             translated(
                 superscript.group,
-                script_x,
+                script_x + upper_correction,
                 ascent - superscript_shift - superscript.ascent,
             ),
             translated(
@@ -779,7 +1479,7 @@ fn layout_three_part_script(
                 ascent + subscript_shift - subscript.ascent,
             ),
         ]),
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -787,25 +1487,118 @@ fn layout_radical(
     value: &MathRadical,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
     let base = layout_argument(
         &value.base,
         fm,
         font_family,
-        font_size,
+        context.cramped(),
         color,
         &format!("{source_path}/base"),
         diagnostics,
     )?;
+    let font_id = fm.resolve_font_for_text(font_family, false, false, "√")?;
+    let data = fm.font_data(font_id)?;
+    let face = ttf_parser::Face::parse(&data.data, data.face_index).ok();
+    if let Some((face, c)) = face
+        .as_ref()
+        .and_then(|face| Some((face, face.tables().math?.constants?)))
+    {
+        let em = font_size / f64::from(face.units_per_em());
+        let ink = ink_bounds(&base, fm);
+        let gap = f64::from(if context.display {
+            c.radical_display_style_vertical_gap().value
+        } else {
+            c.radical_vertical_gap().value
+        })
+        .max(0.0)
+            * em;
+        let extra = f64::from(c.radical_extra_ascender().value).max(0.0) * em;
+        let rule = f64::from(c.radical_rule_thickness().value).max(0.0) * em;
+        if let Some(root) = layout_math_variant(
+            "√",
+            fm,
+            font_family,
+            context,
+            color,
+            Some(ink.height + gap + rule),
+            source_path,
+            diagnostics,
+        )? {
+            let root_ink = ink_bounds(&root, fm);
+            let degree = if value.hide_degree {
+                MeasuredMath::empty()
+            } else {
+                let degree_context = math_script_context(fm, font_family, context, 2)?;
+                layout_argument(
+                    &value.degree,
+                    fm,
+                    font_family,
+                    degree_context,
+                    color,
+                    &format!("{source_path}/degree"),
+                    diagnostics,
+                )?
+            };
+            let before = f64::from(c.radical_kern_before_degree().value) * em;
+            let after = f64::from(c.radical_kern_after_degree().value) * em;
+            let root_x = if value.hide_degree {
+                0.0
+            } else {
+                (before + degree.width + after).max(0.0)
+            };
+            let base_x = root_x + root.width;
+            let rise = (gap + rule + extra - ink.y).max(0.0);
+            let base_y = rise;
+            let rule_y = base_y + ink.y - gap - rule / 2.0;
+            let root_y = rule_y - rule / 2.0 - root_ink.y;
+            let ascent = base_y + base.ascent;
+            let height = (base_y + base.height()).max(root_y + root.height());
+            let mut children = vec![
+                translated(root.group, root_x, root_y),
+                translated(base.group, base_x, base_y),
+                PositionedElement::Line {
+                    start: Point {
+                        x: base_x,
+                        y: rule_y,
+                    },
+                    end: Point {
+                        x: base_x + base.width,
+                        y: rule_y,
+                    },
+                    width: rule,
+                    color,
+                    dash_pattern: None,
+                },
+            ];
+            if !value.hide_degree {
+                let degree_y = (root_y
+                    + root_ink.y
+                    + root_ink.height
+                        * (1.0 - f64::from(c.radical_degree_bottom_raise_percent()) / 100.0)
+                    - degree.height())
+                .max(0.0);
+                children.push(translated(degree.group, before.max(0.0), degree_y));
+            }
+            return Ok(MeasuredMath {
+                top_padding: extra,
+                width: base_x + base.width,
+                ascent,
+                descent: (height - ascent).max(0.0),
+                group: group(children),
+            });
+        }
+    }
     let root = layout_text(
         "√",
         fm,
         font_family,
-        font_size,
+        context,
         color,
         false,
         false,
@@ -816,6 +1609,7 @@ fn layout_radical(
     let rule = font_size * RULE_EM;
     let target_height = base.height() + gap + rule;
     let root = vertically_scaled(root, target_height);
+    let degree_context = math_script_context(fm, font_family, context, 2)?;
     let degree = if value.hide_degree {
         MeasuredMath::empty()
     } else {
@@ -823,7 +1617,7 @@ fn layout_radical(
             &value.degree,
             fm,
             font_family,
-            font_size * SCRIPT_SCALE * SCRIPT_SCALE,
+            degree_context,
             color,
             &format!("{source_path}/degree"),
             diagnostics,
@@ -857,6 +1651,7 @@ fn layout_radical(
     }
     Ok(horizontally_scaled(
         MeasuredMath {
+            top_padding: 0.0,
             width: base_x + base.width,
             ascent,
             descent,
@@ -871,11 +1666,12 @@ fn layout_matrix(
     value: &MathMatrix,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
     if value.rows.is_empty() {
         return Ok(MeasuredMath::empty());
     }
@@ -894,7 +1690,7 @@ fn layout_matrix(
                 cell,
                 fm,
                 font_family,
-                font_size,
+                context,
                 color,
                 &format!("{source_path}/row/{row_index}/cell/{column_index}"),
                 diagnostics,
@@ -950,6 +1746,7 @@ fn layout_matrix(
         y += row_ascent + row_descent + row_gap;
     }
     Ok(MeasuredMath {
+        top_padding: 0.0,
         width,
         ascent,
         descent: height - ascent,
@@ -963,16 +1760,18 @@ fn layout_limit(
     upper: bool,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
+    let script_context = math_script_context(fm, font_family, context, 1)?;
     let base = layout_argument(
         &value.base,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         &format!("{source_path}/base"),
         diagnostics,
@@ -981,7 +1780,7 @@ fn layout_limit(
         &value.limit,
         fm,
         font_family,
-        font_size * SCRIPT_SCALE,
+        script_context,
         color,
         &format!("{source_path}/limit"),
         diagnostics,
@@ -992,6 +1791,7 @@ fn layout_limit(
         let limit_height = limit.height();
         let ascent = limit.height() + gap + base.ascent;
         Ok(MeasuredMath {
+            top_padding: 0.0,
             width,
             ascent,
             descent: base.descent,
@@ -1004,6 +1804,7 @@ fn layout_limit(
         let ascent = base.ascent;
         let base_height = base.height();
         Ok(MeasuredMath {
+            top_padding: 0.0,
             width,
             ascent,
             descent: base.descent + gap + limit.height(),
@@ -1020,11 +1821,13 @@ fn layout_nary(
     value: &MathNary,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
+    let script_context = math_script_context(fm, font_family, context, 1)?;
     let operator_text = if value.character.is_empty() {
         "∫"
     } else {
@@ -1034,7 +1837,7 @@ fn layout_nary(
         operator_text,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         false,
         false,
@@ -1043,6 +1846,17 @@ fn layout_nary(
     )?;
     let operator = if value.grow == Some(false) {
         operator
+    } else if let Some(variant) = layout_math_variant(
+        operator_text,
+        fm,
+        font_family,
+        context,
+        color,
+        None,
+        source_path,
+        diagnostics,
+    )? {
+        variant
     } else {
         horizontally_scaled(operator, NARY_OPERATOR_X_SCALE)
     };
@@ -1050,45 +1864,80 @@ fn layout_nary(
         &value.base,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         &format!("{source_path}/base"),
         diagnostics,
     )?;
-    let mut decorated = operator;
     let under_over = value.limit_location == Some(LimitLocation::UnderOver);
+    let mut subscript = MeasuredMath::empty();
+    let mut superscript = MeasuredMath::empty();
     if !value.hide_subscript && !value.subscript.expressions.is_empty() {
-        let subscript = layout_argument(
+        subscript = layout_argument(
             &value.subscript,
             fm,
             font_family,
-            font_size * SCRIPT_SCALE,
+            script_context,
             color,
             &format!("{source_path}/subscript"),
             diagnostics,
         )?;
-        decorated = if under_over {
-            stack_below(decorated, subscript, font_size)
-        } else {
-            layout_script_pair(decorated, subscript, false, font_size)?
-        };
     }
     if !value.hide_superscript && !value.superscript.expressions.is_empty() {
-        let superscript = layout_argument(
+        superscript = layout_argument(
             &value.superscript,
             fm,
             font_family,
-            font_size * SCRIPT_SCALE,
+            script_context,
             color,
             &format!("{source_path}/superscript"),
             diagnostics,
         )?;
-        decorated = if under_over {
-            stack_above(decorated, superscript, font_size)
-        } else {
-            layout_script_pair(decorated, superscript, true, font_size)?
-        };
     }
+    let decorated = if under_over {
+        let mut decorated = operator;
+        if subscript.width > 0.0 {
+            decorated = stack_below(decorated, subscript, font_size);
+        }
+        if superscript.width > 0.0 {
+            decorated = stack_above(decorated, superscript, font_size);
+        }
+        decorated
+    } else if subscript.width == 0.0 && superscript.width == 0.0 {
+        operator
+    } else {
+        // Both limits attach to the operator, never to the already decorated
+        // lower-limit group, whose width includes the lower script.
+        let shifts = script_shifts(
+            &operator,
+            &subscript,
+            &superscript,
+            fm,
+            font_family,
+            context,
+        )?;
+        let correction = italic_correction(&operator, fm);
+        let after = space_after_script(fm, font_family, font_size)?;
+        let mut measured = layout_measured_scripts(
+            operator,
+            subscript,
+            superscript,
+            false,
+            context,
+            shifts,
+            correction,
+        );
+        if let Some(correction) = correction {
+            for child in measured.group.children.iter_mut().skip(1) {
+                if let PositionedElement::Group(group) = child {
+                    group.transform.e -= correction;
+                }
+            }
+            measured.width -= correction;
+        }
+        measured.width += after;
+        measured
+    };
     Ok(layout_sequence(vec![decorated, base]))
 }
 
@@ -1098,6 +1947,7 @@ fn stack_above(base: MeasuredMath, limit: MeasuredMath, font_size: f64) -> Measu
     let limit_height = limit.height();
     let ascent = limit_height + gap + base.ascent;
     MeasuredMath {
+        top_padding: 0.0,
         width,
         ascent,
         descent: base.descent,
@@ -1113,6 +1963,7 @@ fn stack_below(base: MeasuredMath, limit: MeasuredMath, font_size: f64) -> Measu
     let width = base.width.max(limit.width);
     let base_height = base.height();
     MeasuredMath {
+        top_padding: 0.0,
         width,
         ascent: base.ascent,
         descent: base.descent + gap + limit.height(),
@@ -1128,11 +1979,12 @@ fn layout_delimiter(
     value: &MathDelimiter,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
     let mut arguments = Vec::new();
     for (index, argument) in value.arguments.iter().enumerate() {
         if index > 0 && !value.separator_character.is_empty() {
@@ -1140,7 +1992,7 @@ fn layout_delimiter(
                 &value.separator_character,
                 fm,
                 font_family,
-                font_size,
+                context,
                 color,
                 false,
                 false,
@@ -1152,7 +2004,7 @@ fn layout_delimiter(
             argument,
             fm,
             font_family,
-            font_size,
+            context,
             color,
             &format!("{source_path}/argument/{index}"),
             diagnostics,
@@ -1171,7 +2023,7 @@ fn layout_delimiter(
                 &value.begin_character,
                 fm,
                 font_family,
-                font_size,
+                context,
                 color,
                 false,
                 false,
@@ -1188,7 +2040,7 @@ fn layout_delimiter(
                 &value.end_character,
                 fm,
                 font_family,
-                font_size,
+                context,
                 color,
                 false,
                 false,
@@ -1206,16 +2058,18 @@ fn layout_accent(
     value: &MathAccent,
     fm: &mut FontManager,
     font_family: Option<&str>,
-    font_size: f64,
+    context: MathLayoutStyle,
     color: Color,
     source_path: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<MeasuredMath> {
+    let font_size = context.font_size;
+    let script_context = math_script_context(fm, font_family, context, 1)?;
     let base = layout_argument(
         &value.base,
         fm,
         font_family,
-        font_size,
+        context,
         color,
         &format!("{source_path}/base"),
         diagnostics,
@@ -1229,6 +2083,7 @@ fn layout_accent(
     if matches!(accent_text, "¯" | "̅" | "̲") {
         let rule = font_size * RULE_EM;
         return Ok(MeasuredMath {
+            top_padding: 0.0,
             width: base.width,
             ascent: base.ascent + gap + rule,
             descent: base.descent,
@@ -1254,7 +2109,7 @@ fn layout_accent(
         accent_text,
         fm,
         font_family,
-        font_size * SCRIPT_SCALE,
+        script_context,
         color,
         false,
         false,
@@ -1265,6 +2120,7 @@ fn layout_accent(
     let accent_raise = font_size * 0.262;
     let ascent = base.ascent + accent_raise;
     Ok(MeasuredMath {
+        top_padding: 0.0,
         width,
         ascent,
         descent: base.descent.max(accent.descent),
@@ -1282,6 +2138,7 @@ fn vertically_scaled(value: MeasuredMath, target_height: f64) -> MeasuredMath {
     }
     let scale = (target_height / height).min(MAX_DELIMITER_SCALE);
     MeasuredMath {
+        top_padding: value.top_padding * scale,
         width: value.width,
         ascent: value.ascent * scale,
         descent: value.descent * scale,
@@ -1303,6 +2160,7 @@ fn horizontally_scaled(value: MeasuredMath, scale: f64) -> MeasuredMath {
         return value;
     }
     MeasuredMath {
+        top_padding: value.top_padding,
         width: value.width * scale,
         ascent: value.ascent,
         descent: value.descent,
@@ -1331,6 +2189,10 @@ fn layout_spaced_sequence(values: Vec<MeasuredMath>, spacing: f64) -> MeasuredMa
     let descent = values.iter().map(|value| value.descent).fold(0.0, f64::max);
     let width = values.iter().map(|value| value.width).sum::<f64>()
         + spacing.max(0.0) * values.len().saturating_sub(1) as f64;
+    let top_padding = values
+        .iter()
+        .max_by(|left, right| left.ascent.total_cmp(&right.ascent))
+        .map_or(0.0, |value| value.top_padding);
     let mut x = 0.0;
     let mut children = Vec::with_capacity(values.len());
     for value in values {
@@ -1338,6 +2200,7 @@ fn layout_spaced_sequence(values: Vec<MeasuredMath>, spacing: f64) -> MeasuredMa
         x += value.width + spacing.max(0.0);
     }
     MeasuredMath {
+        top_padding,
         width,
         ascent,
         descent,
@@ -1442,6 +2305,7 @@ mod tests {
             math_properties: None,
             note_defaults: [None, None],
             revision_view: crate::RevisionView::Accepted,
+            revision_style: crate::RevisionStyle::Plain,
             styles: CT_Styles::new_default(),
             numbering: None,
             story_part_names: Default::default(),
@@ -1462,6 +2326,341 @@ mod tests {
         }
     }
 
+    fn fx235_font_with_table(tag: [u8; 4], table: Vec<u8>) -> Vec<u8> {
+        let source = oxml_layout::bundled_fonts::bundled_font_data()
+            .into_iter()
+            .find(|(family, _)| *family == "Caladea")
+            .unwrap()
+            .1;
+        let face = ttf_parser::Face::parse(source, 0).unwrap();
+        let mut tables: Vec<_> = face
+            .raw_face()
+            .table_records
+            .into_iter()
+            .filter(|record| record.tag != ttf_parser::Tag::from_bytes(&tag))
+            .map(|record| {
+                (
+                    record.tag.to_bytes(),
+                    face.raw_face().table(record.tag).unwrap().to_vec(),
+                )
+            })
+            .collect();
+        tables.push((tag, table));
+        tables.sort_by_key(|(tag, _)| *tag);
+        let count = u16::try_from(tables.len()).unwrap();
+        let mut font = vec![0; 12 + tables.len() * 16];
+        font[..4].copy_from_slice(&0x00010000_u32.to_be_bytes());
+        font[4..6].copy_from_slice(&count.to_be_bytes());
+        for (index, (tag, data)) in tables.into_iter().enumerate() {
+            while !font.len().is_multiple_of(4) {
+                font.push(0);
+            }
+            let offset = u32::try_from(font.len()).unwrap();
+            let length = u32::try_from(data.len()).unwrap();
+            let row = 12 + index * 16;
+            font[row..row + 4].copy_from_slice(&tag);
+            font[row + 8..row + 12].copy_from_slice(&offset.to_be_bytes());
+            font[row + 12..row + 16].copy_from_slice(&length.to_be_bytes());
+            font.extend_from_slice(&data);
+        }
+        font
+    }
+
+    #[test]
+    fn fx235_font_math_constants_control_axis_and_actual_ink_clearance() {
+        let mut constants = vec![0; 214];
+        for (offset, value) in [
+            (0, 72_i16),
+            (2, 60),
+            (8, 100),
+            (12, 250),
+            (120, 700),
+            (124, 900),
+            (128, 600),
+            (132, 800),
+            (136, 100),
+            (140, 150),
+            (144, 50),
+            (148, 100),
+            (152, 50),
+            (188, 50),
+            (192, 100),
+            (196, 50),
+            (200, 75),
+        ] {
+            constants[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let bundled = oxml_layout::bundled_fonts::bundled_font_data();
+        let source = bundled
+            .iter()
+            .find(|(name, _)| *name == "Caladea")
+            .unwrap()
+            .1;
+        let root = ttf_parser::Face::parse(source, 0)
+            .unwrap()
+            .glyph_index('√')
+            .unwrap()
+            .0;
+        let mut math = vec![0, 1, 0, 0, 0, 10, 0, 0, 0, 224];
+        math.extend_from_slice(&constants);
+        for word in [0, 12, 0, 1, 0, 18, 1, 1, root, 0, 1, root, 2000] {
+            math.extend_from_slice(&word.to_be_bytes());
+        }
+        let bytes = fx235_font_with_table(*b"MATH", math);
+        let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+        let c = face.tables().math.unwrap().constants.unwrap();
+        let axis_units = f64::from(c.axis_height().value);
+        let units = f64::from(face.units_per_em());
+        let mut fm = FontManager::new_with_fonts(vec![("F-X235 math".into(), bytes)]);
+        for size in [11.0, 22.0] {
+            let fraction = layout_fraction(
+                &MathFraction::new(text("S"), text("T")),
+                &mut fm,
+                Some("F-X235 math"),
+                MathLayoutStyle::new(size, true),
+                Color::BLACK,
+                "fx235",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let PositionedElement::Line { start, width, .. } = &fraction.group.children[2] else {
+                panic!("rule");
+            };
+            assert!((fraction.ascent - start.y - axis_units * size / units).abs() < 1e-8);
+            let mut properties = MathProperties::new();
+            properties.math_font = Some("F-X235 math".into());
+            properties.pre_spacing = Some(0);
+            let radical = OfficeMath::display(vec![CT_OMath::new(vec![MathExpression::Radical(
+                MathRadical::new(text("T")),
+            )])]);
+            let (display, _) = layout_officemath(
+                &radical,
+                &mut fm,
+                size,
+                Color::BLACK,
+                200.0,
+                Some(&properties),
+                "radical-frame",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let actual = ink_bounds(&display, &fm);
+            assert!((actual.y - (100.0 + 75.0) * size / units).abs() < 1e-8);
+            let root_context = MathLayoutStyle::new(size, true);
+            let first = math_script_context(&mut fm, Some("F-X235 math"), root_context, 1).unwrap();
+            let second = math_script_context(&mut fm, Some("F-X235 math"), first, 1).unwrap();
+            let deep = math_script_context(&mut fm, Some("F-X235 math"), second, 1).unwrap();
+            let degree =
+                math_script_context(&mut fm, Some("F-X235 math"), root_context, 2).unwrap();
+            assert!((first.font_size - size * 0.72).abs() < 1e-8);
+            for style in [second, deep, degree] {
+                assert!((style.font_size - size * 0.60).abs() < 1e-8);
+                assert_eq!(style.script_level, 2);
+            }
+            let nested = MathExpression::Superscript(MathScript::new(
+                text("x"),
+                MathArgument::new(vec![MathExpression::Subscript(MathScript::new(
+                    text("a"),
+                    MathArgument::new(vec![MathExpression::Superscript(MathScript::new(
+                        text("b"),
+                        text("c"),
+                    ))]),
+                ))]),
+            ));
+            for (expression, expected) in [
+                (
+                    nested,
+                    vec![("x", 1.0), ("a", 0.72), ("b", 0.60), ("c", 0.60)],
+                ),
+                (
+                    MathExpression::Radical(MathRadical::with_degree(text("d"), text("x"))),
+                    vec![("x", 1.0), ("d", 0.60)],
+                ),
+            ] {
+                let measured = layout_expression(
+                    &expression,
+                    &mut fm,
+                    Some("F-X235 math"),
+                    root_context,
+                    Color::BLACK,
+                    "nested",
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let mut sizes = Vec::new();
+                walk(&measured.group.children, &mut |element, _| {
+                    if let PositionedElement::Text(run) = element {
+                        sizes.push((run.text.clone(), run.font_size));
+                    }
+                });
+                for (text, ratio) in expected {
+                    let actual = sizes.iter().find(|(value, _)| value == text).unwrap().1;
+                    assert!((actual - size * ratio).abs() < 1e-8, "{text}: {actual}");
+                }
+            }
+            for (index, argument, above) in [(0, text("S"), true), (1, text("T"), false)] {
+                let measured = layout_argument(
+                    &argument,
+                    &mut fm,
+                    Some("F-X235 math"),
+                    MathLayoutStyle::new(size, false),
+                    Color::BLACK,
+                    "ink",
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let ink = ink_bounds(&measured, &fm);
+                let PositionedElement::Group(group) = &fraction.group.children[index] else {
+                    panic!("argument");
+                };
+                if above {
+                    assert!(group.transform.f + ink.y + ink.height < start.y - width / 2.0);
+                } else {
+                    assert!(group.transform.f + ink.y > start.y + width / 2.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fx235_optical_script_alternates_use_one_subtable_per_lookup() {
+        fn words(values: &[u16]) -> Vec<u8> {
+            values.iter().flat_map(|v| v.to_be_bytes()).collect()
+        }
+        let base = oxml_layout::bundled_fonts::bundled_font_data();
+        let face = ttf_parser::Face::parse(
+            base.iter()
+                .find(|(family, _)| *family == "Caladea")
+                .unwrap()
+                .1,
+            0,
+        )
+        .unwrap();
+        let a = face.glyph_index('a').unwrap().0;
+        let b = face.glyph_index('b').unwrap().0;
+        let c = face.glyph_index('c').unwrap().0;
+        let mut gsub = words(&[1, 0, 10, 12, 26, 0, 1]);
+        gsub.extend_from_slice(b"ssty");
+        gsub.extend(words(&[8, 0, 1, 0, 1, 4, 3, 0, 2, 10, 30]));
+        for (from, first, second) in [(a, b, c), (b, c, c)] {
+            gsub.extend(words(&[1, 14, 1, 8, 2, first, second, 1, 1, from]));
+        }
+        let bytes = fx235_font_with_table(*b"GSUB", gsub);
+        let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+        for (level, expected) in [(0, a), (1, b), (2, c)] {
+            let mut glyphs = [a];
+            apply_script_alternates(&face, level, &mut glyphs);
+            assert_eq!(glyphs, [expected]);
+        }
+    }
+
+    #[test]
+    fn fx235_upper_integral_limit_does_not_follow_lower_limit_width() {
+        let mut fm = deterministic_font_manager();
+        let mut upper_positions = Vec::new();
+        for lower_text in ["a", "aaaaaaaaa"] {
+            let mut nary = MathNary::new("∫", text("e"));
+            nary.subscript = text(lower_text);
+            nary.superscript = text("b");
+            nary.hide_subscript = false;
+            nary.hide_superscript = false;
+            nary.limit_location = Some(LimitLocation::SubSuperscript);
+            let measured = layout_nary(
+                &nary,
+                &mut fm,
+                None,
+                MathLayoutStyle::new(11.0, false),
+                Color::BLACK,
+                "fx235",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            walk(&measured.group.children, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element
+                    && run.text == "b"
+                {
+                    upper_positions.push(transform.apply(run.origin));
+                }
+            });
+        }
+        assert_eq!(upper_positions.len(), 2);
+        assert!(
+            (upper_positions[0].x - upper_positions[1].x).abs() < 1e-8,
+            "upper attachment cannot depend on lower script width: {upper_positions:?}"
+        );
+    }
+
+    #[test]
+    fn fx235_fraction_rule_clears_both_ink_boxes() {
+        let mut fm = deterministic_font_manager();
+        for denominator in [
+            text("T"),
+            MathArgument::new(vec![MathExpression::Fraction(MathFraction::new(
+                text("T"),
+                text("C"),
+            ))]),
+        ] {
+            let mut diagnostics = Vec::new();
+            let fraction = layout_fraction(
+                &MathFraction::new(text("S"), denominator.clone()),
+                &mut fm,
+                None,
+                MathLayoutStyle::new(11.0, false),
+                Color::BLACK,
+                "fx235",
+                &mut diagnostics,
+            )
+            .unwrap();
+            let numerator = layout_argument(
+                &text("S"),
+                &mut fm,
+                None,
+                MathLayoutStyle::new(11.0, false),
+                Color::BLACK,
+                "numerator",
+                &mut diagnostics,
+            )
+            .unwrap();
+            let denominator = layout_argument(
+                &denominator,
+                &mut fm,
+                None,
+                MathLayoutStyle::new(11.0, false),
+                Color::BLACK,
+                "denominator",
+                &mut diagnostics,
+            )
+            .unwrap();
+            let PositionedElement::Group(num) = &fraction.group.children[0] else {
+                panic!("numerator group")
+            };
+            let PositionedElement::Group(den) = &fraction.group.children[1] else {
+                panic!("denominator group")
+            };
+            let PositionedElement::Line { start, width, .. } = &fraction.group.children[2] else {
+                panic!("fraction rule")
+            };
+            assert!(
+                num.transform.f
+                    + ink_bounds(&numerator, &fm).y
+                    + ink_bounds(&numerator, &fm).height
+                    < start.y - width / 2.0,
+                "numerator ink must clear rule"
+            );
+            assert!(
+                den.transform.f + ink_bounds(&denominator, &fm).y > start.y + width / 2.0,
+                "denominator metric box starts at {}, rule at {}",
+                den.transform.f,
+                start.y
+            );
+            assert!(
+                start.y < fraction.ascent,
+                "rule belongs above surrounding baseline"
+            );
+            assert!((den.transform.f + denominator.height() - fraction.height()).abs() < 1e-8);
+        }
+    }
+
     #[test]
     fn supported_math_expressions_measure_and_lower_to_bounded_groups() {
         let mut fm = deterministic_font_manager();
@@ -1471,7 +2670,7 @@ mod tests {
                 expression,
                 &mut fm,
                 None,
-                11.0,
+                MathLayoutStyle::new(11.0, false),
                 Color::BLACK,
                 &format!("test/{index}"),
                 &mut diagnostics,
@@ -1492,7 +2691,7 @@ mod tests {
             "before",
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             false,
             false,
@@ -1504,7 +2703,7 @@ mod tests {
             &MathExpression::Subscript(MathScript::new(text("x"), text("deep"))),
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             "equation",
             &mut diagnostics,
@@ -1666,7 +2865,7 @@ mod tests {
             &top,
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             "matrix/top",
             &mut Vec::new(),
@@ -1676,7 +2875,7 @@ mod tests {
             &bottom,
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             "matrix/bottom",
             &mut Vec::new(),
@@ -1698,7 +2897,7 @@ mod tests {
             &fixed,
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             "delimiter/fixed",
             &mut Vec::new(),
@@ -1708,7 +2907,7 @@ mod tests {
             &growing,
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             "delimiter/growing",
             &mut Vec::new(),
@@ -1843,7 +3042,7 @@ mod tests {
             &expressions,
             &mut fm,
             None,
-            11.0,
+            MathLayoutStyle::new(11.0, false),
             Color::BLACK,
             11.0 * EQUATION_SPACING_EM,
             "golden",
@@ -1857,7 +3056,7 @@ mod tests {
                     expression,
                     &mut fm,
                     None,
-                    11.0,
+                    MathLayoutStyle::new(11.0, false),
                     Color::BLACK,
                     "golden",
                     &mut Vec::new(),

@@ -1,6 +1,6 @@
 //! Deterministic native document comparison and tracked-revision generation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use base64::Engine;
@@ -826,7 +826,7 @@ impl Document {
                 "document comparison requires identical related-story shells".to_owned(),
             ));
         }
-        let carried_links = remap_equivalent_story_relationships(
+        let (carried_links, mut charts) = remap_equivalent_story_relationships(
             &original,
             &mut edited,
             &original_stories,
@@ -997,6 +997,7 @@ impl Document {
                 owner,
                 relationship,
                 media,
+                chart,
             } = carried;
             if !referenced_by_owner.contains_key(&owner) {
                 let ids = candidate
@@ -1025,6 +1026,15 @@ impl Document {
                         .package
                         .content_types
                         .add_override(&part_name, &content_type);
+                }
+                if let Some(source_part) = chart {
+                    crate::field::copy_fragment_part(
+                        &edited.package,
+                        &mut candidate,
+                        &source_part,
+                        &charts.part_map,
+                        &mut charts.copied,
+                    )?;
                 }
                 candidate
                     .package
@@ -1291,24 +1301,37 @@ struct CarriedRelationship {
     owner: String,
     relationship: Relationship,
     media: Option<CarriedMedia>,
+    chart: Option<String>,
 }
 
-/// Give equivalent edited image and hyperlink relationships their original ids.
-/// Changed image payloads and new hyperlinks get distinct ids and are carried
+const MAX_COMPARISON_CHART_PARTS: usize = 4096;
+const MAX_COMPARISON_CHART_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Default)]
+struct CarriedCharts {
+    part_map: BTreeMap<String, String>,
+    copied: HashSet<String>,
+    bytes: usize,
+}
+
+/// Give equivalent edited image, chart and hyperlink relationships their original ids.
+/// Changed image/chart payloads and new hyperlinks get distinct ids and are carried
 /// into the redline when its tracked content references them.
 fn remap_equivalent_story_relationships(
     original: &Document,
     edited: &mut Document,
     original_stories: &[StoryPart],
     edited_stories: &[StoryPart],
-) -> Result<Vec<CarriedRelationship>> {
+) -> Result<(Vec<CarriedRelationship>, CarriedCharts)> {
     let mut reserved_media = HashSet::new();
+    let mut charts = CarriedCharts::default();
     let mut carried = remap_equivalent_owner_relationships(
         original,
         edited,
         &original.doc_part_name,
         &edited.doc_part_name.clone(),
         &mut reserved_media,
+        &mut charts,
     )?;
     for (left, right) in original_stories.iter().zip(edited_stories) {
         carried.extend(remap_equivalent_owner_relationships(
@@ -1317,9 +1340,10 @@ fn remap_equivalent_story_relationships(
             &left.part_name,
             &right.part_name,
             &mut reserved_media,
+            &mut charts,
         )?);
     }
-    Ok(carried)
+    Ok((carried, charts))
 }
 
 fn remap_equivalent_owner_relationships(
@@ -1328,6 +1352,7 @@ fn remap_equivalent_owner_relationships(
     original_owner: &str,
     edited_owner: &str,
     reserved_media: &mut HashSet<String>,
+    charts: &mut CarriedCharts,
 ) -> Result<Vec<CarriedRelationship>> {
     let original_relationships = original
         .package
@@ -1343,7 +1368,40 @@ fn remap_equivalent_owner_relationships(
     let mut remap = HashMap::new();
     let mut unmatched_links = Vec::new();
     let mut unmatched_images = Vec::new();
+    let mut unmatched_charts = Vec::new();
+    let mut original_charts = HashMap::new();
+    for relationship in &original_relationships.items {
+        if relationship.rel_type == rel_types::CHART {
+            original_charts.insert(
+                relationship.id.clone(),
+                chart_relationship_signature(original, original_owner, relationship)?.0,
+            );
+        }
+    }
     for right in &edited_relationships.items {
+        if right.rel_type == rel_types::CHART {
+            let (signature, parts) = chart_relationship_signature(edited, edited_owner, right)?;
+            if let Some((index, left)) =
+                original_relationships
+                    .items
+                    .iter()
+                    .enumerate()
+                    .find(|(index, left)| {
+                        !used.contains(index) && original_charts.get(&left.id) == Some(&signature)
+                    })
+            {
+                used.insert(index);
+                if left.id != right.id {
+                    remap.insert(right.id.clone(), left.id.clone());
+                }
+            } else {
+                let source_part = OpcPackage::resolve_rel_target(edited_owner, &right.target)
+                    .to_ascii_lowercase();
+                reserve_comparison_chart_parts(original, edited, parts, reserved_media, charts)?;
+                unmatched_charts.push((right.clone(), source_part));
+            }
+            continue;
+        }
         if right.rel_type != rel_types::IMAGE && right.rel_type != rel_types::HYPERLINK {
             continue;
         }
@@ -1408,6 +1466,7 @@ fn remap_equivalent_owner_relationships(
             owner: original_owner.to_owned(),
             relationship: link,
             media: None,
+            chart: None,
         });
     }
     for (mut image, source_part, bytes, content_type) in unmatched_images {
@@ -1450,6 +1509,7 @@ fn remap_equivalent_owner_relationships(
                 owner: original_owner.to_owned(),
                 relationship: image,
                 media,
+                chart: None,
             });
             continue;
         }
@@ -1486,6 +1546,26 @@ fn remap_equivalent_owner_relationships(
                 bytes,
                 content_type,
             }),
+            chart: None,
+        });
+    }
+    for (mut chart, source_part) in unmatched_charts {
+        let mut ordinal = 1;
+        let fresh = loop {
+            let id = format!("rdocxComparisonChart{ordinal}");
+            if occupied.insert(id.clone()) {
+                break id;
+            }
+            ordinal += 1;
+        };
+        remap.insert(chart.id.clone(), fresh.clone());
+        chart.id = fresh;
+        chart.target = charts.part_map[&source_part].clone();
+        carried.push(CarriedRelationship {
+            owner: original_owner.to_owned(),
+            relationship: chart,
+            media: None,
+            chart: Some(source_part),
         });
     }
     if remap.is_empty() {
@@ -1531,6 +1611,184 @@ fn remap_equivalent_owner_relationships(
         relationships.to_xml()?;
     }
     Ok(carried)
+}
+
+fn reserve_comparison_chart_parts(
+    original: &Document,
+    edited: &Document,
+    parts: Vec<String>,
+    reserved: &mut HashSet<String>,
+    charts: &mut CarriedCharts,
+) -> Result<()> {
+    for source in parts {
+        if charts.part_map.contains_key(&source) {
+            continue;
+        }
+        if charts.part_map.len() >= MAX_COMPARISON_CHART_PARTS {
+            return Err(Error::Other(
+                "comparison aggregate chart resources exceed part limit".to_owned(),
+            ));
+        }
+        let size = comparison_chart_part_size(edited, &source)?;
+        charts.bytes = charts.bytes.checked_add(size).ok_or_else(|| {
+            Error::Other("comparison aggregate chart resources overflow".to_owned())
+        })?;
+        if charts.bytes > MAX_COMPARISON_CHART_BYTES {
+            return Err(Error::Other(
+                "comparison aggregate chart resources exceed byte limit".to_owned(),
+            ));
+        }
+        let (directory, filename) = source.rsplit_once('/').unwrap_or(("", &source));
+        let mut ordinal = 1;
+        let target = loop {
+            let target = format!("{directory}/rdocxComparison{ordinal}-{filename}");
+            if !original.package.contains_part(&target)
+                && !edited.package.contains_part(&target)
+                && reserved.insert(target.to_ascii_lowercase())
+            {
+                break target;
+            }
+            ordinal += 1;
+        };
+        charts.part_map.insert(source, target);
+    }
+    Ok(())
+}
+
+fn comparison_chart_part_size(document: &Document, name: &str) -> Result<usize> {
+    let bytes = document
+        .package
+        .get_part(name)
+        .ok_or_else(|| Error::Other(format!("comparison chart target is missing: {name}")))?;
+    let relationship_bytes = document
+        .package
+        .get_part_rels(name)
+        .map(|relationships| relationships.to_xml())
+        .transpose()?
+        .map_or(0, |xml| xml.len());
+    bytes
+        .len()
+        .checked_add(relationship_bytes)
+        .ok_or_else(|| Error::Other("comparison chart closure size overflow".to_owned()))
+}
+
+/// Hash a chart's complete owned graph independently of package part names.
+/// Sorted relationship ids define stable node ordinals, including shared and cyclic edges.
+fn chart_relationship_signature(
+    document: &Document,
+    owner: &str,
+    relationship: &Relationship,
+) -> Result<(String, Vec<String>)> {
+    const MAX_CHART_DEPTH: usize = 128;
+    if !crate::document::relationship_is_internal(relationship) {
+        return Err(Error::Other(
+            "comparison requires an internal chart relationship".to_owned(),
+        ));
+    }
+    fn field(hash: &mut Sha256, bytes: &[u8]) {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    let root = OpcPackage::resolve_rel_target(owner, &relationship.target).to_ascii_lowercase();
+    let mut nodes = vec![root.clone()];
+    let mut ordinals = HashMap::from([(root.clone(), 0usize)]);
+    let mut pending = vec![(root, 0usize)];
+    let mut visited = HashSet::new();
+    let mut hash = Sha256::new();
+    let mut total_bytes = 0usize;
+    while let Some((name, depth)) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if depth > MAX_CHART_DEPTH {
+            return Err(Error::Other(
+                "comparison chart closure exceeds graph limit".to_owned(),
+            ));
+        }
+        let content_type = document
+            .package
+            .content_types
+            .content_type_for(&name)
+            .ok_or_else(|| {
+                Error::Other(format!("comparison chart part has no content type: {name}"))
+            })?;
+        if content_type.starts_with("application/vnd.openxmlformats-package.digital-signature") {
+            return Err(Error::Other(
+                "comparison cannot remap integrity-bound chart resources".to_owned(),
+            ));
+        }
+        let bytes = document
+            .package
+            .get_part(&name)
+            .ok_or_else(|| Error::Other(format!("comparison chart target is missing: {name}")))?;
+        total_bytes = total_bytes
+            .checked_add(comparison_chart_part_size(document, &name)?)
+            .ok_or_else(|| Error::Other("comparison chart closure size overflow".to_owned()))?;
+        if total_bytes > MAX_COMPARISON_CHART_BYTES {
+            return Err(Error::Other(
+                "comparison chart closure exceeds byte limit".to_owned(),
+            ));
+        }
+        field(&mut hash, content_type.as_bytes());
+        field(&mut hash, bytes);
+        let mut edges = document
+            .package
+            .get_part_rels(&name)
+            .map(|rels| rels.items.clone())
+            .unwrap_or_default();
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        field(&mut hash, &(edges.len() as u64).to_le_bytes());
+        let mut ids = HashSet::new();
+        let mut children = Vec::new();
+        for edge in edges {
+            if !ids.insert(edge.id.clone()) {
+                return Err(Error::Other(format!(
+                    "comparison chart relationship id is ambiguous: {}",
+                    edge.id
+                )));
+            }
+            field(&mut hash, edge.id.as_bytes());
+            field(&mut hash, edge.rel_type.as_bytes());
+            if crate::document::relationship_is_internal(&edge) {
+                field(&mut hash, b"internal");
+                let target =
+                    OpcPackage::resolve_rel_target(&name, &edge.target).to_ascii_lowercase();
+                let next = if let Some(ordinal) = ordinals.get(&target) {
+                    *ordinal
+                } else {
+                    if nodes.len() >= MAX_COMPARISON_CHART_PARTS {
+                        return Err(Error::Other(
+                            "comparison chart closure exceeds graph limit".to_owned(),
+                        ));
+                    }
+                    let ordinal = nodes.len();
+                    ordinals.insert(target.clone(), ordinal);
+                    nodes.push(target.clone());
+                    ordinal
+                };
+                field(&mut hash, &(next as u64).to_le_bytes());
+                children.push((target, depth + 1));
+            } else {
+                if edge.target_mode.as_deref() != Some("External") {
+                    return Err(Error::Other(
+                        "comparison chart relationship has an invalid target mode".to_owned(),
+                    ));
+                }
+                field(&mut hash, b"external");
+                field(&mut hash, edge.target.as_bytes());
+            }
+        }
+        // Match the existing copier's sorted depth-first recursion, rather than
+        // shortest-path depth. Shortcut edges must not bypass its stack bound.
+        pending.extend(children.into_iter().rev());
+    }
+    Ok((
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        nodes,
+    ))
 }
 
 fn relationship_payload(
@@ -3077,7 +3335,7 @@ fn normalized_package(
     };
     let bindings = root_namespace_bindings(source, "document", &[])?;
     let mut main_document = story_document(extract_body_inner(source.as_bytes())?, &bindings)?;
-    normalize_drawing_relationships(&mut main_document, document, &document.doc_part_name);
+    normalize_drawing_relationships(&mut main_document, document, &document.doc_part_name)?;
     let main = postcondition_body(&main_document, options);
     Ok((main, related))
 }
@@ -3118,49 +3376,67 @@ fn normalized_story_part(
             let root_bindings = root_namespace_bindings(xml, kind.root_local(), &[])?;
             let owner_bindings = root_namespace_bindings(owner_xml, owner_local, &root_bindings)?;
             let mut model = story_document(&owner_xml[inner], &owner_bindings)?;
-            normalize_drawing_relationships(&mut model, document, physical_owner);
+            normalize_drawing_relationships(&mut model, document, physical_owner)?;
             normalized.extend(story_projection(&model, options));
         }
         Ok(normalized)
     } else {
         let bindings = root_namespace_bindings(xml, kind.root_local(), &[])?;
         let mut model = story_document(&xml[root], &bindings)?;
-        normalize_drawing_relationships(&mut model, document, physical_owner);
+        normalize_drawing_relationships(&mut model, document, physical_owner)?;
         Ok(story_projection(&model, options))
     }
 }
 
-fn normalize_drawing_relationships(model: &mut CT_Document, document: &Document, owner: &str) {
+fn normalize_drawing_relationships(
+    model: &mut CT_Document,
+    document: &Document,
+    owner: &str,
+) -> Result<()> {
+    let mut result = Ok(());
     crate::document::visit_all_drawings_mut(&mut model.body.content, &mut |drawing| {
-        if let Some(inline) = &mut drawing.inline {
-            inline.doc_pr_id = 0;
-            normalize_relationship_id(&mut inline.embed_id, document, owner);
-            if let Some(id) = &mut inline.chart_rel_id {
-                normalize_relationship_id(id, document, owner);
-            }
+        if result.is_err() {
+            return;
         }
-        if let Some(anchor) = &mut drawing.anchor {
-            anchor.doc_pr_id = 0;
-            normalize_relationship_id(&mut anchor.embed_id, document, owner);
-            if let Some(id) = &mut anchor.chart_rel_id {
-                normalize_relationship_id(id, document, owner);
+        result = (|| {
+            if let Some(inline) = &mut drawing.inline {
+                inline.doc_pr_id = 0;
+                normalize_relationship_id(&mut inline.embed_id, document, owner)?;
+                if let Some(id) = &mut inline.chart_rel_id {
+                    normalize_relationship_id(id, document, owner)?;
+                }
             }
-        }
+            if let Some(anchor) = &mut drawing.anchor {
+                anchor.doc_pr_id = 0;
+                normalize_relationship_id(&mut anchor.embed_id, document, owner)?;
+                if let Some(id) = &mut anchor.chart_rel_id {
+                    normalize_relationship_id(id, document, owner)?;
+                }
+            }
+            Ok(())
+        })();
     });
+    result
 }
 
-fn normalize_relationship_id(id: &mut String, document: &Document, owner: &str) {
+fn normalize_relationship_id(id: &mut String, document: &Document, owner: &str) -> Result<()> {
     let Some(relationship) = document
         .package
         .get_part_rels(owner)
         .and_then(|relationships| relationships.get_by_id(id))
     else {
-        return;
+        return Ok(());
     };
-    let signature = if crate::document::relationship_is_internal(relationship) {
+    let signature = if relationship.rel_type == rel_types::CHART {
+        format!(
+            "internal:{}:{}",
+            rel_types::CHART,
+            chart_relationship_signature(document, owner, relationship)?.0
+        )
+    } else if crate::document::relationship_is_internal(relationship) {
         let target = OpcPackage::resolve_rel_target(owner, &relationship.target);
         let Some(bytes) = document.package.get_part(&target) else {
-            return;
+            return Ok(());
         };
         let digest = Sha256::digest(bytes);
         let mut hex = String::with_capacity(digest.len() * 2);
@@ -3178,6 +3454,7 @@ fn normalize_relationship_id(id: &mut String, document: &Document, owner: &str) 
         )
     };
     *id = signature;
+    Ok(())
 }
 
 fn compare_body(
@@ -9231,6 +9508,7 @@ mod tests {
     };
     use crate::Document;
     use crate::Length;
+    use oxml_opc::OpcPackage;
     use oxml_opc::relationship::rel_types;
     use rdocx_oxml::document::BodyContent;
     use rdocx_oxml::namespace::W_NS;
@@ -9706,5 +9984,578 @@ mod tests {
             rejected.package.get_part("/word/settings.xml"),
             Some(settings.as_slice())
         );
+    }
+    fn fx245_document(value: f64, closing: &str) -> Document {
+        let mut doc = Document::new();
+        doc.add_paragraph("Quarterly volume by region.");
+        doc.add_chart(
+            oxml_chart::ChartKind::Bar,
+            Length::inches(6.0),
+            Length::inches(2.6),
+            &oxml_chart::ChartData {
+                categories: vec!["Q1".into(), "Q2".into(), "Q3".into()],
+                series: vec![
+                    ("North".into(), vec![12.0, value, 15.0]),
+                    ("South".into(), vec![9.0, 11.0, 10.0]),
+                    ("West".into(), vec![7.0, 8.0, 13.0]),
+                ],
+                ..oxml_chart::ChartData::default()
+            },
+        )
+        .unwrap();
+        doc.add_paragraph(closing);
+        Document::from_bytes(&doc.to_bytes().unwrap()).unwrap()
+    }
+
+    // Follow the saved graph independently of comparison normalization.
+    fn fx245_chart_and_workbook(doc: &Document) -> (Vec<u8>, Vec<u8>) {
+        let drawing = doc
+            .document
+            .body
+            .content
+            .iter()
+            .find_map(|item| {
+                let BodyContent::Paragraph(p) = item else {
+                    return None;
+                };
+                p.runs.iter().flat_map(|r| &r.content).find_map(|content| {
+                    let RunContent::Drawing(drawing) = content else {
+                        return None;
+                    };
+                    drawing
+                        .inline
+                        .as_ref()
+                        .and_then(|inline| inline.chart_rel_id.clone())
+                })
+            })
+            .expect("one retained chart drawing");
+        let edge = doc
+            .package
+            .get_part_rels(&doc.doc_part_name)
+            .unwrap()
+            .get_by_id(&drawing)
+            .unwrap();
+        assert_eq!(edge.rel_type, rel_types::CHART);
+        let chart_name = OpcPackage::resolve_rel_target(&doc.doc_part_name, &edge.target);
+        let chart = doc.package.get_part(&chart_name).unwrap().to_vec();
+        let workbook = doc
+            .package
+            .get_part_rels(&chart_name)
+            .unwrap()
+            .items
+            .iter()
+            .find(|edge| edge.rel_type == rel_types::PACKAGE)
+            .unwrap();
+        let workbook_name = OpcPackage::resolve_rel_target(&chart_name, &workbook.target);
+        (
+            chart,
+            doc.package.get_part(&workbook_name).unwrap().to_vec(),
+        )
+    }
+
+    fn fx245_check(value: f64, closing: &str, granularity: ComparisonGranularity) {
+        let mut original = fx245_document(14.0, "End of report.");
+        let mut edited = fx245_document(value, closing);
+        let before = original.to_bytes().unwrap();
+        let edited_before = edited.to_bytes().unwrap();
+        let original_resources = fx245_chart_and_workbook(&original);
+        let edited_resources = fx245_chart_and_workbook(&edited);
+        original
+            .compare_with_options(
+                &edited,
+                "Reviewer",
+                "2026-01-01T00:00:00Z",
+                &ComparisonOptions {
+                    granularity,
+                    ..ComparisonOptions::default()
+                },
+            )
+            .unwrap();
+        if value != 14.0 {
+            assert!(
+                !original.revisions().is_empty(),
+                "chart-only changes need a revision"
+            );
+        }
+        assert_eq!(edited.to_bytes().unwrap(), edited_before);
+        let redline = original.to_bytes().unwrap();
+        let mut accepted = Document::from_bytes(&redline).unwrap();
+        let mut rejected = Document::from_bytes(&redline).unwrap();
+        accepted.accept_all().unwrap();
+        rejected.reject_all().unwrap();
+        let accepted = Document::from_bytes(&accepted.to_bytes().unwrap()).unwrap();
+        let rejected = Document::from_bytes(&rejected.to_bytes().unwrap()).unwrap();
+        assert_eq!(fx245_chart_and_workbook(&accepted), edited_resources);
+        assert_eq!(fx245_chart_and_workbook(&rejected), original_resources);
+        assert_eq!(accepted.text(), edited.text());
+        assert_eq!(
+            rejected.text(),
+            Document::from_bytes(&before).unwrap().text()
+        );
+    }
+
+    #[test]
+    fn fx245_chart_data_changes_resolve_both_versions() {
+        for granularity in [ComparisonGranularity::Word, ComparisonGranularity::Run] {
+            fx245_check(18.0, "End of report.", granularity);
+        }
+    }
+
+    #[test]
+    fn fx245_chart_and_adjacent_text_changes_compare_together() {
+        fx245_check(18.0, "End of the report.", ComparisonGranularity::Word);
+    }
+
+    #[test]
+    fn fx245_unchanged_chart_does_not_create_a_revision() {
+        fx245_check(14.0, "End of the report.", ComparisonGranularity::Word);
+        let mut original = fx245_document(14.0, "End of report.");
+        let before = original.to_bytes().unwrap();
+        let edited = Document::from_bytes(&before).unwrap();
+        original
+            .compare(&edited, "Reviewer", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert!(original.revisions().is_empty());
+        assert_eq!(original.to_bytes().unwrap(), before);
+    }
+
+    fn fx245_drawn_chart_names(doc: &Document) -> Vec<String> {
+        doc.document
+            .body
+            .content
+            .iter()
+            .filter_map(|item| {
+                let BodyContent::Paragraph(p) = item else {
+                    return None;
+                };
+                p.runs.iter().flat_map(|r| &r.content).find_map(|content| {
+                    let RunContent::Drawing(drawing) = content else {
+                        return None;
+                    };
+                    let id = drawing.inline.as_ref()?.chart_rel_id.as_ref()?;
+                    let edge = doc
+                        .package
+                        .get_part_rels(&doc.doc_part_name)?
+                        .get_by_id(id)?;
+                    Some(OpcPackage::resolve_rel_target(
+                        &doc.doc_part_name,
+                        &edge.target,
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn fx245_chart_name(doc: &Document) -> String {
+        fx245_drawn_chart_names(doc)
+            .into_iter()
+            .next()
+            .expect("one surviving chart")
+    }
+
+    fn fx245_resolve_pair(mut original: Document, mut edited: Document) -> (Document, Document) {
+        let original_resources = fx245_chart_and_workbook(&original);
+        let edited_resources = fx245_chart_and_workbook(&edited);
+        let edited_before = edited.to_bytes().unwrap();
+        original
+            .compare(&edited, "Reviewer", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert!(!original.revisions().is_empty());
+        assert_eq!(edited.to_bytes().unwrap(), edited_before);
+        let redline = original.to_bytes().unwrap();
+        let mut accepted = Document::from_bytes(&redline).unwrap();
+        let mut rejected = Document::from_bytes(&redline).unwrap();
+        accepted.accept_all().unwrap();
+        rejected.reject_all().unwrap();
+        let accepted = Document::from_bytes(&accepted.to_bytes().unwrap()).unwrap();
+        let rejected = Document::from_bytes(&rejected.to_bytes().unwrap()).unwrap();
+        assert_eq!(fx245_chart_and_workbook(&accepted), edited_resources);
+        assert_eq!(fx245_chart_and_workbook(&rejected), original_resources);
+        (accepted, rejected)
+    }
+
+    #[test]
+    fn fx245_workbook_only_changes_remain_owned() {
+        use std::io::{Cursor, Read, Write};
+        let mut original = fx245_document(14.0, "End of report.");
+        let mut edited = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+        let chart = fx245_chart_name(&edited);
+        let workbook = edited
+            .package
+            .get_part_rels(&chart)
+            .unwrap()
+            .items
+            .iter()
+            .find(|edge| edge.rel_type == rel_types::PACKAGE)
+            .unwrap();
+        let name = OpcPackage::resolve_rel_target(&chart, &workbook.target);
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(edited.package.get_part(&name).unwrap())).unwrap();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut changed = false;
+        for index in 0..archive.len() {
+            let mut member = archive.by_index(index).unwrap();
+            let mut bytes = Vec::new();
+            member.read_to_end(&mut bytes).unwrap();
+            if member.name() == "xl/worksheets/sheet1.xml" {
+                let xml = String::from_utf8(bytes).unwrap();
+                assert!(xml.contains("<v>14</v>"));
+                bytes = xml.replace("<v>14</v>", "<v>18</v>").into_bytes();
+                changed = true;
+            }
+            writer
+                .start_file(member.name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        assert!(changed);
+        edited
+            .package
+            .set_part(&name, writer.finish().unwrap().into_inner());
+        assert_eq!(
+            fx245_chart_and_workbook(&original).0,
+            fx245_chart_and_workbook(&edited).0
+        );
+        assert_ne!(
+            fx245_chart_and_workbook(&original).1,
+            fx245_chart_and_workbook(&edited).1
+        );
+        fx245_resolve_pair(original, edited);
+    }
+
+    #[test]
+    fn fx245_shared_chart_cycles_and_opaque_sidecars_survive_collision_remapping() {
+        let mut original = fx245_document(14.0, "End of report.");
+        original
+            .add_chart(
+                oxml_chart::ChartKind::Bar,
+                Length::inches(6.0),
+                Length::inches(2.6),
+                &oxml_chart::ChartData {
+                    categories: vec!["Q1".into(), "Q2".into(), "Q3".into()],
+                    series: vec![("North".into(), vec![12.0, 14.0, 15.0])],
+                    ..oxml_chart::ChartData::default()
+                },
+            )
+            .unwrap();
+        let chart = fx245_chart_name(&original);
+        let owner = original.doc_part_name.clone();
+        original
+            .package
+            .get_part_rels_mut(&owner)
+            .unwrap()
+            .items
+            .iter_mut()
+            .filter(|edge| edge.rel_type == rel_types::CHART)
+            .nth(1)
+            .unwrap()
+            .target = chart.clone();
+        let sidecar = "/word/sidecar.xml";
+        let opaque = br#"<x:opaque xmlns:x="urn:producer"><!--keep--><?keep exact?><x:v a='one &amp; two'/></x:opaque>"#;
+        original.package.set_part(sidecar, opaque.to_vec());
+        original
+            .package
+            .content_types
+            .add_override(sidecar, "application/xml");
+        original
+            .package
+            .get_or_create_part_rels(&chart)
+            .add_with_id("sidecar", "urn:sidecar", sidecar);
+        original
+            .package
+            .get_or_create_part_rels(sidecar)
+            .add_with_id("back", "urn:cycle", &chart.to_ascii_uppercase());
+        original
+            .package
+            .get_or_create_part_rels(sidecar)
+            .add_external("urn:external", "https://example.invalid/no-fetch");
+        let collision = "/word/charts/rdocxComparison1-chart1.xml";
+        original
+            .package
+            .set_part(collision, b"unrelated collision".to_vec());
+        original
+            .package
+            .content_types
+            .add_override(collision, "application/xml");
+        original.identifiers.preserve_fragment_part(collision);
+        let bytes = original.to_bytes().unwrap();
+        let mut edited = Document::from_bytes(&bytes).unwrap();
+        let xml = String::from_utf8(edited.package.get_part(&chart).unwrap().to_vec()).unwrap();
+        assert!(xml.contains("<c:v>14</c:v>"));
+        edited.package.set_part(
+            &chart,
+            xml.replace("<c:v>14</c:v>", "<c:v>18</c:v>").into_bytes(),
+        );
+        let original_parts = original.package.parts.clone();
+        let mut redline = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+        redline
+            .compare(&edited, "Reviewer", "2026-01-01T00:00:00Z")
+            .unwrap();
+        let redline = Document::from_bytes(&redline.to_bytes().unwrap()).unwrap();
+        let added = redline
+            .package
+            .parts
+            .iter()
+            .filter(|(name, _)| !original_parts.contains_key(*name))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            added.len(),
+            3,
+            "one chart, workbook and sidecar copy despite repeated drawing roots"
+        );
+        assert_eq!(
+            added.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
+            fx245_chart_and_workbook(&edited).0.len()
+                + fx245_chart_and_workbook(&edited).1.len()
+                + opaque.len()
+        );
+        let (accepted, rejected) = fx245_resolve_pair(original, edited);
+        for doc in [&accepted, &rejected] {
+            let ids = doc
+                .document
+                .body
+                .content
+                .iter()
+                .filter_map(|item| {
+                    let BodyContent::Paragraph(p) = item else {
+                        return None;
+                    };
+                    p.runs.iter().flat_map(|r| &r.content).find_map(|content| {
+                        let RunContent::Drawing(drawing) = content else {
+                            return None;
+                        };
+                        drawing
+                            .inline
+                            .as_ref()
+                            .and_then(|inline| inline.chart_rel_id.clone())
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ids.len(), 2, "both originally shared drawings survive");
+            let roots = fx245_drawn_chart_names(doc);
+            assert_eq!(roots[0], roots[1], "physical chart sharing survives");
+            let expected_chart = fx245_chart_and_workbook(doc).0;
+            for id in ids {
+                let edge = doc
+                    .package
+                    .get_part_rels(&doc.doc_part_name)
+                    .unwrap()
+                    .get_by_id(&id)
+                    .unwrap();
+                let name = OpcPackage::resolve_rel_target(&doc.doc_part_name, &edge.target);
+                assert_eq!(doc.package.get_part(&name).unwrap(), expected_chart);
+            }
+            assert_eq!(
+                doc.package.get_part(collision),
+                Some(b"unrelated collision".as_slice())
+            );
+            let root = fx245_chart_name(doc);
+            let rels = doc.package.get_part_rels(&root).unwrap();
+            let edge = rels.get_by_id("sidecar").unwrap();
+            let copied = OpcPackage::resolve_rel_target(&root, &edge.target);
+            assert_eq!(doc.package.get_part(&copied), Some(opaque.as_slice()));
+            let back = doc
+                .package
+                .get_part_rels(&copied)
+                .unwrap()
+                .get_by_id("back")
+                .unwrap();
+            assert_eq!(
+                OpcPackage::resolve_rel_target(&copied, &back.target).to_ascii_lowercase(),
+                root.to_ascii_lowercase()
+            );
+            assert!(
+                doc.package
+                    .get_part_rels(&copied)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .any(|edge| edge.target == "https://example.invalid/no-fetch"
+                        && edge.target_mode.as_deref() == Some("External"))
+            );
+        }
+    }
+
+    #[test]
+    fn fx245_invalid_chart_closure_refuses_atomically() {
+        for invalid in [
+            "missing",
+            "duplicate",
+            "depth",
+            "shortcut-depth",
+            "external",
+        ] {
+            let mut original = fx245_document(14.0, "End of report.");
+            let mut edited = fx245_document(18.0, "End of report.");
+            let chart = fx245_chart_name(&edited);
+            match invalid {
+                "missing" => {
+                    edited
+                        .package
+                        .get_or_create_part_rels(&chart)
+                        .add("urn:sidecar", "/missing.xml");
+                }
+                "duplicate" => {
+                    let edge = edited.package.get_part_rels(&chart).unwrap().items[0].clone();
+                    edited
+                        .package
+                        .get_or_create_part_rels(&chart)
+                        .items
+                        .push(edge);
+                }
+                "depth" | "shortcut-depth" => {
+                    let root = chart.clone();
+                    let mut owner = chart;
+                    for index in 0..130 {
+                        let name = format!("/word/chain{index}.xml");
+                        edited.package.set_part(&name, b"<opaque/>".to_vec());
+                        edited
+                            .package
+                            .content_types
+                            .add_override(&name, "application/xml");
+                        edited.package.get_or_create_part_rels(&owner).add_with_id(
+                            "0-chain",
+                            "urn:chain",
+                            &name,
+                        );
+                        if invalid == "shortcut-depth" {
+                            edited.package.get_or_create_part_rels(&root).add_with_id(
+                                &format!("shortcut{index}"),
+                                "urn:shortcut",
+                                &name,
+                            );
+                        }
+                        owner = name;
+                    }
+                }
+                "external" => {
+                    let owner = edited.doc_part_name.clone();
+                    let edge = edited
+                        .package
+                        .get_part_rels_mut(&owner)
+                        .unwrap()
+                        .items
+                        .iter_mut()
+                        .find(|edge| edge.rel_type == rel_types::CHART)
+                        .unwrap();
+                    edge.target_mode = Some("External".to_owned());
+                    edge.target = "https://example.invalid/chart.xml".to_owned();
+                }
+                _ => unreachable!(),
+            }
+            let original_before = original.to_bytes().unwrap();
+            let edited_before = edited.package.clone();
+            assert!(
+                original
+                    .compare(&edited, "Reviewer", "2026-01-01T00:00:00Z")
+                    .is_err(),
+                "{invalid}"
+            );
+            assert_eq!(original.to_bytes().unwrap(), original_before, "{invalid}");
+            assert_eq!(edited.package.parts, edited_before.parts, "{invalid}");
+            assert_eq!(
+                edited.package.content_types.to_xml().unwrap(),
+                edited_before.content_types.to_xml().unwrap(),
+                "{invalid}"
+            );
+            for (owner, relationships) in &edited_before.part_rels {
+                assert_eq!(
+                    format!("{:?}", edited.package.get_part_rels(owner).unwrap()),
+                    format!("{relationships:?}"),
+                    "{invalid}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn fx245_distinct_chart_roots_share_an_aggregate_resource_limit() {
+        let mut original = fx245_document(14.0, "End of report.");
+        let mut edited = fx245_document(18.0, "End of report.");
+        edited
+            .add_chart(
+                oxml_chart::ChartKind::Bar,
+                Length::inches(6.0),
+                Length::inches(2.6),
+                &oxml_chart::ChartData {
+                    categories: vec!["Q1".into()],
+                    series: vec![("Other".into(), vec![23.0])],
+                    ..oxml_chart::ChartData::default()
+                },
+            )
+            .unwrap();
+        let roots = fx245_drawn_chart_names(&edited);
+        assert_eq!(roots.len(), 2);
+        for (root_index, root) in roots.iter().enumerate() {
+            for index in 0..2048 {
+                let name = format!("/word/leaf-{root_index}-{index}.xml");
+                edited.package.set_part(&name, b"<opaque/>".to_vec());
+                edited
+                    .package
+                    .content_types
+                    .add_override(&name, "application/xml");
+                edited.package.get_or_create_part_rels(root).add_with_id(
+                    &format!("leaf{index}"),
+                    "urn:leaf",
+                    &name,
+                );
+            }
+        }
+        let before = original.to_bytes().unwrap();
+        let edited_parts = edited.package.parts.clone();
+        let error = original
+            .compare(&edited, "Reviewer", "2026-01-01T00:00:00Z")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate chart resources exceed part limit"),
+            "{error}"
+        );
+        assert_eq!(original.to_bytes().unwrap(), before);
+        assert_eq!(edited.package.parts, edited_parts);
+    }
+    #[test]
+    fn fx245_existing_fragment_copy_keeps_distinct_case_alias_destinations() {
+        let mut source = Document::new();
+        let name = "/word/payload.xml";
+        let alias = "/WORD/PAYLOAD.XML";
+        source.package.set_part(name, b"<opaque/>".to_vec());
+        source
+            .package
+            .content_types
+            .add_override(name, "application/xml");
+        source
+            .package
+            .get_or_create_part_rels(name)
+            .add_with_id("cycle", "urn:cycle", alias);
+        let mapping = std::collections::BTreeMap::from([
+            (name.to_owned(), "/word/copy-one.xml".to_owned()),
+            (alias.to_owned(), "/word/copy-two.xml".to_owned()),
+        ]);
+        let mut destination = Document::new();
+        let mut copied = std::collections::HashSet::new();
+        crate::field::copy_fragment_part(
+            &source.package,
+            &mut destination,
+            name,
+            &mapping,
+            &mut copied,
+        )
+        .unwrap();
+        for target in mapping.values() {
+            assert_eq!(
+                destination.package.get_part(target),
+                Some(b"<opaque/>".as_slice())
+            );
+            let edge = destination
+                .package
+                .get_part_rels(target)
+                .unwrap()
+                .get_by_id("cycle")
+                .unwrap();
+            let actual = OpcPackage::resolve_rel_target(target, &edge.target);
+            assert_eq!(actual, "/word/copy-two.xml");
+            assert!(destination.package.contains_part(&actual));
+        }
     }
 }

@@ -1176,3 +1176,121 @@ def test_issue_161_toc_entry_hyperlink_transition_tracks_boundary(tmp_path):
     rejected = rdocx.Document.from_bytes(redline.to_bytes())
     rejected.reject_all()
     assert rejected.compare(rdocx.Document(original_path), "Ada", _MATRIX_TIMESTAMP) == ()
+
+
+# Exact source: https://github.com/tensorbee/rdocx/issues/382
+# SHA-256: 6383e57d2986af0a16229fe3c96d896fc52b7c2e880392519e2cee3121f44d30
+FX245_ISSUE382_SCRIPT = r'''import os
+import re
+import tempfile
+import zipfile
+
+import rdocx
+
+TMP = tempfile.mkdtemp()
+
+
+def build(name, north_q2, closing="End of report."):
+    doc = rdocx.Document()
+    doc.add_paragraph("Quarterly volume by region.")
+    data = rdocx.CategoryChartData()
+    data.categories = ["Q1", "Q2", "Q3"]
+    data.add_series("North", [12, north_q2, 15])
+    data.add_series("South", [9, 11, 10])
+    data.add_series("West", [7, 8, 13])
+    doc.add_chart(rdocx.XL_CHART_TYPE.COLUMN_CLUSTERED, data, rdocx.Inches(6), rdocx.Inches(2.6))
+    doc.add_paragraph(closing)
+    path = os.path.join(TMP, name)
+    doc.save(path)
+    return path
+
+
+def north(path):
+    """The cached values of the first series of the chart part."""
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("word/charts/chart1.xml").decode()
+    return re.findall(r"<c:v>([^<]*)</c:v>", re.search(r"<c:val>.*?</c:val>", xml, re.S).group(0))
+
+
+def check(case, a, b, granularity="word"):
+    """Expected: compare succeeds and records the change; accept_all() gives B's chart values and text,
+    reject_all() A's."""
+    doc = rdocx.Document(a)
+    try:
+        doc.compare(rdocx.Document(b), "Reviewer", "2026-01-01T00:00:00Z", granularity=granularity)
+    except Exception as e:
+        print("[FAIL] %s (%s)\n       %s: %s" % (case, granularity, type(e).__name__, e))
+        return
+    out = os.path.join(TMP, "redline.docx")
+    doc.save(out)
+    acc, rej = rdocx.Document(out), rdocx.Document(out)
+    acc.accept_all()
+    rej.reject_all()
+    acc.save(os.path.join(TMP, "accepted.docx"))
+    rej.save(os.path.join(TMP, "rejected.docx"))
+    got_acc, got_rej = north(os.path.join(TMP, "accepted.docx")), north(os.path.join(TMP, "rejected.docx"))
+    ok = (got_acc == north(b) and got_rej == north(a)
+          and acc.text() == rdocx.Document(b).text() and rej.text() == rdocx.Document(a).text())
+    print("[%s] %s (%s)\n       %d revisions; North after accept_all %s (B %s), after reject_all %s (A %s)"
+          % (" OK " if ok else "FAIL", case, granularity, len(doc.revisions), got_acc, north(b), got_rej, north(a)))
+
+
+a = build("a.docx", 14)
+check("1a one chart value changed (North, Q2: 14 -> 18)", a, build("b1.docx", 18))
+check("1a one chart value changed (North, Q2: 14 -> 18)", a, build("b1.docx", 18), granularity="run")
+check("1b the same value and the next paragraph changed", a, build("b2.docx", 18, "End of the report."))
+check("1c control: only the next paragraph changed", a, build("b3.docx", 14, "End of the report."))
+'''
+
+
+def test_fx245_exact_issue382_script_and_independent_package_graph(capsys):
+    import xml.etree.ElementTree as ET
+    import posixpath
+
+    scope = {}
+    exec(compile(FX245_ISSUE382_SCRIPT, "issue382.py", "exec"), scope)
+    output = capsys.readouterr().out
+    # The exact reporter observer hardcodes chart1.xml, an unused original after
+    # collision-safe replacement. Retain its execution, then inspect the actual
+    # surviving drawing relationship without changing any expected values.
+    assert output.count(" revisions;") == 4, output
+    assert "RdocxError" not in output, output
+
+    def graph(path):
+        with zipfile.ZipFile(path) as package:
+            chart_ns = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+            office_ns = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+            drawing = ET.fromstring(package.read("word/document.xml")).find(".//" + chart_ns + "chart")
+            edge_id = drawing.get(office_ns + "id")
+            edges = ET.fromstring(package.read("word/_rels/document.xml.rels"))
+            edge = next(edge for edge in edges if edge.get("Id") == edge_id)
+            assert edge.get("Type").endswith("/chart")
+            chart_name = posixpath.normpath(posixpath.join("word", edge.get("Target"))).lstrip("/")
+            chart = package.read(chart_name)
+            rels_name = posixpath.join(posixpath.dirname(chart_name), "_rels", posixpath.basename(chart_name) + ".rels")
+            edges = ET.fromstring(package.read(rels_name))
+            external = ET.fromstring(chart).find(chart_ns + "externalData")
+            workbook_edge = next(edge for edge in edges if edge.get("Id") == external.get(office_ns + "id"))
+            assert workbook_edge.get("Type").endswith("/package")
+            workbook_name = posixpath.normpath(posixpath.join(posixpath.dirname(chart_name), workbook_edge.get("Target"))).lstrip("/")
+            workbook = package.read(workbook_name)
+            with zipfile.ZipFile(__import__("io").BytesIO(workbook)) as book:
+                cells = ET.fromstring(book.read("xl/worksheets/sheet1.xml"))
+                values = {cell.get("r"): "".join(cell.itertext()) for cell in cells.iter() if cell.tag.endswith("}c")}
+                assert "B3" in values
+            return chart, workbook, values
+
+    def north_from_surviving_relationship(path):
+        chart = ET.fromstring(graph(path)[0])
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+        return [value.text for value in chart.find(".//" + ns + "val").iter(ns + "v")]
+
+    scope["north"] = north_from_surviving_relationship
+    for value, closing, granularity in ((18, "End of report.", "word"), (18, "End of report.", "run"),
+                                        (18, "End of the report.", "word"), (14, "End of the report.", "word")):
+        edited = scope["build"]("independent-b.docx", value, closing)
+        scope["check"]("independent graph", scope["a"], edited, granularity)
+        output = capsys.readouterr().out
+        assert "[FAIL]" not in output, output
+        assert graph(os.path.join(scope["TMP"], "accepted.docx")) == graph(edited)
+        assert graph(os.path.join(scope["TMP"], "rejected.docx")) == graph(scope["a"])

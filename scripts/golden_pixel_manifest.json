@@ -4,11 +4,11 @@
     "command": "pdftoppm",
     "version": "pdftoppm version 26.01.0"
   },
-  "reason": "F-X224 propagates the approved F-X210 Georgia-to-Gelasio delta to contract, proposal and report from actual reviewed PDF bytes. Four other RGBA samples remain exact.",
+  "reason": "F-X233 intentional paragraph frame geometry and owned flow. Exact independently reviewed contract invoice proposal quote RGBA buffers change, same1275x1650 at150DPI using actual Poppler26.01.0. Three other page-one buffers remain exact; native Word geometry and genuine Base attribution retained.",
   "samples": {
     "contract": {
       "height": 1650,
-      "rgba_sha256": "06421718e6dbad9c622c8f7cfdc474e76620f32045dd46b06d678130a2d5b478",
+      "rgba_sha256": "7c036a31da8463b4118d178ef7a5c6e948a8177934150a779482517564685b64",
       "width": 1275
     },
     "feature_showcase": {
@@ -18,7 +18,7 @@
     },
     "invoice": {
       "height": 1650,
-      "rgba_sha256": "c9c5369f9e7a2145121a720ce20a236ec1983828bb0573f579726a6927db6dfd",
+      "rgba_sha256": "37104f02e2b314e1a1cba622314dbcf9246fc39529b67dc5a99ece415c0b15a9",
       "width": 1275
     },
     "letter": {
@@ -28,12 +28,12 @@
     },
     "proposal": {
       "height": 1650,
-      "rgba_sha256": "08ec5c7046b024447f9ebad03ff49823361a30e61f99e9a5436bb8ff6fe63945",
+      "rgba_sha256": "7d43e40416f1d16752d959aba588bd8ab40f9278dd9d0cbd0051acbdd6968db9",
       "width": 1275
     },
     "quote": {
       "height": 1650,
-      "rgba_sha256": "ccd54d94a8774dcfadf1819d6ac52ffba46878abd2c63e81e1f3d36f864c2a26",
+      "rgba_sha256": "f7c7dbc42a35432d7bc06f7462d7787d714d9f4ce6e0d15c519565025ab79f1c",
       "width": 1275
     },
     "report": {

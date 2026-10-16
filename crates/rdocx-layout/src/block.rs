@@ -109,6 +109,8 @@ pub enum LayoutBlock {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ParagraphSemantics {
+    // Facing group edges are removed only on transient layout clones.
+    pub border_group_before: bool,
     pub source_node: Option<SourceNodeId>,
     pub structure_id: Option<StructureId>,
     pub reflow_direction: TextDirection,
@@ -138,6 +140,7 @@ pub(crate) struct TableSemantics {
 #[derive(Debug, Clone)]
 pub(crate) enum SharedLayoutBlock {
     Owned {
+        border_group_before: bool,
         block: Box<LayoutBlock>,
         reflow_direction: TextDirection,
         body_index: Option<usize>,
@@ -174,6 +177,7 @@ impl SharedLayoutBlock {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ParagraphView<'a> {
+    pub border_group_before: bool,
     pub block: &'a ParagraphBlock,
     pub semantics: Option<&'a ParagraphSemantics>,
     pub reflow_direction: TextDirection,
@@ -252,6 +256,7 @@ impl LayoutBlockLike for LayoutBlock {
     fn paragraph(&self) -> Option<ParagraphView<'_>> {
         match self {
             Self::Paragraph(block) => Some(ParagraphView {
+                border_group_before: false,
                 block,
                 semantics: None,
                 reflow_direction: TextDirection::Auto,
@@ -277,15 +282,18 @@ impl LayoutBlockLike for SharedLayoutBlock {
         match self {
             Self::Owned {
                 block,
+                border_group_before,
                 reflow_direction,
                 ..
             } => block.paragraph().map(|mut paragraph| {
                 paragraph.reflow_direction = *reflow_direction;
+                paragraph.border_group_before = *border_group_before;
                 paragraph
             }),
             Self::Paragraph {
                 block, semantics, ..
             } => Some(ParagraphView {
+                border_group_before: semantics.border_group_before,
                 block,
                 semantics: Some(semantics),
                 reflow_direction: semantics.reflow_direction,
@@ -423,8 +431,9 @@ pub struct ParagraphReflow {
 pub struct ParagraphBlock {
     /// Laid-out lines.
     pub lines: Vec<LayoutLine>,
-    /// Whether the tracked projection contains a visible revision.
-    pub has_visible_revision: bool,
+    /// The colour of the change bar the tracked projection draws beside the
+    /// paragraph, `None` when it shows no revision.
+    pub change_bar: Option<Color>,
     /// Floating drawings anchored to this paragraph.
     ///
     /// These travel with the paragraph so the paginator can resolve a
@@ -470,7 +479,129 @@ pub struct ParagraphBlock {
     pub content_offset_top: f64,
 }
 
+/// Complete painted width of a supported paragraph border edge.
+pub(crate) fn paragraph_border_width(edge: Option<&rdocx_oxml::borders::CT_BorderEdge>) -> f64 {
+    let Some(edge) = edge.filter(|edge| {
+        !edge.val.is_none() && !matches!(edge.val, rdocx_oxml::shared::ST_Border::Art(_))
+    }) else {
+        return 0.0;
+    };
+    let width = edge.sz.unwrap_or(4) as f64 / 8.0;
+    if edge.val == rdocx_oxml::shared::ST_Border::Double {
+        width * 3.0
+    } else {
+        width
+    }
+}
+
+pub(crate) fn paragraph_border_padding(edge: Option<&rdocx_oxml::borders::CT_BorderEdge>) -> f64 {
+    let width = paragraph_border_width(edge);
+    if width == 0.0 {
+        0.0
+    } else {
+        width + edge.and_then(|edge| edge.space).unwrap_or(0) as f64
+    }
+}
+
+/// Facing edges of identical adjacent frames belong to the outer group only.
+pub(crate) fn paragraph_border_groups(paragraphs: &[Option<&ParagraphBlock>]) -> Vec<(bool, bool)> {
+    let joins = |left: Option<&ParagraphBlock>, right: Option<&ParagraphBlock>| {
+        matches!((left,right), (Some(left),Some(right)) if !right.page_break_before
+            && left.borders.is_some() && left.borders == right.borders
+            && left.borders.as_ref().is_some_and(|borders| borders.between.is_none())
+            && left.indent_left == right.indent_left && left.indent_right == right.indent_right)
+    };
+    (0..paragraphs.len())
+        .map(|index| {
+            (
+                index > 0 && joins(paragraphs[index - 1], paragraphs[index]),
+                index + 1 < paragraphs.len() && joins(paragraphs[index], paragraphs[index + 1]),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn collapse_shared_border_groups(blocks: &mut [SharedLayoutBlock]) {
+    if !blocks.iter().any(|block| {
+        block
+            .paragraph()
+            .is_some_and(|paragraph| paragraph.borders.is_some())
+    }) {
+        return;
+    }
+    let paragraphs = blocks
+        .iter()
+        .map(|block| block.paragraph().map(|paragraph| paragraph.block))
+        .collect::<Vec<_>>();
+    let groups = paragraph_border_groups(&paragraphs);
+    for (block, (top, bottom)) in blocks.iter_mut().zip(groups) {
+        if !top && !bottom {
+            continue;
+        }
+        match block {
+            SharedLayoutBlock::Paragraph {
+                block, semantics, ..
+            } => {
+                semantics.border_group_before = top;
+                Arc::make_mut(block).remove_group_border_edges(top, bottom)
+            }
+            SharedLayoutBlock::Owned {
+                block,
+                border_group_before,
+                ..
+            } => {
+                *border_group_before = top;
+                if let LayoutBlock::Paragraph(paragraph) = block.as_mut() {
+                    paragraph.remove_group_border_edges(top, bottom);
+                }
+            }
+            SharedLayoutBlock::Table { .. } => {}
+        }
+    }
+}
+
 impl ParagraphBlock {
+    /// Price frame bands into the existing line stream, so every height
+    /// consumer, including note flattening and cell splitting, sees them.
+    pub(crate) fn add_border_padding(&mut self) {
+        let Some(borders) = &self.borders else {
+            return;
+        };
+        let top = paragraph_border_padding(borders.top.as_ref());
+        let bottom = paragraph_border_padding(borders.bottom.as_ref());
+        if let Some(first) = self.lines.first_mut() {
+            first.height += top;
+            first.ascent += top;
+        }
+        if let Some(last) = self.lines.last_mut() {
+            last.height += bottom;
+        }
+    }
+
+    pub(crate) fn remove_group_border_edges(&mut self, top: bool, bottom: bool) {
+        if !top && !bottom {
+            return;
+        }
+        let Some(borders) = &mut self.borders else {
+            return;
+        };
+        if top {
+            let padding = paragraph_border_padding(borders.top.as_ref());
+            if let Some(first) = self.lines.first_mut() {
+                first.height -= padding;
+                first.ascent -= padding;
+            }
+            borders.top = None;
+        }
+        if bottom {
+            let padding = paragraph_border_padding(borders.bottom.as_ref());
+            if let Some(last) = self.lines.last_mut() {
+                last.height -= padding;
+            }
+            borders.bottom = None;
+        }
+    }
+
     /// Total height of the paragraph lines (not including before/after spacing).
     pub fn content_height(&self) -> f64 {
         self.content_offset_top + self.lines.iter().map(|l| l.height).sum::<f64>()
@@ -502,9 +633,9 @@ pub fn build_paragraph_block(
     page_break_before: bool,
     widow_control: bool,
 ) -> ParagraphBlock {
-    ParagraphBlock {
+    let mut block = ParagraphBlock {
         lines,
-        has_visible_revision: false,
+        change_bar: None,
         anchored: Vec::new(),
         space_before,
         space_after,
@@ -523,7 +654,9 @@ pub fn build_paragraph_block(
         structure_id: None,
         reflow: None,
         content_offset_top: 0.0,
-    }
+    };
+    block.add_border_padding();
+    block
 }
 
 #[cfg(test)]
@@ -534,7 +667,7 @@ mod tests {
     fn paragraph_block_height() {
         let block = ParagraphBlock {
             anchored: Vec::new(),
-            has_visible_revision: false,
+            change_bar: None,
             lines: vec![
                 LayoutLine {
                     items: vec![],

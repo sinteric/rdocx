@@ -1542,6 +1542,7 @@ dependencies = [
  "oxml-drawing",
  "oxml-layout",
  "rdocx-oxml",
+ "ttf-parser",
 ]
 
 [[package]]

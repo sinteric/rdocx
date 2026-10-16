@@ -443,6 +443,18 @@ fn mathml_children_to_argument(
                 let position = positions.entry(element.local.as_str()).or_default();
                 *position += 1;
                 let child_path = format!("{path}/{}[{position}]", element.local);
+                // Pandoc marks an upright function name with an invisible application
+                // operator. Only this supported lim spelling has an implicit equivalent.
+                if element.namespace.as_deref() == Some(MATHML_NS)
+                    && element.local == "mo"
+                    && element.attributes.is_empty()
+                    && element.elements().next().is_none()
+                    && element.text() == "\u{2061}"
+                    && matches!(expressions.last(), Some(MathExpression::Run(run))
+                        if run.text == "lim" && run.properties.normal == Some(true))
+                {
+                    continue;
+                }
                 expressions.extend(mathml_element_to_expressions(
                     element,
                     &child_path,
@@ -489,6 +501,8 @@ fn mathml_element_to_expressions(
         "munder" => &["accentunder"][..],
         "munderover" => &["accent", "accentunder"][..],
         "mfenced" => &["open", "close", "separators"][..],
+        "mi" | "mn" | "mo" | "mtext" => &["mathvariant"][..],
+        "mspace" => &["width"][..],
         _ => &[][..],
     };
     diagnose_attributes(node, path, allowed_attributes, diagnostics)?;
@@ -519,7 +533,35 @@ fn mathml_element_to_expressions(
                     "nested MathML token content was discarded",
                 )?;
             }
-            Ok(vec![MathRun::new(node.text()).into()])
+            let mut run = MathRun::new(node.text());
+            if let Some(variant) = node.attribute("mathvariant") {
+                if variant == "normal" {
+                    run.properties.normal = Some(true);
+                } else {
+                    diagnostics.push(
+                        format!("{path}/@mathvariant"),
+                        "unsupported MathML mathvariant was discarded",
+                    )?;
+                }
+            }
+            Ok(vec![run.into()])
+        }
+        "mspace" => {
+            for (index, _) in node.elements().enumerate() {
+                diagnostics.push(
+                    format!("{path}/*[{}]", index + 1),
+                    "nested MathML spacing content was discarded",
+                )?;
+            }
+            if matches!(node.attribute("width"), Some("0.167em" | "thinmathspace")) {
+                Ok(vec![MathRun::new("\u{2009}").into()])
+            } else {
+                diagnostics.push(
+                    format!("{path}/@width"),
+                    "unsupported MathML spacing width was discarded",
+                )?;
+                Ok(Vec::new())
+            }
         }
         "mfrac" => {
             let children = mathml_element_children(node);
@@ -1505,6 +1547,16 @@ fn write_mathml_argument(
     Ok(())
 }
 
+fn run_has_unconverted_properties(run: &MathRun, normal_supported: bool) -> bool {
+    let properties = &run.properties;
+    properties.style.is_some()
+        || (properties.normal.is_some() && !(normal_supported && properties.normal == Some(true)))
+        || properties.literal.is_some()
+        || properties.script.is_some()
+        || properties.break_before
+        || properties.break_alignment.is_some()
+}
+
 fn write_mathml_expression(
     expression: &MathExpression,
     path: &str,
@@ -1516,7 +1568,7 @@ fn write_mathml_expression(
     }
     match expression {
         MathExpression::Run(run) => {
-            if run.properties != Default::default() {
+            if run_has_unconverted_properties(run, true) {
                 diagnostics.push(
                     format!("{path}/rPr"),
                     "OfficeMath run properties were discarded",
@@ -1529,9 +1581,22 @@ fn write_mathml_expression(
                 )?;
                 return Ok(());
             }
-            output.push_str("<mi>");
-            output.push_str(&xml_escape(&run.text));
-            output.push_str("</mi>");
+            if run.properties.normal == Some(true) {
+                output.push_str("<mi mathvariant=\"normal\">");
+                output.push_str(&xml_escape(&run.text));
+                output.push_str("</mi>");
+            } else {
+                for (index, part) in run.text.split('\u{2009}').enumerate() {
+                    if index > 0 {
+                        output.push_str("<mspace width=\"0.167em\"/>");
+                    }
+                    if !part.is_empty() || run.text.is_empty() {
+                        output.push_str("<mi>");
+                        output.push_str(&xml_escape(part));
+                        output.push_str("</mi>");
+                    }
+                }
+            }
         }
         MathExpression::Fraction(value) => {
             if value.fraction_type != FractionType::Bar {
@@ -1863,16 +1928,9 @@ impl<'a> LatexParser<'a> {
             }
             Some('}') | Some('[') | Some(']') => Err(self.error("unexpected LaTeX delimiter")),
             Some(_) => {
-                let mut text = String::new();
-                while let Some(character) = self.peek() {
-                    if character.is_whitespace()
-                        || matches!(character, '{' | '}' | '[' | ']' | '\\' | '_' | '^' | '&')
-                    {
-                        break;
-                    }
-                    text.push(character);
-                    self.bump();
-                }
+                // TeX scripts bind to one atom, even beside an unscripted run.
+                let character = self.bump().expect("the atom has a character");
+                let text = character.to_string();
                 self.add_text(text.len())?;
                 self.add_node()?;
                 Ok(MathArgument::text(text))
@@ -2020,7 +2078,29 @@ impl<'a> LatexParser<'a> {
                 }]))
             }
             "begin" => self.parse_matrix_environment(start),
-            "," | ";" | "!" | " " => Ok(MathArgument::default()),
+            "pi" | "to" | "rightarrow" | "infty" | "," | "lim" => {
+                let text = match command.as_str() {
+                    "pi" => "π",
+                    "to" | "rightarrow" => "→",
+                    "infty" => "∞",
+                    "," => "\u{2009}",
+                    _ => "lim",
+                };
+                self.add_text(text.len())?;
+                self.add_node()?;
+                let mut run = MathRun::new(text);
+                if command == "lim" {
+                    run.properties.normal = Some(true);
+                }
+                Ok(MathArgument::new(vec![run.into()]))
+            }
+            ";" | "!" | " " => {
+                self.diagnostics.push(
+                    format!("byte:{start}"),
+                    format!("unsupported LaTeX spacing \\{command} was discarded"),
+                )?;
+                Ok(MathArgument::default())
+            }
             "{" | "}" | "_" | "^" | "#" | "$" | "%" | "&" | "\\" => {
                 self.add_text(command.len())?;
                 self.add_node()?;
@@ -2796,13 +2876,22 @@ fn write_latex_expression(
     }
     match expression {
         MathExpression::Run(run) => {
-            if run.properties != Default::default() {
+            let upright_lim = run.text == "lim" && run.properties.normal == Some(true);
+            if run_has_unconverted_properties(run, upright_lim) {
                 diagnostics.push(path, "OfficeMath run properties were discarded")?;
             }
-            if run.text.chars().any(char::is_whitespace) {
+            if run
+                .text
+                .chars()
+                .any(|character| character.is_whitespace() && character != '\u{2009}')
+            {
                 diagnostics.push(path, "OfficeMath run whitespace was discarded by LaTeX")?;
             }
-            output.push_str(&latex_escape(&run.text));
+            if upright_lim {
+                output.push_str("\\lim ");
+            } else {
+                output.push_str(&latex_escape(&run.text));
+            }
         }
         MathExpression::Fraction(value) => {
             if value.fraction_type != FractionType::Bar {
@@ -2967,6 +3056,7 @@ fn latex_escape(value: &str) -> String {
     for character in value.chars() {
         match character {
             '\\' => escaped.push_str("\\backslash{}"),
+            '\u{2009}' => escaped.push_str("\\,"),
             '[' => escaped.push_str("\\lbrack{}"),
             ']' => escaped.push_str("\\rbrack{}"),
             '{' | '}' | '_' | '^' | '#' | '$' | '%' | '&' => {
@@ -3007,6 +3097,237 @@ mod tests {
     use rdocx_oxml::math::{CT_OMath, LimitLocation, MathStyle};
 
     use super::*;
+
+    const ISSUE365: &str =
+        r"\int_{a}^{b} e^{i \pi K} \, dx = \lim_{x \to \infty} \frac{S}{\sqrt{T^2 + C^2}}";
+
+    fn issue365_tree() -> MathArgument {
+        let mut integral = MathNary::new(
+            "∫",
+            MathArgument::new(vec![MathExpression::Superscript(MathScript::new(
+                MathArgument::text("e"),
+                MathArgument::text("iπK"),
+            ))]),
+        );
+        integral.subscript = MathArgument::text("a");
+        integral.superscript = MathArgument::text("b");
+        integral.hide_subscript = false;
+        integral.hide_superscript = false;
+        let mut lim = MathRun::new("lim");
+        lim.properties.normal = Some(true);
+        MathArgument::new(vec![
+            MathExpression::Nary(integral),
+            MathRun::new("\u{2009}dx=").into(),
+            MathExpression::Subscript(MathScript::new(
+                MathArgument::new(vec![lim.into()]),
+                MathArgument::text("x→∞"),
+            )),
+            MathExpression::Fraction(MathFraction::new(
+                MathArgument::text("S"),
+                MathArgument::new(vec![MathExpression::Radical(MathRadical::new(
+                    MathArgument::new(vec![
+                        MathExpression::Superscript(MathScript::new(
+                            MathArgument::text("T"),
+                            MathArgument::text("2"),
+                        )),
+                        MathRun::new("+").into(),
+                        MathExpression::Superscript(MathScript::new(
+                            MathArgument::text("C"),
+                            MathArgument::text("2"),
+                        )),
+                    ]),
+                ))]),
+            )),
+        ])
+    }
+
+    #[test]
+    fn fx234_issue365_preserves_symbols_limits_and_thin_space() {
+        let converted = equation_from_latex(ISSUE365).expect("exact supplied formula");
+        assert!(
+            converted.diagnostics.is_empty(),
+            "{:?}",
+            converted.diagnostics
+        );
+        assert_eq!(converted.value, issue365_tree());
+    }
+
+    #[test]
+    fn fx234_pi_scripts_attach_to_their_original_base() {
+        let command = equation_from_latex(r"M = \frac{4\pi^{2} a^{3}}{G T^{2}}").unwrap();
+        let unicode = equation_from_latex(r"M = \frac{4π^{2} a^{3}}{G T^{2}}").unwrap();
+        assert!(command.diagnostics.is_empty(), "{:?}", command.diagnostics);
+        assert_eq!(command.value, unicode.value);
+    }
+
+    #[test]
+    fn fx234_supported_formula_normalizes_across_latex_mathml_and_docx() {
+        use rdocx_oxml::math::OfficeMath;
+        let expected = issue365_tree();
+        for output in [equation_to_latex(&expected), equation_to_mathml(&expected)] {
+            assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+            let reopened = if output.value.starts_with('<') {
+                equation_from_mathml(&output.value)
+            } else {
+                equation_from_latex(&output.value)
+            }
+            .unwrap();
+            assert!(
+                reopened.diagnostics.is_empty(),
+                "{:?}",
+                reopened.diagnostics
+            );
+            assert_eq!(reopened.value, expected);
+        }
+        let mut doc = crate::Document::new();
+        let opaque = r#"<x:opaque xmlns:x="urn:issue365" data="before">  kept </x:opaque>"#;
+        let xml = String::from_utf8(
+            CT_OMath::new(expected.expressions.clone())
+                .to_xml()
+                .unwrap(),
+        )
+        .unwrap();
+        let xml = xml.replace("</m:oMath>", &format!("{opaque}</m:oMath>"));
+        let preserved = CT_OMath::from_xml(xml.as_bytes()).unwrap();
+        doc.add_paragraph("before")
+            .add_equation(OfficeMath::Inline(preserved))
+            .unwrap();
+        let bytes = doc.to_bytes().unwrap();
+        let reopened = crate::Document::from_bytes(&bytes).unwrap();
+        let equation = reopened
+            .paragraph(0)
+            .unwrap()
+            .equations()
+            .next()
+            .unwrap()
+            .clone();
+        let OfficeMath::Inline(equation) = equation else {
+            panic!("inline equation")
+        };
+        assert!(
+            String::from_utf8(equation.to_xml().unwrap())
+                .unwrap()
+                .contains(opaque)
+        );
+        let converted = equation_to_mathml(&MathArgument::new(equation.expressions));
+        assert!(
+            converted.diagnostics.is_empty(),
+            "{:?}",
+            converted.diagnostics
+        );
+        let normalized = equation_from_mathml(&converted.value).unwrap();
+        assert!(normalized.diagnostics.is_empty());
+        assert_eq!(normalized.value, expected);
+    }
+
+    #[test]
+    fn fx234_losses_and_invisible_function_markers_remain_explicit_and_bounded() {
+        let source = format!(
+            r#"<math xmlns="{MATHML_NS}"><mi mathvariant="bold">x</mi><mspace width="9em"/><mo>&#8289;</mo><mi mathvariant="normal">lim</mi><mo>&#8289;</mo></math>"#
+        );
+        let converted = equation_from_mathml(&source).unwrap();
+        assert_eq!(
+            converted
+                .diagnostics
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/math[1]/mi[1]/@mathvariant", "/math[1]/mspace[1]/@width"]
+        );
+        let mut lim = MathRun::new("lim");
+        lim.properties.normal = Some(true);
+        assert_eq!(
+            converted.value,
+            MathArgument::new(vec![MathRun::new("x\u{2061}").into(), lim.into()])
+        );
+        let losses = equation_from_latex(r"a\;b\!c\unknown{d}").unwrap();
+        assert_eq!(losses.value, MathArgument::text("abc"));
+        assert_eq!(
+            losses
+                .diagnostics
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            ["byte:1", "byte:4", "byte:7"]
+        );
+        assert!(
+            equation_from_latex(&format!(
+                "{}x{}",
+                "{".repeat(MAX_DEPTH + 1),
+                "}".repeat(MAX_DEPTH + 1)
+            ))
+            .is_err()
+        );
+        assert!(equation_from_latex(&r"\pi".repeat(MAX_NODES + 1)).is_err());
+        assert!(
+            equation_from_mathml(&format!(
+                r#"<math xmlns="{MATHML_NS}">{}</math>"#,
+                r#"<mspace width="0.167em"/>"#.repeat(MAX_NODES + 1)
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the exact pinned Pandoc 3.11 executable"]
+    fn fx234_issue365_matches_actual_pinned_pandoc_3_11() {
+        let pandoc = std::env::var("RDOCX_PANDOC").unwrap_or_else(|_| "pandoc".to_owned());
+        let identity = Command::new(&pandoc).arg("--version").output().unwrap();
+        assert!(identity.status.success());
+        assert_eq!(
+            identity.stdout.split(|byte| *byte == b'\n').next(),
+            Some(b"pandoc 3.11".as_slice())
+        );
+        // This current producer has its own identity. The historical 3.10 gate
+        // and its intentional divergences remain unchanged below.
+        let html = pandoc_convert(
+            &pandoc,
+            &["--from=latex", "--to=html", "--math-method=mathml"],
+            &format!("${ISSUE365}$"),
+        );
+        let start = html.find("<math").unwrap();
+        let end = html.find("</math>").unwrap() + "</math>".len();
+        let oracle = equation_from_mathml(&html[start..end]).unwrap();
+        assert_eq!(
+            oracle.value,
+            issue365_tree(),
+            "complete normalized Pandoc structure"
+        );
+        assert_eq!(
+            oracle
+                .diagnostics
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/math[1]/@display", "/math[1]/semantics[1]"]
+        );
+        let mathml = equation_to_mathml(&issue365_tree());
+        assert!(mathml.diagnostics.is_empty());
+        let reverse = pandoc_convert(&pandoc, &["--from=html", "--to=latex"], &mathml.value);
+        let reverse = reverse
+            .trim()
+            .strip_prefix(r"\(")
+            .and_then(|s| s.strip_suffix(r"\)"))
+            .unwrap();
+        let reopened = equation_from_latex(reverse).unwrap();
+        assert_eq!(
+            reopened.value,
+            issue365_tree(),
+            "reverse Pandoc structure for {reverse}"
+        );
+        assert_eq!(
+            reopened
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>(),
+            ["LaTeX \\limits n-ary placement was discarded"]
+        );
+        eprintln!(
+            "Pandoc3.11 LaTeX->HTML/MathML and HTML/MathML->LaTeX normalized tree: {:#?}",
+            oracle.value
+        );
+    }
 
     fn supported_tree() -> MathArgument {
         MathArgument::new(vec![

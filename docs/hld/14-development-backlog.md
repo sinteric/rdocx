@@ -7977,7 +7977,7 @@ Resolve Issue373 from PR375 uncovered slices. Add legal revision colouring and i
 **Depends on**: none
 **Test gate**: regression
 
-Resolve Issue366 by first reproducing its exact border input, including the stated 15tp value. Inspect saved w:sz and w:space and independently measure cropped geometry and paint. Existing size conversion already divides by eight, so distinguish width from clearance, clipping and joins before selecting a fix. Require save/reopen and independent native comparison. Never loosen raster thresholds to hide a delta.
+Qualify Issue366's paragraph borders using the original input when available. When it is unavailable, use the user-approved inferred15point sz120 and raw15 sz15 controls, retain the missing-original limitation and do not claim exact-original reproduction. Inspect saved w:sz and w:space and independently measure cropped geometry and paint. Existing size conversion already divides by eight, so distinguish width from clearance, clipping and joins before selecting a fix. Require save/reopen and independent native comparison. Never loosen raster thresholds to hide a delta.
 
 
 ### F-X234, Preserve supported LaTeX conversion structure
@@ -8107,3 +8107,65 @@ Close Issue381. A marked control becomes an empty `/Sig` field, and the option
 reaches Rust, Python and `rdocx convert`. Output without the option is byte
 identical to before. Signing the PDF in the library stays out of scope. The
 manual Acrobat Reader and Preview fill and sign check is recorded as evidence.
+
+### F-X245, Preserve chart data changes in Word comparison
+
+**Size**: L
+**Depends on**: F-X229, F-X230
+**Test gate**: regression
+
+Resolve [Issue382](https://github.com/tensorbee/rdocx/issues/382). Detect a
+chart-data-only edit at both word and run granularity and record a revision.
+A chart-data edit combined with adjacent text changes must also compare
+successfully. After saving and reopening the redline, accept-all reproduces
+the edited chart part, embedded workbook and text, while reject-all reproduces
+the original. Run the exact supplied script, retain its unchanged-chart control
+and independently inspect package relationships, chart caches and workbook
+values. Preserve existing picture comparison, revision grouping, opaque XML
+and atomic refusal guarantees. Qualify native and installed Python entrypoints.
+
+### F-X246, Honor chart legend position and overlay during rendering
+
+**Size**: L
+**Depends on**: none
+**Test gate**: differential
+
+Resolve [Issue383](https://github.com/tensorbee/rdocx/issues/383) across Word
+and PowerPoint chart rendering. Honor `c:legendPos` right, left, top, bottom
+and top-right, defaulting to right when absent. When `c:overlay` is absent or
+false, reserve space outside the plot so legend entries do not cover bars.
+Qualify true overlay, absent legends and hidden-legend controls without losing
+unmodelled chart XML or schema order. The exact supplied default, bottom and
+left repros must produce distinct renders in both formats with no legend/plot
+overlap. Compare independently measured plot and legend geometry and pinned
+native Office renders in deterministic font mode. Attribute intentional hash
+and raster deltas to this story. During design, explicitly decide the related
+Python legend visibility, position and overlay request for both families and
+record any residual before claiming full issue closure.
+
+### F-X247, Preserve the common LaTeX inputs reported in Issue365
+
+**Size**: L
+**Depends on**: F-X234, F-X235
+**Test gate**: differential
+
+Complete the finite 73 input conversion matrix in
+[Issue365's follow-up](https://github.com/tensorbee/rdocx/issues/365#issuecomment-6200740130).
+Preserve its authenticated original script, all 73 distinct input rows and their
+order. Cover the named Greek and mathematical symbols, relations, operators,
+arrows, upright functions, operatorname/mathrm/text, binom, dfrac/tfrac and
+spacing without losing atom/script ownership or meaningful text. Design any
+forced fraction style, text whitespace or unsupported representation distinction
+explicitly before implementation. This is a bounded extension, not unrestricted
+TeX support, and does not reopen the completed S93 exact-formula contract.
+
+Retain original output separately from a corrected observer whose only script
+change makes the unconditional FAIL summary depend on actual losses. Require
+zero unexpected diagnostics and independently inspected correct normalized
+structure for all 73 inputs. Execute actual pinned Pandoc forward/reverse
+qualification and native/render comparisons where new paint semantics require
+it. Preserve existing bounds, schema order, opaque source, deterministic fonts,
+historical oracle identities and applicable geometry/raster thresholds.
+Qualify native and fresh installed Python save/reopen, real semantic mutation
+failures and applicable publication, binding, WASM and hash riders. Issue365
+remains open until this broader acceptance has evidence on main.

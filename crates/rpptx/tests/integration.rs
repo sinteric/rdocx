@@ -36037,3 +36037,52 @@ fn fx231_unsupported_html_keeps_ordered_diagnostics() {
     assert!(result.diagnostics.iter().all(|d| !d.path.is_empty()));
     assert_eq!(result.presentation.slide(0).unwrap().text(), "a b c d");
 }
+
+#[test]
+fn fx246_ppt_legend_settings_roundtrip_and_noops() {
+    use rpptx::LegendPosition as P;
+    let mut presentation = presentation_with_authored_chart();
+    let id = presentation
+        .slides()
+        .next()
+        .unwrap()
+        .shapes()
+        .last()
+        .unwrap()
+        .non_visual_id()
+        .unwrap();
+    let before = presentation.to_bytes().unwrap();
+    presentation
+        .set_chart_legend(0, id, None, Some(P::Right), Some(false))
+        .unwrap();
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+    for position in [P::Right, P::Left, P::Top, P::Bottom, P::TopRight] {
+        presentation
+            .set_chart_legend(0, id, None, Some(position), Some(true))
+            .unwrap();
+        let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+        let settings = reopened.chart_legend(0, id).unwrap();
+        assert_eq!(settings.position, position);
+        assert!(settings.overlay);
+    }
+    presentation
+        .set_chart_legend(0, id, Some(false), None, None)
+        .unwrap();
+    let hidden = presentation.to_bytes().unwrap();
+    presentation
+        .set_chart_legend(0, id, None, Some(P::Bottom), Some(true))
+        .unwrap();
+    assert_eq!(presentation.to_bytes().unwrap(), hidden);
+    presentation
+        .set_chart_legend(0, id, Some(true), None, None)
+        .unwrap();
+    assert_eq!(presentation.chart_legend(0, id).unwrap().position, P::Right);
+    assert!(!presentation.chart_legend(0, id).unwrap().overlay);
+    let before = presentation.to_bytes().unwrap();
+    assert!(
+        presentation
+            .set_chart_legend(0, id + 999, None, Some(P::Left), None)
+            .is_err()
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+}

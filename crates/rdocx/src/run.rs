@@ -537,11 +537,13 @@ impl<'a> Run<'a> {
     }
 
     /// Set bold formatting in place.
+    #[inline]
     pub fn set_bold(&mut self, val: bool) {
         self.set_bold_value(Some(val));
     }
 
     /// Set or clear direct bold formatting in place.
+    #[inline]
     pub fn set_bold_value(&mut self, val: Option<bool>) {
         if val.is_none() && self.inner.properties.is_none() {
             return;
@@ -558,11 +560,13 @@ impl<'a> Run<'a> {
     }
 
     /// Set italic formatting in place.
+    #[inline]
     pub fn set_italic(&mut self, val: bool) {
         self.set_italic_value(Some(val));
     }
 
     /// Set or clear direct italic formatting in place.
+    #[inline]
     pub fn set_italic_value(&mut self, val: Option<bool>) {
         if val.is_none() && self.inner.properties.is_none() {
             return;
@@ -630,11 +634,13 @@ impl<'a> Run<'a> {
     }
 
     /// Set font size in place.
+    #[inline]
     pub fn set_size(&mut self, pt: f64) {
         self.set_size_value(Some(pt));
     }
 
     /// Set or clear the direct font size in points.
+    #[inline]
     pub fn set_size_value(&mut self, pt: Option<f64>) {
         if pt.is_none() && self.inner.properties.is_none() {
             return;

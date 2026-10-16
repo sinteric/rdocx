@@ -17,6 +17,13 @@ MSRV stays declared separately as `rust-version = "1.93"` in
 two answer different questions: the toolchain file says what this repository is
 developed with, `rust-version` says what it is guaranteed to compile with.
 
+Public setter inlining is selective. The native Word Run bold, italic and size
+setters and their optional-value implementations carry inline annotations for
+separate downstream consumers. Qualification uses an external crate with
+opt-level3, LTO disabled and one codegen unit, with assembly inspection and
+paired archived executables. Paragraph-mark setters already inline under that
+consumer profile. There is no blanket annotation or end-to-end speed guarantee.
+
 ## Deterministic rendering
 
 Normal `oxml-layout` construction may load system fonts. System fonts differ
@@ -180,6 +187,28 @@ payload. The installer skips without materializing only the archive's exact
 `pandoc-lua -> pandoc` and `pandoc-server -> pandoc` symlinks and rejects every
 other unsupported member type. Pandoc and texmath are absent from every
 published crate and production dependency graph.
+
+The exact Issue365 conversion fixture has a separate live Pandoc 3.11 gate,
+`fx234_issue365_matches_actual_pinned_pandoc_3_11`. Its macOS executable identity
+is `pandoc 3.11`, with SHA-256
+`23908d6bc347072befa2bfe312f2c1c44a7c9c2e9e60bb5d41069245454b3236`.
+The gate runs `--from=latex --to=html --math-method=mathml` and
+`--from=html --to=latex`, comparing complete normalized OfficeMath trees in
+both directions. This fixture does not replace the checksum-pinned Linux 3.10
+installer or its historical evidence.
+
+Native equation qualification separately pins Microsoft Word16.113.2
+build16.113.26092012 and Poppler26.09.0. The existing OfficeMath manifest binds
+actual application identity, tool bytes, source recipes, native PDF and normal
+save/reopen evidence. Authentic Word-bundled Cambria and Cambria Math remain
+external caller-font inputs through the existing deterministic render API.
+They are neither installed nor redistributed, and bundled Caladea defaults
+remain unchanged. Historical Word16.104 build16.104.25121423 and Poppler26.01.0
+controls retain their identities and results. Production math reads the existing
+resolved ttf-parser0.25.1 dependency directly from rdocx-layout, with no new
+resolved package, public font API or external executable. Both WASM graphs,
+denied-warning rustdoc, verified local-patched workspace publication dry runs,
+actual affected archive inventories and the10MiB ceiling cover this direct edge.
 
 ODP conversion adds no external production tool and reuses the workspace
 `zip`, `quick-xml`, and `oxml-media` dependencies. LibreOffice 26.2.5.2 remains
@@ -1092,6 +1121,18 @@ Workflow regressions keep the fetch singular and immediately after the cache,
 reject weakened or misplaced commands, and keep all dependency network access
 ahead of the offline helper.
 
+Independent Word legal-paint geometry evidence uses actual Microsoft Word
+16.113.2 build 16.113.26092012 exports of frozen static colour and decoration
+inputs, with retained input and PDF digests and native export receipts. Pinned
+Poppler 26.01.0 supplies raster verification. This component-level authority
+is separate from the existing historical native corpus. Product baseline
+rendering keeps deterministic bundled fonts. Static native paint inputs do
+not qualify tracked change-bar selection, and native versus product font and
+page differences prevent a full-page similarity claim. Archive observations
+for affected published crates are re-derived from current packaged sources
+under the existing exact member inventory, 64 byte compression allowance and
+10 MiB ceiling.
+
 ## Dependency policy
 
 `deny.toml` keeps the unused ZIP codec bans (`zstd`, `bzip2`, `lzma-rust2`, and
@@ -1237,3 +1278,16 @@ styles remain recorded. Own-renderer baselines continue to use deterministic
 font mode and true face selection. External downstream guidance remains a
 reviewed proposal until separately submitted, and integrated sprint gates
 remain independent of isolated feature qualifications.
+
+
+Chart legend native controls pin Microsoft Word16.113.2
+build16.113.26092012 and PowerPoint16.113.4 build16.113.26100421, with
+source/output hashes and application export receipts. PowerPoint uses local
+PDF export with Best for printing. Poppler26.01.0 supplies150DPI raster and
+text extraction. Separate font-matched legend controls use the identical
+native bundled Aptos font bytes, SHA256
+`95980114fcfd42f2f9c446dae429b70582bf2f03097d68433ea9e7d85a49da0b`,
+through the existing deterministic caller-font route. No font installation is
+required. Original font mismatches and empty-legend native overlay remain
+recorded. Component paint qualification does not establish whole-chart or
+outer-frame equivalence, and deterministic shared baselines remain unchanged.

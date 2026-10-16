@@ -11,6 +11,7 @@ from .enum import text as _text
 
 _Path = str | _os.PathLike[str]
 _RevisionView = _Literal["accepted", "tracked"]
+_RevisionStyle = _Literal["plain", "legal"]
 _BorderStyle = _Literal[
     "none", "single", "thick", "double", "dotted", "dashed", "dotDash", "wave"
 ]
@@ -885,6 +886,8 @@ class Document:
     def embed_system_fonts(self, value: bool | None) -> None: ...
 
     def add_chart(self, chart_type: int, chart_data: object, width: int, height: int, *, after: Paragraph | None = None) -> Paragraph: ...
+    def chart_legend(self, paragraph: Paragraph) -> dict[str, bool | str]: ...
+    def set_chart_legend(self, paragraph: Paragraph, *, visible: bool | None = None, position: _Literal["r", "l", "t", "b", "tr"] | None = None, overlay: bool | None = None) -> None: ...
     def to_html(self) -> str: ...
     def to_markdown(self) -> str: ...
     def text(self) -> str: ...
@@ -949,6 +952,7 @@ class Document:
         font_dir: _Path | None = None,
         font_dirs: _Sequence[_Path] | None = None,
         revision_view: _RevisionView = "accepted",
+        revision_style: _RevisionStyle = "plain",
     ) -> tuple[bytes, tuple[str, ...]]: ...
     def to_pdf(
         self,
@@ -957,6 +961,7 @@ class Document:
         font_dir: _Path | None = None,
         font_dirs: _Sequence[_Path] | None = None,
         revision_view: _RevisionView = "accepted",
+        revision_style: _RevisionStyle = "plain",
     ) -> bytes:
         """Render PDF with normal fallback plus ordered caller fonts.
 
@@ -964,15 +969,18 @@ class Document:
         Singular font_dir and ordered font_dirs are mutually exclusive.
         Missing directories fail, malformed supported font files fail, and
         empty valid inputs retain ordinary fallback.
+        Tracked rendering accepts revision_style="legal" for blue double-underlined
+        insertions, red struck deletions and green moves. Plain is the default.
+        Unknown values or legal styling with accepted view raise ValueError.
         """
     def to_pdfa_deterministic(
         self, profile: _Literal["pdfa-2b", "pdfa-3b"] = "pdfa-2b"
     ) -> bytes: ...
-    def render_page_to_png_with_diagnostics(self, page_index: int, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted") -> tuple[bytes | None, tuple[str, ...]]: ...
-    def render_page_to_png(self, page_index: int, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted") -> bytes | None: ...
+    def render_page_to_png_with_diagnostics(self, page_index: int, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted", revision_style: _RevisionStyle = "plain") -> tuple[bytes | None, tuple[str, ...]]: ...
+    def render_page_to_png(self, page_index: int, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted", revision_style: _RevisionStyle = "plain") -> bytes | None: ...
     def render_page_to_svg(self, page_index: int, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None) -> SvgRenderResult | None: ...
-    def render_all_pages_with_diagnostics(self, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted") -> tuple[list[bytes], tuple[str, ...]]: ...
-    def render_all_pages(self, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted") -> list[bytes]: ...
+    def render_all_pages_with_diagnostics(self, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted", revision_style: _RevisionStyle = "plain") -> tuple[list[bytes], tuple[str, ...]]: ...
+    def render_all_pages(self, dpi: float = 150.0, *, fonts: _Sequence[tuple[str, bytes]] | None = None, font_dir: _Path | None = None, font_dirs: _Sequence[_Path] | None = None, revision_view: _RevisionView = "accepted", revision_style: _RevisionStyle = "plain") -> list[bytes]: ...
     def render_pages_with_diagnostics(
         self,
         *,
@@ -985,6 +993,7 @@ class Document:
         font_dir: _Path | None = None,
         font_dirs: _Sequence[_Path] | None = None,
         revision_view: _RevisionView = "accepted",
+        revision_style: _RevisionStyle = "plain",
     ) -> tuple[list[bytes] | bytes, tuple[str, ...]]: ...
     def render_pages(
         self,
@@ -998,6 +1007,7 @@ class Document:
         font_dir: _Path | None = None,
         font_dirs: _Sequence[_Path] | None = None,
         revision_view: _RevisionView = "accepted",
+        revision_style: _RevisionStyle = "plain",
     ) -> list[bytes] | bytes: ...
     def compare(
         self,

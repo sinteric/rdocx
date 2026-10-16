@@ -10582,3 +10582,93 @@ def test_fx231_installed_presentation_imported_whitespace_roundtrip(tmp_path):
 
     linked = reopened.slides[0].shapes[0].text_frame.paragraphs[1]
     assert [(run.text, run.hyperlink.address) for run in linked.runs] == [("x ", "https://example.test/"), ("y", None)]
+
+
+def test_fx246_ppt_legend_controls_defaults_hidden_noops_and_atomicity():
+    import rpptx
+    data = rpptx.CategoryChartData()
+    data.categories = ["Q1", "Q2"]
+    data.add_series("North", [12, 14])
+    data.add_series("South", [9, 11])
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    frame = slide.shapes.add_chart(51, rpptx.Inches(.5), rpptx.Inches(1), rpptx.Inches(6), rpptx.Inches(2.6), data)
+    chart = frame.chart
+    assert (chart.has_legend, chart.legend_position, chart.legend_overlay) == (True, "r", False)
+    before = deck.to_bytes()
+    chart.has_legend = True
+    chart.legend_position = "r"
+    chart.legend_overlay = False
+    assert deck.to_bytes() == before
+    for position in ("r", "l", "t", "b", "tr"):
+        chart = deck.slides[0].shapes[0].chart
+        chart.legend_position = position
+        chart = deck.slides[0].shapes[0].chart
+        chart.legend_overlay = True
+        assert chart.legend_position == position and chart.legend_overlay
+    chart = deck.slides[0].shapes[0].chart
+    chart.has_legend = False
+    chart = deck.slides[0].shapes[0].chart
+    before = deck.to_bytes()
+    chart.legend_position = "l"
+    chart.legend_overlay = True
+    assert deck.to_bytes() == before
+    assert (chart.has_legend, chart.legend_position, chart.legend_overlay) == (False, "r", False)
+    chart.has_legend = True
+    reopened = rpptx.Presentation.from_bytes(deck.to_bytes())
+    assert reopened.slides[0].shapes[0].chart.has_legend
+    chart = deck.slides[0].shapes[0].chart
+    before = deck.to_bytes()
+    for property, value, error in (("has_legend", 1, TypeError), ("legend_overlay", "yes", TypeError), ("legend_position", "bad", ValueError), ("legend_position", 1, TypeError)):
+        with pytest.raises(error):
+            setattr(chart, property, value)
+        assert deck.to_bytes() == before
+
+
+def test_fx246_ppt_grouped_legend_owner_and_retirement():
+    import rpptx
+    data = rpptx.CategoryChartData()
+    data.categories = ["A"]
+    data.add_series("Series", [7])
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    frame = slide.shapes.add_chart(51, rpptx.Inches(1), rpptx.Inches(1), rpptx.Inches(4), rpptx.Inches(2), data)
+    chart = frame.chart
+    assert not chart.has_legend
+    group = slide.shapes.group([frame])
+    chart.has_legend = True
+    chart.legend_position = "b"
+    assert group.shapes[0].chart.legend_position == "b"
+    slide.shapes.remove(group)
+    before = deck.to_bytes()
+    for operation in (lambda: chart.has_legend, lambda: setattr(chart, "has_legend", True), lambda: setattr(chart, "legend_position", "l"), lambda: setattr(chart, "legend_overlay", True)):
+        with pytest.raises(rpptx.StaleElementError):
+            operation()
+        assert deck.to_bytes() == before
+
+
+@pytest.mark.parametrize("trailer", (b"NOT_XML_DOCUMENT_CONTENT", b"<![CDATA[tail]]>", b"&amp;"))
+def test_fx246_ppt_malformed_chart_document_is_refused_atomically(trailer):
+    import io
+    import zipfile
+    import rpptx
+    data = rpptx.CategoryChartData()
+    data.categories = ["A"]
+    data.add_series("North", [7])
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    slide.shapes.add_chart(51, rpptx.Inches(1), rpptx.Inches(1), rpptx.Inches(4), rpptx.Inches(2), data)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(deck.to_bytes())) as source, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            value = source.read(info.filename)
+            if info.filename.startswith("ppt/charts/chart") and info.filename.endswith(".xml"):
+                value += trailer
+            target.writestr(info, value)
+    deck = rpptx.Presentation.from_bytes(buffer.getvalue())
+    chart = deck.slides[0].shapes[0].chart
+    before = deck.to_bytes()
+    for operation in (lambda: chart.has_legend, lambda: setattr(chart, "has_legend", True)):
+        with pytest.raises(Exception):
+            operation()
+        assert deck.to_bytes() == before

@@ -18,7 +18,7 @@ sections, and retains source provenance.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-layout | 322,992 compressed bytes, 1,782,071 member bytes, 15 members | 0.16.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-14 |
+| Crates.io archive: rdocx-layout | 345,245 compressed bytes, 1,894,202 member bytes, 15 members | 0.16.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 | Large-document layout throughput | minimum 250 pages/s, observed 31,019.1 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
 | Large-document layout peak allocation | maximum 64 MiB, observed 29.03 MiB | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 one-page paragraphs with deterministic fonts | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | peak live allocation | 2026-09-19 |
 | Large-document PDF throughput | minimum 1,000 pages/s, observed 60,058.0 pages/s | rdocx 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | release, one test thread | 1,000 deterministic layout pages | `cargo test -p rdocx --test regression_test --release a_thousand_page_document_paginates_and_renders_within_the_declared_limits -- --ignored --exact --nocapture --test-threads=1` | pages per wall-clock second | 2026-09-19 |
@@ -34,6 +34,13 @@ The provenance variants return `WordLayoutResult`. Its
 `body_layout_fragments` accessor reports the point-space block extent on every
 occupied page for one zero-based direct body item. The result keeps an empty
 fragment slice for preserved body content that does not enter layout.
+
+The legal revision preset is a pre-1.0 Rust source compatibility change.
+`LayoutInput` and facade `RenderOptions` require `revision_style` in complete
+struct literals. `ParagraphBlock::change_bar: Option<Color>` replaces
+`has_visible_revision`. Public `NoteLayout::revision_ranges` now carries
+`Vec<(Range<usize>, Color)>`, preserving the bar colour across note fragments.
+Use `RevisionStyle::Plain` for the existing default decoration policy.
 
 ## Relationship
 

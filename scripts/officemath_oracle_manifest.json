@@ -108,5 +108,218 @@
   "raster_expression_windows_pt": [
     [371.0, 397.7, 90.0, 135.0],
     [397.7, 405.0, 90.0, 135.0]
-  ]
+  ],
+  "fx235": {
+    "fixture": "F-X235-exact-Issue365-and-isolated-constructs-cambria-v1",
+    "status": "native exports captured",
+    "word_identity": "Microsoft Word 16.113.2 build 16.113.26092012",
+    "poppler_identity": "pdftoppm version 26.09.0",
+    "source_sha256": {
+      "exact-formula": "077265567d412385781bba5aaf74cd3313c3afce2fd5ef5b78006e7633d36769",
+      "fraction": "06adde3cb79facede1ef473c69ab67ac40e7ad93b75b10351579496bad19e1c1",
+      "nested-fraction": "3d952de082e80c397c8ba5d22fb59ead88dd6d065b54cda29530ba2d3fade5f2",
+      "integral": "0e92941f3dae3b02f38088335be66327f08d1b21853c90a8a46dafa7f46cbde4",
+      "radical": "0d0a2187d85a3fa4f120cf569b6f7791164a5eb7468bf263bc0a0320dd159b1d",
+      "scripts-limit": "217b88708e1dddc8783f161e7f4b1a537bf5ce88c9961eb84c80f3914c933c8c"
+    },
+    "font_files": {
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambria.ttc": {
+        "sha256": "ca2a527ab14967b1c7170a97329ed29f38af51b71c8c2073d89d1c055de22de1",
+        "bytes": 1328244,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambria.ttc"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriai.ttf": {
+        "sha256": "926b632b6ad114075c083539e3db300accdfac3afe2eabbec3e7e4792f3526ec",
+        "bytes": 692332,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriai.ttf"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriab.ttf": {
+        "sha256": "5f686e13ff1b0f4616d6f3e24bd4b916df671cfb44397f7ddfba3ee03eeee10a",
+        "bytes": 644284,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriab.ttf"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriaz.ttf": {
+        "sha256": "dd7fc00fe4c8bd7755788d30632c16c81769f37459b0c9c2813c9c3ff3447c8a",
+        "bytes": 682840,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriaz.ttf"
+      }
+    },
+    "tools": {
+      "/opt/homebrew/bin/pdftoppm": {
+        "sha256": "9a44364d0fa42a43c3efdb2cbab47d275973c4a5856c1109f6bf4513def6bb54",
+        "bytes": 75488,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdftoppm"
+      },
+      "/opt/homebrew/bin/pdftotext": {
+        "sha256": "35b026441d599e8a002b557e3c0eb4aa0da56f96a217bb6a2d8ea1f8b138f7a3",
+        "bytes": 111000,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdftotext"
+      },
+      "/opt/homebrew/bin/pdfinfo": {
+        "sha256": "fafbf3c0999a707eb2792c8259f47585342c8d5e5c1b9a56ce494e41f5250753",
+        "bytes": 113048,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdfinfo"
+      }
+    },
+    "native_pdf_sha256": {
+      "exact-formula": "4115e916a860a51592df6cf1ad92f0e7c3f21b1e8bc38d32b73f059ffea9ce43",
+      "fraction": "f5b5cfb3dc5c62d4653772bde65905a7476ba99ce5a688a81ac30a405e040baa",
+      "integral": "5612920e19565f34f1935815864beb5f24777d6cda77c44cd402c5ab7fab2973",
+      "nested-fraction": "bd54774d1d1ad9f0649471b478ac225f426fdc1d011274f16b893ef129c54dab",
+      "radical": "66f7c78e738b3724c40afc66f7be9f2ef1ba59bda098ac7a5e9883db9f35114b",
+      "scripts-limit": "1fef022257d2ce377da8f75bd31f47700a1f7ddee791973badad5f880a42a682"
+    },
+    "native_reopened_sha256": "4170a60ff56898eda32bc8fde674271761eb89d727f4a6358808a18fe469155d",
+    "first_diagnostic": {
+      "source_sha256": "f3de6bbf7527d71f1cc4cfde05eb8d188ef26a2610810abae8ebf3b8b7055967",
+      "native_pdf_sha256": "56e5cc6e333d2c99eed44fbe874a6200f65f52514fe829634be033e35c8f8055",
+      "requested_fonts": [
+        "Caladea"
+      ],
+      "actual_native_fonts": [
+        "Cambria",
+        "CambriaMath"
+      ],
+      "outcome": "font mismatch, excluded from matching-font qualification"
+    },
+    "word_application": {
+      "info_plist": "/Applications/Microsoft Word.app/Contents/Info.plist",
+      "identity": {
+        "CFBundleIdentifier": "com.microsoft.Word",
+        "CFBundleShortVersionString": "16.113.2",
+        "CFBundleVersion": "16.113.26092012"
+      }
+    },
+    "source_suffix": "cambria",
+    "explicit_spacing": false,
+    "native_default_diagnostic": {
+      "saved_docx_sha256": "4170a60ff56898eda32bc8fde674271761eb89d727f4a6358808a18fe469155d",
+      "injected_paragraph_after_twips": 160,
+      "injected_paragraph_line_auto": 278,
+      "outcome": "Original defaults differ between producers. Original v1 source and native outputs remain authoritative historical evidence, not absolute-baseline parity."
+    },
+    "raster_math_window_pt": [
+      180.0,
+      432.0,
+      72.0,
+      300.0
+    ]
+  },
+  "fx235_v2": {
+    "fixture": "F-X235-exact-Issue365-explicit-layout-cambria-v2",
+    "status": "native exports captured",
+    "word_identity": "Microsoft Word 16.113.2 build 16.113.26092012",
+    "poppler_identity": "pdftoppm version 26.09.0",
+    "source_sha256": {
+      "exact-formula": "df89bd45ca2b98da71589a62ba614f0abc80b18e320ab5ba357676b401188979",
+      "fraction": "783a465d56691943550ef6fcbd730a1c4ac6d49ff16ab8ad50d5c0dbcbea496f",
+      "nested-fraction": "42248baacbbc4c9a8e96ace364bf33ec123ef1200e8fd41d9ff3d926806e326c",
+      "integral": "236ffa99e93fa500c6aa1ba35d516016b2dcff5c4a5e6eb4d3c32506fef9430a",
+      "radical": "c1fd1c1d8a29d709d241b74c97a8b49e7956e73ea2445631dadc4774537f6bf5",
+      "scripts-limit": "230ce56d8137aa826c6c08ef0fa33d1cc13c6f478ca4302ca3c63849593844f6"
+    },
+    "font_files": {
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambria.ttc": {
+        "sha256": "ca2a527ab14967b1c7170a97329ed29f38af51b71c8c2073d89d1c055de22de1",
+        "bytes": 1328244,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambria.ttc"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriai.ttf": {
+        "sha256": "926b632b6ad114075c083539e3db300accdfac3afe2eabbec3e7e4792f3526ec",
+        "bytes": 692332,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriai.ttf"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriab.ttf": {
+        "sha256": "5f686e13ff1b0f4616d6f3e24bd4b916df671cfb44397f7ddfba3ee03eeee10a",
+        "bytes": 644284,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriab.ttf"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriaz.ttf": {
+        "sha256": "dd7fc00fe4c8bd7755788d30632c16c81769f37459b0c9c2813c9c3ff3447c8a",
+        "bytes": 682840,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriaz.ttf"
+      }
+    },
+    "tools": {
+      "/opt/homebrew/bin/pdftoppm": {
+        "sha256": "9a44364d0fa42a43c3efdb2cbab47d275973c4a5856c1109f6bf4513def6bb54",
+        "bytes": 75488,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdftoppm"
+      },
+      "/opt/homebrew/bin/pdftotext": {
+        "sha256": "35b026441d599e8a002b557e3c0eb4aa0da56f96a217bb6a2d8ea1f8b138f7a3",
+        "bytes": 111000,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdftotext"
+      },
+      "/opt/homebrew/bin/pdfinfo": {
+        "sha256": "fafbf3c0999a707eb2792c8259f47585342c8d5e5c1b9a56ce494e41f5250753",
+        "bytes": 113048,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdfinfo"
+      }
+    },
+    "word_application": {
+      "info_plist": "/Applications/Microsoft Word.app/Contents/Info.plist",
+      "identity": {
+        "CFBundleIdentifier": "com.microsoft.Word",
+        "CFBundleShortVersionString": "16.113.2",
+        "CFBundleVersion": "16.113.26092012"
+      }
+    },
+    "source_suffix": "cambria-explicit",
+    "explicit_spacing": true,
+    "raster_math_window_pt": [
+      180.0,
+      432.0,
+      72.0,
+      300.0
+    ],
+    "native_pdf_sha256": {
+      "exact-formula": "2ef03f471cffc4488e6ea0826e1b550cca0e46b4719c53e6952ef9e316c7c57a",
+      "fraction": "e8aca001bb73dcc3f962c8613a0d18eea88dc2a9a41bf068220a1947b03854e4",
+      "integral": "508b80caed1b21baf395f1700f165d8a51dd3a39542b97bf0cd2eb34f89ebce6",
+      "nested-fraction": "4402eda02fe28f7b1f27944dcb3b06b17842f11f007f7702ce9c44c07729556c",
+      "radical": "674b1389b1f6a0c81c56bd0bb83255f301d8164b436c932284bd1439c87da473",
+      "scripts-limit": "c1c3c0b84d4514ba66a8be710adc22683dd4ffadc3d9f04f7d211ccad20ee207"
+    },
+    "native_save_reopen": {
+      "path": "/private/tmp/F-X235-native-inputs/exact-formula-cambria-explicit-word-reopened.docx",
+      "sha256": "7fe874e41bd92236344a96494948a791e6ac8586e3015576dae3cab161c33e97"
+    },
+    "native_receipt_sha256": "c18ceff30d065b0d064f93db4c943a4e63a197407169933c16d89d54392d4e40",
+    "exact_expression_glyph_indices": {
+      "integral-limits": [
+        0,
+        2,
+        8
+      ],
+      "exponential-scripts": [
+        9,
+        10
+      ],
+      "differential-equality": [
+        11,
+        12
+      ],
+      "limit": [
+        13,
+        14
+      ],
+      "fraction": [
+        1,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "radical-scripts": [
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "exact_word_box_count": 15
+  }
 }

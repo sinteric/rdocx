@@ -763,6 +763,11 @@ def fx215_chart_typing() -> None:
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     chart = slide.shapes.add_chart(XL_CHART_TYPE.LINE, Inches(1), Inches(1), Inches(4), Inches(2), data).chart
     assert_type(chart, Chart)
+    assert_type(chart.has_legend, bool)
+    assert_type(chart.legend_overlay, bool)
+    chart.has_legend = True
+    chart.legend_position = "b"
+    chart.legend_overlay = False
     assert_type(chart.categories, tuple[str, ...])
     chart.replace_data(data)
 

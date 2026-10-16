@@ -146,6 +146,26 @@ precede publication. Invalid or retired owners, invalid data and exact no-op
 leave bytes and captured authority unchanged. The Python data objects do not
 add WASM or CLI chart entrypoints.
 
+Word `chart_legend(paragraph)` returns a dictionary with `visible`, `position`
+and `overlay`. `set_chart_legend(paragraph, *, visible=None, position=None,
+overlay=None)` edits a live same-document direct-body Paragraph with exactly
+one supported qualified chart drawing. Opaque ancestry cannot grant authority.
+PowerPoint's existing live Chart exposes writable `has_legend`,
+`legend_position` and `legend_overlay`, including grouped chart owners. Positions
+are `r`, `l`, `t`, `b` and `tr`. Boolean inputs require actual bool values.
+Missing settings read as right and false. Hiding discards the entire legend
+subtree and settings. Position or overlay alone never makes a hidden legend
+visible or stores hidden settings. Showing creates default or explicitly
+combined settings. Repeated effective values preserve exact bytes and held
+owner authority. These additive APIs reuse native `LegendPosition` and
+`LegendSettings` re-exports without new WASM or CLI surfaces.
+
+Legend mutation prepares binding publication before committing the native
+candidate. Shared chart parts are isolated without copying or rewriting the
+workbook. Only the selected qualified Word relationship attribute is retargeted,
+including when an opaque marker shares its old relationship. Unknown, stale,
+foreign, related-story and ambiguous Word owners refuse atomically.
+
 A Chart view captures its frame XML-child authority. Checked Shape XML
 replacement retires old Chart views while retaining the proven Shape owner.
 Fresh chart lookup resolves the current owned graph. Data-only replacement
@@ -2544,6 +2564,14 @@ comparison carries the edited bytes in a distinct media part and owner
 relationship. The drawing run receives a tracked replacement. Acceptance
 resolves the edited relationship and bytes, while rejection retains the
 original relationship and bytes. Unrelated package parts remain unchanged.
+Chart-only and chart-plus-text comparison use the same tracked drawing
+replacement boundary. Complete chart graph identity includes workbook-only edits,
+retained sidecars and shared topology. Edited chart resources receive collision-safe
+relationships and part names, with one shared physical destination per edited
+source resource across owner stories. Saved and reopened accept-all and reject-all
+select their corresponding chart caches and embedded workbooks through the actual
+drawing relationships. Part-name stability is not part of the comparison contract.
+No Rust, Python, CLI or WASM signature changes.
 When a matched paragraph changes a comment range, hyperlink, inline control,
 or preserved child boundary, comparison tracks a complete paragraph deletion
 and insertion if its bookmarks remain in place. The rebuilt TOC entry
@@ -2597,8 +2625,14 @@ document changes, and a duplicated story keeps the native rejection.
 the `comment` story excludes only the comments part. Python and WASM preserve
 comparison output when they save their owned document.
 
-Native Word rendering exposes `rdocx::RevisionView` and the concrete
-`rdocx::RenderOptions`, whose default selects the accepted view. Additive
+Native Word rendering exposes `rdocx::RevisionView`, `rdocx::RevisionStyle`
+and the concrete `rdocx::RenderOptions`, whose default selects accepted view
+and plain style. `RevisionStyle::Legal` requires `RevisionView::Tracked`.
+The public pre-1.0 source changes add `revision_style` to `RenderOptions` and
+`LayoutInput`, replace `ParagraphBlock::has_visible_revision` with the optional
+colour `change_bar`, and change `NoteLayout::revision_ranges` from ranges to
+`(Range<usize>, Color)` pairs. Rust struct literal consumers supply the new
+field and direct layout consumers use the colour-bearing fields. Additive
 option-taking counterparts cover PDF bytes and files, single-page and all-page
 raster output, page layout, deterministic rendering, and caller-supplied font
 paths. The existing methods keep their accepted default. Python `to_pdf`,
@@ -2607,7 +2641,15 @@ paths. The existing methods keep their accepted default. Python `to_pdf`,
 default. Any other value raises `ValueError`. CLI `convert` for PDF and image
 formats and `render` take `--revision-view accepted` or
 `--revision-view tracked`, with `accepted` as the default. An unknown value is
-a usage error.
+a usage error. Python `to_pdf`, `render_page_to_png`, `render_all_pages` and
+`render_pages`, including their diagnostic counterparts, accept keyword-only
+`revision_style="plain"` or `"legal"`. SVG selected through `render_pages`
+uses those revision options. The dedicated `render_page_to_svg` method accepts
+neither revision operand and uses the accepted view with plain style.
+CLI `convert` and `render` accept
+`--revision-style plain|legal`. Unknown styles and legal style with accepted
+view fail before output or cached layout is returned. Existing positional
+Python arguments and caller font inputs retain their meaning.
 HTML and Markdown conversion refuse tracked view before creating output. WASM
 retains its existing rendering behavior.
 Native selected-image rendering adds zero-based page-list entry points that
@@ -3888,7 +3930,13 @@ descendants. No-op and refusal publish nothing. Candidate inventory, revision
 successors and returned Python allocations all complete before the single
 prepared publication. The five Word element objects return namespace-complete
 str and replace_xml(str) returns None through the concrete checked native
-operation.
+operation. Checked paragraph replacement retains ancestor-declared namespace
+bindings needed by preserved inline and anchored drawing payloads when the
+typed paragraph serializer drops the original declaration. It accounts for
+bindings retained on paragraph and run roots and for local namespace shadows.
+The opaque payload interior remains exact. Ordinary parsing and physical
+picture snapshots keep their source authority, and invalid replacement or
+save candidates fail atomically.
 
 Complete Word owner snapshots use the native hidden
 `Document.story_owner_snapshots` provider across the existing crate boundary.

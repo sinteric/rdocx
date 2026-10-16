@@ -19767,3 +19767,152 @@ Metadata no-verify packaging is not publication verification.
 **Hash harness.** All49 outputs unchanged. Intentional comparison XML and new clear operations retain their separate story attribution. No rendering baseline change.
 
 **Notes for future sessions.** Full verification ran at9cdd7980223527400a25a0ed2efa231d0713079a after the user-authorized future planning update. Fresh installed riders ran at f86f1cb7a76bd9f3425c2135d2a00bf9b711fa54, with unchanged compiled/runtime consumers across approved planning docs and the exact roadmap-assertion update. The original f86 package attempt was interrupted and remains failed. Exact commands and hashes are retained in /private/tmp/S92-integrated-full-2/receipt.json, /private/tmp/S92-final-word-1/receipt.json and /private/tmp/S92-final-ppt-story-1/receipt.json. Final current-HEAD full verification and clean sprint review remain closure requirements, with exact results recorded in the S92 run state. Historical hosted acceptance remains source638 and actual profile rendering remains epochb271, with authenticated unchanged producer closure. Only /close-sprint may merge/tag, and publication remains separate.
+
+
+### F-X234, Preserve supported LaTeX conversion structure
+
+**Sprint.** S93
+**Completed.** 2026-10-15
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** The exact Issue365 formula preserves pi, upright lim, arrows, infinity, integral bounds and meaningful thin spacing across bounded LaTeX, MathML and OfficeMath conversion. Ordinary TeX atoms retain their own script bases, including pi squared and a cubed. Supported structure survives public document save/reopen with opaque XML unchanged.
+
+**Non-obvious choices.** Normalize the invisible function marker only after an exact upright lim token. Unsupported spacing and token properties retain explicit loss diagnostics. The live Pandoc3.11 oracle is separately pinned, preserving the historical3.10 identity and outcome. No layout tuning, dependency, public type or product file was added.
+
+**Deviations from the design plan.** None. The package footprint observation was remeasured under the unchanged policy.
+
+**Spec sections touched.** 04-opc-and-packaging.md, bounded conversion boundary. 12-testing-strategy.md, conversion qualification. 15-build-and-toolchain.md, separately pinned Pandoc producer.
+
+**Tests.** fx234_issue365_preserves_symbols_limits_and_thin_space and the script, round-trip, unsupported-input and cap controls pass. Actual pinned Pandoc3.11 forward/reverse qualification passes. Scoped native640unit/380integration/2418regression/2doctest, policy182with2expected skips, check, clippy, formatting, prose and adapter gates pass. Independent source and metadata reviews report zero defects and zero smells. Focused canonical prefix tests pass with byte-identical reviewed math source.
+
+**Hash harness.** All49 worker outputs unchanged. No rendering baseline change. Final integrated sprint hash verification remains due.
+
+**Notes for future sessions.** This is a dependency-prefix checkpoint, completing conversion before F-X235 can start. It does not supply the final full workspace gate or sprint review. Worker branch work/f-x234-codex is retained. Exact scoped evidence and producer hashes remain in the plan and reviews, with transient logs under /private/tmp/fx234-*. Final integration and delivery ledger SHAs are recorded in the S93 run state.
+
+### F-X232, Render legal revisions and qualify checked XML repros
+
+**Sprint.** S93
+**Completed.** 2026-10-16
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Plain and legal revision styles propagate through native layout, CLI and Python rendering. Legal insertions use blue double underline, deletions red strike and moves green decorations. Visible revision ownership selects transient change-bar paint. Stored formatting and revision metadata remain unchanged. Checked paragraph edits retain namespace declarations needed by preserved drawing owners, including related stories.
+
+**Non-obvious choices.** The user approved the pre-1.0 Rust structure changes in RenderOptions, LayoutInput, ParagraphBlock and NoteLayout. One shared double-underline implementation follows independently measured native scale geometry. Plain remains the default. Native legal change-bar selection and full-page font-contour equivalence are not claimed.
+
+**Deviations from the design plan.** Approved clarification includes coloured note revision ranges and the measured0.36point double-underline component bound. The donor's unqualified wider gap was replaced by independently measured geometry.
+
+**Spec sections touched.** HLD08 revision paint, bars, decoration and cache identities. HLD10 native/CLI/Python options, compatibility and checked XML. HLD12 revision, namespace and mutation qualification. HLD15 deterministic native producer evidence.
+
+**Tests.** fx232_legal_revision_paint_preserves_stored_formatting, fx232_render_style_participates_in_every_cache_identity, fx232_double_underline_has_two_separate_strokes and exact checked-owner repros qualify the regression gate. Warm/fresh, post-mutation, actual caller-font and split-note controls pass. Source all-pass2 and metadata pass1 report zero defects and zero smells. Native Word16.113.2 build16.113.26092012 independently qualifies colours and12/24/36point double strokes within0.36points. Scoped native, installed parity, publication and risk riders are recorded separately.
+
+**Hash harness.** The reviewed default double-underline repair changes exactly feature_showcase PDF bytes and page-content hashes. XML, resources and page1PNG remain unchanged at that checkpoint. These two entries overlap the later F-X233 border change set. The final sprint has18net unique changed hash entries, not20. No page1pixel baseline move is attributed to this story.
+
+**Notes for future sessions.** PR375 donor head0c608f7a2a1d5a9f8391a4de1dfed661df6e105a is provenance, not acceptance evidence. Original failed tests and environment retries remain failed.
+
+**Integrated S93 verification.** The complete source at16f1fc1beb11b61d5f4e38723c173c2891a06346 passes formatting, full Clippy,5299 changed-default tests with59ignored and6552 all-feature workspace tests with72ignored. These are separate overlapping configurations, not a unique combined test count. All49hashes and7pixel checks pass with the reviewed18net unique hash changes and4pixel buffers. Repository policy runs182tests with2expected skips. The no-default-fonts path passes149tests with1ignored. Both WASM targets, denied-warning workspace docs, README examples,22locally patched and genuinely verified publication dry-run archives below10MiB and cargo deny pass. Exact commands, exits and source guards are in /private/tmp/S93-full-final-4/receipt.json, SHA256 b8fc4d70663c362caf6ef9461a1d063529e30469e4b5a868d03e41f2f7a23858. Its unchanged-source continuation authenticates the eight earlier passing steps in /private/tmp/S93-full-final-3. The original policy attempt failed with E0463 because README compilation searched an obsolete dependency-cache directory. Preserving that directory and correcting the generated cache path resolved the failure without a source edit. Failed and interrupted attempts remain retained.
+
+**Integrated installed Python and native qualification.** The fresh Word wheel passes806installed nodes with0failures, errors or skips, strict mypy1file and stubtest6modules at16f1fc1. PowerPoint passes860nodes, strict mypy1file and stubtest9modules at12fa27101f153614ac60bff324b0ef2cdd586e29. Its authenticated197unchanged-input,14workspace-package successor closure accepts that evidence at16f1fc1, whose layout-only repair is outside the PowerPoint runtime graph. The combined1666accepted members are not claimed freshly rerun at one SHA. Word receipt /private/tmp/S93-python-word-successor/receipt.json has SHA25636590c7aba096b45907d0beb9cab8483647319afdbdbff26dfc3f7f71342c3a3. Fresh native controls at16f1fc1 pass in /private/tmp/S93-native-final/run-16f1fc1beb11b61d5f4e38723c173c2891a06346/aggregate-native-receipt.json, SHA256aab4177f87e10e845536ae0ef12402b0ccd84db42cb9b066f4cb6d62c1fe2b4b. Historical setter timings remain historical. The original external cache consumer now produces3byte-equal warm/cold pairs. Failed observer controls, the pip bytecode-authentication failure and cancelled predecessor Word run remain distinct from accepted successors. A clean sprint review and fresh full Rust verification at the final documentation/review successor remain closure requirements. External runtime evidence requires explicit unchanged-input successor authentication there.
+
+### F-X233, Repair paragraph border geometry
+
+**Sprint.** S93
+**Completed.** 2026-10-16
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Paragraph borders price their own top/bottom bands and clear space into flow, join adjacent same-border paragraphs into one outer frame and paint the first/last edges of split paragraphs appropriately. Shared paragraph flow reaches body, table and related-story layout. Wrap reservation measures content at its actual shifted origin and restores frame padding once. Cached table reconstruction retains grouped-border semantics when rebinding source owners, keeping vertical bridges continuous after real cache hits.
+
+**Non-obvious choices.** OOXML width remains sz/8points, with paired double strokes and existing page-border behavior preserved. Word evidence supports a1.5point horizontal allowance and maximum paragraph-spacing collapse. The original Issue366 document is unavailable. The user-approved15point sz120 screenshot and distinct raw15 sz15 control are inferred inputs, not exact-original reproduction.
+
+**Deviations from the design plan.** Approved acceptance clarification explicitly retains the missing-original limitation. New component bounds of0.36points for width and0.60points for positions/flow cover observed native export quantization. No existing raster threshold was relaxed. Supplemental cache pass1 found D1, a12point missing bridge after warm typed-authoring table reuse. One retained semantic boolean repairs it. The existing-module regression covers direct/nested cells with/without provenance, proves actual cache hits after paragraph insertion and compares full painted output. It fails on old production with exit101, then passes with the fix. Independent cache pass2 is clean, and the original external consumer changes from true/false/false to3 equal warm/cold pairs.
+
+**Spec sections touched.** HLD08 paragraph paint and geometry. HLD12 border geometry, native evidence and baseline qualification. HLD14 F-X233 acceptance wording for approved inferred inputs.
+
+**Tests.** fx233_fifteen_point_border_has_correct_paint_geometry, fx233_raw_fifteen_border_size_keeps_eighth_point_units and fragment/corner/group/wrap controls qualify the regression gate. Eleven focused controls and six restored semantic mutation failures pass their required outcomes. The post-cache-fix layout suite passes352unit tests and1doctest. Scoped policy182tests with2opt-in skips and independent clean source, metadata, acceptance and cache-pass2 reviews support feature acceptance. Native width, clearance, extents and topology remain component qualification.
+
+**Hash harness.** Reviewed intentional changes affect18entries: PDF bytes and page-content hashes for all seven samples, plus page1PNG for contract, invoice, proposal and quote. XML and resource hashes remain unchanged. Two feature_showcase PDF entries already changed in F-X232, so the final sprint union is18net unique entries. The pinned Poppler26.01.0 manifest changes exactly four decoded150DPI1275by1650page1RGBA buffers, contract, invoice, proposal and quote. Genuine detached Base and no-paragraph-border invoice counterproofs support attribution. Other three pixel buffers remain exact.
+
+**Notes for future sessions.** Exact old/new attribution is retained in /private/tmp/F-X233-remediated-hash-attribution.json and /private/tmp/F-X233-exact-pixel-attribution.json. Cache RED, focused GREEN and352+1logs remain at /private/tmp/S93-cache-regression-red.json, /private/tmp/S93-cache-regression-green.log and /private/tmp/S93-cache-layout-tests.log. The independent review is .claude/reviews/F-X233-cache-pass-2.md, and final external probe digests are under the native aggregate's table-cache-probe/cold-warm-equality.json. Missing original input and unclaimed whole-page font-contour parity remain explicit. Integrated S93 Rust, installed Python, native and retained-failure evidence is recorded under F-X232 in this completion batch. Final successor gate and clean sprint review remain closure requirements.
+
+
+### F-X235, Qualify equation layout against native Word
+
+**Sprint.** S93
+**Completed.** 2026-10-16
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** OfficeMath layout reads actual selected-face glyph ink and OpenType MATH constants/variants for fraction clearance, script positioning, radical frames, integral side limits and baseline geometry. First and second script sizes derive from the root style and saturate consistently with optical alternate depth. Logical text and opaque source remain intact.
+
+**Non-obvious choices.** The direct ttf-parser edge reuses resolved0.25.1 without adding a package or public font API. Missing MATH data retains the bounded historical fallback. Authentic external Word-bundled Cambria fonts enter through the existing deterministic caller-font API and are not redistributed. Explicit source spacing avoids omitted native paragraph defaults.
+
+**Deviations from the design plan.** Approved private font-data refinement and separately identified matching-font v2 sources follow measured failure of the existing-API candidate and implicit-spacing controls. Those failures and original Caladea fallback diagnostics remain separate evidence. No threshold was weakened.
+
+**Spec sections touched.** HLD08 Word OfficeMath layout. HLD12 geometry, native raster and mutation qualification. HLD15 current and historical producer identities and direct dependency verification.
+
+**Tests.** fx235_fraction_rule_clears_both_ink_boxes, constructed-font root-relative script/degree/optical controls and the existing OfficeMath differential harness qualify the story. Six native cases and six exact-expression clusters pass unchanged1.0point geometry and0.99SSIM at150DPI against Word16.113.2 build16.113.26092012 and Poppler26.09.0. The actual1.01point translation is rejected for five of six controls by the composite gate. Signed residual cancellation prevents a universal per-case rejection claim, and SSIM alone is not the negative gate. Historical thirteen expression controls retain original identities and outcomes. Clean source pass2, metadata pass1 and integration pass1 support scoped acceptance.
+
+**Hash harness.** No typed OfficeMath occurs in the seven shared samples. All49worker entries and the shared pixel manifest remain unchanged by this story. It adds no shared baseline move to the existing border/underline attribution.
+
+**Notes for future sessions.** Current native qualification is separate from historical Word16.104 build16.104.25121423 and Poppler26.01.0. Integrated source matches reviewed worker exactly. The later nested-script closure edit is test Rustfmt only, including optional trailing comma removal, with byte-identical production prefix. Genuine combined archive reconciliation is documented in the integration review. Integrated S93 Rust, installed Python, native and retained-failure evidence is recorded under F-X232 in this completion batch. Final successor gate and clean sprint review remain closure requirements.
+
+
+### F-X236, Measure public setter inlining before changing policy
+
+**Sprint.** S93
+**Completed.** 2026-10-16
+**Size.** S, estimated 1 day, actual not recorded
+
+**What was built.** Six ordinary inline annotations expose three measured Run setter chains across the actual public crate boundary. Setter bodies, public signatures and ParagraphMark setters remain unchanged.
+
+**Non-obvious choices.** A separate external consumer uses opt-level3, lto=false and codegen-units1. Nine alternating timing pairs and assembly inspection establish actual call elimination. The Run ratio of medians is0.716466851, unchanged mark control1.002663346 and noisy authoring1.029707557. Candidate binary size falls192bytes. These results support selective annotations without an end-to-end speedup or blanket inline policy claim.
+
+**Deviations from the design plan.** None. The semantic evidence was strengthened after review to include genuinely absent optional-property branches. The original observer error and pass1 gap remain recorded.
+
+**Spec sections touched.** HLD12 external non-LTO qualification and semantic controls. HLD15 measured selective annotation and provenance.
+
+**Tests.** Existing run/paragraph regressions and an independently inspected real external semantic consumer qualify true, false and None for fresh and initialized properties. Original and reopened package XML independently verifies ten cases, including fresh None leaving w:rPr absent, complex-script twins and unrelated colour preservation. Clean all-pass2 and metadata pass1, scoped native/policy checks and actual publication/archive riders support acceptance.
+
+**Hash harness.** All49worker entries unchanged. This annotation-only change introduces no rendering baseline delta.
+
+**Notes for future sessions.** Raw paired timings, assembly and semantic artifacts remain under /private/tmp/F-X236-consumer. Actual compiler is rustc1.97.1 commit8bab26f4f68e0e26f0bb7960be334d5b520ea452, LLVM22.1.6, aarch64-apple-darwin on Apple M5 Max. Benchmark source SHA256 is5e0db6b7d5688bd1c2bdda9003d3359dd3fa6a20f80408b790a09c6147a29da3, manifestc3417af6a1a134be7b9ff8854beee275c966c7693eb406b4395aec4a052a7f43 and lock21f334455aa08bea5331e4267d004ecfcd45bb99a39fc7fa809e0f9981b1a03d. Independent pass2 semantic source is3289b542cb70705a25eb0c3ab5fcd0eda3b57e6eeb3d7442892be4a4b0580ba3. ParagraphMark baseline assembly already inlines and justifies no annotation. Integrated S93 Rust, installed Python, native and retained-failure evidence is recorded under F-X232 in this completion batch. Final successor gate and clean sprint review remain closure requirements.
+
+
+### F-X245, Preserve chart data changes in Word comparison
+
+**Sprint.** S93
+**Completed.** 2026-10-16
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Word comparison includes complete chart resource closure identity before alignment and unchanged shortcuts, including embedded workbook-only edits. Collision-safe bounded copying preserves original and edited graphs until accept-all or reject-all selects the surviving version. Shared targets, cycles, sidecars and external metadata retain their ownership and bytes.
+
+**Non-obvious choices.** Existing package-copy infrastructure serves the chart boundary with operation-local maps and aggregate unique-resource/byte caps. No external relationship is fetched. The exact reporter's north() observer reads fixed chart1.xml rather than the surviving drawing. Its original output is retained separately from an explicitly corrected relationship-resolved observer, without changing source cases or expected chart/workbook values. Canonical part names and removal of unrelated unused originals are not promised.
+
+**Deviations from the design plan.** Approved observer clarification distinguishes selected graph correctness from fixed ZIP member spelling. Existing archive numeric carriers are remeasured under unchanged policy.
+
+**Spec sections touched.** HLD09 chart graph ownership. HLD10 comparison staging and reconstruction. HLD12 chart/workbook package qualification.
+
+**Tests.** fx245_chart_data_changes_resolve_both_versions, fx245_chart_and_adjacent_text_changes_compare_together, fx245_unchanged_chart_does_not_create_a_revision and workbook-only controls qualify the regression gate. Native and fresh installed Word cases cover both granularities, original/edited save-reopen values, shared roots, collisions, aliases, cycles, external metadata, physical depth, aggregate bounds and atomic refusal. Clean source pass2 and metadata pass1 support scoped acceptance.
+
+**Hash harness.** All49worker outputs unchanged. New source-built comparison fixtures do not change shared rendering baselines.
+
+**Notes for future sessions.** Original reporter output remains distinct from relationship-correct package observations. The existing rich-fragment caller retains distinct preallocated destination semantics. Integrated S93 Rust, installed Python, native and retained-failure evidence is recorded under F-X232 in this completion batch. Final successor gate and clean sprint review remain closure requirements.
+
+
+### F-X246, Honor chart legend position and overlay during rendering
+
+**Sprint.** S93
+**Completed.** 2026-10-16
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Shared chart rendering measures real labels/keys and reserves exterior space for right, left, top, bottom and top-right legends when overlay is absent or false. True overlay and hidden/absent controls retain the correct plot. Both native facades and approved Python APIs expose visibility, position and overlay while preserving chart/workbook ownership and opaque producer XML.
+
+**Non-obvious choices.** Word uses the existing direct-body paragraph handle instead of a new Chart proxy. PowerPoint uses its existing live Chart. Hiding removes the legend subtree and discards settings. Position/overlay-only changes to an absent legend are no-ops. Strict expanded-name and document admission, selected relationship-span rewriting and copy-on-write preserve unrelated opaque references and atomic refusal.
+
+**Deviations from the design plan.** User-approved scope includes both Python families. Independent review approved80by120pixel component crops with at least2.5points padding, retaining original100pixel failures that include Word's unrelated outer frame. Translation only and0.99SSIM remain unchanged. This is legend component qualification, not whole-chart or outer-frame equivalence.
+
+**Spec sections touched.** HLD09 legend properties and measured rendering. HLD08 cross-format chart geometry. HLD10 native/Python contracts and ownership. HLD12 component differential qualification. HLD15 deterministic font/tool provenance and package inventories.
+
+**Tests.** fx246_legend_position_reserves_measured_plot_space, fx246_overlay_and_absent_legends_keep_the_correct_plot, bounded-label and opaque/source-order controls qualify the differential gate with exact default/bottom/left packages in both formats. Native Word and PowerPoint component comparisons retain1point bounds and150DPI0.99SSIM. Independently recomputed SSIM is0.9995260801031176 for Word and0.9991474873189379 for PowerPoint. Actual old-renderer outputs fail the same observer. The legacy overlap observer is retained as insensitive to an actual overlay mutation. A separate painted-bar and baseline observer passes18 original nonoverlay controls and rejects that actual mutation. A fresh genuine old-renderer replay remains rejected by the corrected component observer. Installed ownership/document refusal, shared graph and stubs/typing controls accompany native matrices. Clean source pass2, metadata pass1 and integration pass1 support acceptance.
+
+**Hash harness.** The seven shared samples contain bitmap charts, not ChartML. All49worker entries and shared pixel baselines remain unchanged by this story. Separate component oracle evidence does not create a shared baseline move.
+
+**Notes for future sessions.** Original native empty-legend Word overlay disagrees with the approved product default false and remains diagnostic. Original Aptos/Calibri mismatches remain recorded. Matching-font controls qualify keys, labels and the adjacent right plot edge only. Integrated S93 Rust, installed Python, native and retained-failure evidence is recorded under F-X232 in this completion batch. Final successor gate and clean sprint review remain closure requirements.

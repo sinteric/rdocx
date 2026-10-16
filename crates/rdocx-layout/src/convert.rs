@@ -80,6 +80,19 @@ pub(crate) fn underline(value: Option<ST_Underline>) -> Option<Underline> {
     })
 }
 
+/// The stroke width of an underline of `style` on text of `font_size`
+/// points and, for a double underline, how far below the first line the
+/// second one lies. Keep at least 1.5 points between stroke centres so small
+/// text remains visibly double. The scale rule is qualified against native
+/// Word paint at 12, 24 and 36 points.
+pub(crate) fn underline_strokes(style: Underline, font_size: f64) -> (f64, Option<f64>) {
+    match style {
+        Underline::Thick => (font_size / 12.0, None),
+        Underline::Double => (font_size / 24.0, Some((font_size / 12.0).max(1.5))),
+        _ => (font_size / 18.0, None),
+    }
+}
+
 pub(crate) fn line_spacing(properties: &CT_PPr) -> LineSpacing {
     match (properties.line_spacing, properties.line_rule.as_deref()) {
         (Some(spacing), Some("exact")) => LineSpacing::Exact(spacing.to_pt()),
