@@ -509,6 +509,13 @@ evaluator gets written either way, so the presets become data rather than code.
 Presets additionally carry the `<a:rect>` text rectangle needed to place text
 inside non-rectangular shapes.
 
+A DrawingML arc with both radii zero is a point and leaves the current pen
+position unchanged after finite-value validation. Generated preset corners
+can reach this case through default zero adjustments. The shared evaluator
+omits only that point arc, retaining the positive-radius rounded corners and
+the rest of the path. Negative radii and unsupported single-zero-axis forms
+retain the existing diagnostic. Positive arcs keep their segment budget.
+
 Presentation connectors reuse these generated definitions. `line` and
 `straightConnector1` produce a single open segment. Bent and curved connector
 presets retain their adjustment values and produce the generated ordered line
@@ -945,7 +952,10 @@ carries the fact on the lowered table block, and the row painter places the
 logically last cell first. The lowered column widths, every cell's grid column,
 the retained semantics and the structure tree stay in reading order, so cell
 ownership, the body fragments and the accessibility contract are unchanged. A
-left-to-right table takes the same placement arithmetic it always did.
+left-to-right table takes the same placement arithmetic it always did. Table
+justification and signed indentation resolve from the leading margin, which
+is the right margin for `w:bidiVisual`. Without authored or inherited
+justification, the table has zero indentation from that leading margin.
 
 A row's omitted leading grid columns move that row alone. The resolved offset
 is `w:wBefore` when present and otherwise the width of the `w:gridBefore`
@@ -1890,7 +1900,10 @@ VML shape with finite positive point bounds becomes a watermark only when it
 contains one VML text path string or one relationship-namespaced image id.
 Namespace aliases and shadows are resolved by expanded name. Unsupported,
 ambiguous, malformed, or unrelated VML remains preserved but does not enter
-layout. Named VML colours and six-digit RGB values lower to shared colour.
+layout. Named VML colours and three-digit or six-digit RGB values lower to shared
+colour. Shorthand RGB duplicates each hexadecimal digit, so `#e00` lowers to
+the same colour as `#ee0000`. Other lengths and non-hexadecimal values remain
+unsupported.
 Unsupported colours and unresolved image relationships suppress that watermark
 and add a stable diagnostic.
 
@@ -1913,6 +1926,38 @@ select the even variant even when it is blank. `w:pgNumType/@w:start` resets
 that displayed parity for a section. Missing later variants inherit only the
 same type from the preceding section. No selected first or even variant borrows
 default header, footer, or watermark content.
+
+The selected header and footer reserve body room on each page when their
+painted height reaches beyond the authored margins. Measurement and painting
+use the same inter-paragraph spacing, collapsed by default and summed under
+`doNotUseHTMLParagraphAutoSpacing`. Horizontal sections recompute capacity for
+each selected variant, so a tall default story does not displace a blank
+first-page story.
+
+Vertical sections shape initial paragraphs against the largest active story
+band before rotating the body. Pagination starts from authored margins and
+reserves the selected first, even or default story on each page. Retained
+logical input is rebroken to that page's vertical measure, including paragraph
+continuations. A cursor recorded before visual bidi ordering consumes Unicode
+scalars in plain text and atomic markers, rich spans, tabs, objects and breaks.
+Generated hyphens consume no extra input. Continuations reset first-line
+indentation and do not replay list markers or anchors.
+
+Tables use the existing width-aware layout cache to prepare the finite distinct
+active story measures. Alternative measurements clone the numbering state from
+before the primary table, so counters advance once. Shared source and structure
+identities remain the same. Pagination selects unconsumed rows at the current
+measure, and rebreaks only the remaining plain cell content after a row split.
+Variant selection uses the page's selected measure before transposition can
+round it. Width comparison and cache identity remain exact, with no tolerance
+that can alias distinct measures. Horizontal pages use their active column width.
+Selected-template side and remaining bottom margins carry percentage cell
+spacing to the new measure. Removed fragment-top and completed-cell bottom
+gaps stay removed.
+Repeated header rows use the selected measure. Notes are registered at every
+selected vertical measure, preserving the registry's single numbering advance
+and the raw width used by endnote pages. Existing whole-row guards for
+merges, rotations, nested tables, exact clipping and anchors remain in force.
 
 The native authoring facade preserves that selection contract. Creating a
 first-page story enables the section title-page state. Creating an even-page
@@ -2462,6 +2507,14 @@ a labelled bounds fallback.
 The corpus renderer and integration tests call the same crate-local package
 rendering function. Relationship assembly, media admission, chart parsing,
 resolution and ordinary renderer lowering therefore have one production path.
+
+Pie and doughnut rendering projects preserved `c:varyColors` and `c:dPt`
+markup without rewriting those payloads. Explicit point fill takes precedence
+over explicit series fill, then varied theme accents use logical cache indices.
+Absent or false `c:varyColors` retains the series palette. Category legend
+swatches use the same resolved point colors as the slices. Unsupported point
+paint and malformed color options return contextual chart errors through the
+existing visible fallback path.
 
 An OLE payload remains raw for serialization. Its optional standard fallback
 `p:pic` is an upstream projection only. When that picture has an embedded PNG
