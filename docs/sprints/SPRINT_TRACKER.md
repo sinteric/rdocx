@@ -107,6 +107,7 @@ defended.
 | S90 | M24, X | 20 | 18 | 2 | 55 | 3 | Completed 18 stories. The reconstructed 55-day estimate comprises 50 estimated days recorded for completed features plus F-X178 at 1 day and the chosen 4-day lower bound for F-283. Actual days are the three elapsed working dates from 2026-10-07 through 2026-10-09 inclusive, not person-days. F-X178 and F-283 carry to S91. F-X178 needs a separate scope decision and Issue264 remains excluded. New F-X192 owns the remaining bibliography catalogue in S91, and Issue281 remains open. Word0.16.0 and shared/PowerPoint0.14.0 are prepared for separately approved publication after close |
 | S91 | M24, X | 39 | 29 | 10 | 130 | 7 | Completed 29 top-level stories and four F-X211 delivery children. Child records are not counted twice. The reconstructed 130-day lower bound comprises 97 days for completed scope and 33 for carries, using S1/M2/L4. Actual days are seven worked dates, 2026-10-09 through 2026-10-15, including weekend work, not person-days. The frozen scope contains 40 issues and 30 PRs. Discussions264 and281 stay open. Bibliography, navigation and standalone authoring carry to S92. Local full verification and sprint review pass3 are clean. The exact reviewed-source build-only rehearsal38659673259 passed all27 build jobs, both seven-file Python sets and twelve CLI archives. Fresh hosted-wheel installs passed78 priority cases on each of Python3.9 and3.12 plus strict typing and stub checks. Word0.16.1 and shared/PowerPoint0.14.1 are prepared for publication after close |
 | S91.1 | M24, X | 4 | 4 | 0 | 10 | 1 | Four corrective stories completed with clean integrated review and actual final reviewed-commit full verification. Corrected primary CI38708235000 passed, separate owner CI38702668217 qualifies95/100 with42 hard gates,51 native clauses and five no-credit cases. All49 product hashes unchanged. Actual days count the single worked date2026-10-15, not person-effort. Exact-main verification, both prepared publications and acceptance-aware contributor reconciliation follow close. Future planning is preserved separately |
+| S92 | M24, X | 6 | 6 | 0 | 15 to 18 | 1 | Six repair stories completed, including explicit Issue378 intake. Actual days count the single worked date2026-10-15, not person-effort. Final full verification at133ce33b passed all14 checks,49 unchanged hashes and22 verified archives. Independent review pass2 is clean. User accepted240-cell fill3.304061s with strict open/edit and linear-work gates retained. Future parity/forms planning is included without delivery credit. M24 continues to S99. No release prepared |
 
 ## Completed features
 
@@ -688,6 +689,7 @@ five working days.
 | S90 | 18 | 3 | 30.00 |
 | S91 | 29 | 7 | 20.71 |
 | S91.1 | 4 | 1 | 20.00 |
+| S92 | 6 | 1 | 30.00 |
 
 S90 velocity measures calendar throughput for a parallel team. It does not
 measure person effort or establish a sustainable single-developer forecast.
@@ -698,6 +700,11 @@ S91 counts29 completed top-level contracts once. Four completed F-X211 delivery 
 S91.1 records one worked date,2026-10-15. Its20.00 stories per week measures
 parallel calendar throughput. Per-feature person-effort remains unrecorded.
 
+S92 records one worked date,2026-10-15. Its30.00 stories per week is parallel
+calendar throughput, not a sustainable single-developer forecast. The last
+three sprint windows, S91, S91.1 and S92, total39 stories over9 worked-date
+units, or21.67 stories per week. Shared calendar dates are not person-days.
+
 ## Escalation record
 
 Logged when an escalation trigger from `.claude/WORKFLOW.md` fires, with what
@@ -705,6 +712,7 @@ was done about it. Empty is the expected state.
 
 | Date | Trigger | F-ID or sprint | Response |
 |------|---------|----------------|----------|
+| 2026-10-15 | Three-sprint throughput differs from the2-stories/week assumption by983percent | S91, S91.1, S92 | Record21.67 stories/week as parallel calendar throughput. Retain dependency-defined roadmap boundaries and developer-effort estimates. Do not convert this observation into elapsed delivery promises or invent person-effort actuals |
 | 2026-07-30 | Three-sprint velocity variance exceeded 30 percent | S01 to S03 | Reforecast 366 remaining estimated days to 45 to 50 active weeks, retain dependency-defined boundaries, and recalibrate after S06 |
 | 2026-07-31 | Sprint estimate variance exceeded 30 percent | S05 | Record 4 actual days against 8 estimated, retain the 45 to 50 active week reforecast, and recalibrate after S06 |
 | 2026-07-31 | Sprint estimate variance exceeded 30 percent | S06 | Reforecast 124 remaining stories at the observed five stories per active week to about 25 active weeks, while retaining dependency-defined sprint boundaries |
@@ -1013,3 +1021,50 @@ Issues264 and281 remain excluded and open.
 | F-X226 | S91.1 | M | 2 | not recorded | 2026-10-15 | Targeted checked-owner relationship retirement preserves shared/opaque graphs, debug validation and atomicity. Actual debug and optimized public regression plus scoped gates qualified |
 
 | F-X227 | S91.1 | L | 4 | not recorded | 2026-10-15 | Actual ownerCI38702668217 qualifies95/100,42hard51native24docs and5no-credit with safe one-job cleanup. Exact source215 rehearsal artifacts and installed156/typing4 qualify their recorded source. Final gates/publication pending |
+
+## External benchmark sprint insertion, 2026-10-15
+
+Insert S96 before the conditional spreadsheet programme. F-313 through F-318
+answer Issue 377 with six pending stories estimated at 21 developer-days. The
+previous S96 through S105 spreadsheet roadmap shifts to S97 through S106.
+Issue281 remains open for F-184, now at S97. Historical delivered rows and
+earlier replan records remain unchanged. No completion, velocity or release is
+recorded by planning.
+
+## Repair sprint insertion, 2026-10-15
+
+Plan S92 and S93 for the contribution and issue-repair wave, with nine new
+pending F-IDs F-X228 throughF-X236 and existing F-X178. Shift the previous
+S92 throughS106 future roadmap by two. Preserve the separately added external
+Word benchmark sprint and F-313 throughF-318 at S98, before Excel starts at
+S99. The roadmap now ends at S108. S91.1 scope and release preparation remain
+unchanged. Historical sprint IDs, tags and delivered rows are unchanged.
+Issues264,281 and377 remain open. This records planning, not delivery.
+
+
+| F-X229 | S92 | L | 4 | not recorded | 2026-10-15 | Correctness-only PR374 subset repairs hyperlink, empty paragraph, table-adjacent and trailing deletion reconstruction. Scoped worker gates and canonical focused reconciliation qualify dependency-prefix completion. Final sprint gate remains due |
+
+
+## Issue378 execution intake, 2026-10-15
+
+Add pending F-X237, size L estimated4 developer-days, to S92 at the user's explicit request. The six-story sprint estimate is now15 to18 developer-days. This records scope intake only, with no completion or velocity credit. All original repair acceptance remains intact.
+
+## Issue379 through Issue381 sprint insertion, 2026-10-15
+
+Insert S94, Python and CLI parity, for Issues379 and380 as F-X238 through
+F-X241, about 12 developer-days. Insert S96, Fillable PDF forms, for Issue381
+as F-X242 through F-X244, about 13 developer-days. Planned S94 through S98
+work moves to S95 and S97 through S100. The conditional Excel programme moves
+to S101 through S110, and Issue281's F-184 decision is at S101. The active S92
+wave and S93 plan are unchanged. No completion, velocity or release is
+recorded by planning.
+
+| F-X178 | S92 | S | 1 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |
+
+| F-X228 | S92 | M | 2 to 3 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |
+
+| F-X230 | S92 | M | 2 to 3 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |
+
+| F-X231 | S92 | M | 2 to 3 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |
+
+| F-X237 | S92 | L | 4 | not recorded | 2026-10-15 | Approved repair contract, scoped regression and preservation gates, clean independent feature/integration review, final integrated native and installed risk riders, verified22 archives and49 unchanged hashes. Actual evidence retains source epochs and user-accepted F-X237 fill tradeoff |

@@ -1082,6 +1082,37 @@ exact accept and reject reconstruction when the original ends in a
 self-closing empty paragraph and when retained content includes a field,
 drawing, media relationship, and unrelated opaque package part.
 
+Comparison reconstruction regressions cover whole-paragraph external hyperlinks,
+namespace aliases and foreign lookalikes, table-adjacent insertions and deletions,
+empty body and header properties, typed text in an empty paragraph and multiple
+trailing deletions. Run, word and character cases retain default and ignored
+formatting policies. Independent reopened link text, target and anchor checks
+supplement modeled reconstruction. Table-mark resolution refuses opaque children
+and meaningful raw text, comments or processing instructions before a retained
+table without mutating package bytes. Whole-paragraph wrapping preserves foreign
+subtrees and raw gaps, and hyperlink cleanup retains opaque resolved content.
+The captured raw hyperlink boundary admits one owner and refuses nested chains
+at depths2 and257 atomically across insertion, deletion and all granularities.
+A bounded mixed-owner gap matrix retains every source and destination owner once,
+pairs only compatible kinds and remains deterministic. Word and character grouping has a separate exact-output matrix.
+
+The word and character grouping matrix independently pins the Issue372 sentence
+to11 word revisions and its exact readable markup, while run granularity keeps
+the two whole-run changes. Equal one-word anchors, including long words at
+character granularity, remain unchanged. Strictly shorter word anchors and
+intervening whitespace fold only inside structural and formatting segments.
+Adjacent changed normal and bold owners retain separate change stretches.
+Bookmark, comment, opaque XML, PI, field, ignored-whitespace and inline-control
+controls retain their exact boundaries. Accepted and rejected outputs reopen
+with independently checked link targets, display text and per-character bold
+properties. Inline-control PI, foreign raw XML, bookmark and comment markers
+retain independently checked text before and after each exact preserved marker
+in both Word and Character modes, including pure insertions and deletions.
+Default and explicit Run records remain equal. Existing drawing and full
+reconstruction controls remain active.
+A bounded unit matrix checks coverage, deterministic output and retained segment
+identity without timing thresholds or an additional alignment algorithm.
+
 The source-built external differential pins Microsoft Word 16.104 build
 16.104.25121423 and locale `en-US`. Its 24 normalized records cover every
 supported story, move, field owner, and property revision, and calibrated
@@ -3580,19 +3611,19 @@ in CI.
 | Job | Command |
 |---|---|
 | changes | On pushes and pull requests, classify changed paths for the nine filtered jobs with `dorny/paths-filter` v4.0.3 pinned to reviewed commit `ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d` |
-| test | Install exact uv 0.10.2, Poppler 26.01.0, LibreOffice 26.2.5.2, and Pandoc 3.10, fetch both pinned corpora, run the pinned Pandoc texmath differential and exact locked release-mode 1,000-page performance regression with one test thread, run `python3 scripts/docx_authoring_conformance.py --public`, run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` with an isolated uv cache and 8 MiB Rust test-thread stack, run the exact locked deterministic animation golden, then run `python3 scripts/golden_png_harness.py --check` |
+| test | Install exact uv 0.10.2, Poppler 26.01.0, LibreOffice 26.2.5.2, and Pandoc 3.10, fetch both pinned corpora, run the pinned Pandoc texmath differential and exact locked release-mode 1,000-page performance regression with one test thread, run `python3 scripts/docx_authoring_conformance.py --public`, run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` with an isolated uv cache and 8 MiB Rust test-thread stack, run the exact locked deterministic animation golden, then run `python3 scripts/golden_png_harness.py --check`. The job uses development optimization1 with debug assertions and overflow checks explicitly enabled. |
 | no-default-features | `cargo test -p oxml-layout --no-default-features` |
 | wasm | Locked `wasm32-unknown-unknown` checks, `wasm-pack test --node`, and local bundler pack and fresh-install gates for `rdocx-wasm` and `rpptx-wasm` |
 | prose | `python3 scripts/prose_check.py` and `python3 scripts/sync_agent_skills.py --check` |
 | release-regressions | Install cargo-release 1.1.3 with its locked dependency graph, then run `python3 -m unittest scripts.test_sprint_workflow` |
 | hash-harness | `python3 scripts/hash_harness.py --check` |
-| presentation-fidelity | Prime locked Cargo dependencies, install exact LibreOffice 26.2.5.2 and Poppler 26.01.0 on Ubuntu 24.04, fetch the pinned corpus, run the exact locked deterministic animation golden, then run `python3 scripts/pptx_ssim_harness.py --check` |
+| presentation-fidelity | Prime locked Cargo dependencies, install exact LibreOffice 26.2.5.2 and Poppler 26.01.0 on Ubuntu 24.04, fetch the pinned corpus, run the exact locked deterministic animation golden, then run `python3 scripts/pptx_ssim_harness.py --check`. The corpus renderer uses its release profile. |
 | word-fidelity | Restore the pinned Rust cache, run `cargo fetch --locked`, fetch the pinned Word corpus, then run `python3 scripts/docx_ssim_harness.py --check` on pinned Ubuntu 24.04 LibreOffice and Poppler with its locked offline helper |
 | clippy | `cargo clippy --workspace --all-targets --all-features --exclude rdocx-py --exclude rpptx-py -- -D warnings` |
 | fmt | `cargo fmt --all -- --check` |
 | doc | `cargo doc --workspace --no-deps --all-features --exclude rdocx-py --exclude rpptx-py` with `RUSTDOCFLAGS=-D warnings`, then `python3 scripts/readme_doctests.py` |
 | package-oxml-layout | Verify the exact 24-font and six licence-and-notice-file inventory, then build and size-check the verified archive |
-| msrv | Install exact uv 0.10.2, fetch both pinned corpora, then run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` under Rust 1.93 with an isolated uv cache and 8 MiB Rust test-thread stack |
+| msrv | Install exact uv 0.10.2, fetch both pinned corpora, then run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` under Rust 1.93 with an isolated uv cache and 8 MiB Rust test-thread stack. The job uses development optimization1 with debug assertions and overflow checks explicitly enabled. |
 | python-bindings | On pull requests, build each Python package with `maturin develop --locked` in its own Python 3.12.9 environment. The presentation cell mounts the SHA-256-pinned LibreOffice 26.2.5 macOS image, verifies build 26.2.5.2, and exposes `soffice` to the original Issue 158 deck workflow. Both cells then run their complete pytest directory with pinned Poppler 26.01.0. |
 | supply-chain | `cargo-deny check` |
 | ci-gate | Always validate that every selected filtered job succeeded and every unselected filtered job was skipped |
@@ -3612,7 +3643,12 @@ The `changes` job routes `test`, `msrv`, `wasm`, `python-bindings`,
 `presentation-fidelity`, `word-fidelity`, `hash-harness`, `supply-chain`, and
 `prose` through inline fail-safe path filters. Every filter selects `ci.yml`,
 so a routing edit cannot suppress its own gate. Product and toolchain paths
-include each job's transitive workspace inputs. A documentation-only HLD
+include each job's transitive workspace inputs. Presentation fidelity selects
+its twelve-crate renderer and example dependency closure, including all eight
+shared OOXML crates and the four presentation model/render crates. It also
+selects the imported golden PNG helper. Unrelated Word, CLI and binding-only
+crate changes do not select this job. Regression tests derive the local
+closure from current manifests so a new dependency requires its route. A documentation-only HLD
 change selects `prose` and skips the filtered product jobs. The supply-chain
 job also runs on the weekly schedule without change detection.
 
@@ -4034,8 +4070,15 @@ separate required gates.
 
 Complete source inventories compare the prior successful algorithm across body,
 cells, controls, text boxes, headers, notes, comments and namespace aliases.
-Counters require one materialization and owner scan per physical source, batched
-namespace discovery and one evaluator paragraph listing. Empty qualified owners
+Counters require one materialization and owner scan per physical source, one
+item scan per owner, bounded namespace discovery including prefix scans and one
+evaluator paragraph listing. Full combined item, physical cell, paragraph XML
+and hyperlink payloads match their separate providers. Complete registry
+outcomes also preserve invalid source and relationship refusal.
+Namespace frame copies count declaration-bearing elements. Exact old-helper
+differentials cover inherited versus target context, Start/End/Empty events,
+shadowing and restoration, default/prefix undeclaration, duplicate and empty
+requests, malformed attributes, early return and incomplete XML. Empty qualified owners
 have positive listing, no-op update, save/reopen and installed Python/CLI
 controls. Foreign ownership and invalid excerpt offsets have refusal controls.
 
@@ -4149,7 +4192,7 @@ variant and do not replace the genuine PowerPoint paired-face positive.
 
 Native application normalization remains separate from the library's exact
 unrelated-edit preservation controls. Known absent historical movie and PNG
-oracles remain unqualified under their S92 disposition. Original failed
+oracles remain unqualified under their S94 disposition. Original failed
 commands and distinct successful successors retain their actual membership.
 
 Chart authoring controls exercise installed bar/line creation in both families,
@@ -4227,6 +4270,30 @@ no-op revision preservation. Native conversion checks use pinned tools and
 private headless profiles. Ignored tests and collection-only observations do
 not supply acceptance evidence. This scoped qualification does not replace
 the final immutable100 measurement or the integrated sprint gate.
+
+Table-owner performance controls count actual source builds, owner and namespace
+scans, parsed model table/cell visits and indexed revision candidates. Complete
+inventories at60,120,240 cells materialize each source once and traverse each
+physical modeled table and cell once. Generated route uniqueness bounds retained
+old parent candidates, while small duplicate and mixed body-slot controls compare
+exact first matches with the legacy pairwise predicate. Merged, omitted, nested,
+controlled and related-story cells retain physical ownership through save and
+reopen. Ordinary edits, stale descendants, first retirement causes, opaque
+payload and late allocation refusal remain independent correctness gates.
+
+Installed release timing controls warm up once, then retain five open/edit and
+three fill samples at60,120,240 cells. The40-by6 cell fill is mandatory. The
+same-host authenticated0.16.0 baseline uses the same interpreter and hardware.
+Median limits are max(three times baseline,10ms) for open and
+max(three times baseline,30ms) for one edit. Fill retains its raw samples and
+max(three times baseline,500ms) comparison as diagnostic evidence alongside
+explicit acceptance of the measured result. No replacement factor or general
+future slack is implied. Deterministic work counts establish scaling
+independently of timing. No-table and unrelated-paragraph controls,
+raw samples and source, wheel, native library and compiler provenance accompany
+the measurements. A separate fresh debug-guarded opt-level2 wheel executes the
+complete Word Python suite with its existing runtime and font prerequisites.
+Release timing does not replace guarded correctness acceptance.
 
 ## Integrated Python compatibility qualification
 

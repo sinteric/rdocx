@@ -989,7 +989,15 @@ impl<'a> Run<'a> {
 
     /// Set character width scale in place.
     pub fn set_width_scale(&mut self, percent: u32) {
-        self.ensure_rpr().width_scale = Some(percent);
+        self.set_width_scale_value(Some(percent));
+    }
+
+    /// Set or clear direct character width scale, in percent.
+    pub fn set_width_scale_value(&mut self, percent: Option<u32>) {
+        if percent.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        self.ensure_rpr().width_scale = percent;
     }
 
     /// Set text position (positive = raised, negative = lowered) in half-points.
@@ -1000,7 +1008,15 @@ impl<'a> Run<'a> {
 
     /// Set text position in place.
     pub fn set_position(&mut self, half_points: i32) {
-        self.ensure_rpr().position = Some(half_points);
+        self.set_position_value(Some(half_points));
+    }
+
+    /// Set or clear direct text position, in signed half-points.
+    pub fn set_position_value(&mut self, half_points: Option<i32>) {
+        if half_points.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        self.ensure_rpr().position = half_points;
     }
 
     /// Set hidden/vanish text.
@@ -1627,6 +1643,42 @@ mod tests {
     use super::*;
     use rdocx_oxml::CT_Document;
     use rdocx_oxml::document::BodyContent;
+
+    #[test]
+    fn clearing_width_scale_and_position_does_not_create_run_properties() {
+        let mut inner = CT_R::new("plain");
+        let mut run = Run { inner: &mut inner };
+        run.set_width_scale_value(None);
+        run.set_position_value(None);
+        assert!(inner.properties.is_none());
+    }
+
+    #[test]
+    fn clearing_width_scale_and_position_preserves_other_direct_properties() {
+        let mut inner = run_with_inner_xml(
+            r#"<w:rPr><w:b w:val="0"/><x:keep xmlns:x="urn:producer" x:flag="exact"/></w:rPr><w:t>value</w:t>"#,
+        );
+        let original = inner.properties.clone().unwrap();
+        {
+            let mut run = Run { inner: &mut inner };
+            run.set_width_scale_value(Some(0));
+            run.set_position_value(Some(-7));
+        }
+        assert_eq!(inner.properties.as_ref().unwrap().width_scale, Some(0));
+        assert_eq!(inner.properties.as_ref().unwrap().position, Some(-7));
+        Run { inner: &mut inner }.set_width_scale_value(None);
+        assert_eq!(inner.properties.as_ref().unwrap().width_scale, None);
+        assert_eq!(inner.properties.as_ref().unwrap().position, Some(-7));
+        Run { inner: &mut inner }.set_width_scale_value(Some(u32::MAX));
+        Run { inner: &mut inner }.set_position_value(None);
+        assert_eq!(
+            inner.properties.as_ref().unwrap().width_scale,
+            Some(u32::MAX)
+        );
+        assert_eq!(inner.properties.as_ref().unwrap().position, None);
+        Run { inner: &mut inner }.set_width_scale_value(None);
+        assert_eq!(inner.properties.unwrap(), original);
+    }
 
     #[test]
     fn fx200_vertical_modes_match_optional_direct_transition_matrix() {

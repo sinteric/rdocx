@@ -1,13 +1,15 @@
 # F-X192, Complete the remaining Word bibliography catalogue
 
 **Status**: approved
-**Sprint**: S92
+**Sprint**: S95
 **Size**: L
 **Depends on**: F-282
 
 ## Scheduling
 
-The user parked this unfinished S90 carryover at S92. Preserve its worker
+The user parked this unfinished S90 carryover at S92. The repair sprint
+insertion moved its prospective target to S94. The Issue379 through381
+roadmap insertion now schedules it in S95. Preserve its worker
 branch, dirty worktree, reviews and native evidence. S91 issue and PR repairs
 continue without requiring this story to complete. The contract is unchanged.
 

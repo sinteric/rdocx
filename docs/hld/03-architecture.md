@@ -9,6 +9,19 @@ physical paragraph, table, cell, section and captured hyperlink owners.
 Supported publication retains only proven surviving owners. Regular runs keep
 the conservative document epoch, while frozen Story and StoryItem captures
 also retain snapshot-inventory authority.
+Word owner inventories share source, owner and item qualification across full
+item, cell, paragraph XML and hyperlink projections in one operation. They
+materialize each source once and pair qualified physical owners with one traversal of each parsed outer table and its nested models.
+Physical coordinates retain row and cell vectors rather than logical grid
+columns. Candidate revision matching indexes current owner routes and retains
+all admissible parent matches until descendant matching completes. Body-slot
+and projection fallback classes remain distinct because their pairwise match
+relation is not transitive. Earliest matching old ownership determines retained
+scopes. No historical owner registry or persistent source cache is introduced.
+Namespace scans retain a frame per element and copy inherited maps only when
+the element declares a namespace. Attribute validation and scope restoration
+retain their checked source semantics.
+
 Presentation bindings capture concrete slide, shape, table-grid and text-owner
 scopes, then locate retained physical owners in their current source graph.
 Manual native snapshot constructors remain unbound and visible snapshot
@@ -1117,8 +1130,12 @@ formatting, the prior holds no `w:rPr` and reads like Word's form, so rejecting
 it keeps the edited mark formatting. Contextual markers act on their owning
 run, paragraph mark, numbering property, or row. A removed paragraph mark
 merges with the next paragraph across a table that immediately follows it when
-every row of that table is removed by the same resolution. A removed paragraph
-mark inside removed content, such as a cell paragraph of a removed row, needs
+every row of that table is removed by the same resolution. Before a retained
+table, removal drops an emptied paragraph, permitting proofing markers but
+refusing retained content, opaque children or meaningful raw gaps atomically.
+A hyperlink whose selected revisions remove every child is dropped only when
+its resolved inner bytes contain no opaque content. Previously empty hyperlinks
+remain. A removed paragraph mark inside removed content, such as a cell paragraph of a removed row, needs
 no merge partner. The merged paragraph keeps the resolved properties of the
 last paragraph, whose mark remains. Resolution stages every affected package part, resolves
 selected descendants before their enclosing subtree, reparses the complete
@@ -1129,12 +1146,27 @@ source index assigns stable public story categories and private owner paths to
 modeled paragraphs, tables, fields, and nested text boxes. A concrete
 hierarchical longest-common-subsequence alignment covers paragraphs, runs,
 table rows, nested tables, lists, and modeled content inside existing
-content-control shells. The default path retains whole-run behavior. An
+content-control shells. Changed gap owners pair by kind and in order, so a
+paragraph beside an edited table cannot force whole-table replacement. The
+default path retains whole-run behavior. An
 additive options value selects Unicode-scalar character units or maximal
 Unicode word, whitespace, and punctuation-or-symbol units, and applies
 left-biased ignores for formatting, textual whitespace, fields, comments, and
 selected story categories. Selected categories leave the original story bytes
 untouched and are excluded before shell checks and revision-id allocation.
+A linear post-pass groups word and character changes into consecutive deletions
+followed by insertions within each structural and formatting owner segment.
+Whitespace anchors between changes fold. Other anchors fold only when their
+joined word count is strictly smaller than both deleted and inserted word counts
+on each side. Character fragments carry word state across units, so an unchanged
+one-word anchor between one-word edits stays even when those words are long.
+Fields, drawings, ignored units, opaque children, bookmark and comment markers,
+hyperlinks, controls and formatting transitions stop grouping. Formatting-only
+changes and replacements using ignored formatting also stop it. Different runs
+retain their own formatting and coalescing ownership. Run granularity retains
+its existing alignment and revision output. Supported inline controls retain raw
+child run cuts before extraction, align Word and Character units within those
+shell segments and copy each shell before its first inserted unit.
 Non-text content remains atomic. Unmatched identical owners become move pairs
 only within one story. A changed run of consecutive paragraphs that holds a
 pair whose hyperlinks, bookmarks, comment ranges, preserved raw children, or
@@ -1145,12 +1177,17 @@ neighbouring paragraphs until each side holds every complex field it begins or
 ends, so a table of contents, whose end Word writes in a paragraph of its own,
 is deleted and inserted whole, which Word needs to accept or reject it. A
 whole deleted, inserted, or moved paragraph carries its bookmarks and comment
-ranges inside its revision wrappers, and its hyperlinks and simple fields only
-inside a complex field deleted or inserted whole with it, since neither may
-sit in a revision wrapper and Word reads each as a field whose codes stay
-untracked. Comparison refuses otherwise, and when the two sides of such a run
-share a bookmark or comment range, or a moved paragraph holds one, since the
-redline would hold it twice. Deleted content writes a field code as
+ranges inside its revision wrappers. Hyperlink shells remain outside the
+wrappers, which track their own children, so whole hyperlink paragraphs can be
+inserted, deleted or moved. Simple fields still require a complex field carried
+whole around them. Empty whole-paragraph hyperlinks remain refused. Captured
+nested Word hyperlinks remain unsupported and are refused before deeper wrapping.
+Wrapper calls are bounded to the paragraph and one direct hyperlink owner. Comparison
+also refuses when the two sides of such a run share a bookmark or comment range,
+or a moved paragraph holds one, since the redline would hold it twice. Expanded
+Word names distinguish typed owners from foreign lookalikes, whose raw bytes
+remain opaque. Whole-owner wrappers retain comments and processing instructions
+in their original positions. Deleted content writes a field code as
 `w:delInstrText`, since Word refuses to open a deletion that holds
 `w:instrText`. A carried hyperlink whose target only the edited side has gets
 its relationship in the redline, and a paragraph mark lists its revision
@@ -1158,8 +1195,10 @@ markers in schema order before its formatting.
 When a matched paragraph changes its comment range, hyperlink, inline control,
 or preserved child boundary without moving a bookmark, comparison writes a
 paired paragraph deletion and insertion. This also covers a TOC entry whose
-cached text becomes a hyperlink and PAGEREF field. Unmatched paragraphs with a
-hyperlink outside a carried complex field still refuse the pair.
+cached text becomes a hyperlink and PAGEREF field. Empty self-closing paragraphs
+are opened before granular properties or text are inserted. A paragraph before
+a retained table carries its own mark revision. Trailing deletion chains mark
+the kept predecessor once and retain accepted and rejected paragraph properties.
 Changed field results remain inside their field owner, while instruction or
 form changes replace that complete owner. Supported run, paragraph, table, and
 section properties emit property revisions that retain the original property

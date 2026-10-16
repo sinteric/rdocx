@@ -19612,3 +19612,158 @@ The exact22-package locally patched publication dry run passes without uploading
 **Notes for future sessions.** The actual corpus and rehearsal producers remain source215. Earlier installed104/native8/full778/854 and original app witnesses keep their b3b or historical identities, with complete source-body, mode and artifact bridges to current unchanged consumers. The source215 archive bytes are separately retained before cache reuse. Skills PR37 remains an external upstream follow-up under the approved post-publication closure decision. Final reviewed-source full gate and clean sprint review remain due. Normal close, exact-main release verification, publication and acceptance-aware contributor reconciliation remain separate pending gates. Original failed attempts and producer identities remain unchanged.
 
 **Evidence references.** `.claude/reviews/F-X227-source-pass-1.md`. Relevant source/artifact bridge b7890b384a31ad34d6e00107607ebf2dfe17176628666eec8b069edecc1e31a8 retains actual producer identities.
+
+
+### F-X229, Repair comparison reconstruction correctness
+
+**Sprint.** S92
+**Completed.** 2026-10-15
+**Size.** L, estimated4 days, actual not recorded
+
+**What was built.** Whole-paragraph hyperlinks retain their owning shells while
+revision wrappers track their content. Empty paragraph properties, table-adjacent
+paragraph marks, deterministic mixed-owner pairing and trailing deletion chains
+now reconstruct both document sides through save and reopen. Issues368 through371
+are covered by independent properties, relationships and structural assertions.
+
+**Non-obvious choices.** Reuse Hadrien Mary's PR374 correctness commits ca8372f8,
+64b68611,4c509c27,313ae8f5 and f8ba1a3b separately from its grouping subset.
+Foreign expanded names, raw gaps and opaque children retain exact bytes. Captured
+nested Word hyperlinks refuse atomically with a statically bounded paragraph
+plus one direct hyperlink wrapper, preserving the unsupported boundary.
+
+**Deviations from the design plan.** No product scope expansion. Independent
+review found and then verified the bounded-owner refusal repair. Actual combined
+source archive measurements replace isolated worker metadata without changing
+the64-byte allowance or10MiB limit.
+
+**Spec sections touched.** Architecture comparison and revision resolution in
+03-architecture.md, native Word comparison ownership in10-bindings-spec.md, and
+comparison regression, preservation and terminal paragraph coverage in
+12-testing-strategy.md.
+
+**Tests.** Genuine Base failures establish the regression gate. Final equipped
+scoped worker suite passes625 unit,379 integration,2409 regression and2 doctests.
+Worker policy180 passes with2 existing skips. Canonical policy passes182 tests
+with2 existing skips after explicit1.97.1 compiler and rustdoc selection and
+independently reviewed build-only target isolation. Earlier root-cache stalls
+and incompatible-cache attempts remain uncredited. Independent microscope pass2 and
+canonical integration pass1 are clean. Canonical comparison, paragraph, table
+and hyperlink reconstruction filters pass on the actual combined prefix.
+All existing parser preservation, refusal and owner controls remain present.
+
+**Hash harness.** Unchanged, all49 entries. Intentional correctness XML changes
+are attributed to this feature, separately from F-X230 grouping.
+
+**Notes for future sessions.** This is the scoped dependency-prefix checkpoint
+that permits F-X230 to start. Final integrated full verification and sprint
+review remain due. Actual combined rdocx metadata declares3714005 compressed
+bytes,51847828 normalized member bytes and37 members. The actual archive
+compresses to3714006 bytes. Receipt SHA-256 is
+9817499112aa3eeeb3ae292338c83eaea6e0078260bd20c2a50fd22dabc72495.
+Metadata no-verify packaging is not publication verification.
+
+
+### F-X178, Clearable direct run formatting setters
+
+**Sprint.** S92
+**Completed.** 2026-10-15
+**Size.** S, estimated 1 days, actual not recorded
+
+**What was built.** Native Run.set_width_scale_value and Run.set_position_value accept None to remove only the selected override without allocating absent properties. Existing setters delegate to Some. Explicit false, zero, negative position and opaque properties survive save and reopen.
+
+**Non-obvious choices.** The existing Rust contract is additive. No new Python property or unit interpretation was introduced.
+
+**Deviations from the design plan.** None.
+
+**Spec sections touched.** 10-bindings-spec.md, native nullable formatting setters.
+
+**Tests.** Genuine failing unit and round-trip controls, scoped worker verification and independent feature/integration reviews pass. Final integrated native suites and verified patched-local archives cover the additive public methods.
+
+**Hash harness.** All49 outputs unchanged. Intentional comparison XML and new clear operations retain their separate story attribution. No rendering baseline change.
+
+**Notes for future sessions.** Full verification ran at9cdd7980223527400a25a0ed2efa231d0713079a after the user-authorized future planning update. Fresh installed riders ran at f86f1cb7a76bd9f3425c2135d2a00bf9b711fa54, with unchanged compiled/runtime consumers across approved planning docs and the exact roadmap-assertion update. The original f86 package attempt was interrupted and remains failed. Exact commands and hashes are retained in /private/tmp/S92-integrated-full-2/receipt.json, /private/tmp/S92-final-word-1/receipt.json and /private/tmp/S92-final-ppt-story-1/receipt.json. Final current-HEAD full verification and clean sprint review remain closure requirements, with exact results recorded in the S92 run state. Historical hosted acceptance remains source638 and actual profile rendering remains epochb271, with authenticated unchanged producer closure. Only /close-sprint may merge/tag, and publication remains separate.
+
+
+### F-X228, Qualify faster CI without weakening gates
+
+**Sprint.** S92
+**Completed.** 2026-10-15
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Actual CI uses job-local native optimization1 with debug assertions and overflow checks, retains binding optimization2 safety, renders the deterministic corpus in release, and routes presentation/golden checks through their authenticated source closure. All existing suites, pinned tools and owner-only dispatch boundaries remain.
+
+**Non-obvious choices.** Adapt Hadrien Mary's PR376 while separating donor timings from observed acceptance. Hosted evidence stays bound to the reviewed source prefix638cf3e4, distinct from the final local full gate.
+
+**Deviations from the design plan.** The approved source-availability checkpoint pushed only the clean sprint ref before actual acceptance. Owner compatibility was explicitly false.
+
+**Spec sections touched.** 12-testing-strategy.md and15-build-and-toolchain.md, CI profiles and routing.
+
+**Tests.** Actual run38755615219 succeeded with18 required jobs and only the owner corpus skipped. Test/MSRV, full Python778/854, presentation/Word fidelity and aggregate passed. Word hard multiscript5/5 passed while broad Word/PPT SSIM trends remained false. Current harness self-test runs8 controls with2 corpus-evidence skips. Actual later producer epoch renders50decks/421PNGs and ordered manifests identically in both profiles, with all166producer inputs and Cargo/binary closure authenticated at the integrated source. No causal speedup claim.
+
+**Hash harness.** All49 outputs unchanged. Intentional comparison XML and new clear operations retain their separate story attribution. No rendering baseline change.
+
+**Notes for future sessions.** Full verification ran at9cdd7980223527400a25a0ed2efa231d0713079a after the user-authorized future planning update. Fresh installed riders ran at f86f1cb7a76bd9f3425c2135d2a00bf9b711fa54, with unchanged compiled/runtime consumers across approved planning docs and the exact roadmap-assertion update. The original f86 package attempt was interrupted and remains failed. Exact commands and hashes are retained in /private/tmp/S92-integrated-full-2/receipt.json, /private/tmp/S92-final-word-1/receipt.json and /private/tmp/S92-final-ppt-story-1/receipt.json. Final current-HEAD full verification and clean sprint review remain closure requirements, with exact results recorded in the S92 run state. Historical hosted acceptance remains source638 and actual profile rendering remains epochb271, with authenticated unchanged producer closure. Only /close-sprint may merge/tag, and publication remains separate.
+
+
+### F-X230, Group comparison changes for readable revisions
+
+**Sprint.** S92
+**Completed.** 2026-10-15
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Word and Character comparison group changed blocks while retaining equal-word anchors, adjacent formatting transitions and physical XML boundaries. Issue372 produces the expected11 revisions. Accept/reject resolution preserves exact content, properties and relationships through reopen.
+
+**Non-obvious choices.** Reuse Hadrien Mary's PR374 grouping commit7ebb5120 separately from F-X229 correctness. Count words across attributed units with carried state and retain raw-child cuts, including inline controls. Default Run behavior and atomic refusal remain exact.
+
+**Deviations from the design plan.** Independent review defects D1 and D2 received genuine failing controls, bounded repair and a clean third pass. No unresolved finding remains.
+
+**Spec sections touched.** 03-architecture.md,10-bindings-spec.md and12-testing-strategy.md, comparison grouping and reconstruction.
+
+**Tests.** Actual focused matrix covers24 Word/Character scenarios and48 resolved reopen checks. Final worker native, Clippy, policy182 with2 existing skips and hash49 passed. Clean independent feature pass3 and canonical integration pass1 authenticate current source and package reconciliation. Final integrated native suites preserve the X229 controls.
+
+**Hash harness.** All49 outputs unchanged. Intentional comparison XML and new clear operations retain their separate story attribution. No rendering baseline change.
+
+**Notes for future sessions.** Full verification ran at9cdd7980223527400a25a0ed2efa231d0713079a after the user-authorized future planning update. Fresh installed riders ran at f86f1cb7a76bd9f3425c2135d2a00bf9b711fa54, with unchanged compiled/runtime consumers across approved planning docs and the exact roadmap-assertion update. The original f86 package attempt was interrupted and remains failed. Exact commands and hashes are retained in /private/tmp/S92-integrated-full-2/receipt.json, /private/tmp/S92-final-word-1/receipt.json and /private/tmp/S92-final-ppt-story-1/receipt.json. Final current-HEAD full verification and clean sprint review remain closure requirements, with exact results recorded in the S92 run state. Historical hosted acceptance remains source638 and actual profile rendering remains epochb271, with authenticated unchanged producer closure. Only /close-sprint may merge/tag, and publication remains separate.
+
+
+### F-X231, Preserve PowerPoint HTML import whitespace
+
+**Sprint.** S92
+**Completed.** 2026-10-15
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Pending collapsed spaces retain their producing run's formatting and hyperlink ownership. Emphasis edges, span boundaries, explicit breaks and NBSP survive native HTML import, save and reopen. Existing equivalent Word HTML and Markdown behavior remains qualified.
+
+**Non-obvious choices.** Adapt only the necessary PowerPoint slice of Hadrien Mary's advanced PR359. Preserve the native importer boundary. Fresh Python acceptance opens the actual native-imported PPTX rather than adding a new Python import API.
+
+**Deviations from the design plan.** No surface expansion. Shared package carriers were serialized and measured on actual combined source.
+
+**Spec sections touched.** 10-bindings-spec.md, native HTML import contract.
+
+**Tests.** Genuine PowerPoint RED, native and Word controls and clean feature/integration reviews pass. Current-source fresh installed PPT story node passes1 with0 skips using the actual selected native constructor/save/reopen fixture. The exact installed Word story node is a member of the fresh complete Word suite.
+
+**Hash harness.** All49 outputs unchanged. Intentional comparison XML and new clear operations retain their separate story attribution. No rendering baseline change.
+
+**Notes for future sessions.** Full verification ran at9cdd7980223527400a25a0ed2efa231d0713079a after the user-authorized future planning update. Fresh installed riders ran at f86f1cb7a76bd9f3425c2135d2a00bf9b711fa54, with unchanged compiled/runtime consumers across approved planning docs and the exact roadmap-assertion update. The original f86 package attempt was interrupted and remains failed. Exact commands and hashes are retained in /private/tmp/S92-integrated-full-2/receipt.json, /private/tmp/S92-final-word-1/receipt.json and /private/tmp/S92-final-ppt-story-1/receipt.json. Final current-HEAD full verification and clean sprint review remain closure requirements, with exact results recorded in the S92 run state. Historical hosted acceptance remains source638 and actual profile rendering remains epochb271, with authenticated unchanged producer closure. Only /close-sprint may merge/tag, and publication remains separate.
+
+
+### F-X237, Restore linear Python table owner inventory
+
+**Sprint.** S92
+**Completed.** 2026-10-15
+**Size.** L, estimated 4 days, actual not recorded
+
+**What was built.** One immutable operation qualifies complete Word item, cell, paragraph and hyperlink inventories. Physical table traversal and scalar cell capture are linear, and ephemeral branch-class indexes preserve the legacy first matching owner across revision publication. Namespace frames copy maps only when declarations change.
+
+**Non-obvious choices.** One additive hidden native story_owner_snapshots API serves the existing crate boundary. No persistent cache, table binding shortcut, authority bypass or mutation/reopen weakening was introduced. Physical merges, omissions, nested/control owners, aliases, generations and atomic refusal retain their existing contract.
+
+**Deviations from the design plan.** The user explicitly accepts measured120/240 fills0.925389s/3.304061s. Former3x failures remain retained as failures and diagnostic comparisons, with no replacement multiplier or future waiver. Strict open/edit limits and deterministic linear work counts remain gates. Further optimization stopped.
+
+**Spec sections touched.** 03-architecture.md,10-bindings-spec.md and12-testing-strategy.md, owner inventory and qualification.
+
+**Tests.** Actual Base/native/scalar/namespace RED precedes the fixes. Deterministic60/120/240 work counts and exact legacy success/refusal differentials pass. Worker native634/380/2409/2, pure Rust binding3, guarded complete Word782 including56 font nodes, policy182 with2 expected skips, WASM/docs and verified22 archives pass. Independent feature/integration reviews are clean. The identical equipped successor resolves the retained failed sandbox conversion attempt. Fresh integrated complete Word and all native gates also pass.
+
+**Hash harness.** All49 outputs unchanged. Intentional comparison XML and new clear operations retain their separate story attribution. No rendering baseline change.
+
+**Notes for future sessions.** Full verification ran at9cdd7980223527400a25a0ed2efa231d0713079a after the user-authorized future planning update. Fresh installed riders ran at f86f1cb7a76bd9f3425c2135d2a00bf9b711fa54, with unchanged compiled/runtime consumers across approved planning docs and the exact roadmap-assertion update. The original f86 package attempt was interrupted and remains failed. Exact commands and hashes are retained in /private/tmp/S92-integrated-full-2/receipt.json, /private/tmp/S92-final-word-1/receipt.json and /private/tmp/S92-final-ppt-story-1/receipt.json. Final current-HEAD full verification and clean sprint review remain closure requirements, with exact results recorded in the S92 run state. Historical hosted acceptance remains source638 and actual profile rendering remains epochb271, with authenticated unchanged producer closure. Only /close-sprint may merge/tag, and publication remains separate.

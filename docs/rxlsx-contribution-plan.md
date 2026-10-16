@@ -31,7 +31,7 @@ including reuse behind a consistent facade. Record why this implementation is
 worth maintaining. Amend the existing non-goal to permit a separate rxlsx
 family while keeping oxml-sml limited to chart workbooks.
 
-Do not mark F-184 or S95 done merely because this document exists.
+Do not mark F-184 or S101 done merely because this document exists.
 
 ## 2. First-cut design and reusable groundwork
 
@@ -109,13 +109,16 @@ contracts. Their large-workbook gates require measured memory evidence.
 
 ## 3. Parallel streams and responsibilities
 
-The maintainer progresses through S91 to S94 on the Word stream. The
-contributor progresses through S95 onward on an independent Excel stream.
+The canonical roadmap retains S91.1 publication, S92 and S93 repairs,
+S94 Python/CLI parity, S95 Word features, S96 fillable PDF forms,
+S97 throughS99 Word features and the S100 external Word benchmark. The
+conditional Excel programme starts at S101. An independent contributor stream
+remains a workflow proposal until the extensions below are implemented.
 Both use separate branches and checkouts. Sprint numbers do not dictate merge
 order, but story dependencies remain mandatory.
 
 Keep one canonical set of record paths. On `sprint/s91`, CURRENT_SPRINT describes
-S91. On `sprint/s95`, the same path describes S95. Neither stream creates an
+S91. On `sprint/s101`, the same path describes S101. Neither stream creates an
 alternate tracker. Each branch is internally consistent, although the other
 stream's unpublished progress may not yet appear there.
 
@@ -183,7 +186,7 @@ keep their own context.
 
 Only `/close-sprint` merges into main. Serialize sprint closes. The next closing
 branch incorporates the latest main, reconciles shared changes and re-establishes
-its integrated verification and sprint review. S95 may close before S91 if its
+its integrated verification and sprint review. S101 may close before S91 if its
 dependencies and acceptance gates pass. Shared baseline updates are exclusive.
 
 ## 5. Proposed Excel story and sprint realignment
@@ -194,18 +197,22 @@ before assigning implementation. Boundaries are capabilities, not calendar
 promises. Add sprints if the reviewed sizing does not fit, rather than weakening
 gates or silently overloading a sprint.
 
-| Sprint | Proposed delivery |
+The current canonical schedule is below. The earlier reader/editor acceleration
+proposal still requires child-story design and a capacity decision. This guide
+allocates no additional IDs and does not supersede SPRINT_PLAN.md.
+
+| Sprint | Canonical planned delivery |
 |---|---|
-| S95 | F-184 decision, first-cut F-204 corpus, F-185 package ownership and workbook core |
-| S96 | F-186 strings/styles/formats, initial reading, shared-formula reference handling from F-189 |
-| S97 | Safe edits and atomic writing, sheet creation/basic settings, initial CLI/Python interfaces |
-| S98 | Bounded evaluator and basic rendering, structural edits, further formula/table support |
-| S99 | Streaming memory gates, broader calculation, charts, typed validation and conditional formatting |
-| S100 | Pivot model and local refresh, slicers and Data Model preservation boundary |
-| S101 | Power Query package model and bounded M language |
-| S102 | Power Query execution and allowed connectors |
-| S103 | Office Scripts-compatible API and sandboxed execution |
-| S104 | Remaining rendering/binding coverage and advanced lifecycle gate |
+| S101 | F-184 go/no-go, F-204 corpus, F-185 workbook and worksheet core |
+| S102 | F-186 strings/styles/formats, F-189 formula parser, F-205 tables and structured references |
+| S103 | F-206 advanced worksheet objects |
+| S104 | F-187 reader and F-188 writer, including their full streaming contracts |
+| S105 | F-190 calculation, F-191 charts, F-192 validation and conditional formatting |
+| S106 | F-193 pivots, F-207 recalculation, F-208 slicers and Data Model boundary |
+| S107 | F-209 Power Query package and bounded M language |
+| S108 | F-210 Power Query execution and allowed connectors |
+| S109 | F-211 Office Scripts surface and F-212 sandboxed execution |
+| S110 | F-194 rendering and F-195 distribution and advanced lifecycle gate |
 
 Split F-187/F-188 into initial read/write capability and genuine streaming work.
 Split F-190, F-194 and F-195 into early bounded capability and later completeness.
@@ -217,7 +224,7 @@ depend on a delivered child rather than the entire parent, but that must be an
 explicit contract change. Do not count the minimal editor as completing the
 original full streaming or distribution contracts.
 
-Add a coherent reader/editor release boundary after S97 if its complete API,
+Consider an earlier reader/editor release only after its complete API,
 bindings and acceptance checks pass. Add a release preparation story and use the
 existing separate publication approval. Later rendering and advanced lifecycle
 capabilities have their own reviewed boundaries. Neither sprint close nor this
@@ -265,9 +272,9 @@ Issue 281 open while its programme discussion remains outstanding.
 
 ## 7. Validation and next actions
 
-Use meaningful workflow tests for simultaneous S91/S95 contexts, remote claims
+Use meaningful workflow tests for simultaneous S91/S101 contexts, remote claims
 and handoffs, duplicate IDs, contributor story additions, completed-status
-preservation, ledger conflicts, S95 closing before S91, and evidence becoming
+preservation, ledger conflicts, S101 closing before S91, and evidence becoming
 stale after source changes. Confirm one stream cannot mutate or delete the
 other stream's active worker state.
 

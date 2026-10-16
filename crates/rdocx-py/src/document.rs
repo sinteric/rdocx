@@ -3815,6 +3815,7 @@ impl PyCoreProperties {
 // Only current physical owners are retained. A committed mutation supplies the
 // replacement inventory before any state is published.
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(crate) enum WordOwnerLocation {
     Paragraph(rdocx::ContentLocation),
     Run(rdocx::ContentLocation, rdocx_oxml::text::AcceptedRunPath),
@@ -3829,6 +3830,7 @@ pub(crate) enum WordOwnerLocation {
     Hyperlink(rdocx::ContentLocation, usize),
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct WordOwnerAddress {
     location: WordOwnerLocation,
     parent: Option<usize>,
@@ -3969,9 +3971,17 @@ impl WordOwnerLocation {
 fn word_owner_locations(document: &rdocx::Document) -> rdocx::Result<Vec<WordOwnerAddress>> {
     let mut result = Vec::new();
     let mut table_ordinals = HashMap::new();
-    let snapshots = document.story_item_snapshots()?;
+    let (snapshots, cell_snapshots, paragraph_snapshots, link_snapshots) =
+        document.story_owner_snapshots()?;
     let mut body_slots = HashMap::new();
     let mut cell_parents = HashMap::new();
+    let mut table_cells = HashMap::<rdocx::ContentLocation, Vec<_>>::new();
+    for (table, row, cell, story) in cell_snapshots {
+        table_cells
+            .entry(table)
+            .or_default()
+            .push((row, cell, story));
+    }
     for snapshot in &snapshots {
         let location = snapshot.location();
         if location.story().kind() == rdocx::StoryKind::Body
@@ -4005,16 +4015,7 @@ fn word_owner_locations(document: &rdocx::Document) -> rdocx::Result<Vec<WordOwn
                 None
             },
         });
-        let cells = document.read_story_table(&location, |table| {
-            (0..table.row_count())
-                .flat_map(|row| {
-                    let count = table.row(row).map_or(0, |row| row.cell_count());
-                    (0..count).map(move |cell| (row, cell))
-                })
-                .collect::<Vec<_>>()
-        })?;
-        for (row, cell) in cells {
-            let story = document.story_table_cell(&location, row, cell)?;
+        for (row, cell, story) in table_cells.remove(&location).unwrap_or_default() {
             result.push(WordOwnerAddress {
                 location: WordOwnerLocation::Cell {
                     table: location.clone(),
@@ -4055,7 +4056,7 @@ fn word_owner_locations(document: &rdocx::Document) -> rdocx::Result<Vec<WordOwn
         }
     }
     let mut paragraph_ordinals = HashMap::new();
-    for (location, xml) in document.story_range_paragraphs()? {
+    for (location, xml) in paragraph_snapshots {
         let story = location.story();
         let parent = cell_parents
             .get(&(
@@ -4112,7 +4113,7 @@ fn word_owner_locations(document: &rdocx::Document) -> rdocx::Result<Vec<WordOwn
     }
     let mut local_indexes = HashMap::<rdocx::ContentLocation, usize>::new();
     let mut story_indexes = HashMap::<rdocx::StoryId, usize>::new();
-    for (location, _) in document.story_link_snapshots()? {
+    for (location, _) in link_snapshots {
         let local = local_indexes.entry(location.clone()).or_default();
         let position = story_indexes.entry(location.story().clone()).or_default();
         result.push(WordOwnerAddress {
@@ -4148,6 +4149,12 @@ fn same_inventory_route(
     mut after: usize,
 ) -> bool {
     loop {
+        #[cfg(test)]
+        FX237_ROUTE_WORK.set({
+            let mut work = FX237_ROUTE_WORK.get();
+            work[4] += 1;
+            work
+        });
         let record = &old[before];
         let address = &new[after];
         let b = &address.location;
@@ -4212,6 +4219,268 @@ fn same_inventory_route(
             _ => return false,
         }
     }
+}
+
+// The legacy relation is pairwise, not transitive. Index both slot and
+// projection routes, partitioning the old operands before selecting a branch.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum WordRouteKey {
+    Slot(rdocx::StoryItemKind, usize, Vec<usize>),
+    Projection(
+        rdocx::StoryKind,
+        String,
+        usize,
+        rdocx::StoryItemKind,
+        Option<usize>,
+    ),
+    CellProjection(rdocx::StoryItemKind, Option<usize>),
+    Cell(usize, usize),
+    Run(rdocx_oxml::text::AcceptedRunPath),
+    Section(usize),
+    Hyperlink(
+        rdocx::StoryKind,
+        String,
+        usize,
+        rdocx::StoryItemKind,
+        Vec<usize>,
+        usize,
+    ),
+}
+
+fn word_route_key(
+    address: &WordOwnerAddress,
+    class: usize,
+    parent_cell: bool,
+) -> Option<WordRouteKey> {
+    match &address.location {
+        WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location) => {
+            let body = location.story().kind() == rdocx::StoryKind::Body;
+            if body
+                && class & 1 != 0
+                && let Some(slot) = address.body_slot
+            {
+                let suffix = if matches!(address.location, WordOwnerLocation::Paragraph(_)) {
+                    if location.index_path().len() > 2 {
+                        return None;
+                    }
+                    location.index_path().get(1..).unwrap_or_default().to_vec()
+                } else {
+                    Vec::new()
+                };
+                let kind = if matches!(address.location, WordOwnerLocation::Paragraph(_)) {
+                    rdocx::StoryItemKind::Paragraph
+                } else {
+                    rdocx::StoryItemKind::Table
+                };
+                Some(WordRouteKey::Slot(kind, slot, suffix))
+            } else if parent_cell && class & 2 != 0 {
+                Some(WordRouteKey::CellProjection(
+                    location.item_kind(),
+                    address.projection_ordinal,
+                ))
+            } else {
+                let story = location.story();
+                Some(WordRouteKey::Projection(
+                    story.kind(),
+                    story.part_name().to_owned(),
+                    story.owner_index(),
+                    location.item_kind(),
+                    address.projection_ordinal,
+                ))
+            }
+        }
+        WordOwnerLocation::Cell { row, cell, .. } => Some(WordRouteKey::Cell(*row, *cell)),
+        WordOwnerLocation::Run(_, path) => Some(WordRouteKey::Run(path.clone())),
+        WordOwnerLocation::Section(index) => Some(WordRouteKey::Section(*index)),
+        WordOwnerLocation::Hyperlink(location, index) => {
+            let story = location.story();
+            Some(WordRouteKey::Hyperlink(
+                story.kind(),
+                story.part_name().to_owned(),
+                story.owner_index(),
+                location.item_kind(),
+                location.index_path().to_vec(),
+                *index,
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FX237_ROUTE_WORK: std::cell::Cell<[usize; 8]> = const { std::cell::Cell::new([0; 8]) };
+}
+
+fn indexed_inventory_matches(
+    old: &[WordOwner],
+    new: &[WordOwnerAddress],
+    publication: &WordPublication,
+) -> Vec<Option<usize>> {
+    let mut index = HashMap::<(Option<usize>, usize, WordRouteKey), Vec<usize>>::new();
+    let mut links = HashMap::<WordRouteKey, Vec<usize>>::new();
+    for (before, owner) in old.iter().enumerate() {
+        let address = WordOwnerAddress {
+            location: owner.location.clone(),
+            parent: owner.parent,
+            body_slot: owner.body_slot,
+            projection_ordinal: owner.projection_ordinal,
+        };
+        let parent_cell = owner
+            .parent
+            .is_some_and(|parent| matches!(old[parent].location, WordOwnerLocation::Cell { .. }));
+        let body_slot = match &owner.location {
+            WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location) => {
+                location.story().kind() == rdocx::StoryKind::Body && owner.body_slot.is_some()
+            }
+            _ => false,
+        };
+        let class = usize::from(body_slot) | (usize::from(parent_cell) << 1);
+        // The candidate determines which pairwise branch applies. Supply each
+        // branch's old key in its own namespace, without merging parent routes.
+        let mut keys = Vec::new();
+        for candidate_class in 0..4 {
+            if let Some(key) = word_route_key(&address, candidate_class, candidate_class & 2 != 0)
+                && !keys.contains(&key)
+            {
+                keys.push(key);
+            }
+        }
+        for key in keys {
+            #[cfg(test)]
+            FX237_ROUTE_WORK.set({
+                let mut work = FX237_ROUTE_WORK.get();
+                work[6] += 1;
+                work
+            });
+            index
+                .entry((owner.parent, class, key.clone()))
+                .or_default()
+                .push(before);
+            if matches!(owner.location, WordOwnerLocation::Hyperlink(..)) {
+                links.entry(key).or_default().push(before);
+            }
+        }
+        #[cfg(test)]
+        FX237_ROUTE_WORK.set({
+            let mut work = FX237_ROUTE_WORK.get();
+            work[0] += 1;
+            work
+        });
+    }
+    #[cfg(test)]
+    FX237_ROUTE_WORK.set({
+        let mut work = FX237_ROUTE_WORK.get();
+        work[7] = index.values().map(Vec::len).max().unwrap_or(0);
+        work
+    });
+    let mut matches = vec![None::<Vec<usize>>; new.len()];
+    for target in 0..new.len() {
+        let mut stack = vec![(target, false)];
+        while let Some((after, ready)) = stack.pop() {
+            if matches[after].is_some() {
+                continue;
+            }
+            if !ready && let Some(parent) = new[after].parent {
+                stack.push((after, true));
+                if matches[parent].is_none() {
+                    stack.push((parent, false));
+                }
+                continue;
+            }
+            let address = &new[after];
+            let mut found = Vec::new();
+            // Removal's original override uses the source content route alone,
+            // independently of the normal parent-chain matcher.
+            let removed_link = if let (
+                WordPublication::HyperlinkRemove(WordOwnerLocation::Hyperlink(
+                    removed,
+                    removed_index,
+                )),
+                WordOwnerLocation::Hyperlink(location, position),
+            ) = (publication, &address.location)
+            {
+                if same_content_owner(removed, location) {
+                    let previous = if position >= removed_index {
+                        position.checked_add(1)
+                    } else {
+                        Some(*position)
+                    };
+                    if let Some(previous) = previous {
+                        let shifted = WordOwnerAddress {
+                            location: WordOwnerLocation::Hyperlink(location.clone(), previous),
+                            parent: None,
+                            body_slot: None,
+                            projection_ordinal: None,
+                        };
+                        if let Some(key) = word_route_key(&shifted, 0, false) {
+                            found.extend(links.get(&key).into_iter().flatten().copied());
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !removed_link {
+                let parents = address.parent.map_or_else(
+                    || vec![None],
+                    |parent| {
+                        matches[parent]
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .copied()
+                            .map(Some)
+                            .collect()
+                    },
+                );
+                let parent_cell = address.parent.is_some_and(|parent| {
+                    matches!(new[parent].location, WordOwnerLocation::Cell { .. })
+                });
+                for parent in parents {
+                    #[cfg(test)]
+                    FX237_ROUTE_WORK.set({
+                        let mut work = FX237_ROUTE_WORK.get();
+                        work[5] += 1;
+                        work
+                    });
+                    for class in 0..4 {
+                        if let Some(key) = word_route_key(address, class, parent_cell)
+                            && let Some(candidates) = index.get(&(parent, class, key))
+                        {
+                            for &before in candidates {
+                                #[cfg(test)]
+                                FX237_ROUTE_WORK.set({
+                                    let mut work = FX237_ROUTE_WORK.get();
+                                    work[2] += 1;
+                                    work
+                                });
+                                if same_inventory_route(old, before, new, after) {
+                                    found.push(before);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found.sort_unstable();
+            found.dedup();
+            #[cfg(test)]
+            FX237_ROUTE_WORK.set({
+                let mut work = FX237_ROUTE_WORK.get();
+                work[1] += 1;
+                work[3] = work[3].max(found.len());
+                work
+            });
+            matches[after] = Some(found);
+        }
+    }
+    matches
+        .into_iter()
+        .map(|matched| matched.unwrap().into_iter().next())
+        .collect()
 }
 
 impl WordOwner {
@@ -4847,31 +5116,12 @@ impl PyDocument {
                 "checked XML owner has no current physical authority",
             ));
         }
+        let matches = indexed_inventory_matches(&self.owners, &locations, &publication);
         let mut retained = Vec::new();
         let mut births = Vec::new();
         for (index, address) in locations.iter().enumerate() {
             let location = &address.location;
-            let old = self.owners.iter().enumerate().find(|(before, _)| {
-                if let (
-                    WordPublication::HyperlinkRemove(WordOwnerLocation::Hyperlink(
-                        removed,
-                        removed_index,
-                    )),
-                    WordOwnerLocation::Hyperlink(candidate_location, candidate_index),
-                    WordOwnerLocation::Hyperlink(old_location, old_index),
-                ) = (&publication, location, &self.owners[*before].location)
-                    && same_content_owner(removed, candidate_location)
-                {
-                    let previous_index = if candidate_index >= removed_index {
-                        candidate_index.checked_add(1)
-                    } else {
-                        Some(*candidate_index)
-                    };
-                    return same_content_owner(candidate_location, old_location)
-                        && previous_index == Some(*old_index);
-                }
-                same_inventory_route(&self.owners, *before, &locations, index)
-            });
+            let old = matches[index].map(|before| (before, &self.owners[before]));
             let mut states = Vec::new();
             let mut descendant = false;
             if let (Some((before, _)), Some(selected)) = (old, selected_index) {
@@ -10192,5 +10442,568 @@ impl PyFontDefinition {
                 embedded_fonts,
             },
         )
+    }
+}
+
+#[cfg(test)]
+fn fx237_legacy_word_owner_locations(
+    document: &rdocx::Document,
+) -> rdocx::Result<Vec<WordOwnerAddress>> {
+    let mut result = Vec::new();
+    let mut table_ordinals = HashMap::new();
+    let snapshots = document.story_item_snapshots()?;
+    let mut body_slots = HashMap::new();
+    let mut cell_parents = HashMap::new();
+    for snapshot in &snapshots {
+        let location = snapshot.location();
+        if location.story().kind() == rdocx::StoryKind::Body
+            && snapshot.is_direct_child()
+            && matches!(
+                location.item_kind(),
+                rdocx::StoryItemKind::Paragraph | rdocx::StoryItemKind::ContentControl
+            )
+        {
+            body_slots.insert(location.clone(), snapshot.direct_body_index());
+        }
+    }
+    for snapshot in &snapshots {
+        if snapshot.location().item_kind() != rdocx::StoryItemKind::Table {
+            continue;
+        }
+        let location = snapshot.location().clone();
+        let ordinal = table_ordinals
+            .entry(location.story().clone())
+            .or_insert(0usize);
+        let projection_ordinal = Some(*ordinal);
+        *ordinal += 1;
+        let table_index = result.len();
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Table(location.clone()),
+            parent: None,
+            projection_ordinal,
+            body_slot: if snapshot.is_direct_child() {
+                snapshot.direct_body_index()
+            } else {
+                None
+            },
+        });
+        let cells = document.read_story_table(&location, |table| {
+            (0..table.row_count())
+                .flat_map(|row| {
+                    let count = table.row(row).map_or(0, |row| row.cell_count());
+                    (0..count).map(move |cell| (row, cell))
+                })
+                .collect::<Vec<_>>()
+        })?;
+        for (row, cell) in cells {
+            let story = document.story_table_cell(&location, row, cell)?;
+            result.push(WordOwnerAddress {
+                location: WordOwnerLocation::Cell {
+                    table: location.clone(),
+                    row,
+                    cell,
+                    story,
+                },
+                parent: Some(table_index),
+                body_slot: None,
+                projection_ordinal: None,
+            });
+        }
+    }
+    for (index, address) in result.iter().enumerate() {
+        if let WordOwnerLocation::Cell { story, .. } = &address.location {
+            cell_parents
+                .entry((
+                    story.kind(),
+                    story.part_name().to_owned(),
+                    story.owner_index(),
+                ))
+                .or_insert(index);
+        }
+    }
+    // Join nested table routes through their actual physical cell owner. An
+    // unresolved route stays conservative rather than acquiring an ordinal parent.
+    for address in &mut result {
+        if let WordOwnerLocation::Table(location) = &address.location {
+            let story = location.story();
+            let parent = cell_parents
+                .get(&(
+                    story.kind(),
+                    story.part_name().to_owned(),
+                    story.owner_index(),
+                ))
+                .copied();
+            address.parent = parent;
+        }
+    }
+    let mut paragraph_ordinals = HashMap::new();
+    for (location, xml) in document.story_range_paragraphs()? {
+        let story = location.story();
+        let parent = cell_parents
+            .get(&(
+                story.kind(),
+                story.part_name().to_owned(),
+                story.owner_index(),
+            ))
+            .copied();
+        let ordinal = paragraph_ordinals
+            .entry(location.story().clone())
+            .or_insert(0usize);
+        let projection_ordinal = Some(*ordinal);
+        *ordinal += 1;
+        let index = result.len();
+        let paragraph = rdocx_oxml::CT_P::from_xml_fragment(&xml)?;
+        // Reuse the containing item's fact from this exact immutable source
+        // inventory, matching the native paragraph snapshot's containing route.
+        let body_slot = if location.story().kind() == rdocx::StoryKind::Body {
+            let containing = match location.index_path() {
+                [_] => Some(location.clone()),
+                [control, _] => Some(rdocx::ContentLocation::new(
+                    location.story().clone(),
+                    rdocx::StoryItemKind::ContentControl,
+                    vec![*control],
+                )),
+                _ => None,
+            };
+            containing.and_then(|containing| body_slots.get(&containing).copied().flatten())
+        } else {
+            None
+        };
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Paragraph(location.clone()),
+            parent,
+            body_slot,
+            projection_ordinal,
+        });
+        for path in paragraph.accepted_run_paths() {
+            result.push(WordOwnerAddress {
+                location: WordOwnerLocation::Run(location.clone(), path),
+                parent: Some(index),
+                body_slot: None,
+                projection_ordinal: None,
+            });
+        }
+    }
+    for index in 0..document.section_count() {
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Section(index),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: None,
+        });
+    }
+    let mut local_indexes = HashMap::<rdocx::ContentLocation, usize>::new();
+    let mut story_indexes = HashMap::<rdocx::StoryId, usize>::new();
+    for (location, _) in document.story_link_snapshots()? {
+        let local = local_indexes.entry(location.clone()).or_default();
+        let position = story_indexes.entry(location.story().clone()).or_default();
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Hyperlink(location.clone(), *local),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: Some(*position),
+        });
+        *local += 1;
+        *position += 1;
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+fn fx237_legacy_matches(
+    old: &[WordOwner],
+    new: &[WordOwnerAddress],
+    publication: &WordPublication,
+) -> Vec<Option<usize>> {
+    new.iter()
+        .enumerate()
+        .map(|(after, address)| {
+            old.iter().enumerate().find_map(|(before, owner)| {
+                if let (
+                    WordPublication::HyperlinkRemove(WordOwnerLocation::Hyperlink(
+                        removed,
+                        position,
+                    )),
+                    WordOwnerLocation::Hyperlink(location, candidate),
+                    WordOwnerLocation::Hyperlink(previous, index),
+                ) = (publication, &address.location, &owner.location)
+                    && same_content_owner(removed, location)
+                {
+                    let expected = if candidate >= position {
+                        candidate.checked_add(1)
+                    } else {
+                        Some(*candidate)
+                    };
+                    return (same_content_owner(location, previous) && expected == Some(*index))
+                        .then_some(before);
+                }
+                same_inventory_route(old, before, new, after).then_some(before)
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn fx237_test_owners(locations: Vec<WordOwnerAddress>) -> Vec<WordOwner> {
+    let scopes = locations
+        .iter()
+        .flat_map(|address| address.location.scopes().iter().copied())
+        .collect::<Vec<_>>();
+    let states = RevisionCounter::new().initialize_scopes(&scopes).unwrap();
+    word_owners_with_states(locations, &states)
+}
+
+#[cfg(test)]
+fn fx237_control_table() -> rdocx_oxml::content_control::CT_Sdt {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>same</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:sdtContent></w:sdt></w:body></w:document>"#;
+    let mut parsed = rdocx_oxml::document::CT_Document::from_xml(xml).unwrap();
+    let rdocx_oxml::document::BodyContent::ContentControl(control) = parsed.body.content.remove(0)
+    else {
+        unreachable!()
+    };
+    control
+}
+
+#[test]
+fn fx237_combined_registry_matches_legacy_success_and_refusal() {
+    Python::initialize();
+    Python::attach(|py| {
+        for content in [
+            "<w:p><w:hyperlink r:id='missing'><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>",
+            "<w:p><w:hyperlink w:anchor='inside'><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>",
+            "<w:p><f:hyperlink xmlns:f='urn:foreign'><w:r><w:t>opaque</w:t></w:r></f:hyperlink></w:p>",
+            "<w:tbl><w:tblGrid><w:gridCol w:w='1000'/></w:tblGrid><w:tr><w:tc><w:tcPr><f:keep xmlns:f='urn:opaque'/></w:tcPr><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+        ] {
+            let seed = rdocx::Document::new().to_bytes().unwrap();
+            let xml = format!(
+                "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><w:body>{content}<w:sectPr/></w:body></w:document>"
+            );
+            let scope = PyDict::new(py);
+            scope.set_item("seed", PyBytes::new(py, &seed)).unwrap();
+            scope.set_item("xml", xml).unwrap();
+            // Author raw package input independently of checked native insertion,
+            // so a dangling relationship actually reaches both inventory paths.
+            py.run(c"import io, zipfile\noriginal = zipfile.ZipFile(io.BytesIO(seed))\noutput = io.BytesIO()\nwith zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:\n    for name in original.namelist():\n        archive.writestr(name, xml.encode() if name == 'word/document.xml' else original.read(name))\nresult = output.getvalue()", Some(&scope), Some(&scope)).unwrap();
+            let bytes = scope
+                .get_item("result")
+                .unwrap()
+                .unwrap()
+                .extract::<Vec<u8>>()
+                .unwrap();
+            let document = rdocx::Document::from_bytes(&bytes).unwrap();
+            let legacy = fx237_legacy_word_owner_locations(&document);
+            let combined = word_owner_locations(&document);
+            if content.contains("r:id='missing'") {
+                assert!(legacy.is_err());
+                assert!(combined.is_err());
+            }
+            match (legacy, combined) {
+                (Ok(legacy), Ok(combined)) => assert_eq!(legacy, combined),
+                (Err(legacy), Err(combined)) => {
+                    assert_eq!(legacy.to_string(), combined.to_string())
+                }
+                (legacy, combined) => panic!(
+                    "complete registry admission changed: legacy={legacy:?} combined={combined:?}"
+                ),
+            }
+        }
+    });
+}
+
+#[test]
+fn fx237_revision_route_work_is_linear() {
+    if let Ok(path) = std::env::var("FX237_PROFILE_INPUT") {
+        let bytes = std::fs::read(path).unwrap();
+        let started = std::time::Instant::now();
+        let document = rdocx::Document::from_bytes(&bytes).unwrap();
+        eprintln!("FX237 filled native_open={:?}", started.elapsed());
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let items = document.story_item_snapshots().unwrap();
+            let item_time = started.elapsed();
+            let table = items
+                .iter()
+                .find(|item| item.location().item_kind() == rdocx::StoryItemKind::Table)
+                .unwrap()
+                .location();
+            let started = std::time::Instant::now();
+            document.story_table_cell(table, 0, 0).unwrap();
+            let scalar_time = started.elapsed();
+            let started = std::time::Instant::now();
+            document.story_owner_snapshots().unwrap();
+            let cell_time = started.elapsed();
+            let started = std::time::Instant::now();
+            document.story_range_paragraphs().unwrap();
+            let paragraph_time = started.elapsed();
+            let started = std::time::Instant::now();
+            document.story_link_snapshots().unwrap();
+            let link_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let old = fx237_test_owners(word_owner_locations(&document).unwrap());
+            let inventory_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let mut candidate = document.clone_for_staging();
+            candidate.try_set_cell_text(0, 0, 0, "edited").unwrap();
+            let mutation_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let new = word_owner_locations(&candidate).unwrap();
+            let candidate_inventory_time = started.elapsed();
+            FX237_ROUTE_WORK.set([0; 8]);
+            let started = std::time::Instant::now();
+            indexed_inventory_matches(&old, &new, &WordPublication::Conservative);
+            eprintln!(
+                "FX237 filled items={item_time:?} scalar={scalar_time:?} combined={cell_time:?} paragraphs={paragraph_time:?} links={link_time:?} registry={inventory_time:?} mutation={mutation_time:?} candidate_registry={candidate_inventory_time:?} index={:?} work={:?}",
+                started.elapsed(),
+                FX237_ROUTE_WORK.get()
+            );
+        }
+    }
+    for cells in [60, 120, 240] {
+        let mut document = rdocx::Document::new();
+        document.add_paragraph("same");
+        document.add_table(cells / 6, 6);
+        document.add_table(1, 1).cell(0, 0).unwrap().add_table(1, 1);
+        let control = fx237_control_table();
+        let body = document
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == rdocx::StoryKind::Body)
+            .unwrap();
+        document
+            .insert_content(
+                &rdocx::ContentLocation::end(body),
+                rdocx::ContentFragment::content_control(control).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            word_owner_locations(&document).unwrap(),
+            fx237_legacy_word_owner_locations(&document).unwrap()
+        );
+        let old = fx237_test_owners(word_owner_locations(&document).unwrap());
+        document.try_set_cell_text(0, 0, 0, "edited").unwrap();
+        let new = word_owner_locations(&document).unwrap();
+        FX237_ROUTE_WORK.set([0; 8]);
+        let actual = indexed_inventory_matches(&old, &new, &WordPublication::Conservative);
+        let work = FX237_ROUTE_WORK.get();
+        assert_eq!(
+            actual,
+            fx237_legacy_matches(&old, &new, &WordPublication::Conservative)
+        );
+        eprintln!(
+            "FX237 cells={cells} old={} new={} work={work:?}",
+            old.len(),
+            new.len()
+        );
+        assert!(
+            work[4] <= 12 * new.len(),
+            "actual predicate ancestry visits: {work:?}"
+        );
+        assert!(
+            work[5] <= 2 * new.len(),
+            "actual old-parent probes: {work:?}"
+        );
+        assert!(
+            work[6] <= 3 * old.len(),
+            "actual old-key insertions: {work:?}"
+        );
+        assert!(
+            work[7] <= 1,
+            "generated physical index keys must be unique: {work:?}"
+        );
+        assert_eq!(work[0], old.len());
+        assert_eq!(work[1], new.len());
+        assert!(
+            work[2] <= 2 * new.len(),
+            "bounded candidate checks: {work:?}"
+        );
+        assert!(work[3] <= 2, "physical generated parent matches: {work:?}");
+    }
+}
+
+#[test]
+fn fx237_indexed_routes_match_legacy_first_match() {
+    let mut previous = rdocx::Document::new();
+    previous.add_paragraph("before");
+    let body = previous
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == rdocx::StoryKind::Body)
+        .unwrap();
+    previous
+        .insert_content(
+            &rdocx::ContentLocation::end(body),
+            rdocx::ContentFragment::content_control(fx237_control_table()).unwrap(),
+        )
+        .unwrap();
+    previous.add_table(1, 1);
+    let previous = fx237_test_owners(word_owner_locations(&previous).unwrap());
+    let mut candidate = rdocx::Document::new();
+    candidate.add_paragraph("before");
+    candidate.add_paragraph("between");
+    candidate.add_table(1, 1);
+    let candidate = word_owner_locations(&candidate).unwrap();
+    FX237_ROUTE_WORK.set([0; 8]);
+    let indexed = indexed_inventory_matches(&previous, &candidate, &WordPublication::Conservative);
+    let generated = FX237_ROUTE_WORK.get();
+    assert_eq!(
+        indexed,
+        fx237_legacy_matches(&previous, &candidate, &WordPublication::Conservative)
+    );
+    assert!(
+        generated[3] <= 2,
+        "actual root class transitions remain bounded: {generated:?}"
+    );
+    assert_eq!(generated[7], 1, "each actual old index key remains unique");
+    let mut document = rdocx::Document::new();
+    document.add_paragraph("same");
+    document.add_table(1, 2).cell(0, 0).unwrap().add_table(1, 1);
+    let base = word_owner_locations(&document).unwrap();
+    let mut old_addresses = Vec::new();
+    // Mix slot presence independently across otherwise identical physical
+    // addresses. Duplicate roots test first-match, not merely set equality.
+    for address in &base {
+        old_addresses.push(WordOwnerAddress {
+            location: address.location.clone(),
+            parent: address.parent,
+            body_slot: address.body_slot,
+            projection_ordinal: address.projection_ordinal,
+        });
+    }
+    let paragraph = base
+        .iter()
+        .find(|address| {
+            matches!(address.location, WordOwnerLocation::Paragraph(_)) && address.parent.is_none()
+        })
+        .unwrap();
+    for slot in [None, Some(0), Some(1), None] {
+        old_addresses.push(WordOwnerAddress {
+            location: paragraph.location.clone(),
+            parent: None,
+            body_slot: slot,
+            projection_ordinal: paragraph.projection_ordinal,
+        });
+    }
+    let location = match &paragraph.location {
+        WordOwnerLocation::Paragraph(location) => location.clone(),
+        _ => unreachable!(),
+    };
+    for index in [0, 1, 2, usize::MAX] {
+        old_addresses.push(WordOwnerAddress {
+            location: WordOwnerLocation::Hyperlink(location.clone(), index),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: None,
+        });
+    }
+    old_addresses.push(WordOwnerAddress {
+        location: WordOwnerLocation::Paragraph(rdocx::ContentLocation::new(
+            location.story().clone(),
+            rdocx::StoryItemKind::Paragraph,
+            vec![0, 1, 2],
+        )),
+        parent: None,
+        body_slot: Some(0),
+        projection_ordinal: Some(0),
+    });
+    // The earlier child belongs to the later duplicate parent. Choosing only
+    // the first parent before querying descendants would return the wrong owner.
+    let duplicate = fx237_test_owners(vec![
+        WordOwnerAddress {
+            location: WordOwnerLocation::Section(0),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: None,
+        },
+        WordOwnerAddress {
+            location: WordOwnerLocation::Section(0),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: None,
+        },
+        WordOwnerAddress {
+            location: paragraph.location.clone(),
+            parent: Some(1),
+            body_slot: None,
+            projection_ordinal: Some(0),
+        },
+        WordOwnerAddress {
+            location: paragraph.location.clone(),
+            parent: Some(0),
+            body_slot: None,
+            projection_ordinal: Some(0),
+        },
+    ]);
+    let duplicate_new = vec![
+        WordOwnerAddress {
+            location: WordOwnerLocation::Section(0),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: None,
+        },
+        WordOwnerAddress {
+            location: paragraph.location.clone(),
+            parent: Some(0),
+            body_slot: None,
+            projection_ordinal: Some(0),
+        },
+    ];
+    assert_eq!(
+        indexed_inventory_matches(&duplicate, &duplicate_new, &WordPublication::Conservative),
+        vec![Some(0), Some(2)]
+    );
+    assert_eq!(
+        indexed_inventory_matches(&duplicate, &duplicate_new, &WordPublication::Conservative),
+        fx237_legacy_matches(&duplicate, &duplicate_new, &WordPublication::Conservative)
+    );
+    let old = fx237_test_owners(old_addresses);
+    for slot in [None, Some(0), Some(1), Some(2)] {
+        let mut new = word_owner_locations(&document).unwrap();
+        for address in &mut new {
+            if matches!(address.location, WordOwnerLocation::Paragraph(_))
+                && address.parent.is_none()
+            {
+                address.body_slot = slot;
+            }
+        }
+        for index in [0, 1, 2, usize::MAX] {
+            new.push(WordOwnerAddress {
+                location: WordOwnerLocation::Hyperlink(location.clone(), index),
+                parent: None,
+                body_slot: None,
+                projection_ordinal: None,
+            });
+        }
+        new.push(WordOwnerAddress {
+            location: WordOwnerLocation::Paragraph(rdocx::ContentLocation::new(
+                location.story().clone(),
+                rdocx::StoryItemKind::Paragraph,
+                vec![0, 1, 2],
+            )),
+            parent: None,
+            body_slot: slot,
+            projection_ordinal: Some(0),
+        });
+        for publication in [
+            WordPublication::Conservative,
+            WordPublication::AppendBody,
+            WordPublication::HyperlinkRemove(WordOwnerLocation::Hyperlink(location.clone(), 1)),
+            WordPublication::CellText(location.clone(), 0, 0),
+            WordPublication::TableGrid(location.clone()),
+            WordPublication::ElementXml(paragraph.location.clone()),
+            WordPublication::RunText(paragraph.location.clone()),
+            WordPublication::HeaderFooterAppend(0),
+            WordPublication::ParagraphAppend(location.clone()),
+            WordPublication::ParagraphText(match &paragraph.location {
+                WordOwnerLocation::Paragraph(location) => location.clone(),
+                _ => unreachable!(),
+            }),
+        ] {
+            assert_eq!(
+                indexed_inventory_matches(&old, &new, &publication),
+                fx237_legacy_matches(&old, &new, &publication)
+            );
+        }
     }
 }

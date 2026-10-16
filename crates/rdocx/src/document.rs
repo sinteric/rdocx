@@ -6546,6 +6546,12 @@ thread_local! {
     static STORY_TEXT_PREFIX_BYTES: Cell<usize> = const { Cell::new(0) };
     static STORY_OWNER_SCANS: Cell<usize> = const { Cell::new(0) };
     static STORY_NAMESPACE_SCANS: Cell<usize> = const { Cell::new(0) };
+    static FX237_LEGACY_CELL_STEPS: Cell<usize> = const { Cell::new(0) };
+    static FX237_NAMESPACE_FRAME_COPIES: Cell<usize> = const { Cell::new(0) };
+    static FX237_ITEM_SCANS: Cell<usize> = const { Cell::new(0) };
+    static FX237_PREFIX_NAMESPACE_BYTES: Cell<usize> = const { Cell::new(0) };
+    static FX237_TABLE_VISITS: Cell<usize> = const { Cell::new(0) };
+    static FX237_CELL_VISITS: Cell<usize> = const { Cell::new(0) };
     static FX211_PROFILE: Cell<[usize; 12]> = const { Cell::new([0; 12]) };
     static FX211_PROFILE_CONTEXT: Cell<usize> = const { Cell::new(0) };
 }
@@ -6859,8 +6865,18 @@ fn story_range_paragraph_spans(
             .filter(|item| item.kind == StoryItemKind::ContentControl)
             .map(|item| item.full.start),
     )?;
+    story_range_paragraph_spans_from_inventory(xml, owners, &inventories, &control_scopes)
+}
+
+#[allow(clippy::type_complexity)] // Story-ordered paragraphs retain checked locations and source spans.
+fn story_range_paragraph_spans_from_inventory(
+    xml: &[u8],
+    owners: &[(StoryId, StoryOwnerSpan)],
+    inventories: &[Vec<StoryItemSpan>],
+    control_scopes: &HashMap<usize, BTreeMap<String, String>>,
+) -> Result<Vec<Vec<(ContentLocation, Range<usize>)>>> {
     let mut spans = Vec::with_capacity(owners.len());
-    for ((story, _), items) in owners.iter().zip(&inventories) {
+    for ((story, _), items) in owners.iter().zip(inventories) {
         let mut paragraphs = Vec::new();
         for (index, item) in items.iter().enumerate() {
             let item_spans = match item.kind {
@@ -7601,10 +7617,156 @@ fn story_element_end(xml: &[u8], start: usize) -> Result<usize> {
     }
 }
 
+// Most elements inherit an unchanged map. Stop at the first declaration, then
+// let the original decoder apply the whole element to a full inherited copy.
+// Stopping here preserves namespace-value errors before later attribute errors.
+fn changed_story_namespace_scope(
+    inherited: &BTreeMap<String, String>,
+    element: &BytesStart<'_>,
+) -> Result<Option<BTreeMap<String, String>>> {
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| {
+            Error::Other(format!("story namespace scope attribute failed: {error}"))
+        })?;
+        let name = attribute.key.as_ref();
+        if name == b"xmlns" || name.starts_with(b"xmlns:") {
+            #[cfg(test)]
+            FX237_NAMESPACE_FRAME_COPIES.set(FX237_NAMESPACE_FRAME_COPIES.get() + 1);
+            let mut scope = inherited.clone();
+            update_story_namespace_scope(&mut scope, element)?;
+            return Ok(Some(scope));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn story_namespace_scope_at(
     xml: &[u8],
     offset: usize,
 ) -> Result<BTreeMap<String, String>> {
+    #[cfg(test)]
+    FX237_PREFIX_NAMESPACE_BYTES.set(FX237_PREFIX_NAMESPACE_BYTES.get() + offset.min(xml.len()));
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut scopes = vec![BTreeMap::<String, String>::new()];
+    let mut changed_frames = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("story namespace scope scan failed: {error}")))?
+        {
+            Event::Start(element) => {
+                let inherited = scopes.last().expect("initial namespace scope");
+                let changed = changed_story_namespace_scope(inherited, &element)?;
+                if before == offset {
+                    return Ok(changed.unwrap_or_else(|| inherited.clone()));
+                }
+                changed_frames.push(changed.is_some());
+                if let Some(scope) = changed {
+                    scopes.push(scope);
+                }
+            }
+            Event::Empty(element) => {
+                if before == offset {
+                    let inherited = scopes.last().expect("initial namespace scope");
+                    return Ok(changed_story_namespace_scope(inherited, &element)?
+                        .unwrap_or_else(|| inherited.clone()));
+                }
+            }
+            Event::End(_) => {
+                if changed_frames.pop() == Some(true) {
+                    scopes.pop();
+                }
+            }
+            Event::Eof => {
+                return Err(Error::Other(
+                    "story item namespace scope was not found".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn story_namespace_scopes_at(
+    xml: &[u8],
+    offsets: impl IntoIterator<Item = usize>,
+) -> Result<HashMap<usize, BTreeMap<String, String>>> {
+    let requested = offsets.into_iter().collect::<HashSet<_>>();
+    let mut found = HashMap::with_capacity(requested.len());
+    if requested.is_empty() {
+        return Ok(found);
+    }
+    #[cfg(test)]
+    STORY_NAMESPACE_SCANS.set(STORY_NAMESPACE_SCANS.get() + 1);
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut scopes = vec![BTreeMap::<String, String>::new()];
+    let mut changed_frames = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("story namespace scope scan failed: {error}")))?
+        {
+            Event::Start(element) => {
+                let inherited = scopes.last().expect("initial namespace scope");
+                // Snapshot inherited context and preserve the original early
+                // return before this target's declarations are validated.
+                if requested.contains(&before) {
+                    found.insert(before, inherited.clone());
+                    if found.len() == requested.len() {
+                        return Ok(found);
+                    }
+                }
+                let changed = changed_story_namespace_scope(inherited, &element)?;
+                changed_frames.push(changed.is_some());
+                if let Some(scope) = changed {
+                    scopes.push(scope);
+                }
+            }
+            Event::Empty(_) => {
+                if requested.contains(&before) {
+                    found.insert(
+                        before,
+                        scopes.last().expect("initial namespace scope").clone(),
+                    );
+                    if found.len() == requested.len() {
+                        return Ok(found);
+                    }
+                }
+            }
+            Event::End(_) => {
+                if changed_frames.pop() == Some(true) {
+                    scopes.pop();
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    let missing = requested
+        .into_iter()
+        .filter(|offset| !found.contains_key(offset))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(found)
+    } else {
+        Err(Error::Other(format!(
+            "story namespace scopes were not found at offsets {missing:?}"
+        )))
+    }
+}
+
+#[cfg(test)]
+fn fx237_legacy_namespace_scope_at(xml: &[u8], offset: usize) -> Result<BTreeMap<String, String>> {
+    #[cfg(test)]
+    FX237_PREFIX_NAMESPACE_BYTES.set(FX237_PREFIX_NAMESPACE_BYTES.get() + offset.min(xml.len()));
     let mut reader = quick_xml::Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut scopes = vec![BTreeMap::<String, String>::new()];
@@ -7646,7 +7808,8 @@ pub(crate) fn story_namespace_scope_at(
     }
 }
 
-fn story_namespace_scopes_at(
+#[cfg(test)]
+fn fx237_legacy_namespace_scopes_at(
     xml: &[u8],
     offsets: impl IntoIterator<Item = usize>,
 ) -> Result<HashMap<usize, BTreeMap<String, String>>> {
@@ -11544,6 +11707,8 @@ fn scan_story_control_paragraphs_with_scope(
 
 fn scan_story_items(xml: &[u8], owner: &StoryOwnerSpan) -> Result<Vec<StoryItemSpan>> {
     #[cfg(test)]
+    FX237_ITEM_SCANS.set(FX237_ITEM_SCANS.get() + 1);
+    #[cfg(test)]
     {
         let mut counts = FX211_PROFILE.get();
         counts[0] += 1;
@@ -14163,6 +14328,8 @@ fn nth_cell_in_row<'a>(row: &'a mut CT_Row, index: &mut usize) -> Option<&'a mut
 }
 
 fn take_cell<'a>(cell: &'a mut CT_Tc, index: &mut usize) -> Option<&'a mut CT_Tc> {
+    #[cfg(test)]
+    FX237_LEGACY_CELL_STEPS.set(FX237_LEGACY_CELL_STEPS.get() + 1);
     if *index == 0 {
         Some(cell)
     } else {
@@ -14179,6 +14346,97 @@ fn take_cell<'a>(cell: &'a mut CT_Tc, index: &mut usize) -> Option<&'a mut CT_Tc
         }
         None
     }
+}
+
+// Traverse the parsed physical tree once. Coordinates name direct physical
+// rows/cells only, while controls still participate in source correspondence.
+enum PhysicalCellNode<'a> {
+    Table(&'a CT_Tbl),
+    Row(&'a CT_Row, usize, Option<usize>),
+    Cell(&'a CT_Tc, usize, Option<(usize, usize)>),
+    Control(&'a CT_Sdt, usize),
+}
+
+#[allow(clippy::type_complexity)]
+fn physical_table_cells(table: &CT_Tbl) -> (usize, Vec<(usize, Option<(usize, usize)>)>) {
+    let mut stack = vec![PhysicalCellNode::Table(table)];
+    let mut tables = 0;
+    let mut cells = Vec::new();
+    while let Some(node) = stack.pop() {
+        let mut children = Vec::new();
+        match node {
+            PhysicalCellNode::Table(table) => {
+                let index = tables;
+                tables += 1;
+                let mut controls = table.content_controls.iter().peekable();
+                for boundary in 0..=table.rows.len() {
+                    while controls.peek().is_some_and(|(at, _, _)| *at == boundary) {
+                        children.push(PhysicalCellNode::Control(
+                            &controls.next().unwrap().2,
+                            index,
+                        ));
+                    }
+                    if let Some(row) = table.rows.get(boundary) {
+                        children.push(PhysicalCellNode::Row(row, index, Some(boundary)));
+                    }
+                }
+            }
+            PhysicalCellNode::Row(row, table, ordinal) => {
+                let mut controls = row.content_controls.iter().peekable();
+                for boundary in 0..=row.cells.len() {
+                    while controls.peek().is_some_and(|(at, _, _)| *at == boundary) {
+                        children.push(PhysicalCellNode::Control(
+                            &controls.next().unwrap().2,
+                            table,
+                        ));
+                    }
+                    if let Some(cell) = row.cells.get(boundary) {
+                        children.push(PhysicalCellNode::Cell(
+                            cell,
+                            table,
+                            ordinal.map(|row| (row, boundary)),
+                        ));
+                    }
+                }
+            }
+            PhysicalCellNode::Cell(cell, table, coordinate) => {
+                cells.push((table, coordinate));
+                for child in &cell.content {
+                    match child {
+                        CellContent::Table(table) => children.push(PhysicalCellNode::Table(table)),
+                        CellContent::ContentControl(control) => {
+                            children.push(PhysicalCellNode::Control(control, table))
+                        }
+                        CellContent::Paragraph(_) => {}
+                    }
+                }
+            }
+            PhysicalCellNode::Control(control, table) => {
+                for child in &control.content {
+                    match child {
+                        SdtContent::Table(table) => children.push(PhysicalCellNode::Table(table)),
+                        SdtContent::Row(row) => {
+                            children.push(PhysicalCellNode::Row(row, table, None))
+                        }
+                        SdtContent::Cell(cell) => {
+                            children.push(PhysicalCellNode::Cell(cell, table, None))
+                        }
+                        SdtContent::ContentControl(control) => {
+                            children.push(PhysicalCellNode::Control(control, table))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        stack.extend(children.into_iter().rev());
+    }
+    #[cfg(test)]
+    {
+        FX237_TABLE_VISITS.set(FX237_TABLE_VISITS.get() + tables);
+        FX237_CELL_VISITS.set(FX237_CELL_VISITS.get() + cells.len());
+    }
+    (tables, cells)
 }
 
 fn cell_count_in_control(control: &CT_Sdt) -> usize {
@@ -14217,6 +14475,8 @@ fn cell_count_in_row(row: &CT_Row) -> usize {
 }
 
 fn cell_count_in_cell(cell: &CT_Tc) -> usize {
+    #[cfg(test)]
+    FX237_LEGACY_CELL_STEPS.set(FX237_LEGACY_CELL_STEPS.get() + 1);
     cell.content
         .iter()
         .map(|child| match child {
@@ -22152,8 +22412,12 @@ impl Document {
             ));
         }
         let (source, item) = self.story_item_source(location)?;
-        let scope = story_namespace_scope_at(&source.xml, item.full.start)?;
-        let closed = close_content_fragment_namespaces(&source.xml[item.full], &scope)?;
+        Self::story_table_from_source(&source.xml, &item)
+    }
+
+    fn story_table_from_source(xml: &[u8], item: &StoryItemSpan) -> Result<CT_Tbl> {
+        let scope = story_namespace_scope_at(xml, item.full.start)?;
+        let closed = close_content_fragment_namespaces(&xml[item.full.clone()], &scope)?;
         let mut wrapped =
             format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#).into_bytes();
         wrapped.extend_from_slice(&closed);
@@ -22196,9 +22460,542 @@ impl Document {
         Ok(result)
     }
 
+    /// Snapshot all checked Word owners within one immutable source inventory.
+    ///
+    /// The four families have the same order, payload and admission as story
+    /// items, physical table cells, range paragraphs and hyperlinks respectively.
+    /// Source qualification is shared only within this call, never across edits.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)] // One cross-crate projection carries four existing owned families.
+    pub fn story_owner_snapshots(
+        &self,
+    ) -> Result<(
+        Vec<StoryItemSnapshot>,
+        Vec<(ContentLocation, usize, usize, StoryId)>,
+        Vec<(ContentLocation, Vec<u8>)>,
+        Vec<(ContentLocation, LinkInfo)>,
+    )> {
+        let mut snapshots = Vec::new();
+        let mut cells = Vec::new();
+        let mut paragraphs = Vec::new();
+        let mut links = Vec::new();
+        let mut seen = HashSet::new();
+        let mut emitted_cells = HashSet::new();
+        for source in self.story_sources()? {
+            let physical_owners = scan_story_owners(&source.xml, source.root_kind)?;
+            let owner_scopes = story_namespace_scopes_at(
+                &source.xml,
+                physical_owners.iter().map(|owner| owner.full.start),
+            )?;
+            let mut owners = Vec::with_capacity(physical_owners.len());
+            let mut inventories = Vec::with_capacity(physical_owners.len());
+            let mut admitted = Vec::with_capacity(physical_owners.len());
+            for owner in &physical_owners {
+                let scope = owner_scopes.get(&owner.full.start).ok_or_else(|| {
+                    Error::Other("story owner namespace scope was not inventoried".into())
+                })?;
+                inventories.push(scan_story_items_with_scope(&source.xml, owner, scope)?);
+                let story = StoryId {
+                    kind: owner.kind,
+                    part_name: source.part_name.clone(),
+                    owner_index: owner.owner_index,
+                    fingerprint: owner.fingerprint,
+                };
+                admitted.push(seen.insert((
+                    owner.kind,
+                    source.part_name.clone(),
+                    owner.owner_index,
+                )));
+                owners.push((story, owner.clone()));
+            }
+            let scopes = story_namespace_scopes_at(
+                &source.xml,
+                inventories
+                    .iter()
+                    .flatten()
+                    .flat_map(|item| [item.scan.start, item.full.start]),
+            )?;
+            cells.extend(Self::story_table_cells_from_inventory(
+                &source,
+                &physical_owners,
+                &inventories,
+                &scopes,
+                &mut emitted_cells,
+            )?);
+            let paragraph_spans = story_range_paragraph_spans_from_inventory(
+                &source.xml,
+                &owners,
+                &inventories,
+                &scopes,
+            )?;
+            let mut link_spans = Vec::with_capacity(owners.len());
+            for ((story, _), items) in owners.iter().zip(&inventories) {
+                link_spans.push(ordered_story_link_spans(
+                    &source.xml,
+                    story,
+                    items.clone(),
+                    &scopes,
+                )?);
+            }
+            let leaf_scopes = story_namespace_scopes_at(
+                &source.xml,
+                paragraph_spans
+                    .iter()
+                    .flatten()
+                    .map(|(_, span)| span.start)
+                    .chain(link_spans.iter().flatten().map(|(_, link)| link.full.start)),
+            )?;
+            for (owner_index, ((story, _), items)) in owners.iter().zip(&inventories).enumerate() {
+                if !admitted[owner_index] {
+                    continue;
+                }
+                let mut direct_items = Vec::new();
+                if story.kind == StoryKind::Body {
+                    for item in items.iter().filter(|item| item.direct_owner_child) {
+                        if item.kind != StoryItemKind::PreservedNode
+                            || !content_fragment_root_is_section_properties(&source.xml, item)?
+                        {
+                            direct_items.push(item);
+                        }
+                    }
+                }
+                let mut direct_cursor = 0;
+                for (index, item) in items.iter().enumerate() {
+                    while direct_items
+                        .get(direct_cursor)
+                        .is_some_and(|direct| direct.full.end <= item.full.start)
+                    {
+                        direct_cursor += 1;
+                    }
+                    let direct_body_index = direct_items.get(direct_cursor).and_then(|direct| {
+                        (direct.full.start <= item.full.start && item.full.end <= direct.full.end)
+                            .then_some(direct_cursor)
+                    });
+                    let scope = scopes.get(&item.scan.start).ok_or_else(|| {
+                        Error::Other("story item namespace scope was not inventoried".into())
+                    })?;
+                    let text = story_item_text_with_scope(&source.xml, item, scope, items)?;
+                    let xml = if item.complex_field {
+                        complex_story_field_xml(&source.xml, item)?
+                    } else {
+                        source.xml[item.full.clone()].to_vec()
+                    };
+                    snapshots.push(StoryItemSnapshot {
+                        location: ContentLocation::new(story.clone(), item.kind, vec![index]),
+                        direct_body_index,
+                        direct_child: item.direct_owner_child,
+                        text,
+                        xml,
+                    });
+                }
+            }
+            for (index, mut spans) in paragraph_spans.into_iter().enumerate() {
+                if !admitted[index] {
+                    continue;
+                }
+                spans.sort_by_key(|(_, span)| span.start);
+                for (location, span) in spans {
+                    let scope = leaf_scopes.get(&span.start).ok_or_else(|| {
+                        Error::Other("story paragraph namespace scope was not inventoried".into())
+                    })?;
+                    paragraphs.push((
+                        location,
+                        close_content_fragment_namespaces(&source.xml[span], scope)?,
+                    ));
+                }
+            }
+            for (index, spans) in link_spans.into_iter().enumerate() {
+                if !admitted[index] {
+                    continue;
+                }
+                for (location, span) in spans {
+                    let scope = leaf_scopes.get(&span.full.start).ok_or_else(|| {
+                        Error::Other("story hyperlink namespace scope was not inventoried".into())
+                    })?;
+                    let info = self.story_link_info(location.story(), &source.xml, span, scope)?;
+                    links.push((location, info));
+                }
+            }
+        }
+        Ok((snapshots, cells, paragraphs, links))
+    }
+
+    /// Snapshot direct physical cell coordinates and their checked source owners.
+    ///
+    /// Each source is materialized once. Outer tables are parsed once and their
+    /// nested models participate in the same physical correspondence traversal.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    #[cfg(test)]
+    fn story_table_cell_snapshots(&self) -> Result<Vec<(ContentLocation, usize, usize, StoryId)>> {
+        let mut result = Vec::new();
+        let mut emitted = HashSet::new();
+        for source in self.story_sources()? {
+            let owners = scan_story_owners(&source.xml, source.root_kind)?;
+            let scopes = story_namespace_scopes_at(
+                &source.xml,
+                owners.iter().map(|owner| owner.full.start),
+            )?;
+            let mut tables = Vec::new();
+            for owner in &owners {
+                let scope = scopes
+                    .get(&owner.full.start)
+                    .ok_or_else(|| Error::Other("table owner scope missing".into()))?;
+                let story = StoryId {
+                    kind: owner.kind,
+                    part_name: source.part_name.clone(),
+                    owner_index: owner.owner_index,
+                    fingerprint: owner.fingerprint,
+                };
+                for (index, item) in scan_story_items_with_scope(&source.xml, owner, scope)?
+                    .into_iter()
+                    .enumerate()
+                {
+                    if item.kind == StoryItemKind::Table {
+                        tables.push((
+                            item.full,
+                            ContentLocation::new(story.clone(), item.kind, vec![index]),
+                        ));
+                    }
+                }
+            }
+            // Recover physical order with one lexical pass instead of sorting
+            // a growing table inventory. Qualification came from the owner scan.
+            let mut by_start = tables
+                .into_iter()
+                .map(|item| (item.0.start, item))
+                .collect::<HashMap<_, _>>();
+            let mut tables = Vec::with_capacity(by_start.len());
+            let mut reader = quick_xml::Reader::from_reader(source.xml.as_ref());
+            let mut buffer = Vec::new();
+            loop {
+                let before = reader.buffer_position() as usize;
+                match reader.read_event_into(&mut buffer).map_err(|error| {
+                    Error::Other(format!("table source order scan failed: {error}"))
+                })? {
+                    Event::Start(_) | Event::Empty(_) => {
+                        if let Some(item) = by_start.remove(&before) {
+                            tables.push(item);
+                        }
+                    }
+                    Event::Eof => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            if !by_start.is_empty() {
+                return Err(Error::Other(
+                    "table physical source order is incomplete".into(),
+                ));
+            }
+            let scopes =
+                story_namespace_scopes_at(&source.xml, tables.iter().map(|(span, _)| span.start))?;
+            let cells = owners
+                .iter()
+                .filter(|owner| owner.kind == StoryKind::TableCell)
+                .collect::<Vec<_>>();
+            let mut next = 0;
+            let mut cell_cursor = 0;
+            while next < tables.len() {
+                let root = next;
+                let span = tables[root].0.clone();
+                next += 1;
+                while next < tables.len() && tables[next].0.end < span.end {
+                    next += 1;
+                }
+                let scope = scopes
+                    .get(&span.start)
+                    .ok_or_else(|| Error::Other("table item scope missing".into()))?;
+                let closed = close_content_fragment_namespaces(&source.xml[span.clone()], scope)?;
+                let mut wrapped =
+                    format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#).into_bytes();
+                wrapped.extend(closed);
+                wrapped.extend_from_slice(b"</w:body></w:document>");
+                let parsed = CT_Document::from_xml(&wrapped)?;
+                let [BodyContent::Table(table)] = parsed.body.content.as_slice() else {
+                    return Err(Error::Other(
+                        "rich table has ambiguous physical content".into(),
+                    ));
+                };
+                let (count, modeled) = physical_table_cells(table);
+                while cells
+                    .get(cell_cursor)
+                    .is_some_and(|owner| owner.full.start < span.start)
+                {
+                    cell_cursor += 1;
+                }
+                let first = cell_cursor;
+                while cells
+                    .get(cell_cursor)
+                    .is_some_and(|owner| owner.full.start < span.end)
+                {
+                    cell_cursor += 1;
+                }
+                let physical = &cells[first..cell_cursor];
+                if modeled.len() != physical.len() {
+                    return Err(Error::Other(
+                        "rich table cell source correspondence is incomplete".into(),
+                    ));
+                }
+                let mut table_routes = vec![None; count];
+                let mut containing = Vec::<usize>::new();
+                let mut cursor = root;
+                for ((table, coordinate), owner) in modeled.into_iter().zip(physical) {
+                    while cursor < next && tables[cursor].0.start < owner.full.start {
+                        while containing
+                            .last()
+                            .is_some_and(|&index| tables[index].0.end < tables[cursor].0.end)
+                        {
+                            containing.pop();
+                        }
+                        containing.push(cursor);
+                        cursor += 1;
+                    }
+                    while containing
+                        .last()
+                        .is_some_and(|&index| tables[index].0.end <= owner.full.start)
+                    {
+                        containing.pop();
+                    }
+                    let index = *containing
+                        .last()
+                        .ok_or_else(|| Error::Other("cell has no physical table".into()))?;
+                    if owner.full.end >= tables[index].0.end
+                        || table_routes[table].is_some_and(|before| before != index)
+                    {
+                        return Err(Error::Other(
+                            "rich table cell has ambiguous physical owner".into(),
+                        ));
+                    }
+                    table_routes[table] = Some(index);
+                    if let Some((row, cell)) = coordinate
+                        && emitted.insert((tables[index].1.clone(), row, cell))
+                    {
+                        result.push((
+                            tables[index].1.clone(),
+                            row,
+                            cell,
+                            StoryId {
+                                kind: owner.kind,
+                                part_name: source.part_name.clone(),
+                                owner_index: owner.owner_index,
+                                fingerprint: owner.fingerprint,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn story_table_cells_from_inventory(
+        source: &StorySource<'_>,
+        owners: &[StoryOwnerSpan],
+        inventories: &[Vec<StoryItemSpan>],
+        scopes: &HashMap<usize, BTreeMap<String, String>>,
+        emitted: &mut HashSet<(ContentLocation, usize, usize)>,
+    ) -> Result<Vec<(ContentLocation, usize, usize, StoryId)>> {
+        let mut result = Vec::new();
+        let mut tables = Vec::new();
+        for (owner, items) in owners.iter().zip(inventories) {
+            let story = StoryId {
+                kind: owner.kind,
+                part_name: source.part_name.clone(),
+                owner_index: owner.owner_index,
+                fingerprint: owner.fingerprint,
+            };
+            for (index, item) in items.iter().enumerate() {
+                if item.kind == StoryItemKind::Table {
+                    tables.push((
+                        item.full.clone(),
+                        ContentLocation::new(story.clone(), item.kind, vec![index]),
+                    ));
+                }
+            }
+        }
+        // Recover physical order with one lexical pass instead of sorting
+        // a growing table inventory. Qualification came from the owner scan.
+        let mut by_start = tables
+            .into_iter()
+            .map(|item| (item.0.start, item))
+            .collect::<HashMap<_, _>>();
+        let mut tables = Vec::with_capacity(by_start.len());
+        let mut reader = quick_xml::Reader::from_reader(source.xml.as_ref());
+        let mut buffer = Vec::new();
+        loop {
+            let before = reader.buffer_position() as usize;
+            match reader
+                .read_event_into(&mut buffer)
+                .map_err(|error| Error::Other(format!("table source order scan failed: {error}")))?
+            {
+                Event::Start(_) | Event::Empty(_) => {
+                    if let Some(item) = by_start.remove(&before) {
+                        tables.push(item);
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        if !by_start.is_empty() {
+            return Err(Error::Other(
+                "table physical source order is incomplete".into(),
+            ));
+        }
+        let cells = owners
+            .iter()
+            .filter(|owner| owner.kind == StoryKind::TableCell)
+            .collect::<Vec<_>>();
+        let mut next = 0;
+        let mut cell_cursor = 0;
+        while next < tables.len() {
+            let root = next;
+            let span = tables[root].0.clone();
+            next += 1;
+            while next < tables.len() && tables[next].0.end < span.end {
+                next += 1;
+            }
+            let scope = scopes
+                .get(&span.start)
+                .ok_or_else(|| Error::Other("table item scope missing".into()))?;
+            let closed = close_content_fragment_namespaces(&source.xml[span.clone()], scope)?;
+            let mut wrapped =
+                format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#).into_bytes();
+            wrapped.extend(closed);
+            wrapped.extend_from_slice(b"</w:body></w:document>");
+            let parsed = CT_Document::from_xml(&wrapped)?;
+            let [BodyContent::Table(table)] = parsed.body.content.as_slice() else {
+                return Err(Error::Other(
+                    "rich table has ambiguous physical content".into(),
+                ));
+            };
+            let (count, modeled) = physical_table_cells(table);
+            while cells
+                .get(cell_cursor)
+                .is_some_and(|owner| owner.full.start < span.start)
+            {
+                cell_cursor += 1;
+            }
+            let first = cell_cursor;
+            while cells
+                .get(cell_cursor)
+                .is_some_and(|owner| owner.full.start < span.end)
+            {
+                cell_cursor += 1;
+            }
+            let physical = &cells[first..cell_cursor];
+            if modeled.len() != physical.len() {
+                return Err(Error::Other(
+                    "rich table cell source correspondence is incomplete".into(),
+                ));
+            }
+            let mut table_routes = vec![None; count];
+            let mut containing = Vec::<usize>::new();
+            let mut cursor = root;
+            for ((table, coordinate), owner) in modeled.into_iter().zip(physical) {
+                while cursor < next && tables[cursor].0.start < owner.full.start {
+                    while containing
+                        .last()
+                        .is_some_and(|&index| tables[index].0.end < tables[cursor].0.end)
+                    {
+                        containing.pop();
+                    }
+                    containing.push(cursor);
+                    cursor += 1;
+                }
+                while containing
+                    .last()
+                    .is_some_and(|&index| tables[index].0.end <= owner.full.start)
+                {
+                    containing.pop();
+                }
+                let index = *containing
+                    .last()
+                    .ok_or_else(|| Error::Other("cell has no physical table".into()))?;
+                if owner.full.end >= tables[index].0.end
+                    || table_routes[table].is_some_and(|before| before != index)
+                {
+                    return Err(Error::Other(
+                        "rich table cell has ambiguous physical owner".into(),
+                    ));
+                }
+                table_routes[table] = Some(index);
+                if let Some((row, cell)) = coordinate
+                    && emitted.insert((tables[index].1.clone(), row, cell))
+                {
+                    result.push((
+                        tables[index].1.clone(),
+                        row,
+                        cell,
+                        StoryId {
+                            kind: owner.kind,
+                            part_name: source.part_name.clone(),
+                            owner_index: owner.owner_index,
+                            fingerprint: owner.fingerprint,
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Resolve one related table cell through its actual enclosing physical table.
     #[doc(hidden)]
     pub fn story_table_cell(
+        &self,
+        location: &ContentLocation,
+        row: usize,
+        cell: usize,
+    ) -> Result<StoryId> {
+        if location.item_kind != StoryItemKind::Table || location.is_end {
+            return Err(Error::Other(
+                "rich table needs an existing table location".to_owned(),
+            ));
+        }
+        let (source, item) = self.story_item_source(location)?;
+        let table = Self::story_table_from_source(&source.xml, &item)?;
+        TableRef { inner: &table }
+            .cell(row, cell)
+            .ok_or_else(|| Error::Other("rich table cell index is out of range".to_owned()))?;
+        let owners = scan_story_owners(&source.xml, source.root_kind)?
+            .into_iter()
+            .filter(|owner| {
+                owner.kind == StoryKind::TableCell
+                    && item.full.start < owner.full.start
+                    && owner.full.end < item.full.end
+            })
+            .collect::<Vec<_>>();
+        let (_, modeled) = physical_table_cells(&table);
+        if modeled.len() < owners.len() {
+            return Err(Error::Other(
+                "rich table cell source correspondence is incomplete".into(),
+            ));
+        }
+        if modeled.len() > owners.len() {
+            return Err(Error::Other(
+                "rich table has unqualified modeled cells".into(),
+            ));
+        }
+        let ordinal = modeled
+            .iter()
+            .position(|(table, coordinate)| *table == 0 && *coordinate == Some((row, cell)))
+            .ok_or_else(|| Error::Other("rich table cell has no unique physical owner".into()))?;
+        let owner = &owners[ordinal];
+        let story = StoryId {
+            kind: owner.kind,
+            part_name: source.part_name.clone(),
+            owner_index: owner.owner_index,
+            fingerprint: owner.fingerprint,
+        };
+        Ok(story)
+    }
+
+    #[cfg(test)]
+    fn fx237_legacy_story_table_cell(
         &self,
         location: &ContentLocation,
         row: usize,
@@ -37146,6 +37943,465 @@ mod tests {
             }
         }
     }
+    fn fx237_assert_combined_inventory(document: &Document) {
+        let legacy = (|| -> Result<_> {
+            Ok((
+                document.story_item_snapshots()?,
+                document.story_table_cell_snapshots()?,
+                document.story_range_paragraphs()?,
+                document.story_link_snapshots()?,
+            ))
+        })();
+        let combined = document.story_owner_snapshots();
+        match (legacy, combined) {
+            (Ok(legacy), Ok(combined)) => assert_eq!(legacy, combined),
+            (Err(_), Err(_)) => {}
+            (legacy, combined) => {
+                panic!("inventory admission changed: legacy={legacy:?} combined={combined:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn fx237_namespace_scope_boundaries_match_legacy() {
+        for xml in [
+            "<r xmlns='urn:base' xmlns:p='urn:one'><a plain='1'><b xmlns:p='urn:two'><p:c/><d xmlns='' xmlns:p=''><e/></d><p:c/></b><p:c/></a></r>",
+            "<r xmlns:p='urn:base'><a><b><c xmlns:q='urn:&amp;escaped'><q:d/></c></b><p:e/></a><p:f/></r>",
+            "<r><bad xmlns:p='&unknown;' duplicate='1' duplicate='2'><later/></bad></r>",
+            "<r><bad duplicate='1' duplicate='2'><later/></bad></r>",
+            "<r><bad xmlns:p='one' xmlns:p='two'><later/></bad></r>",
+            "<r><bad duplicate='1' duplicate='2'/><later/></r>",
+            "<r><bad xmlns:p='&unknown;'/><later/></r>",
+            "<r><a></r>",
+            "<r><a",
+            "</r>",
+            "<r><a/></r><tail",
+            "<r xmlns='urn:base'><a xmlns=''><leaf/></a><sibling/></r>",
+        ] {
+            let xml = xml.as_bytes();
+            let mut reader = quick_xml::Reader::from_reader(xml);
+            let mut offsets = Vec::new();
+            let mut buffer = Vec::new();
+            loop {
+                let before = reader.buffer_position() as usize;
+                match reader.read_event_into(&mut buffer) {
+                    Ok(Event::Start(_) | Event::Empty(_)) => offsets.push(before),
+                    Ok(Event::Eof) | Err(_) => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            for offset in offsets.iter().copied().chain([xml.len() + 1]) {
+                assert_eq!(
+                    story_namespace_scope_at(xml, offset).map_err(|error| error.to_string()),
+                    fx237_legacy_namespace_scope_at(xml, offset).map_err(|error| error.to_string()),
+                    "scalar boundary {offset} in {}",
+                    String::from_utf8_lossy(xml),
+                );
+                assert_eq!(
+                    story_namespace_scopes_at(xml, [offset, offset])
+                        .map_err(|error| error.to_string()),
+                    fx237_legacy_namespace_scopes_at(xml, [offset, offset])
+                        .map_err(|error| error.to_string()),
+                    "duplicate requested boundary {offset} in {}",
+                    String::from_utf8_lossy(xml),
+                );
+            }
+            assert_eq!(
+                story_namespace_scopes_at(xml, offsets.clone()).map_err(|error| error.to_string()),
+                fx237_legacy_namespace_scopes_at(xml, offsets).map_err(|error| error.to_string()),
+                "complete consumed boundaries in {}",
+                String::from_utf8_lossy(xml),
+            );
+            assert!(story_namespace_scopes_at(xml, []).unwrap().is_empty());
+            assert!(
+                fx237_legacy_namespace_scopes_at(xml, [])
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let xml = b"<r xmlns='urn:base' xmlns:p='urn:one'><a xmlns='' xmlns:p=''><leaf/></a><sibling/></r>";
+        let at = |needle: &[u8]| {
+            xml.windows(needle.len())
+                .position(|bytes| bytes == needle)
+                .unwrap()
+        };
+        let leaf = story_namespace_scope_at(xml, at(b"<leaf")).unwrap();
+        assert!(!leaf.contains_key(""));
+        assert!(!leaf.contains_key("p"));
+        let restored = story_namespace_scope_at(xml, at(b"<sibling")).unwrap();
+        assert_eq!(restored.get("").map(String::as_str), Some("urn:base"));
+        assert_eq!(restored.get("p").map(String::as_str), Some("urn:one"));
+        let inherited = story_namespace_scopes_at(xml, [at(b"<a ")]).unwrap();
+        assert_eq!(inherited[&at(b"<a ")], restored);
+    }
+
+    #[test]
+    fn fx237_namespace_scope_frames_only_copy_declarations() {
+        for cells in [60, 120, 240] {
+            let mut document = Document::new();
+            document.add_table(cells / 6, 6);
+            let xml = document.document.to_xml().unwrap();
+            let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+            let mut offsets = Vec::new();
+            let mut buffer = Vec::new();
+            loop {
+                let before = reader.buffer_position() as usize;
+                match reader.read_event_into(&mut buffer).unwrap() {
+                    Event::Start(_) | Event::Empty(_) => offsets.push(before),
+                    Event::Eof => break,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+            FX237_NAMESPACE_FRAME_COPIES.set(0);
+            story_namespace_scopes_at(&xml, offsets.clone()).unwrap();
+            story_namespace_scope_at(&xml, *offsets.last().unwrap()).unwrap();
+            let copies = FX237_NAMESPACE_FRAME_COPIES.get();
+            eprintln!(
+                "FX237 namespaceframes cells={cells} copies={copies} requested={}",
+                offsets.len()
+            );
+            assert!(
+                copies <= 2,
+                "only the root introduces namespace declarations: {copies}"
+            );
+        }
+    }
+
+    #[test]
+    fn fx237_combined_inventory_keeps_projection_and_relationship_refusals() {
+        for content in [
+            "<w:p><w:hyperlink r:id='missing'><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p>",
+            "<w:p><w:r><w:t>text</w:t></w:r></w:p>",
+            "<w:p><f:hyperlink xmlns:f='urn:foreign'><w:r><w:t>opaque</w:t></w:r></f:hyperlink></w:p>",
+            "<w:p><w:sdt><w:sdtContent><w:r><w:t>inline</w:t></w:r></w:sdtContent></w:sdt></w:p>",
+        ] {
+            let xml = format!(
+                "<w:document xmlns:w='{WORD_NAMESPACE}' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'><w:body>{content}<w:sectPr/></w:body></w:document>"
+            );
+            let mut document = Document::new();
+            document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            fx237_assert_combined_inventory(&document);
+            if content.contains("r:id='missing'") {
+                assert!(document.story_link_snapshots().is_err());
+                assert!(document.story_owner_snapshots().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn fx237_batched_cell_routes_equal_checked_single_cell_routes() {
+        let table = |content: &str| {
+            format!(
+                "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w='1000'/><w:gridCol w:w='1000'/></w:tblGrid>{content}</w:tbl>"
+            )
+        };
+        let cell = "<w:tc><w:tcPr/><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc>";
+        let row = format!("<w:tr>{cell}{cell}</w:tr>");
+        let merged = "<w:tr><w:trPr><w:gridBefore w:val='1'/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val='2'/><w:vMerge w:val='restart'/></w:tcPr><w:p/></w:tc></w:tr>";
+        let controlled =
+            format!("<w:sdt><w:sdtPr/><w:sdtContent>{row}</w:sdtContent></w:sdt>{row}");
+        let cell_control = format!(
+            "<w:tr><w:sdt><w:sdtPr/><w:sdtContent>{cell}</w:sdtContent></w:sdt>{cell}</w:tr>"
+        );
+        for content in [
+            table(&row),
+            table(merged),
+            table(&controlled),
+            table(&cell_control),
+            format!(
+                "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+                table(&row)
+            ),
+            table(
+                "<w:tr><f:tc xmlns:f='urn:foreign'><w:p/></f:tc><w:tc><w:tcPr><x:keep xmlns:x='urn:opaque'/></w:tcPr><w:p/></w:tc></w:tr>",
+            ),
+        ] {
+            let mut document = Document::new();
+            let xml = format!(
+                "<w:document xmlns:w='{WORD_NAMESPACE}'><w:body>{content}<w:sectPr/></w:body></w:document>"
+            );
+            document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            fx237_assert_combined_inventory(&document);
+            let actual = document.story_table_cell_snapshots().unwrap();
+            let mut expected = HashMap::new();
+            for snapshot in document.story_item_snapshots().unwrap() {
+                if snapshot.location().item_kind() != StoryItemKind::Table {
+                    continue;
+                }
+                let location = snapshot.location();
+                for (row, cell) in document
+                    .read_story_table(location, |table| {
+                        (0..table.row_count())
+                            .flat_map(|row| {
+                                (0..table.row(row).unwrap().cell_count())
+                                    .map(move |cell| (row, cell))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap()
+                {
+                    assert_eq!(
+                        document.story_table_cell(location, row, cell).unwrap(),
+                        document
+                            .fx237_legacy_story_table_cell(location, row, cell)
+                            .unwrap()
+                    );
+                    expected.insert(
+                        (location.clone(), row, cell),
+                        document
+                            .fx237_legacy_story_table_cell(location, row, cell)
+                            .unwrap(),
+                    );
+                }
+            }
+            assert_eq!(
+                actual
+                    .into_iter()
+                    .map(|(table, row, cell, story)| ((table, row, cell), story))
+                    .collect::<HashMap<_, _>>(),
+                expected
+            );
+        }
+        let mut related = all_story_range_fixture();
+        let roots = related
+            .stories()
+            .unwrap()
+            .into_iter()
+            .filter(|story| story.kind() != StoryKind::TableCell)
+            .collect::<Vec<_>>();
+        let mut seed = Document::new();
+        let model = seed.add_table(1, 1).inner.clone();
+        for root in roots {
+            let current = related
+                .stories()
+                .unwrap()
+                .into_iter()
+                .find(|story| {
+                    story.kind() == root.kind()
+                        && story.part_name() == root.part_name()
+                        && story.owner_index() == root.owner_index()
+                })
+                .unwrap();
+            if current.kind() == StoryKind::TextBox {
+                let (source, owner) = related.story_source_and_owner(&current).unwrap();
+                if scan_story_owners(&source.xml, source.root_kind)
+                    .unwrap()
+                    .iter()
+                    .any(|parent| {
+                        parent.kind == StoryKind::TableCell
+                            && parent.full.start < owner.full.start
+                            && owner.full.end < parent.full.end
+                    })
+                {
+                    // The scalar contract refuses cells hidden in paragraph
+                    // drawing XML inside an enclosing modeled table.
+                    continue;
+                }
+            }
+            related
+                .insert_content(
+                    &ContentLocation::end(current),
+                    ContentFragment::table(model.clone()).unwrap(),
+                )
+                .unwrap();
+        }
+        fx237_assert_combined_inventory(&related);
+        let mut kinds = HashSet::new();
+        let mut expected = HashMap::new();
+        for snapshot in related.story_item_snapshots().unwrap() {
+            if snapshot.location().item_kind() != StoryItemKind::Table {
+                continue;
+            }
+            let location = snapshot.location();
+            kinds.insert(location.story().kind());
+            for (row, cell) in related
+                .read_story_table(location, |table| {
+                    (0..table.row_count())
+                        .flat_map(|row| {
+                            (0..table.row(row).unwrap().cell_count()).map(move |cell| (row, cell))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+            {
+                let legacy = related
+                    .fx237_legacy_story_table_cell(location, row, cell)
+                    .unwrap();
+                assert_eq!(
+                    related.story_table_cell(location, row, cell).unwrap(),
+                    legacy
+                );
+                expected.insert((location.clone(), row, cell), legacy);
+            }
+        }
+        for kind in [
+            StoryKind::Body,
+            StoryKind::Header,
+            StoryKind::Footer,
+            StoryKind::Footnote,
+            StoryKind::Endnote,
+            StoryKind::Comment,
+            StoryKind::TextBox,
+        ] {
+            assert!(
+                kinds.contains(&kind),
+                "missing qualified related table {kind:?}"
+            );
+        }
+        assert_eq!(
+            related.story_table_cell_snapshots().unwrap().len(),
+            expected.len(),
+            "physical alias routes must not duplicate owners"
+        );
+        assert_eq!(
+            related
+                .story_table_cell_snapshots()
+                .unwrap()
+                .into_iter()
+                .map(|(table, row, cell, story)| ((table, row, cell), story))
+                .collect::<HashMap<_, _>>(),
+            expected
+        );
+        for rows in [1, 2] {
+            let mut document = Document::new();
+            document
+                .add_table(rows, 2)
+                .cell(0, 0)
+                .unwrap()
+                .add_table(1, 2);
+            document.add_table(1, 1);
+            document.set_header("related");
+            let mut expected = HashMap::new();
+            for snapshot in document.story_item_snapshots().unwrap() {
+                if snapshot.location().item_kind() != StoryItemKind::Table {
+                    continue;
+                }
+                let location = snapshot.location();
+                let coordinates = document
+                    .read_story_table(location, |table| {
+                        (0..table.row_count())
+                            .flat_map(|row| {
+                                (0..table.row(row).unwrap().cell_count())
+                                    .map(move |cell| (row, cell))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap();
+                for (row, cell) in coordinates {
+                    assert_eq!(
+                        document.story_table_cell(location, row, cell).unwrap(),
+                        document
+                            .fx237_legacy_story_table_cell(location, row, cell)
+                            .unwrap()
+                    );
+                    expected.insert(
+                        (location.clone(), row, cell),
+                        document
+                            .fx237_legacy_story_table_cell(location, row, cell)
+                            .unwrap(),
+                    );
+                }
+            }
+            STORY_SOURCE_BUILDS.set(0);
+            FX237_TABLE_VISITS.set(0);
+            FX237_CELL_VISITS.set(0);
+            let actual = document
+                .story_table_cell_snapshots()
+                .unwrap()
+                .into_iter()
+                .map(|(table, row, cell, story)| ((table, row, cell), story))
+                .collect::<HashMap<_, _>>();
+            assert_eq!(actual, expected);
+            assert_eq!(STORY_SOURCE_BUILDS.get(), 1);
+            assert_eq!(FX237_TABLE_VISITS.get(), 3);
+            assert_eq!(FX237_CELL_VISITS.get(), rows * 2 + 3);
+            let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened.story_table_cell_snapshots().unwrap().len(),
+                actual.len()
+            );
+        }
+    }
+
+    #[test]
+    fn fx237_table_cell_snapshots_scan_each_source_and_visit_each_cell_once() {
+        for cells in [60, 120, 240] {
+            let mut document = Document::new();
+            document.add_table(cells / 6, 6);
+            STORY_SOURCE_BUILDS.set(0);
+            STORY_OWNER_SCANS.set(0);
+            STORY_NAMESPACE_SCANS.set(0);
+            FX237_ITEM_SCANS.set(0);
+            FX237_PREFIX_NAMESPACE_BYTES.set(0);
+            FX237_TABLE_VISITS.set(0);
+            FX237_CELL_VISITS.set(0);
+            let routes = document.story_owner_snapshots().unwrap().1;
+            assert_eq!(FX237_ITEM_SCANS.get(), cells + 1);
+            let source_bytes = document.document.to_xml().unwrap().len();
+            assert!(
+                FX237_PREFIX_NAMESPACE_BYTES.get() <= source_bytes,
+                "prefix namespace work must remain bounded per registry"
+            );
+            eprintln!(
+                "FX237 fullregistry cells={cells} source={} owners={} namespace={} items={} prefix_bytes={} source_bytes={source_bytes}",
+                STORY_SOURCE_BUILDS.get(),
+                STORY_OWNER_SCANS.get(),
+                STORY_NAMESPACE_SCANS.get(),
+                FX237_ITEM_SCANS.get(),
+                FX237_PREFIX_NAMESPACE_BYTES.get()
+            );
+            assert_eq!(FX237_TABLE_VISITS.get(), 1);
+            assert_eq!(FX237_CELL_VISITS.get(), cells);
+            assert_eq!(STORY_NAMESPACE_SCANS.get(), 3);
+            assert_eq!(routes.len(), cells);
+            assert_eq!(
+                STORY_SOURCE_BUILDS.get(),
+                1,
+                "complete cell inventory must materialize sources once"
+            );
+            assert_eq!(
+                STORY_OWNER_SCANS.get(),
+                1,
+                "complete cell inventory must scan each source once"
+            );
+            STORY_SOURCE_BUILDS.set(0);
+            STORY_OWNER_SCANS.set(0);
+            FX237_ITEM_SCANS.set(0);
+            FX237_PREFIX_NAMESPACE_BYTES.set(0);
+            FX237_LEGACY_CELL_STEPS.set(0);
+            FX237_CELL_VISITS.set(0);
+            FX237_TABLE_VISITS.set(0);
+            document
+                .story_table_cell(&routes[0].0, cells / 6 - 1, 5)
+                .unwrap();
+            assert_eq!(
+                FX237_CELL_VISITS.get(),
+                cells,
+                "public scalar provider visits each cell once"
+            );
+            assert_eq!(
+                STORY_SOURCE_BUILDS.get(),
+                1,
+                "scalar source must be materialized once"
+            );
+            assert_eq!(
+                STORY_OWNER_SCANS.get(),
+                2,
+                "scalar qualification and physical correspondence scans"
+            );
+            assert_eq!(FX237_ITEM_SCANS.get(), 1);
+            assert!(FX237_PREFIX_NAMESPACE_BYTES.get() <= source_bytes);
+            assert_eq!(FX237_TABLE_VISITS.get(), 1);
+            assert!(
+                FX237_LEGACY_CELL_STEPS.get() <= cells,
+                "scalar lookup repeats physical cell walks: {}",
+                FX237_LEGACY_CELL_STEPS.get()
+            );
+        }
+    }
+
     #[test]
     fn fx222_owner_and_namespace_scans_are_per_source() {
         for rows in [32, 64] {

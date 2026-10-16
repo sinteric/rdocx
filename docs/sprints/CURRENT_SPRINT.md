@@ -1,54 +1,54 @@
-# Current Sprint, S91.1
+# Current Sprint, S92
 
-**Milestone**: M24, X, release runtime and CI repairs.
+**Milestone**: M24, X, contribution and issue repairs.
 
-**Goal**: Fix the native CI setup, default-WASM parser and checked chart relationship failures found after S91 merged, then deliver the original first-draft corpus CI criterion. Requalify the still-unpublished Word0.16.1 and shared/PowerPoint0.14.1 families, preserving the frozen40-issue/30-PR scope and open discussions264/281.
+**Goal**: Resolve the planned contribution and issue repairs against the published S91.1 result. Qualify faster CI, finish clearable run formatting, repair comparison reconstruction and readable revision grouping, and preserve PowerPoint HTML import whitespace. Restore linear Python table-owner inventory for newly reported Issue378. The six stories total 15 to 18 developer-days of estimated effort.
 
 ## Spec references
 
-- `docs/hld/04-opc-and-packaging.md`, package identity and verbatim opaque XML.
-- `docs/hld/06-presentationml-model.md`, shape-tree parser storage and source preservation.
-- `docs/hld/10-bindings-spec.md`, actual default-stack WASM facade and package round-trip.
-- `docs/hld/12-testing-strategy.md`, regression, binding and exact source/oracle verification.
-- `docs/hld/15-build-and-toolchain.md`, pinned tools, CI job matrix and closed-main releases.
+- `docs/hld/14-development-backlog.md`, F-X228, F-X178 and F-X229 through F-X231 and F-X237 define the repair contracts, prerequisites and story gates.
+- `docs/hld/02-scope-and-non-goals.md`, HTML slide import and Word interchange boundaries retain bounded supported constructs and explicit diagnostics.
+- `docs/hld/04-opc-and-packaging.md`, package ownership and relationship identity govern comparison reconstruction and save/reopen preservation.
+- `docs/hld/10-bindings-spec.md`, Word formatting, tracked revision resolution, comparison options and native presentation HTML import define the current public surfaces.
+- `docs/hld/12-testing-strategy.md`, comparison reconstruction, source-preservation regressions, installed binding checks and the CI job matrix define required evidence.
+- `docs/hld/15-build-and-toolchain.md`, CI routing, pinned native tools and build profiles constrain performance improvements without weakening gates.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-X224 | Repair hosted release tool and stack routing | M | done | - |
-| F-X225 | Keep DrawingML text-style parsing within the default WASM stack | M | done | - |
-| F-X226 | Release superseded relationships after checked PowerPoint XML edits | M | done | - |
-| F-X227 | Execute the unchanged first-draft compatibility corpus in owner CI | L | done | - |
+| F-X228 | Qualify faster CI without weakening gates | M | done | - |
+| F-X178 | Clearable direct run formatting setters | S | done | - |
+| F-X231 | Preserve PowerPoint HTML import whitespace | M | done | - |
+| F-X229 | Repair comparison reconstruction correctness | L | done | - |
+| F-X230 | Group comparison changes for readable revisions | M | done | - |
+| F-X237 | Restore linear Python table owner inventory | L | done | - |
 
 ## Sequencing note
 
-All prerequisite features are already done in S91. F-X224 through F-X226 implemented in parallel in separate worktrees with disjoint source leases. F-X227 is implemented and independently reviewed, with actual external acceptance now qualified. ROOT owns shared records, integration and final artifact qualification. No S92 feature work or new contributor intake is included.
+Rows are listed in dependency order, not F-ID order.
 
-## Current qualification
+Qualify and integrate F-X228 from PR376 first using actual current-head CI. Preserve every required suite, pinned native setup, debug assertions, overflow checks, binding profile and owner-only dispatch boundary. Contributor timing claims alone are not acceptance evidence.
 
-F-X224 through F-X227 are implemented and independently reviewed. Scoped completion records bind their actual worker and integrated evidence. Corrected primary CI38708235000 is SUCCESS at 6d7c7da729e0ecb34252e821341f22844e37a9fd, with receipt /private/tmp/S91.1-primary-corrected-raster-acceptance-1/terminal-receipt.json and SHAad03f29ef28fe9a5174cdb7cb30a8811c4cb25fa237eac4df1b8a0d63d388792. The successful terminal results and all18 job logs were authenticated before completion.
+F-X178 depends on completed F-X200 and resolves Issue364 through the remaining width-scale and position reset forms. F-X231 depends on completed F-X217 and finishes advanced PR359's PowerPoint emphasis-edge spaces, span-boundary whitespace and NBSP. Qualify equivalent delivered Word cases once. Confirm applicable native and installed entrypoints during design against the current public surface.
 
-Local integrated b3b qualification passed6463 Rust tests,778 Word and854 PowerPoint Python tests,104 font cases, eight native SVG owners, two F216 controls and Node2/2/3 at the unchanged1MiB stack. Source215 verification passed all15 core stages and supply-chain checks. Its exact-source build-only rehearsal38696969789 passed27 jobs with publication jobs intentionally skipped,12 wheels, two source distributions,12 CLI archives,156 installed priority checks and four typing/stub checks. Complete relevant source/body/mode and artifact bridges preserve those actual producer identities rather than calling them new executions.
+F-X229 depends on completed F-X203 and resolves Issues368 through371 using PR374's correctness subset. F-X230 starts only after F-X229 completes, then resolves Issue372 with the separately attributed grouping changes. Reconstruction correctness must remain established while revision grouping changes intentionally.
 
-Actual owner CI38702668217 atsource215 completed all100 original first attempts with safe cleanup and no timeout. Independent admissions qualify95 correct files,42 hard gates,51 native clauses and24 documentation cases. Per-area counts are BASE24/24, XML13/14, LIFE16/16 and AREA42/46. Five approved non-successes remain in the denominator without correct-file credit. All114 unaffected saved files match historical bytes and the three revised-input cases have fresh observations. Historical native and app witnesses retain their original provenance. The one-job runner was removed with API404 and reaped process groups.
+CI, setters and HTML import can proceed in separate claimed worktrees. Explicitly lease shared native sources and integration test entrypoints. Rebase or extract minimal contribution slices against the published S91.1 result, reconcile semantic conflicts against both contracts and avoid duplicating delivered fixes. Only one story may own a deterministic baseline change in a wave.
 
-Original main CI38662802341 and primary CI38696954013 remain failed. The latter passed its full native, binding, MSRV, animation and fidelity consumers but failed three stale raster expectations omitted from the approved F-X210 change. Their attributed correction leaves all49 product hashes, four unrelated rasters and exact thresholds unchanged. Failed preparers, refused assignments and missing historical S92 oracles remain separately recorded.
+S93 retains rendering, border, LaTeX, equation and setter-inlining work. Bibliography, navigation, standalone authoring and the later benchmark and Excel programme retain their planned sprint assignments. Discussion issues264,281 and377 remain open.
 
-Final reviewed-source full verification of the final reviewed sprint commit and clean sprint review remain due. Normal close, exact-main full verification, both family publications and acceptance-aware reconciliation of the70 included records remain pending. Discussions264 and281 stay open, and S92 deferrals remain unchanged. Issue360 may close only after publication under the approved reviewed-submission delivery boundary, with skills PR37 merge tracked externally. Registry roles, trusted publishers, exact final notes and release URLs must be revalidated at release.
-
-Advanced PR359 remains partially addressed, with new PowerPoint HTML import
-whitespace acceptance assigned to the separately planned repair sprint. Its
-release-bound comment must state that remaining scope and leave the PR open.
-Discussions264,281 and377 remain open. No new intake enters S91.1.
+Issue378 was explicitly added during execution on2026-10-15. F-X237 restores linear table open and single-edit work, with authenticated release0.16.0 timing comparison and the exact40-by6 fill. It proceeds in a separate worktree from comparison grouping, with shared Word facade and package measurement carriers reconciled explicitly. This adds no Issue316 implementation scope.
 
 ## Definition of done for this sprint
 
-- Preserve original main CI38662802341 failures and exact Node24.11.1 reproduction.
-- Pass existing native font/animation consumers and exact executable fractional release-tag controls.
-- Pass the unchanged real PowerPoint Node facade under the default1MiB stack, with public APIs, opaque XML, child order and parser bounds intact.
-- Pass the original public chart alias edit in debug and optimized builds, preserving validation, sibling graphs and atomic refusal.
-- Complete normal scoped lifecycle, zero-finding independent microscopes, fresh integrated full verification and clean sprint review.
-- Qualify actual current paired Rust/CLI/Python artifacts,39/312 installed runtime/typing, font104/native-eight riders, primary hosted CI and exact-SHA build-only rehearsal.
-- Run the unchanged first-draft corpus in actual owner CI with honest per-area rates under the approved F-X227 contract.
-- Close normally without changing S91's tag. Publish both prepared families only after exact-main checks, then reconcile the70 humanized comments. Discussions264 and281 remain open, and all existing S92 work remains deferred.
+- Complete all six approved story contracts through design, implementation, scoped verification and independent zero-defect, zero-smell microscope review.
+- Qualify actual integrated CI improvements from PR376 without dropping suites, native oracles, setup, assertions or overflow checks.
+- Prove explicit set/clear and save/reopen behavior for Issue364, including absent-property and existing explicit-false controls.
+- Prove accept-all and reject-all reconstruction for Issues368 through371, preserving properties, relationships, tables, stories and opaque XML. Prove Issue372 grouping respects fields, comments, bookmarks, hyperlinks and formatting boundaries.
+- Prove PR359's remaining PowerPoint HTML whitespace cases through applicable public entrypoints and save/reopen, retaining diagnostics and existing semantic export acceptance.
+- Prove Issue378 linear cell inventory and route matching, same-host open/edit timing acceptance and the explicitly accepted measured fill tradeoff, physical owner and stale-generation preservation, atomic refusal and full fresh Word Python acceptance.
+- Pass the integrated full verification and sprint review, including applicable installed bindings and native/oracle controls. Attribute every intentional deterministic hash or raster delta separately and retain unchanged controls.
+- Close issues and contribution PRs only against their full criteria and required publication evidence. Only /close-sprint merges to main, and only /release publishes an approved reviewed SHA. Discussions264,281 and377 remain open.
+
+The sprint clock starts at its first /start-feature. All stories are pending and unclaimed at opening.

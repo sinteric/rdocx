@@ -6655,3 +6655,232 @@ def test_preserved_control_paragraphs_keep_checked_source_and_ordinary_reads(pro
     with pytest.raises(rdocx.StaleElementError, match="Document.add_paragraph"):
         _ = run.text
     assert [paragraph.text for paragraph in document.paragraphs] == ["outside", "updated", "later"]
+
+
+def test_fx231_installed_word_html_whitespace_entrypoints(tmp_path):
+    import rdocx
+    import xml.etree.ElementTree as ET
+
+    html = '<p>a <b>b </b> c&nbsp;&nbsp;d</p><p><a href="https://example.test/">x </a><i> </i> y</p>'
+    source = tmp_path / "source.html"
+    source.write_text(html, encoding="utf-8")
+    inserted = rdocx.Document()
+    anchor = inserted.add_paragraph("anchor")
+    assert inserted.insert_html(html, after=anchor) == ()
+    created, diagnostics = rdocx.Document.from_html(html)
+    opened, opened_diagnostics = rdocx.Document.open_html(source)
+    assert diagnostics == opened_diagnostics == ()
+    for document in (created, opened, inserted):
+        output = tmp_path / "saved.docx"
+        document.save(output)
+        reopened = rdocx.Document(output)
+        with zipfile.ZipFile(io.BytesIO(reopened.to_bytes())) as archive:
+            root = ET.fromstring(archive.read("word/document.xml"))
+            relations = ET.fromstring(archive.read("word/_rels/document.xml.rels"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs = root.findall("./w:body/w:p", ns)[-2:]
+        first = [("".join(run.itertext()), run.find("w:rPr/w:b", ns) is not None) for run in paragraphs[0].findall("w:r", ns)]
+        assert first == [("a ", False), ("b ", True), ("c\u00a0\u00a0d", False)]
+        link = paragraphs[1].find("w:hyperlink", ns)
+        assert "".join(link.itertext()) == "x "
+        relation_id = link.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]
+        assert next(item.attrib["Target"] for item in relations if item.attrib["Id"] == relation_id) == "https://example.test/"
+        assert "".join(paragraphs[1].itertext()) == "x y"
+
+
+def test_fx237_table_open_edit_and_fill_costs():
+    import hashlib
+    import json
+    import os
+    import platform
+    import statistics
+    import sys
+    from pathlib import Path
+    import rdocx
+
+    output = os.environ.get("FX237_TIMING_OUTPUT")
+    results = {}
+    for cells in (60, 120, 240):
+        rows = cells // 6
+        fills = []
+        # One discarded warm-up, then three measured fills for qualification.
+        for trial in range(4 if output else 1):
+            document = rdocx.Document()
+            document.add_table(rows, 6)
+            started = time.perf_counter()
+            for row in range(rows):
+                for column in range(6):
+                    document.tables[0].cell(row, column).text = f"r{row} c{column}"
+            elapsed = time.perf_counter() - started
+            if trial:
+                fills.append(elapsed)
+            data = document.to_bytes()
+            reopened = rdocx.Document.from_bytes(data)
+            assert [[reopened.tables[0].cell(row, column).text for column in range(6)]
+                    for row in range(rows)] == [[f"r{row} c{column}" for column in range(6)]
+                                               for row in range(rows)]
+        fill_output_sha256 = hashlib.sha256(data).hexdigest()
+        input_directory = os.environ.get("FX237_TIMING_INPUTS") if output else None
+        fixture_path = None
+        if input_directory:
+            directory = Path(input_directory)
+            directory.mkdir(parents=True, exist_ok=True)
+            fixture_path = directory / f"{cells}-cells.docx"
+            if not fixture_path.exists():
+                assert not os.environ.get("FX237_TIMING_BASELINE"), "candidate must consume authenticated baseline input"
+                fixture_path.write_bytes(data)
+            data = fixture_path.read_bytes()
+        input_sha256 = hashlib.sha256(data).hexdigest()
+        opens, edits = [], []
+        for trial in range(6 if output else 1):
+            started = time.perf_counter()
+            document = rdocx.Document.from_bytes(data)
+            opened = time.perf_counter() - started
+            started = time.perf_counter()
+            document.tables[0].cell(0, 0).text = "edited"
+            edited = time.perf_counter() - started
+            assert rdocx.Document.from_bytes(document.to_bytes()).tables[0].cell(0, 0).text == "edited"
+            if trial:
+                opens.append(opened)
+                edits.append(edited)
+        if output:
+            results[str(cells)] = {"fill": fills, "open": opens, "edit": edits,
+                                   "input_sha256": input_sha256, "input_path": str(fixture_path) if fixture_path else None,
+                                   "fill_output_sha256": fill_output_sha256,
+                                   "medians": {"fill": statistics.median(fills),
+                                               "open": statistics.median(opens),
+                                               "edit": statistics.median(edits)}}
+    if output:
+        controls = {"no_table_open": [], "unrelated_replace_text": []}
+        plain = rdocx.Document()
+        plain.add_paragraph("control")
+        plain_data = plain.to_bytes()
+        related = rdocx.Document.from_bytes(data)
+        related.add_paragraph("unrelated control")
+        related_data = related.to_bytes()
+        for trial in range(6):
+            started = time.perf_counter()
+            assert rdocx.Document.from_bytes(plain_data).paragraphs[0].text == "control"
+            plain_time = time.perf_counter() - started
+            related = rdocx.Document.from_bytes(related_data)
+            paragraph = related.paragraphs[-1]
+            started = time.perf_counter()
+            paragraph.replace_text("unrelated", "changed")
+            related_time = time.perf_counter() - started
+            assert related.paragraphs[-1].text == "changed control"
+            if trial:
+                controls["no_table_open"].append(plain_time)
+                controls["unrelated_replace_text"].append(related_time)
+        from importlib.metadata import version
+        payload = {"version": version("rdocx"), "module": rdocx.__file__,
+                   "python": sys.version, "executable": sys.executable,
+                   "platform": platform.platform(), "machine": platform.machine(),
+                   "results": results, "controls": controls}
+        baseline_path = os.environ.get("FX237_TIMING_BASELINE")
+        if baseline_path:
+            baseline = json.loads(Path(baseline_path).read_text())
+            payload["baseline_comparison"] = {
+                cells: {phase: {"limit": max(3 * baseline["results"][cells]["medians"][phase], floor),
+                                "within_limit": actual["medians"][phase] <= max(3 * baseline["results"][cells]["medians"][phase], floor),
+                                "enforced": phase != "fill"}
+                        for phase, floor in (("open", .010), ("edit", .030), ("fill", .500))}
+                for cells, actual in results.items()
+            }
+        Path(output).write_text(json.dumps(payload, indent=2) + "\n")
+        if baseline_path:
+            baseline = json.loads(Path(baseline_path).read_text())
+            assert baseline["version"] == "0.16.0"
+            assert baseline["python"] == payload["python"]
+            assert baseline["platform"] == payload["platform"]
+            for cells, actual in results.items():
+                assert actual["input_sha256"] == baseline["results"][cells]["input_sha256"]
+                for phase, floor in (("open", .010), ("edit", .030), ("fill", .500)):
+                    limit = max(3 * baseline["results"][cells]["medians"][phase], floor)
+                    # Fill retains its former 3x comparison as diagnostic data.
+                    # The approved plan records the exact user-accepted result.
+                    if phase != "fill":
+                        assert actual["medians"][phase] <= limit, (cells, phase, actual, limit)
+
+
+def test_fx237_table_owner_inventory_preserves_physical_routes_and_generations():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("unrelated")
+    outer = document.add_table(2, 2)
+    outer.cell(0, 0).text = "first"
+    outer.cell(0, 1).text = "same"
+    outer.cell(1, 1).text = "same"
+    outer.cell(0, 0).add_table(1, 1).cell(0, 0).text = "nested"
+    with pytest.raises(Exception, match="Cell.add_table|stale"):
+        _ = outer.cell(0, 0)
+    outer = document.tables[0]
+    paragraph = document.paragraphs[0]
+    nested = outer.cell(0, 0).tables[0].cell(0, 0).paragraphs[0]
+    sibling = outer.cell(0, 1).paragraphs[0]
+    selected = outer.cell(1, 1)
+    removed = selected.paragraphs[0]
+    old_run = sibling.runs[0]
+    selected.text = "changed"
+    assert selected.text == "changed" and sibling.text == "same"
+    assert nested.text == "nested" and paragraph.text == "unrelated"
+    with pytest.raises(Exception, match="Cell.text|stale"):
+        _ = removed.text
+    with pytest.raises(Exception, match="Cell.text|stale"):
+        _ = old_run.text
+    sibling.replace_text("same", "retained")
+    with pytest.raises(Exception, match="Paragraph.replace_text|stale"):
+        _ = nested.text
+    assert document.tables[0].cell(0, 0).tables[0].cell(0, 0).text == "nested"
+    assert document.paragraphs[0].text == "unrelated"
+    for _ in range(2):
+        document = rdocx.Document.from_bytes(document.to_bytes())
+        table = document.tables[0]
+        assert table.cell(1, 1).text == "changed"
+        assert table.cell(0, 1).text == "retained"
+        assert table.cell(0, 0).tables[0].cell(0, 0).text == "nested"
+        assert document.paragraphs[0].text == "unrelated"
+
+
+def test_fx237_owner_inventory_refusal_is_atomic(monkeypatch):
+    import datetime
+    import json
+    import rdocx
+
+    document = rdocx.Document()
+    table = document.add_table(1, 2)
+    table.cell(0, 0).text = "first"
+    table.cell(0, 1).text = "second"
+    first, second = table.cell(0, 0), table.cell(0, 1)
+    paragraph = first.paragraphs[0]
+    opaque = '<x:keep xmlns:x="urn:fx237" marker="preserve"/>'
+    xml = second.element.xml
+    start = xml.index(">") + 1
+    second.element.replace_xml(xml[:start] + "<w:tcPr>" + opaque + "</w:tcPr>" + xml[start:])
+    assert opaque in second.element.xml
+    document.add_paragraph("field ").add_run("").add_field('DATE \\@ "yyyy-MM-dd"', "1999-01-01")
+    # Refresh after the conservative append, then force a real report allocation
+    # refusal after native candidate preparation on a document with cell owners.
+    first, second = document.tables[0].cell(0, 0), document.tables[0].cell(0, 1)
+    paragraph = first.paragraphs[0]
+    baseline = document.to_bytes()
+    def refuse_report(*args, **kwargs):
+        raise MemoryError("fx237 prepublication report allocation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json, "loads", refuse_report)
+        with pytest.raises(MemoryError, match="fx237 prepublication"):
+            document.update_all_fields(now=datetime.datetime(2026, 10, 10))
+    assert document.to_bytes() == baseline and paragraph.text == "first"
+    with pytest.raises(Exception):
+        first.merge(second)
+    assert document.to_bytes() == baseline
+    assert first.text == "first" and paragraph.text == "first"
+    assert opaque in second.element.xml
+    before = second.element.xml
+    second.element.replace_xml(before)
+    assert document.to_bytes() == baseline and paragraph.text == "first"
+    foreign = rdocx.Document().add_table(1, 1).cell(0, 0)
+    with pytest.raises(Exception):
+        first.merge(foreign)
+    assert document.to_bytes() == baseline

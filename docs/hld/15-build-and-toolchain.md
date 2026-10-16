@@ -1011,6 +1011,13 @@ compiler. Separate native environments pin pytest9.1.1 and Meson1.9.1.
 The authenticated utility directory is exported through `GITHUB_PATH`.
 Full binding preparation and its104 and native-eight controls remain mandatory.
 
+Test and MSRV use job-local development optimization1 with debug assertions
+and overflow checks explicitly enabled. Workspace profiles remain unchanged,
+and the Python binding rows retain their separate development optimization2.
+The complete native suites and oracle controls still execute. Profile settings
+alone establish no speedup. Qualification records actual current-source job
+and step durations with runner and cache limitations.
+
 The Test and Presentation fidelity deterministic animation commands also use
 `RUST_MIN_STACK=8388608`. This is a native test-thread budget and does not alter
 product runtime behavior or the separate WASM runtime.
@@ -1044,7 +1051,16 @@ contracts.
 **A dedicated Presentation fidelity job** runs on Ubuntu 24.04, primes locked
 Cargo dependencies, fetches the pinned 50-deck corpus, installs LibreOffice and
 Poppler through the shared checksum-pinned installers, and runs
-`scripts/pptx_ssim_harness.py --check`. The harness rejects any LibreOffice
+`scripts/pptx_ssim_harness.py --check`. Its existing corpus command builds and
+runs `render_deck` in the release profile with deterministic bundled fonts.
+The presentation path filter covers the actual renderer and example closure:
+`oxml-chart`, `oxml-core`, `oxml-drawing`, `oxml-layout`, `oxml-media`,
+`oxml-opc`, `oxml-pdf`, `oxml-sml`, `rpptx`, `rpptx-layout`, `rpptx-oxml`
+and `rpptx-render`, plus root build settings, corpus inputs, pinned installers
+and its imported golden PNG helper. Dependency-derived regression coverage
+rejects missing routes and unrelated crate selection. Same-source profile
+qualification requires exact PNG and render-manifest equality. The harness
+rejects any LibreOffice
 version other than
 26.2.5.2 build `cd7284b4cbbfeb507e630c1aac019f4157393acb` and any pdftoppm
 version other than 26.01.0 before rendering begins. This turns a package-manager

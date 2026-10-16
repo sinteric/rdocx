@@ -110,12 +110,24 @@ jobs:
               - 'Cargo.lock'
               - 'Cargo.toml'
               - 'rust-toolchain.toml'
-              - 'crates/**'
+              - 'crates/oxml-chart/**'
+              - 'crates/oxml-core/**'
+              - 'crates/oxml-drawing/**'
+              - 'crates/oxml-layout/**'
+              - 'crates/oxml-media/**'
+              - 'crates/oxml-opc/**'
+              - 'crates/oxml-pdf/**'
+              - 'crates/oxml-sml/**'
+              - 'crates/rpptx/**'
+              - 'crates/rpptx-layout/**'
+              - 'crates/rpptx-oxml/**'
+              - 'crates/rpptx-render/**'
               - 'scripts/fetch_pptx_corpus.py'
               - 'scripts/install_pinned_libreoffice.py'
               - 'scripts/install_pinned_poppler.py'
               - 'scripts/pptx-corpus-manifest.tsv'
               - 'scripts/pptx_ssim_harness.py'
+              - 'scripts/golden_png_harness.py'
             word_fidelity:
               - '.github/workflows/ci.yml'
               - '.cargo/**'
@@ -162,6 +174,10 @@ jobs:
     if: needs.changes.outputs.test == 'true'
     name: Test
     runs-on: ubuntu-24.04
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -712,6 +728,10 @@ jobs:
     if: needs.changes.outputs.msrv == 'true'
     name: MSRV (1.93)
     runs-on: ubuntu-24.04
+    env:
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master

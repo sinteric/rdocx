@@ -35618,3 +35618,422 @@ fn fx216_full_effective_source_formatting_properties_match_current_corpus_and_ne
         .unwrap();
     }
 }
+
+/// The text and the underline, strike, bold and italic of each run of the
+/// first paragraph of each shape on the first slide of an HTML import.
+#[cfg(feature = "default-template")]
+fn html_marked_runs(html: &str) -> Vec<Vec<(String, [bool; 4])>> {
+    use oxml_drawing::text::{TextRun, TextStrike, TextUnderline};
+    use rpptx_oxml::shape_tree::ShapeTreeChild;
+    use rpptx_oxml::slide_parts::CT_Slide;
+
+    let imported = rpptx::Presentation::from_html(html, &[]).expect("HTML imports");
+    let bytes = imported.presentation.to_bytes().expect("HTML deck saves");
+    let package = open_opc(&bytes, "HTML import");
+    let slide = CT_Slide::from_xml(package.get_part("/ppt/slides/slide1.xml").unwrap()).unwrap();
+    slide
+        .common_slide_data
+        .shape_tree
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            ShapeTreeChild::Shape(shape) => shape.text_body.as_ref(),
+            _ => None,
+        })
+        .map(|body| {
+            body.paragraphs()[0]
+                .runs
+                .iter()
+                .filter_map(|run| match run {
+                    TextRun::Run(run) => Some(run),
+                    _ => None,
+                })
+                .map(|run| {
+                    let properties = run.properties.clone().unwrap_or_default();
+                    (
+                        run.text.value.clone(),
+                        [
+                            properties
+                                .underline
+                                .is_some_and(|underline| underline != TextUnderline::None),
+                            properties
+                                .strike
+                                .is_some_and(|strike| strike != TextStrike::None),
+                            properties.bold == Some(true),
+                            properties.italic == Some(true),
+                        ],
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn html_import_keeps_the_space_around_an_emphasised_span_outside_it() {
+    const PLAIN: [bool; 4] = [false; 4];
+    const U: [bool; 4] = [true, false, false, false];
+    const S: [bool; 4] = [false, true, false, false];
+    const B: [bool; 4] = [false, false, true, false];
+    const I: [bool; 4] = [false, false, false, true];
+    let box_html = |body: &str, top: u32| {
+        format!(
+            "<div style='position:absolute;left:10px;top:{top}px;width:400px;height:40px'><p>{body}</p></div>"
+        )
+    };
+    let html = format!(
+        "<section data-slide>{}{}{}</section>",
+        box_html(
+            "see <u>u</u> then <s>s</s> then <b>b</b> then <i>i</i> end",
+            10
+        ),
+        box_html("<u>u</u> <s>s</s>", 60),
+        box_html("<u>u </u>tail", 110),
+    );
+    let runs = |items: &[(&str, [bool; 4])]| {
+        items
+            .iter()
+            .map(|(text, marks)| ((*text).to_owned(), *marks))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        html_marked_runs(&html),
+        [
+            runs(&[
+                ("see ", PLAIN),
+                ("u", U),
+                (" then ", PLAIN),
+                ("s", S),
+                (" then ", PLAIN),
+                ("b", B),
+                (" then ", PLAIN),
+                ("i", I),
+                (" end", PLAIN),
+            ]),
+            // A space between two spans is in neither of them.
+            runs(&[("u", U), (" ", PLAIN), ("s", S)]),
+            // A space written inside the span stays in it, as a browser draws it.
+            runs(&[("u ", U), ("tail", PLAIN)]),
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn html_import_collapses_spaces_on_both_sides_of_a_span_edge_into_one() {
+    const PLAIN: [bool; 4] = [false; 4];
+    const U: [bool; 4] = [true, false, false, false];
+    const S: [bool; 4] = [false, true, false, false];
+    const B: [bool; 4] = [false, false, true, false];
+    const I: [bool; 4] = [false, false, false, true];
+    const BI: [bool; 4] = [false, false, true, true];
+    let deck = |bodies: &[&str]| {
+        let boxes = bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                format!(
+                    "<div style='position:absolute;left:10px;top:{}px;width:400px;height:40px'><p>{body}</p></div>",
+                    10 + 50 * index
+                )
+            })
+            .collect::<String>();
+        html_marked_runs(&format!("<section data-slide>{boxes}</section>"))
+    };
+    let runs = |items: &[(&str, [bool; 4])]| {
+        items
+            .iter()
+            .map(|(text, marks)| ((*text).to_owned(), *marks))
+            .collect::<Vec<_>>()
+    };
+    // The one space stays where the whitespace sequence starts: at the end
+    // of the span when it ends one, before the span when it starts one.
+    for (tag, mark) in [("u", U), ("s", S), ("b", B), ("i", I)] {
+        assert_eq!(
+            deck(&[
+                &format!("a <{tag}>b </{tag}> c"),
+                &format!("and <{tag}> that</{tag}>"),
+            ]),
+            [
+                runs(&[("a ", PLAIN), ("b ", mark), ("c", PLAIN)]),
+                runs(&[("and ", PLAIN), ("that", mark)]),
+            ],
+            "{tag}"
+        );
+    }
+    // Nested spans, a span that holds only whitespace between two edges, and
+    // a link, whose properties differ from the text around it.
+    assert_eq!(
+        deck(&[
+            "a <b>b <i> c</i></b> d",
+            "<b>x <i>y </i></b> z",
+            "a <s>b </s><i> </i> c",
+            "a <a href='https://example.test/'>b </a> c",
+            "a <a href='https://example.test/'> b</a>",
+            // A non-breaking space is not collapsible and stays as written.
+            "a&nbsp;&nbsp;<s>b</s>",
+        ]),
+        [
+            runs(&[("a ", PLAIN), ("b ", B), ("c", BI), (" d", PLAIN)]),
+            runs(&[("x ", B), ("y ", BI), ("z", PLAIN)]),
+            runs(&[("a ", PLAIN), ("b ", S), ("c", PLAIN)]),
+            runs(&[("a ", PLAIN), ("b ", PLAIN), ("c", PLAIN)]),
+            runs(&[("a ", PLAIN), ("b", PLAIN)]),
+            runs(&[("a\u{a0}\u{a0}", PLAIN), ("b", S)]),
+        ]
+    );
+}
+
+#[cfg(feature = "default-template")]
+fn fx231_box(body: &str) -> String {
+    format!(
+        "<section data-slide><div style='position:absolute;left:10px;top:10px;width:400px;height:200px'>{body}</div></section>"
+    )
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn fx231_nbsp_only_content_is_not_discarded() {
+    let positioned =
+        rpptx::Presentation::from_html(&fx231_box("<p>&nbsp;&nbsp;</p>"), &[]).unwrap();
+    assert!(
+        positioned
+            .diagnostics
+            .iter()
+            .all(|d| d.message == "implicit layout is unsupported, use explicit absolute geometry")
+    );
+    assert_eq!(
+        positioned.presentation.slide(0).unwrap().text(),
+        "\u{a0}\u{a0}"
+    );
+    let table = rpptx::Presentation::from_html("<table style='position:absolute;left:10px;top:10px;width:200px;height:100px'><tr><td>&nbsp;</td><td>a &nbsp;&nbsp; b</td></tr></table>", &[]).unwrap();
+    assert_eq!(
+        table.presentation.slide(0).unwrap().text(),
+        "\u{a0}\ta \u{a0}\u{a0} b"
+    );
+    let flow = rpptx::Presentation::from_html("<p>&nbsp;</p><blink>&nbsp;</blink>", &[]).unwrap();
+    assert_eq!(
+        flow.diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "implicit layout is unsupported, use explicit absolute geometry",
+            "unsupported HTML element `blink` was dropped"
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn fx231_pending_space_preserves_full_properties_and_link_owner() {
+    let html = fx231_box(
+        "<p><span style='font-family:Carlito;font-size:18pt;color:#123456'><a href='https://example.test/one'><u>a </u></a></span><i> </i><a href='https://example.test/two'><b>b</b></a> c</p>",
+    );
+    let result = rpptx::Presentation::from_html(&html, &[]).unwrap();
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|d| d.message == "implicit layout is unsupported, use explicit absolute geometry")
+    );
+    let deck = rpptx::Presentation::from_bytes(&result.presentation.to_bytes().unwrap()).unwrap();
+    let frame = deck
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .text_frame()
+        .unwrap();
+    let paragraph = frame.paragraph(0).unwrap();
+    assert_eq!(paragraph.run_count(), 3);
+    assert_eq!(
+        (0..3)
+            .map(|i| paragraph.run(i).unwrap().text().to_owned())
+            .collect::<Vec<_>>(),
+        ["a ", "b", " c"]
+    );
+    let first = paragraph.run(0).unwrap();
+    assert_eq!(first.font_name(), Some("Carlito"));
+    assert_eq!(first.font_size(), Some(1800));
+    assert_eq!(first.font_color().as_deref(), Some("123456"));
+    assert_eq!(
+        first.properties().unwrap().underline,
+        Some(oxml_drawing::text::TextUnderline::Single)
+    );
+    for (index, target) in [
+        (0, "https://example.test/one"),
+        (1, "https://example.test/two"),
+    ] {
+        let run = paragraph.run(index).unwrap();
+        let id = run
+            .properties()
+            .unwrap()
+            .hyperlink_click
+            .as_ref()
+            .unwrap()
+            .relationship_id
+            .as_ref()
+            .unwrap();
+        assert_eq!(deck.hyperlink_address(0, id), Some(target));
+    }
+    assert!(
+        paragraph
+            .run(2)
+            .unwrap()
+            .properties()
+            .is_none_or(|p| p.hyperlink_click.is_none())
+    );
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn fx231_whitespace_boundaries_reset_between_paragraphs_and_breaks() {
+    let result = rpptx::Presentation::from_html(
+        &fx231_box("<p>  <b>a </b> </p><p> </p><p> <i>b </i><br> <u>c </u> </p><p>d&#8195;e</p>"),
+        &[],
+    )
+    .unwrap();
+    let deck = result.presentation;
+    let frame = deck
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .text_frame()
+        .unwrap();
+    assert_eq!(frame.paragraph_count(), 4);
+    assert_eq!(
+        (0..4)
+            .map(|i| frame.paragraph(i).unwrap().text())
+            .collect::<Vec<_>>(),
+        ["a", "", "b\u{b} c", "d\u{2003}e"]
+    );
+    assert_eq!(frame.paragraph(2).unwrap().run(0).unwrap().text(), "b");
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn fx231_native_html_entrypoints_save_reopen_exact_runs() {
+    let html = fx231_box(
+        "<p>a <b>b </b> c&nbsp;&nbsp;d</p><p><a href='https://example.test/'>x </a><i> </i> y</p>",
+    );
+    let directory = f222_temp_directory("fx231-html");
+    fs::create_dir(&directory).unwrap();
+    let input = directory.join("input.html");
+    fs::write(&input, &html).unwrap();
+    let direct = rpptx::Presentation::from_html(&html, &[]).unwrap();
+    let opened = rpptx::Presentation::open_html::<&Path>(&input, &[]).unwrap();
+    assert_eq!(direct.diagnostics, opened.diagnostics);
+    let expected = vec![
+        ("a ".to_owned(), [false; 4]),
+        ("b ".to_owned(), [false, false, true, false]),
+        ("c\u{a0}\u{a0}d".to_owned(), [false; 4]),
+    ];
+    assert_eq!(html_marked_runs(&html), [expected]);
+    let bytes = direct.presentation.to_bytes().unwrap();
+    let mut package = open_opc(&bytes, "fx231 preservation");
+    let templates = package
+        .parts
+        .iter()
+        .filter(|(name, _)| {
+            name.starts_with("/ppt/slideMasters/")
+                || name.starts_with("/ppt/slideLayouts/")
+                || name.starts_with("/ppt/theme/")
+        })
+        .map(|(name, data)| (name.clone(), data.clone()))
+        .collect::<Vec<_>>();
+    let opaque = "<p:extLst><p:ext uri='{fx231}'><q:opaque xmlns:q='urn:fx231' x='  keep  '> text </q:opaque></p:ext></p:extLst>";
+    let slide = String::from_utf8(package.get_part("/ppt/slides/slide1.xml").unwrap().to_vec())
+        .unwrap()
+        .replace("</p:sld>", &format!("{opaque}</p:sld>"));
+    package.set_part("/ppt/slides/slide1.xml", slide.into_bytes());
+    let deck = rpptx::Presentation::from_bytes(&package_bytes(package)).unwrap();
+    let output = directory.join("output.pptx");
+    deck.save(&output).unwrap();
+    let reopened = rpptx::Presentation::open(&output).unwrap();
+    assert_eq!(reopened.slide(0).unwrap().text(), "a b c\u{a0}\u{a0}d\nx y");
+    for deck in [&opened.presentation, &reopened] {
+        let frame = deck
+            .slide(0)
+            .unwrap()
+            .shape(0)
+            .unwrap()
+            .text_frame()
+            .unwrap();
+        let paragraph = frame.paragraph(0).unwrap();
+        assert_eq!(
+            (0..paragraph.run_count())
+                .map(|i| {
+                    let run = paragraph.run(i).unwrap();
+                    (run.text().to_owned(), run.properties().and_then(|p| p.bold))
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("a ".to_owned(), None),
+                ("b ".to_owned(), Some(true)),
+                ("c\u{a0}\u{a0}d".to_owned(), None)
+            ]
+        );
+        let linked = frame.paragraph(1).unwrap();
+        assert_eq!(linked.run(0).unwrap().text(), "x ");
+        let run = linked.run(0).unwrap();
+        let id = run
+            .properties()
+            .unwrap()
+            .hyperlink_click
+            .as_ref()
+            .unwrap()
+            .relationship_id
+            .as_ref()
+            .unwrap();
+        assert_eq!(deck.hyperlink_address(0, id), Some("https://example.test/"));
+    }
+    let saved = open_opc(&reopened.to_bytes().unwrap(), "fx231 reopened");
+    assert!(
+        String::from_utf8_lossy(saved.get_part("/ppt/slides/slide1.xml").unwrap()).contains(opaque)
+    );
+    for (name, data) in templates {
+        assert_eq!(saved.get_part(&name), Some(data.as_slice()), "{name}");
+    }
+    if let Some(path) = std::env::var_os("FX231_INSTALLED_INPUT") {
+        fs::write(path, bytes).unwrap();
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn fx231_unsupported_html_keeps_ordered_diagnostics() {
+    let result = rpptx::Presentation::from_html(
+        &fx231_box("<p style='made-up:yes'>a <blink>b </blink><a href='javascript:x'>c</a> d</p>"),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .map(|d| (d.property.as_deref(), d.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (Some("made-up"), "unsupported CSS property `made-up`"),
+            (
+                Some("position"),
+                "implicit layout is unsupported, use explicit absolute geometry"
+            ),
+            (
+                None,
+                "unsupported inline HTML element `blink` was flattened"
+            ),
+            (None, "unsupported HTML element `blink` was dropped"),
+            (
+                Some("href"),
+                "unsafe hyperlink scheme was dropped from `javascript:x`"
+            )
+        ]
+    );
+    assert!(result.diagnostics.iter().all(|d| !d.path.is_empty()));
+    assert_eq!(result.presentation.slide(0).unwrap().text(), "a b c d");
+}

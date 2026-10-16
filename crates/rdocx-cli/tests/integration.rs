@@ -6469,3 +6469,40 @@ fn fx220_cli_font_refusals_preserve_inputs_and_existing_outputs() {
         assert!(help.contains(flag));
     }
 }
+
+#[test]
+fn fx231_cli_word_html_whitespace_roundtrip() {
+    let ws = TempWorkspace::new("fx231-html");
+    let source = ws.path.join("input.html");
+    let output = ws.path.join("output.docx");
+    fs::write(
+        &source,
+        "<p>a <b>b </b> c&nbsp;&nbsp;d</p><p><a href='https://example.test/'>x </a><i> </i> y</p>",
+    )
+    .unwrap();
+    let result = cli(&[
+        "convert",
+        source.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_success(&result, "HTML whitespace import");
+    let document = Document::open(&output).unwrap();
+    let paragraph = document.paragraph(0).unwrap();
+    assert_eq!(
+        paragraph
+            .runs()
+            .map(|run| (run.text(), run.is_bold()))
+            .collect::<Vec<_>>(),
+        [
+            ("a ".to_owned(), false),
+            ("b ".to_owned(), true),
+            ("c\u{a0}\u{a0}d".to_owned(), false)
+        ]
+    );
+    assert_eq!(document.paragraph(1).unwrap().text(), "x y");
+    let links = document.links();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].text, "x ");
+    assert_eq!(links[0].url.as_deref(), Some("https://example.test/"));
+}

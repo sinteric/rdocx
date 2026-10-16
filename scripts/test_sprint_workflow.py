@@ -341,6 +341,98 @@ class SprintWorkflowTests(unittest.TestCase):
     def ci_filter_matches(self, patterns: tuple[str, ...], path: str) -> bool:
         return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
+    def assert_native_ci_optimization(self, ci: str) -> None:
+        expected = (
+            'CARGO_PROFILE_DEV_OPT_LEVEL: "1"',
+            'CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "true"',
+            'CARGO_PROFILE_DEV_OVERFLOW_CHECKS: "true"',
+        )
+        for name in ("test", "msrv"):
+            job = self.yaml_block(ci, f"  {name}:")
+            environment = self.yaml_block(job, "    env:")
+            self.assertEqual(self.yaml_direct_lines(environment, 6), expected)
+        binding = self.yaml_block(ci, "  python-bindings:")
+        self.assertEqual(
+            self.yaml_direct_lines(self.yaml_block(binding, "    env:"), 6),
+            tuple(line.replace('LEVEL: "1"', 'LEVEL: "2"') for line in expected),
+        )
+        root_environment = self.yaml_block(ci, "env:")
+        self.assertNotIn("CARGO_PROFILE_DEV", root_environment)
+
+    def test_native_ci_optimization_preserves_debug_checks_and_binding_profile(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        self.assert_native_ci_optimization(ci)
+        for job_name in ("test", "msrv", "python-bindings"):
+            job = self.yaml_block(ci, f"  {job_name}:")
+            for key, replacement in (
+                ("OPT_LEVEL", '"0"'),
+                ("DEBUG_ASSERTIONS", '"false"'),
+                ("OVERFLOW_CHECKS", '"false"'),
+            ):
+                old = next(line for line in job.splitlines() if f"CARGO_PROFILE_DEV_{key}:" in line)
+                altered = old.split(":", 1)[0] + ": " + replacement
+                for changed in (job.replace(old, altered), job.replace(old + "\n", "")):
+                    with self.subTest(job=job_name, key=key, mutation=changed):
+                        with self.assertRaises(AssertionError):
+                            self.assert_native_ci_optimization(ci.replace(job, changed, 1))
+
+    def assert_presentation_renderer_routes(self, ci: str) -> None:
+        patterns = self.ci_filters(ci)["presentation_fidelity"]
+        workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
+        workspace_dependencies = workspace["workspace"]["dependencies"]
+        packages = {}
+        for manifest in (workflow.REPO / "crates").glob("*/Cargo.toml"):
+            data = tomllib.loads(manifest.read_text())
+            packages[data["package"]["name"]] = (manifest, data)
+        pending = ["rpptx"]
+        closure = set()
+        while pending:
+            name = pending.pop()
+            if name in closure:
+                continue
+            closure.add(name)
+            manifest, data = packages[name]
+            self.assertTrue(self.ci_filter_matches(patterns, str(manifest.parent.relative_to(workflow.REPO) / "src/lib.rs")), name)
+            sections = [data, *data.get("target", {}).values()]
+            for section in sections:
+                for kind in ("dependencies", "dev-dependencies", "build-dependencies"):
+                    for alias, settings in section.get(kind, {}).items():
+                        if isinstance(settings, dict) and settings.get("workspace"):
+                            settings = workspace_dependencies[alias]
+                        dependency = settings.get("package", alias) if isinstance(settings, dict) else alias
+                        if dependency in packages:
+                            pending.append(dependency)
+        for required in (
+            ".github/workflows/ci.yml", ".cargo/config.toml", "Cargo.toml",
+            "Cargo.lock", "rust-toolchain.toml", "crates/rpptx/examples/render_deck.rs",
+            "scripts/fetch_pptx_corpus.py", "scripts/pptx-corpus-manifest.tsv",
+            "scripts/install_pinned_libreoffice.py", "scripts/install_pinned_poppler.py",
+            "scripts/pptx_ssim_harness.py", "scripts/golden_png_harness.py",
+        ):
+            self.assertTrue(self.ci_filter_matches(patterns, required), required)
+        for name, (manifest, _) in packages.items():
+            if name not in closure:
+                path = str(manifest.parent.relative_to(workflow.REPO) / "src/lib.rs")
+                self.assertFalse(self.ci_filter_matches(patterns, path), path)
+        self.assertFalse(self.ci_filter_matches(patterns, "docs/hld/00-vision.md"))
+
+    def test_presentation_fidelity_routes_the_renderer_dependency_closure(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text()
+        self.assert_presentation_renderer_routes(ci)
+        filter_block = ci.split("            presentation_fidelity:\n", 1)[1].split("            word_fidelity:", 1)[0]
+        for line in filter_block.splitlines(keepends=True):
+            if not line.strip().startswith("- "):
+                continue
+            with self.subTest(missing=line.strip()):
+                changed = ci.replace(filter_block, filter_block.replace(line, "", 1), 1)
+                with self.assertRaises(AssertionError):
+                    self.assert_presentation_renderer_routes(changed)
+        for broad in ("crates/**", "crates/oxml-*/**", "crates/rpptx*/**"):
+            changed = ci.replace(filter_block, filter_block + f"              - '{broad}'\n", 1)
+            with self.subTest(broad=broad):
+                with self.assertRaises(AssertionError):
+                    self.assert_presentation_renderer_routes(changed)
+
     def ci_gate_environment(
         self,
         *,
@@ -8485,7 +8577,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertTrue(all(len(value) == 1 for value in placements.values()))
         self.assertEqual(
             {sprint for value in placements.values() for sprint, _, _ in value},
-            set(range(70, 75)) | {86, 89, 90} | set(range(92, 96)),
+            set(range(70, 75)) | {86, 89, 90, 95} | set(range(97, 100)),
         )
 
         backlog_rows: dict[str, list[tuple[int, str, str, str]]] = {

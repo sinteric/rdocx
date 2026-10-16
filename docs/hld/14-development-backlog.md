@@ -50,14 +50,14 @@ contracts require integrated gates at each sprint boundary.
 M23 closes the five-document from-scratch business-document boundary. M24 then
 classifies and closes the broader modern DOCX authoring surface before M19 may
 begin. The spreadsheet programme remains a business decision and proceeds only
-if F-184 confirms a material gap in the Rust ecosystem at S96.
+if F-184 confirms a material gap in the Rust ecosystem at S101.
 
 The stopping and compression choices are:
 
 - **Stop after M23.** S73 can generate the five private reference documents
   from `Document::new()` through public modeled APIs, with no base template,
   raw OOXML, or LibreOffice field-update pass.
-- **Stop after M24.** S95 provides the complete modern DOCX authoring boundary.
+- **Stop after M24.** S99 provides the complete modern DOCX authoring boundary.
   Every in-scope feature is authorable, readable, mutable, round-trip safe,
   rendered where applicable, and classified across the public bindings.
 - **Archive M19 at its decision gate.** F-184 may still find that the advanced
@@ -1604,7 +1604,7 @@ decision lands.
 OPC, DrawingML, the chart engine, the layout engine and the PDF backend all
 exist and are format-neutral, which lowers the cost of a third family. That is
 not sufficient reason to build one. F-184 must reassess the Rust ecosystem when
-S96 begins. M19 proceeds only if no credible maintained crate provides the
+S101 begins. M19 proceeds only if no credible maintained crate provides the
 combined lifecycle required here: open an existing advanced workbook, preserve
 what is not executed, edit typed features, recalculate formulas and local
 pivots, refresh a declared Power Query subset, automate it through an Office
@@ -1626,7 +1626,7 @@ render to PDF.
 
 ### F-184, Advanced spreadsheet go or no-go (S)
 The go or no-go decision record. Reassess the maintained Rust spreadsheet
-ecosystem at S96, state whether the combined lifecycle gap still exists, and
+ecosystem at S101, state whether the combined lifecycle gap still exists, and
 archive M19 if it does not. If it does, amend `02-scope-and-non-goals.md`, define
 the boundary between `oxml-sml` as chart support and `rxlsx` as a library, and
 publish the preserve, model, and execute classification for every advanced
@@ -1639,7 +1639,7 @@ CLI/Python workflow with rendering. Compare integration, installation,
 maintenance and release costs, including reuse behind a consistent facade.
 Evaluate the utility and limits of a reader/editor stage before calculation
 and pivots, retaining formula and pivot state with explicit stale-result
-diagnostics when edits cannot be recalculated. The existing S105 distribution
+diagnostics when edits cannot be recalculated. The existing S110 distribution
 boundary remains until a separate reviewed roadmap decision changes it.
 
 The reporter's [follow-up](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6063901190)
@@ -1925,6 +1925,69 @@ element after a round trip.
 **Test gate**: regression. Foreign `tcW` XML remains unmodelled and
 byte-identical, and an `isLgl` raw child stays before `suff` after parse and
 write.
+
+### External Word benchmark, S100
+
+Issue 377 reports that `neurotic_docx_bench` scores `rdocx convert` against
+pinned Microsoft Word PDF exports. Its 2026-10-14 cohort ranks rdocx 0.16.0
+eighth of ten at an ITT median of 45.90. These stories reproduce that score
+locally, then close the largest measured gaps. The benchmark corpus is never
+committed, because ODC-By covers the collection and not the individual files.
+
+### F-313, External Word benchmark reproduction loop (S)
+A pinned local run of the benchmark's own scorer over its 400-document
+conversion set and Word PDFs, producing a per-document score, page-count and
+failure table for one rdocx build. No Word installation is required.
+**Depends on**: none.
+**Test gate**: regression. The released 0.16.0 binary reproduces the published
+ITT median within the scorer's recorded noise, and the per-document table is
+written outside the repository.
+
+### F-314, Benchmark conversion failures and startup latency (M)
+Fix the three documents that fail to convert in the published cohort, and
+measure where process startup time goes, including system font discovery,
+before reducing it.
+**Depends on**: F-313.
+**Test gate**: regression. All three documents convert, and the measured
+startup cost has a recorded before and after on the same machine.
+
+### F-315, Word tracked-change markup print view (L)
+An opt-in revision view that paints tracked changes the way Word's Save as PDF
+does with all markup shown: per-author insertion and deletion colours,
+underline and strikethrough, change bars and moved text. The default
+accepted view and every hash baseline stay unchanged.
+**Depends on**: F-313.
+**Test gate**: golden. Benchmark documents with tracked changes and no comments
+match their Word PDFs within the recorded tolerance, and default output is
+byte identical to before this story.
+
+### F-316, Word comment and revision balloon pane (L)
+The markup pane Word draws when comments or formatting revisions are present:
+page content scaled into the reduced area, comment and formatting balloons on
+the right and their connector lines. Builds on the F-315 view.
+**Depends on**: F-315.
+**Test gate**: golden. Benchmark documents with comments match their Word PDFs
+within the recorded tolerance, including the balloon geometry.
+
+### F-317, Benchmark pagination and layout fidelity wave (L)
+Group the lowest-scoring clean documents into root-cause clusters such as page
+breaks, table splits, spacing and font substitution. Fix the largest clusters.
+Every fix must also hold on the F-197 Word SSIM harness, so the work does not
+overfit one Word build and one scorer.
+**Depends on**: F-313.
+**Test gate**: regression. The page-count mismatch rate and the clean-document
+median both improve on the F-313 baseline, with no F-197 regression and every
+hash delta declared.
+
+### F-318, Benchmark release, adapter update and README badge (M)
+Prepare the stable family release that carries F-314 through F-317. Propose
+the benchmark adapter change that passes the markup view, request a rerun, and
+add the README badge chosen from the Issue 377 options. Publication itself
+stays with `/release` and its separate final approval.
+**Depends on**: F-314, F-315, F-316, F-317.
+**Test gate**: regression. The prepared release passes the full gate, and the
+F-313 loop on the release candidate records the expected ranking before the
+rerun request.
 
 ---
 
@@ -2268,7 +2331,7 @@ documents only as anonymous, non-identifying capability families. The audit
 found no duplicate scope, missing owner, dangling dependency, dependency cycle,
 or scheduling conflict in F-243 through F-310. Their boundaries, sizes, and
 dependencies remain authoritative. The current plan places them in S71 through
-S75, S86, and S89 through S95.
+S75, S86, S89 through S91, S95, and S97 through S99.
 **Capability matrix owner**: `docs/hld/02-scope-and-non-goals.md`, "Modern DOCX
 capability matrix".
 **Test gate**: regression. Every in-scope matrix row has evidence, an owner
@@ -6636,7 +6699,7 @@ before sprint close.
 
 ### F-X192, Complete the remaining Word bibliography catalogue (L)
 
-Complete the Word bibliography work deferred from S90 and now carried to S92
+Complete the Word bibliography work deferred from S90 and now carried to S95
 by the user. F-282 delivers the native source-authoring foundation and its measured
 formatter subset. This story owns the full pinned Word catalogue result
 contract, without claiming the existing subset establishes complete parity.
@@ -7296,19 +7359,18 @@ provenance for GitHub reconciliation through sprint close.
 
 ### F-X178, Clearable direct run formatting setters (S)
 
-Follow-up to [Issue 264](https://github.com/tensorbee/rdocx/issues/264). A
-declarative wrapper needs one setter per run property that can set a value,
-write an explicit false, or clear direct formatting. `Run` lacks that form for
-double strike, all caps, small caps, vertical alignment, character spacing,
-width scale, position and hidden. Add `_value` setters that take an `Option`
-and match `set_bold_value`. Vertical alignment takes a typed value covering
-superscript, subscript and baseline. The existing one-way setters keep their
-behaviour. Rust facade only, binding parity is decided in design.
-**Depends on**: none.
-**Test gate**: unit and round trip. Each new setter writes a value, writes an
-explicit false where the property is boolean, removes only its own element on
-`None`, and adds no `w:rPr` to a run that has none. Values survive save and
-reopen, and all 49 hash entries are unchanged.
+Resolve Issue364 using the existing clearable-setter contract. The delivered
+formatting providers cover double strike, caps, vertical alignment, spacing
+and hidden. Implement only the remaining width-scale and position `_value`
+setters taking `Option`, matching `set_bold_value`. Preserve the one-way
+setters. Rust facade scope and any binding parity are confirmed in design.
+Issue264 remains an open requirements discussion, with no broader Styles
+implementation implied by this repair.
+**Depends on**: F-X200.
+**Test gate**: unit and round trip. Each property writes its explicit value,
+removes only its own element on `None`, and adds no `w:rPr` when absent.
+Retain explicit-false controls for boolean setters. Values survive save and
+reopen, with all existing deterministic hashes unchanged.
 
 ### F-X168, Current issue and contribution closure evidence (M)
 
@@ -7817,8 +7879,7 @@ Resolve Issue362 and assess PR363 at immutable0b9a3cccc1b31bac7ec4108c923faa176b
 **Depends on**: F-X220
 **Test gate**: differential
 
-Investigate native Word use of distinct embedded regular, bold, italic and bold-italic faces for an uninstalled family against the documented MS-OE376 one-font-per-name boundary. Preserve F-X220 API and renderer contracts. Require exact prepared font glyph and metric proof before and after native save and normal reopen, absent host installation, fresh family/key controls and recorded native normalization. A workaround must preserve document semantics and source ownership. Do not claim synthetic bold is genuine bold or rewrite family names without an approved design. The user deferred this interoperability work to S92 on 2026-10-13. It does not gate S91 closure.
-
+Investigate native Word use of distinct embedded regular, bold, italic and bold-italic faces for an uninstalled family against the documented MS-OE376 one-font-per-name boundary. Preserve F-X220 API and renderer contracts. Require exact prepared font glyph and metric proof before and after native save and normal reopen, absent host installation, fresh family/key controls and recorded native normalization. A workaround must preserve document semantics and source ownership. Do not claim synthetic bold is genuine bold or rewrite family names without an approved design. This interoperability work is planned for S95 under the 2026-10-13 deferral. It does not gate S91 closure.
 
 ### F-X224, Repair hosted release tool and stack routing
 
@@ -7864,3 +7925,185 @@ owner CI route must preserve private Office resources, require explicit
 runner authority and demonstrate task-scoped admission or isolation. Retain
 full hosted binding suites and debug save assertions. No new production API,
 dependency, product file, font substitute or reopened contributor intake.
+
+### F-X228, Qualify faster CI without weakening gates
+
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Assess PR376 for faster CI with measured current-head results. Use dev opt-level1 for Test and MSRV and release-mode presentation corpus rendering. Narrow presentation routing only against actual Cargo and example dependency closure. Preserve debug assertions, overflow checks, existing binding opt-level2, owner-only dispatch controls, HarfBuzz14.4, animation stack setup, all suites and independent oracles. No donor timing claim counts as current evidence.
+
+
+### F-X229, Repair comparison reconstruction correctness
+
+**Size**: L
+**Depends on**: F-X203
+**Test gate**: regression
+
+Resolve Issues368 through371 using the correctness subset of PR374. Support whole-paragraph hyperlink insertion and deletion, edits adjacent to tables, empty paragraph properties and trailing or line-break-only paragraph deletion. Accept-all and reject-all must reconstruct destination and source properties, relationships, tables and stories through save/reopen. Preserve opaque XML, atomic failure and bounded resources. Keep presentation grouping changes separate.
+
+
+### F-X230, Group comparison changes for readable revisions
+
+**Size**: M
+**Depends on**: F-X229
+**Test gate**: regression
+
+Resolve Issue372 using the separately attributed grouping subset of PR374. Group word and character revisions for readable comparisons while preserving acceptance/rejection reconstruction. Do not cross fields, opaque XML, comments, bookmarks, hyperlinks or formatting boundaries. Review intentional output changes separately from the correctness repair and test mixed edits plus unchanged controls.
+
+
+### F-X231, Preserve PowerPoint HTML import whitespace
+
+**Size**: M
+**Depends on**: F-X217
+**Test gate**: regression
+
+Assess advanced PR359 PowerPoint HTML import whitespace. Preserve spaces beside emphasis, repeated whitespace across span boundaries and NBSP through native and installed public entrypoints and save/reopen. Qualify the already equivalent Word changes with the advanced tests without duplicating implementation. Semantic HTML and Markdown export acceptance remains with F-X218. Report intentional deltas and unsupported input explicitly.
+
+
+### F-X232, Render legal revisions and qualify checked XML repros
+
+**Size**: L
+**Depends on**: F-X201, F-X211a, F-X211d
+**Test gate**: regression
+
+Resolve Issue373 from PR375 uncovered slices. Add legal revision colouring and improved double underline without changing stored formatting. Include render settings in layout cache identity and keep native, CLI and Python parity. Review proposed public RevisionStyle fields and ParagraphBlock type changes for compatibility in design. Reuse existing checked-XML and namespace providers, qualifying the exact header/footer paragraph, run and ancestor-namespace repros. Require independent native paint evidence and separately attributed deterministic product and external raster deltas.
+
+
+### F-X233, Repair paragraph border geometry
+
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Resolve Issue366 by first reproducing its exact border input, including the stated 15tp value. Inspect saved w:sz and w:space and independently measure cropped geometry and paint. Existing size conversion already divides by eight, so distinguish width from clearance, clipping and joins before selecting a fix. Require save/reopen and independent native comparison. Never loosen raster thresholds to hide a delta.
+
+
+### F-X234, Preserve supported LaTeX conversion structure
+
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Resolve the conversion half of Issue365 for its exact supplied formula. Preserve pi, lim, to, infty and meaningful spacing with exact normalized OfficeMath structure and explicit loss diagnostics. Reuse existing fraction, radical and n-ary support. Retain bounded input and parser depth limits. Pin the actual independent Pandoc producer and retain the existing structural oracle contract. This is a bounded issue repair, not unrestricted TeX support.
+
+
+### F-X235, Qualify equation layout against native Word
+
+**Size**: L
+**Depends on**: F-X234
+**Test gate**: differential
+
+Resolve the layout half of Issue365 after conversion completion. Qualify integral limits, fractions, radicals, scripts, baselines and glyph coverage for the exact formula. Retain the existing one-point geometry and declared150DPI SSIM contract. Pin the actual independent native Word producer for new fixtures and retain historical evidence identities. Deterministic font mode, save/reopen and reviewed product/raster changes are required.
+
+
+### F-X236, Measure public setter inlining before changing policy
+
+**Size**: S
+**Depends on**: none
+**Test gate**: regression
+
+Resolve Issue367 through a real cross-crate non-LTO consumer benchmark and compiler evidence. Apply selective public-setter inline annotations only where measured benefit justifies them, or record an evidence-based disposition explaining no change. Preserve semantics, public API and resource bounds. Do not introduce a blanket inline policy or assert an unmeasured performance problem.
+
+
+### F-X237, Restore linear Python table owner inventory
+
+**Size**: L
+**Depends on**: none
+**Test gate**: regression
+
+Resolve Issue378's v0.16.1 Python table open and edit regression. Batch qualified
+physical cell inventory and index revision-route reconciliation without changing
+owner authority, stale-handle causes, merged or nested cell identity, opaque
+source preservation or atomic publication. Opening and one edit must perform
+linear work in source cells and owner inventory. Qualify60,120 and240 cells and
+the exact40-by6 fill with deterministic work counts and authenticated same-host
+release0.16.0 timing comparison. Preserve no-table controls and full fresh Word
+Python acceptance. A small additive hidden native batch API may serve the
+existing cross-crate registry consumer. No new Python surface is required.
+
+### F-X238, Restore python-docx Word names from the first-draft corpus
+
+**Size**: L
+**Depends on**: none
+**Test gate**: regression
+
+Resolve the Word half of Issue379. Every Word name the issue lists, including
+`Document.add_section`, works as in python-docx 1.2.0 or fails with an error
+that names the supported rdocx alternative. The three divergence scripts fail
+with a message naming the supported way. The PR333 corpus runner at
+`193819ca` runs each listed script unchanged and reports the results
+separately from the F-X211 corpus. Wrap existing native behaviour. New document
+semantics require a separate design.
+
+### F-X239, python-pptx notes names and refusal of silent zero values
+
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Resolve the PowerPoint half of Issue379 and its unit follow-up. Add
+`Slide.has_notes_slide`, `notes_slide.notes_text_frame` and the
+`MSO_THEME_COLOR_INDEX` alias. The five assignments that now save zero raise
+before they change the document, and each message names the unit to use.
+
+### F-X240, Python and CLI signing and signature verification
+
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Resolve the signing half of Issue380. Python `sign` and `verify_signatures`
+for documents and presentations, accepting DER and PEM keys and certificates,
+and matching `sign` and `verify-signatures` CLI commands with a non-zero exit
+for an invalid or partial signature. Published wheels and CLI builds enable
+`digital-signatures` only after dependency, licence and size gates pass. A
+test changes one signed part and sees verification name it.
+
+### F-X241, Python and CLI form reading and filling
+
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Resolve the form half of Issue380. Python content control and legacy form
+field reading and filling by tag, alias or name, and `rdocx fill --values`.
+A template with plain text, checkbox, drop-down and date controls plus a
+legacy text field reads back its filled values after save and reopen through
+both Python and the CLI.
+
+### F-X242, Form control geometry and AcroForm field model
+
+**Size**: L
+**Depends on**: none
+**Test gate**: regression
+
+First of three Issue381 stories. Layout reports the page rectangle of every
+content control and legacy form field. Each maps to an AcroForm text, button
+or choice field with a unique name from its tag, alias or legacy name, a
+tooltip from its alias or help text, and its current value without
+placeholder text. No PDF output changes in this story.
+
+### F-X243, Field appearance streams, full-font resources and conformance
+
+**Size**: L
+**Depends on**: F-X242
+**Test gate**: differential
+
+Write the F-X242 fields into the PDF behind an opt-in option. Every widget has
+an appearance stream, the field font in `/DR` covers typed input beyond the
+page subset, and tagged output places widgets under `/Form` structure
+elements. `qpdf --json` lists the expected names, types, values and
+rectangles, and the PDF/A and PDF/UA checks still pass with the option on.
+
+### F-X244, Signature field, bindings and CLI option
+
+**Size**: M
+**Depends on**: F-X243
+**Test gate**: regression
+
+Close Issue381. A marked control becomes an empty `/Sig` field, and the option
+reaches Rust, Python and `rdocx convert`. Output without the option is byte
+identical to before. Signing the PDF in the library stays out of scope. The
+manual Acrobat Reader and Preview fill and sign check is recorded as evidence.

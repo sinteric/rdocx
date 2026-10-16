@@ -14,6 +14,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from fetch_pptx_corpus import EXPECTED_COUNT, load_manifest, verify_directory
 from golden_png_harness import decode_png
@@ -137,6 +138,7 @@ def run_rust_renderer(corpus: Path, output: Path, manifest: Path) -> None:
         [
             "cargo",
             "run",
+            "--release",
             "--quiet",
             "-p",
             "rpptx",
@@ -347,6 +349,16 @@ def run_suite(test_names: list[str] | None = None) -> bool:
 
 
 class PptxSsimHarnessTests(unittest.TestCase):
+    def test_rust_renderer_uses_release_without_changing_arguments(self) -> None:
+        with patch("subprocess.run") as run:
+            run_rust_renderer(Path("corpus"), Path("output"), Path("manifest.tsv"))
+        run.assert_called_once_with(
+            ["cargo", "run", "--release", "--quiet", "-p", "rpptx", "--example",
+             "render_deck", "--", "corpus", "output", "manifest.tsv"],
+            cwd=REPO_ROOT,
+            check=True,
+        )
+
     def test_identical_images_have_ssim_one(self) -> None:
         image = (2, 1, bytes((10, 20, 30, 255, 40, 50, 60, 128)))
         self.assertEqual(structural_similarity(image, image), 1.0)

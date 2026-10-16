@@ -25467,3 +25467,63 @@ fn fx211d_merge_refuses_removed_opaque_properties_atomically() {
         "merge discarded opaque properties: {unsafe_successes:?}"
     );
 }
+
+#[test]
+fn run_width_scale_and_position_can_restore_inheritance_after_reopen() {
+    const OPAQUE: &str = r#"<x:keep xmlns:x="urn:producer" x:flag="exact"/>"#;
+    let mut document = Document::new();
+    document.add_paragraph("").add_run("value").bold(false);
+    let bytes = document.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let xml = xml.replacen("</w:rPr>", &format!("{OPAQUE}</w:rPr>"), 1);
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut document = Document::from_bytes(&bytes.into_inner()).unwrap();
+    {
+        let mut paragraph = document.paragraph_mut(0).unwrap();
+        let mut run = paragraph.run_mut(0).unwrap();
+        run.set_width_scale(80);
+        run.set_position(-4);
+    }
+    for (scale, position) in [
+        (Some(80), Some(-4)),
+        (None, Some(-4)),
+        (Some(0), None),
+        (None, None),
+        (Some(100), Some(0)),
+    ] {
+        {
+            let mut paragraph = document.paragraph_mut(0).unwrap();
+            let mut run = paragraph.run_mut(0).unwrap();
+            run.set_width_scale_value(scale);
+            run.set_position_value(position);
+        }
+        let bytes = document.to_bytes().unwrap();
+        document = Document::from_bytes(&bytes).unwrap();
+        let xml = document_xml(&mut document);
+        assert!(std::str::from_utf8(&xml).unwrap().contains(OPAQUE));
+        let model = rdocx_oxml::CT_Document::from_xml(&xml).unwrap();
+        let rdocx_oxml::document::BodyContent::Paragraph(paragraph) = &model.body.content[0] else {
+            panic!("expected paragraph");
+        };
+        let properties = paragraph.runs[0].properties.as_ref().unwrap();
+        assert_eq!(properties.width_scale, scale);
+        assert_eq!(properties.position, position);
+        assert_eq!(properties.bold, Some(false));
+    }
+
+    let mut plain = Document::new();
+    plain.add_paragraph("").add_run("plain");
+    {
+        let mut paragraph = plain.paragraph_mut(0).unwrap();
+        let mut run = paragraph.run_mut(0).unwrap();
+        run.set_width_scale_value(None);
+        run.set_position_value(None);
+    }
+    let bytes = plain.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    let xml = document_xml(&mut reopened);
+    assert!(!std::str::from_utf8(&xml).unwrap().contains("<w:rPr"));
+}

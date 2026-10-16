@@ -2576,7 +2576,7 @@ Only the selected branch projects paint. The complete source owner is fingerprin
 before publication. Text watermark authoring admits only opacity 0.5, with a named
 atomic unsupported error for other valid-range values before any owner allocation.
 Legacy VML authoring and image opacity retain their separate contracts. Full-range
-DrawingML text opacity is deferred to F-X219 in S92.
+DrawingML text opacity is deferred to F-X219 in S95.
 Generic text boxes retain their existing representation. Picture
 alpha and rotation are projected only from the admitted picture chain, then use the existing image group opacity and affine paint
 path. Ordinary pictures with no effects retain their existing representation.

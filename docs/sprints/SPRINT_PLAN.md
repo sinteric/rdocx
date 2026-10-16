@@ -11,7 +11,7 @@ a zero-finding `/microscope`. Full verification and sprint review cover the
 final integrated result at closure. A formal dependency checkpoint completes
 a prerequisite from scoped evidence and focused integration checks.
 
-The active roadmap runs through S105, with earlier deferred cutover boundaries
+The active roadmap runs through S110, with earlier deferred cutover boundaries
 retained in place. The sizing rationale and compression options are in
 `docs/hld/14-development-backlog.md`.
 
@@ -759,9 +759,9 @@ against `14-development-backlog.md` M14 through M24.
 The order is deliberate and each boundary is a stopping point. Stopping after
 S45 leaves one chart engine serving both families. Stopping after S51 leaves a
 document-automation product. S69 closes the first Word-depth programme. S73
-closes from-scratch generation for the five private business documents, and S95
+closes from-scratch generation for the five private business documents, and S99
 closes the broader modern DOCX authoring boundary. The advanced spreadsheet
-programme starts only after S95 and only if its feasibility gate confirms a gap
+programme starts only after the S100 benchmark sprint and only if its feasibility gate confirms a gap
 worth filling in the Rust ecosystem.
 
 | Sprints | Milestone | Stories | Days |
@@ -775,8 +775,9 @@ worth filling in the Rust ecosystem.
 | S59 to S64 | M21, presentation depth | 15 | 60 |
 | S65 to S69 | M22, Word depth | 12 | 44 |
 | S70 to S73 | M23, from-scratch business documents | 24 | 112 |
-| S74 to S75, S86, S89 to S95 | M24, modern DOCX authoring completeness | 47 | 219 |
-| S96 to S105 | M19, advanced spreadsheets | 21 | 85 |
+| S74 to S75, S86, S89 to S91, S95, S97 to S99 | M24, modern DOCX authoring completeness | 47 | 219 |
+| S100 | M20, external Word benchmark fidelity | 6 | 21 |
+| S101 to S110 | M19, advanced spreadsheets | 21 | 85 |
 
 The table counts milestone stories only. S70 also carries four cross-cutting
 Issue 67 and Issue 69 stories estimated at 12 developer-days. S76 through
@@ -1333,7 +1334,7 @@ evidence is attributed correctly. F-X084 through F-X086 are independent after
 that intake and may run in parallel, but only one story may own a rendering
 baseline change. F-240 is the planning authority. F-241 and F-242 consume its
 approved matrix, and F-240 updates the provisional sprint contents before
-S70 closes. The M24 end gate is S95.
+S70 closes. The M24 end gate is S99.
 
 #### Sprint S71, Fresh package, styles, and numbering
 
@@ -2040,7 +2041,7 @@ PR 279 supplies F-X182. PR 280 is stacked on it and supplies F-X183, including n
 Issue [281](https://github.com/tensorbee/rdocx/issues/281), raised by `hadim`,
 adds roadmap feedback to this sprint intake. Record its unified CLI/Python
 workflow, template filling, preservation-safe edits and rendering needs in the
-existing F-184 decision at S96. The [maintainer response](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6058792996)
+existing F-184 decision at S99. The [maintainer response](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6058792996)
 answers scheduling and staged-delivery questions and requests concrete workflows
 and preservation needs. Keep the discussion open for the F-184 decision. S90 delivers the documented
 assessment, while spreadsheet implementation retains its affirmative decision
@@ -2516,11 +2517,175 @@ PR359 open for the separately planned PowerPoint HTML import residual.
 Discussions264,281 and377 remain open. Future replanning in the primary
 worktree is separate from this frozen publication source.
 
-#### Sprint S92, Bibliography and navigation carryovers, templates and forms
+#### Sprint S92, Contribution and issue repairs
+
+**Goal**: resolve the new contribution and issue repairs without expanding the
+frozen S91.1 publication scope. Six stories total 15 to 18 developer-days after the explicit Issue378 intake.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X228 | Qualify faster CI without weakening gates | M |
+| F-X178 | Clearable direct run formatting setters | S |
+| F-X229 | Repair comparison reconstruction correctness | L |
+| F-X230 | Group comparison changes for readable revisions | M |
+| F-X231 | Preserve PowerPoint HTML import whitespace | M |
+| F-X237 | Restore linear Python table owner inventory | L |
+
+Integrate F-X228 from PR376 first, with actual current-head CI evidence.
+F-X178 resolves Issue364 using the existing story, implementing only the
+remaining width-scale and position reset forms. It does not close Issue264.
+F-X229 addresses Issues368 through371 using PR374's correctness commits.
+F-X230 follows its completion and separately addresses Issue372 using the
+comparison-grouping commit. F-X231 consumes the advanced PR359 PowerPoint
+HTML import changes. Qualify its already equivalent Word changes once.
+Semantic export Issues352 and353 and PR358 retain their existing acceptance.
+
+CI, setters and HTML import can proceed in separate worktrees. Comparison
+correctness precedes grouping. Lease shared native sources and integration
+test entrypoints explicitly. Rebase or extract minimal contributor commits
+against the published S91.1 result. Resolve conflicts manually against both
+contracts. Do not merge stacked donor branches wholesale or duplicate fixes.
+
+Issue378 was explicitly added during execution on2026-10-15. F-X237 repairs the Python table-owner inventory and revision-route performance regression with exact preservation and same-host timing gates. It is independent of comparison grouping and shares only measured package carriers at integration. Issue316 receives no additional implementation scope here.
+
+#### Sprint S93, Rendering and remaining issue repairs
+
+**Goal**: finish the remaining issue acceptance with independent rendering and
+conversion evidence. Five stories total 13 to 16 developer-days.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X232 | Render legal revisions and qualify checked XML repros | L |
+| F-X233 | Repair paragraph border geometry | M |
+| F-X234 | Preserve supported LaTeX conversion structure | M |
+| F-X235 | Qualify equation layout against native Word | L |
+| F-X236 | Measure public setter inlining before changing policy | S |
+
+F-X232 assesses PR375 for Issue373. Reuse delivered namespace and checked-XML
+providers, then qualify the exact header/footer repros. Legal revision colours
+and double underline remain uncovered. Review public rendering-type changes
+as compatibility decisions before implementation. F-X233 diagnoses Issue366
+from its exact border input before selecting a fix. F-X234 and then F-X235
+resolve Issue365's conversion and layout halves. F-X236 resolves Issue367
+through a measured cross-crate decision, with selective changes only if useful.
+
+Legal revision and border painting share paginator resources and integrate
+serially. Conversion completion precedes equation layout acceptance. Only one
+story may own the deterministic baseline in each wave. Expected product and
+independent raster changes require separate attribution and review. These
+estimates are developer effort, not elapsed-time promises. Split an expanded
+contract into a later sprint instead of weakening gates or enlarging this wave.
+
+##### Repair intake, coverage and closure gates
+
+The read-only GitHub snapshot at 2026-10-15 09:59 UTC contains 33 open PRs and
+53 issues. Issues264,281 and377 remain open conversations. The forty previously
+included issues retain their existing acceptance owners and publication gates.
+The ten new issues map as follows. A merged related PR alone closes none.
+
+| Issue or contribution | Acceptance owner | Remaining work and required evidence |
+|---|---|---|
+| Issue364 | F-X178 | Set, clear and save/reopen width-scale and position. Explicit false and no-rPr-on-None controls for the full existing setter contract |
+| Issue365 | F-X234, F-X235 | Exact supplied formula structure, symbol and spacing loss diagnostics, independent native geometry and raster controls |
+| Issue366 | F-X233 | Reproduce the exact border values, inspect saved size/space and isolate clipping, clearance or join errors before fixing |
+| Issue367 | F-X236 | Cross-crate non-LTO benchmark and compiler evidence supporting selective inline annotations or a documented disposition |
+| Issues368,369,370,371, PR374 correctness | F-X229 | Hyperlink paragraph insertion/deletion, edits adjacent to tables, empty paragraph properties and trailing or line-break-only deletion. Accept-all/reject-all reconstruction and save/reopen |
+| Issue372, PR374 grouping | F-X230 | Readable word/character groups without crossing fields, opaque XML, comments, bookmarks, hyperlinks or formatting boundaries |
+| Issue373, PR375 | F-X232 | Legal revision preset and double underline, immutable stored formatting, cache identity, public surface parity and exact checked-XML owner/namespace repros |
+| Advanced PR359 | F-X231 | PowerPoint emphasis-edge spaces, repeated span-boundary spaces and NBSP. Qualify equivalent Word cases without reimplementation |
+| Advanced PR357 | Existing F-X216 | Current unsaved-source branding and staged source/destination regression qualification. No demonstrated new implementation residual |
+| PR376 | F-X228 | Current integrated CI, unchanged suites and oracles, preserved binding profile and native setup |
+
+All 33 donor PRs target main at the recorded base
+`733ce6f7b2b816c5760692abf5c99d68b29ae897`. Thirty-two conflict, while PR376
+is mergeable at the snapshot. None has a submitted GitHub review or inline
+review thread. All issue bodies, PR comments and current revisions were read.
+Thirty-one aggregate checks are green. PR357 and PR376 fail the old Word
+story-inventory scaling test, with measured ratios 3.67 and 3.83. F-X222's
+integrated provider repair requires current-head evidence, not a weaker limit.
+Contributor CI is provenance, not the integrated sprint gate.
+
+PR374 head `3d7a3c9b703042b5ad53e586b94fe01eb843daf0` separates correctness
+from grouping commit `7ebb5120aceee40d765a408faf19e1fa4bcc1724`.
+PR375 head `0c608f7a2a1d5a9f8391a4de1dfed661df6e105a` inherits PR328 and
+PR333 changes. Extract only uncovered work. PR376 head is
+`4cd93af075ddfd2ad6ccd394d7d91fc26e1fa571`.
+PR359 advanced to `e974ea2240691c0de581efa172ba8c88a77c054b` and contains
+PR354. PR357 advanced to `57011087f7d34f28a09f1217afdacf3dc64f0aa0`.
+Do not close advanced PR359 on the strength of the frozen release alone.
+
+Previously assessed stacks retain their current owners: PR324 before327,
+PR325 before330, PR336 before338 and PR354 before359. PR328 and333 overlap
+PR375. Preserve accepted fixes and qualify combined imports, namespace owners,
+formatting, comparison and rendering after reconciliation. Read current heads
+and comments again at implementation and final closure, without silently
+expanding either sprint's approved scope.
+
+Each story requires design, scoped verification and zero-finding microscope.
+The integrated result requires the full /verify gate and sprint review,
+including installed bindings, applicable native/oracle controls and explained
+deterministic hash/raster deltas. Only /close-sprint may merge to main.
+Only /release may publish at its separately approved reviewed SHA. Close PRs
+and issues only after all their criteria and publication requirements pass.
+No issue is complete merely because its provider was integrated.
+
+##### Prospective sprint numbering
+
+S91.1's completed scope, branch and release records retain their original IDs.
+S92 is the active repair sprint, and S93 remains planned. Earlier S92 throughS95
+feature targets now map to S94 throughS97. The external Word benchmark sprint
+added in the parallel planning session moves from S96 to S98 with F-313
+throughF-318 intact. The conditional Excel programme moves from S97 throughS106
+to S99 throughS108. Historical records, tags, completed plans and frozen release
+notes retain their original IDs. Their earlier future-target references are
+superseded by this prospective map. Active CURRENT_SPRINT is replaced only by
+/sync-sprint after the current sprint closes. Issue281's go/no-go remains F-184
+at S99. Issue377 stays open through its separately planned benchmark work.
+
+##### Issue379 through Issue381 intake, 2026-10-15
+
+Issues379,380 and381 arrived after the snapshot above and no S92 or S93
+story owns them. They get two new sprints instead of enlarging S93. S94 takes
+Issues379 and380 as Python and CLI parity work. S96 takes Issue381 directly
+after the forms sprint, because fillable PDF fields reuse its control model.
+The map above shifts again. Template and form work moves from S94 to S95,
+collaboration from S95 to S97, drawings from S96 to S98 and the M24 end gate
+from S97 to S99. The benchmark sprint moves from S98 to S100 with F-313
+through F-318 intact. The conditional Excel programme moves from S99 through
+S108 to S101 through S110, and Issue281's go/no-go is F-184 at S101.
+
+#### Sprint S94, Python and CLI parity
+
+**Goal**: let first-draft python-docx and python-pptx scripts and the Rust-only
+signing and form surfaces work from Python and the CLI, without new Rust
+document semantics. Four stories total about 12 developer-days.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X238 | Restore python-docx Word names from the first-draft corpus | L |
+| F-X239 | python-pptx notes names and refusal of silent zero values | M |
+| F-X240 | Python and CLI signing and signature verification | M |
+| F-X241 | Python and CLI form reading and filling | M |
+
+| Issue | Acceptance owner | Remaining work and required evidence |
+|---|---|---|
+| Issue379 Word names and divergences | F-X238 | Every listed Word name works as in python-docx 1.2.0 or fails with an error naming the rdocx alternative. The PR333 corpus runner at `193819ca` reports these results separately from the F-X211 corpus |
+| Issue379 PowerPoint names and unit refusals | F-X239 | Notes slide names, `MSO_THEME_COLOR_INDEX` and the five assignments that now save zero raise before they change the document, naming the unit to use |
+| Issue380 signing | F-X240 | Python and CLI sign and verify for docx and pptx. A changed part fails verification by name. Wheels and CLI builds enable `digital-signatures` with dependency, licence and size gates |
+| Issue380 forms | F-X241 | Python form reading and filling and `rdocx fill --values`. Every control type and a legacy text field read back after save and reopen |
+
+F-X238 and F-X239 share the Python binding sources and integrate serially.
+F-X240 and F-X241 wrap existing Rust functions and may proceed in parallel
+with them once binding entrypoints are leased. Enabling `digital-signatures`
+in published artefacts is a packaging decision reviewed at design, not a
+default change for the Rust crates.
+
+#### Sprint S95, Bibliography and navigation carryovers, templates and forms
 
 **Goal**: resume the parked F-X192 bibliography and F-283 navigation contracts
 after S91. Preserve the existing template, control and form programme for
-capacity review when S92 opens. This scheduling decision opens no new sprint
+capacity review when S95 opens. The eleven-story batch has a lower-bound
+estimate of 36 developer-days and must be split before opening. This scheduling decision opens no new sprint
 and changes no acceptance contract.
 
 | F-ID | Title | Size |
@@ -2529,7 +2694,6 @@ and changes no acceptance contract.
 | F-X219 | Qualify full-range text watermark interoperability | M |
 | F-X223 | Qualify native Word embedded multi-face interoperability | M |
 | F-283 | Complete numbering-aware navigation fields | L |
-| F-X178 | Clearable direct run formatting setters | S |
 | F-284 | Stable container-wide template grammar | L |
 | F-285 | Content control creation and lifecycle | L |
 | F-286 | Rich, repeating, and typed content controls | L |
@@ -2545,11 +2709,6 @@ use actual independent producer output, with a separate infrastructure design
 when resumed. It adds no repair scope to the frozen S91 issue/PR set and does
 not waive applicable current source, schema, save/reopen or rendering gates.
 
-F-X178 is the explicit S90 carry for the user-excluded Issue264. Its next
-eligible planning target is S92. It remains pending and requires a separate
-scope decision before implementation, preserving the exclusion in S90 and
-the inserted S91.
-
 F-X192 resumes its retained unfinished worker branch and native evidence.
 F-283 consumes completed S91 F-X200 numbering without duplicate work.
 These two stories are parked, not completed. Issues264 and281 remain open.
@@ -2561,7 +2720,29 @@ into a complete form. F-290 may proceed alongside the form work after S90.
 The sprint gate checks public-created templates and forms through save-reopen,
 with explicit diagnostics for unavailable external mail-merge data.
 
-#### Sprint S93, Collaboration authoring
+#### Sprint S96, Fillable PDF forms
+
+**Goal**: export Word form controls as fillable AcroForm fields with an empty
+signature field, behind an opt-in option, while PDF/A and PDF/UA output stay
+valid. Three stories total about 13 developer-days.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X242 | Form control geometry and AcroForm field model | L |
+| F-X243 | Field appearance streams, full-font resources and conformance | L |
+| F-X244 | Signature field, bindings and CLI option | M |
+
+Issue381 is accepted only when all three stories pass. F-X242 makes layout
+report each control's rectangle and maps text, rich text, checkbox,
+drop-down, combo box and date controls and legacy fields to field types and
+unique names. F-X243 writes an appearance stream for every widget, a field
+font that covers typed input, and `/Form` structure elements in tagged
+output. F-X244 adds the empty `/Sig` field and the option across Rust, Python
+and `rdocx convert`. Output without the option stays byte identical. Signing
+the PDF itself remains out of scope. The stories run in order because each
+builds on the previous field model.
+
+#### Sprint S97, Collaboration authoring
 
 **Goal**: create complete Word revisions, comments, permission ranges, and
 comparison results, with caller-controlled identity and time instead of
@@ -2577,13 +2758,13 @@ ambient state.
 | F-296 | Collaboration identity and deterministic time policy | M |
 
 F-291 establishes revision ownership. F-292 and F-293 then cover property,
-move, and comment records across stories. F-294 uses the S92 form and
+move, and comment records across stories. F-294 uses the S95 form and
 protection surface. F-295 composes complete comparison revisions, and F-296
 closes identity and clock inputs. The sprint gate covers Word differential
 results, accept and reject views, and byte-identical output in deterministic
 mode.
 
-#### Sprint S94, Drawings, diagrams, and embedded content
+#### Sprint S98, Drawings, diagrams, and embedded content
 
 **Goal**: complete the visible and packaged Word object surface across every
 valid insertion point without raw compatibility wrappers or executable payload
@@ -2603,7 +2784,7 @@ F-297 through F-302 build independent object families on the shared
 relationship model. F-303 is their integrated deterministic layout and render
 gate.
 
-#### Sprint S95, Package extensibility and modern DOCX end gate
+#### Sprint S99, Package extensibility and modern DOCX end gate
 
 **Goal**: close package extension, accessibility, conformance, determinism,
 resource, binding, documentation, and stability boundaries for modern DOCX
@@ -2627,9 +2808,51 @@ the milestone-wide public API and operational gate. F-311 and F-312 close the
 remaining positioned-paragraph and run-effect render checks. A 1.0 decision remains
 separate from completing this sprint.
 
+### M20, Fidelity at scale, external Word benchmark
+
+#### Sprint S100, External Word benchmark fidelity
+
+**Goal**: measure Word PDF conversion against the external
+[`neurotic_docx_bench`](https://github.com/jandira-tech/neurotic_docx_bench)
+oracles from [Issue 377](https://github.com/tensorbee/rdocx/issues/377), close
+the largest measured gaps, and lead every converter not affiliated with the
+benchmark author.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-313 | External Word benchmark reproduction loop | S |
+| F-314 | Benchmark conversion failures and startup latency | M |
+| F-315 | Word tracked-change markup print view | L |
+| F-316 | Word comment and revision balloon pane | L |
+| F-317 | Benchmark pagination and layout fidelity wave | L |
+| F-318 | Benchmark release, adapter update and README badge | M |
+
+The 2026-10-14 cohort ranks rdocx 0.16.0 eighth of ten at an ITT median of
+45.90 over 400 documents. The leader is the author-affiliated jubarte at 82.45,
+and the best unaffiliated converter is Wordcraft 0.7.0 at 53.82. Three causes
+dominate. Word's oracle exports 300 of the 400 documents with all markup and a
+balloon pane, while `rdocx convert` renders the accepted view at full width.
+The page count differs on 111 documents against 12 for jubarte. Clean
+documents still trail jubarte by about 23 points.
+
+F-313 runs the benchmark's own scorer locally against its pinned Word PDFs and
+records a per-document baseline. The benchmark corpus stays outside the
+repository because ODC-By does not license the individual files. F-314 fixes
+the three conversion failures and measures process startup. F-315 and F-316
+add an opt-in markup view, so default output and hash baselines do not move.
+F-317 triages the worst documents into root-cause clusters and fixes the
+largest. Each fix must also hold on the F-197 Word SSIM harness, so the work
+does not overfit one Word build and one scorer. F-318 prepares the release,
+asks the benchmark maintainer to pass the markup flag and rerun, and adds the
+README badge from the Issue 377 options. Publication still requires `/release`
+and its separate final approval.
+
+Overtaking jubarte is a stretch goal, not this sprint's gate. Further
+fidelity waves follow from F-317's cluster list as separately planned work.
+
 ### M19, Advanced spreadsheets
 
-#### Sprint S96, Spreadsheet decision, corpus and core model
+#### Sprint S101, Spreadsheet decision, corpus and core model
 
 **Goal**: decide whether a material Rust ecosystem gap still exists, then build
 the ownership model only if that decision is affirmative.
@@ -2641,7 +2864,7 @@ the ownership model only if that decision is affirmative.
 | F-185 | Workbook and worksheet model | L |
 
 F-184 is a true go or no-go gate. It reassesses Calamine,
-`rust_xlsxwriter`, `umya-spreadsheet`, `xls`, and any credible successor at S96,
+`rust_xlsxwriter`, `umya-spreadsheet`, `xls`, and any credible successor at S101,
 then classifies each proposed feature as preserved, modeled and editable, or
 executable. If the ecosystem provides the complete required lifecycle by then,
 M19 is archived rather than implemented.
@@ -2650,8 +2873,8 @@ M19 is archived rather than implemented.
 for a unified CLI/Python workflow, template filling, preservation-safe edits
 and rendering. Include integration, installation and maintenance costs in
 F-184, including reuse of a maintained engine behind a consistent facade.
-S96 through S99 stage reading and loss-aware editing before calculation and
-pivots. Rendering and distribution retain the S105 boundary. An earlier
+S101 through S104 stage reading and loss-aware editing before calculation and
+pivots. Rendering and distribution retain the S110 boundary. An earlier
 distributable reader/editor requires a reviewed roadmap and release decision.
 
 The reporter's [follow-up](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6063901190)
@@ -2680,7 +2903,7 @@ stories and any proposed reader/editor distribution boundary with that order
 before approving implementation. S90 records this direction without claiming
 that the conditional spreadsheet programme or an earlier release is approved.
 
-#### Sprint S97, Styles, tables and structured references
+#### Sprint S102, Styles, tables and structured references
 
 **Goal**: model the indexed formatting and structured data semantics that
 ordinary business workbooks rely on.
@@ -2695,7 +2918,7 @@ F-189 lands here because structured table references are part of the formula
 grammar rather than a string convention. The sprint does not yet calculate
 formulas.
 
-#### Sprint S98, Advanced worksheet objects
+#### Sprint S103, Advanced worksheet objects
 
 **Goal**: cover the visible and interactive worksheet surface before the
 streaming package boundary freezes it.
@@ -2708,7 +2931,7 @@ This includes comments, hyperlinks, rich text, drawings, grouping, panes,
 sparklines, page breaks, and modern image cells. External content stays offline
 unless an explicit bounded policy allows retrieval.
 
-#### Sprint S99, Streaming read and write
+#### Sprint S104, Streaming read and write
 
 **Goal**: prove that advanced workbooks remain bounded at the package boundary.
 
@@ -2721,7 +2944,7 @@ Both carry an asserted memory ceiling rather than a hoped-for one. A 100 MB
 fixture is the gate, not a smoke test. Unsupported package parts and
 relationships remain attached through unrelated typed edits.
 
-#### Sprint S100, Calculation and sheet features
+#### Sprint S105, Calculation and sheet features
 
 **Goal**: calculate ordinary and modern formulas, then expose the features that
 depend on their results.
@@ -2737,7 +2960,7 @@ including dynamic arrays, spill ranges, and structured references. Unsupported
 functions retain cached values with diagnostics. F-191 reuses `oxml-chart`
 rather than creating a spreadsheet-only chart engine.
 
-#### Sprint S101, Pivots and the Data Model boundary
+#### Sprint S106, Pivots and the Data Model boundary
 
 **Goal**: move PivotTables from opaque preservation to typed local refresh and
 define the boundary around proprietary analytical models.
@@ -2753,7 +2976,7 @@ and visible cells. Slicers and pivot charts follow that refresh. OLAP, Power
 Pivot, VertiPaq, and DAX state is preserved and inspectable but is not executed
 under this milestone.
 
-#### Sprint S102, Power Query language and package model
+#### Sprint S107, Power Query language and package model
 
 **Goal**: understand and evaluate M independently of external data access.
 
@@ -2766,7 +2989,7 @@ refresh metadata. The language boundary covers the pure transformations needed
 by the corpus before credentials, connectors, or network policy enter the
 runtime.
 
-#### Sprint S103, Power Query execution
+#### Sprint S108, Power Query execution
 
 **Goal**: refresh a bounded, useful connector set without weakening privacy or
 offline determinism.
@@ -2780,7 +3003,7 @@ privacy levels, source combination, timeouts, byte limits, caching, and query
 folding are explicit contracts. Proprietary and tenant-bound connectors remain
 preserved with diagnostics.
 
-#### Sprint S104, Office Scripts-compatible automation
+#### Sprint S109, Office Scripts-compatible automation
 
 **Goal**: automate the same workbook model through a versioned and sandboxed
 TypeScript surface.
@@ -2795,7 +3018,7 @@ not pretend to provide OneDrive, SharePoint, Power Automate, or Microsoft tenant
 identity. It does provide bounded workbook, range, table, chart, pivot, and
 query automation with atomic failure.
 
-#### Sprint S105, Rendering, distribution and advanced end gate
+#### Sprint S110, Rendering, distribution and advanced end gate
 
 **Goal**: close M19 as a headless advanced spreadsheet engine rather than a
 file-format crate.
@@ -2825,12 +3048,13 @@ at the fully verified SHA.
 | End of S64, M21 | Incubating `rpptx` family. Publish the stable family too only when the reviewed dependency diff requires new shared pins. | Collaboration, security, timing, media, SmartArt, ODP, handouts, HTML import, and PDF import form one complete presentation-depth boundary. |
 | End of S69, M22 | Stable `rdocx` family at v0.13.0 through F-X078. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | OfficeMath, fields, dynamic TOC, automation, comparison, embedded content, and modern package variants complete the planned Word-depth boundary. |
 | End of S73, M23 | Stable `rdocx` family after the five-document public-API-only conformance gate passes. | This is the first boundary where the reference business documents can be authored from `Document::new()` without raw XML or a base template. |
-| End of S95, M24 | Stable `rdocx` family after the modern Word authoring capability matrix is closed. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | This boundary completes the planned modern DOCX authoring surface, lossless extensibility, accessibility, strict-package, determinism, binding, and stability gates. |
-| End of S105, conditional M19 | The new `rxlsx` distribution family defined by F-195, plus only the existing families whose reviewed dependency pins moved. | F-195 is the first point where the conditional spreadsheet programme has a complete facade, CLI, WASM, Python, rendering, and advanced lifecycle gate. |
+| End of S99, M24 | Stable `rdocx` family after the modern Word authoring capability matrix is closed. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | This boundary completes the planned modern DOCX authoring surface, lossless extensibility, accessibility, strict-package, determinism, binding, and stability gates. |
+| End of S100, external benchmark | Stable `rdocx` family carrying the opt-in markup view and the benchmark fidelity fixes. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | The benchmark maintainer reruns released versions only, so the measured gains need a published family behind them. |
+| End of S110, conditional M19 | The new `rxlsx` distribution family defined by F-195, plus only the existing families whose reviewed dependency pins moved. | F-195 is the first point where the conditional spreadsheet programme has a complete facade, CLI, WASM, Python, rendering, and advanced lifecycle gate. |
 
 No intermediate sprint publishes merely because one subsystem compiles. A
 security fix may still justify a separately planned patch release, but ordinary
-feature work waits for the next boundary above. If F-184 archives M19, the S105
+feature work waits for the next boundary above. If F-184 archives M19, the S110
 boundary disappears with the programme and no spreadsheet release namespace is
 created.
 
@@ -3235,3 +3459,8 @@ release preparation F-X221 unfinished. Bibliography, navigation and standalone
 authoring remain in S92. Intake stays frozen40 issues/30 PRs, with discussions
 264 and281 excluded and open. Final full verification, focused appearance
 riders, sprint review and authorized publication/closure remain due.
+
+
+## Issue378 execution intake, 2026-10-15
+
+The user adds F-X237 to S92 for the reported Python0.16.1 table-cell performance regression. The original five repair contracts remain intact. Qualify linear open and single-edit work, the exact40-by6 fill and authenticated same-host release0.16.0 timing while preserving checked physical-owner and revision semantics. This intake does not alter the historical frozen contribution or compatibility corpora.

@@ -234,6 +234,13 @@ doc.save_pdf("out.pdf")                        # documented as an rdocx extensio
 
 ## Python Word formatting and checked list publication
 
+Native `Run::set_width_scale_value` accepts `Option<u32>` percent and
+`Run::set_position_value` accepts `Option<i32>` signed half-points. Some writes
+an explicit direct property, including zero. None removes only that property
+and leaves an absent `w:rPr` absent. Existing width-scale and position setters
+and builders retain their signatures and delegate to these nullable forms.
+The Python Font surface retains its existing properties.
+
 `Font` exposes optional superscript, subscript, small_caps, all_caps,
 double_strike, hidden and rtl. Superscript and subscript share one direct
 `w:vertAlign` source. True selects that mode, false clears only its own active
@@ -1779,6 +1786,15 @@ editable presentation only after save, reopen, and validation. Python, WASM,
 and CLI surfaces gain no presentation HTML import entry point and retain their
 existing import methods and errors.
 
+Presentation HTML text collapses ASCII whitespace across inline boundaries.
+The retained space keeps the formatting and hyperlink ownership of the first
+source text in that whitespace sequence. Leading and trailing paragraph spaces
+are trimmed, and explicit breaks reset pending whitespace. Nonbreaking spaces
+and other non-ASCII spacing characters remain literal text, including supported
+positioned NBSP-only content and table cells. Unpositioned content still receives
+the explicit unsupported implicit-layout diagnostic.
+
+
 Native Rust callers can import PDF pages through
 `Presentation::from_pdf_bytes`, `from_pdf_bytes_with_limits`, and `open_pdf`.
 The additive pre-1.0 surface exposes concrete `PdfImportMode`,
@@ -2510,6 +2526,15 @@ formatting, textual whitespace, fields, comments, and any public
 `ComparisonStoryKind`. The non-exhaustive story enum names the main, header,
 footer, comment, text-box, footnote, and endnote categories. The comparison
 surface covers relationship-resolved stories, fields, and nested text boxes.
+Word and character revisions group changed stretches as deletions followed by
+insertions. Whitespace between changes folds, while a non-whitespace anchor
+folds only when its joined word count is strictly shorter than both changed
+sides before and after it. Character units count joined words rather than
+letters. Structural, opaque and formatting boundaries, fields, drawings and
+ignored units remain barriers. Default and explicit run granularity retain their
+existing output. Inside supported inline controls, retained raw children keep
+their physical text ownership on both sides through accept, reject and reopen.
+No new comparison option or public signature is introduced.
 The native facade stages the main story from package-authoritative XML and
 preserves exact unchanged drawing wrappers even when sibling text in the same
 paragraph, table, cell, or control changes. Accepting and rejecting the result
@@ -2525,6 +2550,17 @@ and insertion if its bookmarks remain in place. The rebuilt TOC entry
 transition to a hyperlink and PAGEREF field uses this path. Granular matching
 cuts at bookmark and comment range boundaries so inserted text stays on its
 edited side of a marker.
+Whole inserted, deleted and moved hyperlink paragraphs keep the hyperlink shell
+outside revisions and track its content inside. Resolved hyperlink targets and
+display text survive save and reopen. Empty whole-paragraph hyperlinks and simple
+fields outside a complex field carried whole remain explicit atomic refusals.
+Nested captured Word hyperlinks are also refused atomically, keeping wrapper
+call depth bounded to one paragraph and one direct hyperlink owner.
+Edits before retained tables carry the changed paragraph's own mark, and a
+removed mark before a retained table requires no content to remain. Opaque
+children and meaningful raw gaps prevent that removal. Empty paragraphs can gain
+properties or text, and multiple trailing deletions retain both property states.
+Foreign same-name XML stays opaque. This changes no public method signature.
 When comment owners or metadata change, comparison carries the edited comments
 and their related package graph in the redline. A related private custom XML
 part retains the original comment graph for rejection. Acceptance keeps the
@@ -3853,6 +3889,20 @@ successors and returned Python allocations all complete before the single
 prepared publication. The five Word element objects return namespace-complete
 str and replace_xml(str) returns None through the concrete checked native
 operation.
+
+Complete Word owner snapshots use the native hidden
+`Document.story_owner_snapshots` provider across the existing crate boundary.
+Its four owned families retain full story items, physical cells, paragraph XML
+and hyperlink information with the same validation as the separate providers.
+One operation shares source, owner and item qualification without caching
+across revisions. Each cell tuple contains the checked enclosing table, physical row and
+cell coordinates and source-qualified cell identity. Nested tables and controls
+participate in the same correspondence traversal. Python exposes no additional
+method. Registry construction and candidate revision reconciliation perform
+bounded work per current physical owner. Indexed matching preserves the existing
+pairwise body-slot, projection, parent and run-path rules and first-match order,
+including hyperlink index shifts after removal. A scalar cell lookup retains
+its separate checked compatibility contract.
 
 Section margin aliases use the canonical EMU length interface and truncating
 Twips conversion. Header/footer paragraph append preserves the selected held

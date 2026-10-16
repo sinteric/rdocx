@@ -24361,6 +24361,284 @@ fn compare_and_resolve(
 }
 
 #[test]
+fn comparison_revises_an_empty_paragraph() {
+    // An empty paragraph is written self-closing. A property change or text
+    // inserted into it went after the `<w:p/>` at word granularity, so the
+    // tracked story did not resolve to either version.
+    fn space_after_zero(paragraph: &mut rdocx::Paragraph<'_>) {
+        paragraph.set_space_after(Length::pt(0.0));
+    }
+    fn centred(paragraph: &mut rdocx::Paragraph<'_>) {
+        paragraph.set_alignment(Alignment::Center);
+    }
+    fn unchanged(_: &mut rdocx::Paragraph<'_>) {}
+    let build = |text: &str, format: fn(&mut rdocx::Paragraph<'_>)| {
+        let mut document = Document::new();
+        document.add_paragraph(text);
+        document.add_paragraph("Body.");
+        format(&mut document.paragraph_mut(0).unwrap());
+        document.to_bytes().unwrap()
+    };
+    let resolved = |tracked: &mut Document| {
+        let tracked = tracked.to_bytes().unwrap();
+        let mut accepted = Document::from_bytes(&tracked).unwrap();
+        accepted.accept_all().unwrap();
+        let mut rejected = Document::from_bytes(&tracked).unwrap();
+        rejected.reject_all().unwrap();
+        (accepted, rejected)
+    };
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let options = rdocx::ComparisonOptions {
+            granularity,
+            ..Default::default()
+        };
+        for (text, format, property) in [
+            (
+                "",
+                space_after_zero as fn(&mut rdocx::Paragraph<'_>),
+                r#"<w:spacing w:after="0"/>"#,
+            ),
+            ("", centred, r#"<w:jc w:val="center"/>"#),
+            // The control: a paragraph with a run is not self-closing.
+            ("x", space_after_zero, r#"<w:spacing w:after="0"/>"#),
+        ] {
+            let label = format!("{granularity:?} {text:?} {property}");
+            let original = build(text, unchanged);
+            let edited = build(text, format);
+            let xml = compare_and_resolve(&original, &edited, &options);
+            let tracked = format!(
+                r#"<w:p><w:pPr>{property}<w:pPrChange w:id="0" w:author="Ada" w:date="2026-09-30T09:30:00Z"><w:pPr/></w:pPrChange></w:pPr>"#
+            );
+            assert!(xml.contains(&tracked), "{label}: {xml}");
+            let mut compared = Document::from_bytes(&original).unwrap();
+            compared
+                .compare_with_options(
+                    &Document::from_bytes(&edited).unwrap(),
+                    "Ada",
+                    "2026-09-30T09:30:00Z",
+                    &options,
+                )
+                .unwrap();
+            let (accepted, rejected) = resolved(&mut compared);
+            let edited = Document::from_bytes(&edited).unwrap();
+            let paragraph = accepted.paragraph(0).unwrap();
+            let wanted = edited.paragraph(0).unwrap();
+            assert_eq!(paragraph.space_after(), wanted.space_after(), "{label}");
+            assert_eq!(paragraph.alignment(), wanted.alignment(), "{label}");
+            let paragraph = rejected.paragraph(0).unwrap();
+            assert_eq!(paragraph.space_after(), None, "{label}");
+            assert_eq!(paragraph.alignment(), None, "{label}");
+        }
+
+        // Text typed into an empty paragraph, alone and with a property change.
+        for format in [unchanged as fn(&mut rdocx::Paragraph<'_>), space_after_zero] {
+            let mut edited = Document::new();
+            edited.add_paragraph("typed");
+            edited.add_paragraph("Body.");
+            format(&mut edited.paragraph_mut(0).unwrap());
+            let xml =
+                compare_and_resolve(&build("", unchanged), &edited.to_bytes().unwrap(), &options);
+            assert!(
+                xml.contains(r#"<w:ins w:id="#) && !xml.contains("<w:p/>"),
+                "{granularity:?}: {xml}"
+            );
+        }
+    }
+
+    // Ignoring formatting leaves the empty paragraph as it was.
+    let options = rdocx::ComparisonOptions {
+        granularity: rdocx::ComparisonGranularity::Word,
+        ignore_formatting: true,
+        ..Default::default()
+    };
+    let mut compared = Document::from_bytes(&build("", unchanged)).unwrap();
+    compared
+        .compare_with_options(
+            &Document::from_bytes(&build("", space_after_zero)).unwrap(),
+            "Ada",
+            "2026-09-30T09:30:00Z",
+            &options,
+        )
+        .unwrap();
+    assert!(compared.revisions().is_empty());
+    let (accepted, _) = resolved(&mut compared);
+    assert_eq!(accepted.paragraph(0).unwrap().space_after(), None);
+}
+
+#[test]
+fn comparison_revises_an_empty_header_paragraph() {
+    let original = document_with_comparison_header("<w:p/>")
+        .to_bytes()
+        .unwrap();
+    let edited =
+        document_with_comparison_header(r#"<w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>"#)
+            .to_bytes()
+            .unwrap();
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let options = rdocx::ComparisonOptions {
+            granularity,
+            ..Default::default()
+        };
+        let mut compared = Document::from_bytes(&original).unwrap();
+        compared
+            .compare_with_options(
+                &Document::from_bytes(&edited).unwrap(),
+                "Ada",
+                "2026-09-30T09:30:00Z",
+                &options,
+            )
+            .unwrap_or_else(|error| panic!("{granularity:?}: {error}"));
+        let header = comparison_part_xml(&mut compared, "/word/header1.xml");
+        assert!(
+            header.contains(
+                r#"<w:p><w:pPr><w:spacing w:after="0"/><w:pPrChange w:id="0" w:author="Ada" w:date="2026-09-30T09:30:00Z"><w:pPr/></w:pPrChange></w:pPr></w:p>"#
+            ),
+            "{granularity:?}: {header}"
+        );
+        let tracked = compared.to_bytes().unwrap();
+        for (resolve, wanted) in [
+            (Document::accept_all as fn(&mut Document) -> _, &edited),
+            (Document::reject_all, &original),
+        ] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            resolve(&mut resolved).unwrap();
+            let mut wanted = Document::from_bytes(wanted).unwrap();
+            assert!(
+                resolved
+                    .compare(&wanted, "postcondition", "2026-09-30T09:31:00Z")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                comparison_part_xml(&mut resolved, "/word/header1.xml")
+                    .contains(r#"<w:spacing w:after="0"/>"#),
+                comparison_part_xml(&mut wanted, "/word/header1.xml")
+                    .contains(r#"<w:spacing w:after="0"/>"#),
+                "{granularity:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn comparison_deletes_several_final_paragraphs() {
+    // The last deleted paragraph of a story keeps its mark, and the mark of
+    // the paragraph before the deleted ones carries the deletion. That mark
+    // went to the deleted paragraph just before the last one, already
+    // deleted whole, so accepting kept an empty paragraph.
+    const BREAK: &str = "<w:p><w:r><w:br/></w:r></w:p>";
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let centred = r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>kept</w:t></w:r></w:p>"#;
+    let control = |paragraphs: &[String]| {
+        format!(
+            "<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt>{}",
+            paragraphs.concat(),
+            paragraph("After the control.")
+        )
+    };
+    let bytes = |body: &str| {
+        document_with_content_controls(&wrap_word_body(body))
+            .to_bytes()
+            .unwrap()
+    };
+    let cases = [
+        (
+            [BREAK.to_owned(), BREAK.to_owned(), paragraph("Heading.")].concat(),
+            BREAK.to_owned(),
+        ),
+        (
+            [paragraph("x"), paragraph("y"), paragraph("z")].concat(),
+            paragraph("x"),
+        ),
+        (
+            [centred.to_owned(), paragraph("y"), paragraph("z")].concat(),
+            centred.to_owned(),
+        ),
+        (
+            control(&[paragraph("x"), paragraph("y"), paragraph("z")]),
+            control(&[paragraph("x")]),
+        ),
+        // The controls: one deleted final paragraph.
+        ([BREAK, BREAK].concat(), BREAK.to_owned()),
+        (
+            [BREAK.to_owned(), paragraph("Heading.")].concat(),
+            BREAK.to_owned(),
+        ),
+    ];
+    for (original, edited) in cases {
+        for options in [
+            rdocx::ComparisonOptions::default(),
+            rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+            rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ignore_fields: true,
+                ignore_formatting: true,
+                ..Default::default()
+            },
+        ] {
+            let (original, edited) = (bytes(&original), bytes(&edited));
+            let xml = compare_and_resolve(&original, &edited, &options);
+            // The mark of the kept paragraph carries the deletion, and no
+            // paragraph mark is deleted twice.
+            let kept = &xml[xml.find("<w:p>").unwrap()..];
+            assert!(
+                kept[..kept.find("</w:p>").unwrap()].contains("<w:rPr><w:del "),
+                "{options:?}: {xml}"
+            );
+            assert!(!xml.contains(r#"/><w:del w:id="#), "{options:?}: {xml}");
+            if options.ignore_formatting {
+                continue;
+            }
+            // The kept paragraph merges into the final mark with its own
+            // properties, which rejecting gives back to each paragraph.
+            let mut compared = Document::from_bytes(&original).unwrap();
+            compared
+                .compare_with_options(
+                    &Document::from_bytes(&edited).unwrap(),
+                    "Ada",
+                    "2026-09-30T09:30:00Z",
+                    &options,
+                )
+                .unwrap();
+            let tracked = compared.to_bytes().unwrap();
+            let mut accepted = Document::from_bytes(&tracked).unwrap();
+            accepted.accept_all().unwrap();
+            let edited = Document::from_bytes(&edited).unwrap();
+            assert_eq!(
+                accepted.paragraph(0).unwrap().alignment(),
+                edited.paragraph(0).unwrap().alignment(),
+                "{options:?}"
+            );
+            let mut rejected = Document::from_bytes(&tracked).unwrap();
+            rejected.reject_all().unwrap();
+            let original = Document::from_bytes(&original).unwrap();
+            for index in 0..3 {
+                assert_eq!(
+                    rejected
+                        .paragraph(index)
+                        .map(|paragraph| paragraph.alignment()),
+                    original
+                        .paragraph(index)
+                        .map(|paragraph| paragraph.alignment()),
+                    "{options:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn comparison_tracks_a_rebuilt_table_of_contents() {
     // The rebuild moves the field begin into a paragraph of its own, writes
     // each entry with a PAGEREF field, as a hyperlink under `\h`, and
@@ -24569,28 +24847,36 @@ fn comparison_carries_bookmarks_and_whole_fields_in_whole_paragraph_changes() {
 
 #[test]
 fn comparison_refuses_whole_paragraph_structures_word_cannot_resolve() {
-    // A hyperlink or simple field may not sit in a revision wrapper. Word
-    // reads either as a field whose codes stay untracked, so accepting a
-    // deleted one or rejecting an inserted one leaves an empty field, unless
-    // a field deleted or inserted whole around it goes with it. A moved
-    // paragraph's bookmark would be held by both ends of the move.
+    // A simple field may not sit in a revision wrapper, and rdocx resolves no
+    // revision inside one, unless a field deleted or inserted whole around it
+    // goes with it. That holds inside a hyperlink too, whose children the
+    // wrappers go inside. A hyperlink without content has nothing to wrap,
+    // so resolving would leave it behind. A moved paragraph's bookmark would
+    // be held by both ends of the move.
     let plain = r#"<w:p><w:r><w:t>Alpha</w:t></w:r></w:p>"#;
     let last = r#"<w:p><w:r><w:t>Omega</w:t></w:r></w:p>"#;
-    let linked = r#"<w:p><w:r><w:t xml:space="preserve">See </w:t></w:r><w:hyperlink w:anchor="elsewhere"><w:r><w:t>there</w:t></w:r></w:hyperlink></w:p>"#;
     let paged = r#"<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#;
+    let linked_field = r#"<w:p><w:hyperlink w:anchor="elsewhere"><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#;
+    let empty_link = r#"<w:p><w:r><w:t xml:space="preserve">See </w:t></w:r><w:hyperlink w:anchor="elsewhere"/></w:p>"#;
     let bookmarked = r#"<w:p><w:bookmarkStart w:id="5" w:name="target"/><w:r><w:t>Moved text</w:t></w:r><w:bookmarkEnd w:id="5"/></w:p>"#;
     let cases = [
-        (
-            "hyperlink inserted",
-            format!("{plain}{last}"),
-            format!("{plain}{linked}{last}"),
-            "hyperlink or simple field outside a field",
-        ),
         (
             "simple field deleted",
             format!("{plain}{paged}{last}"),
             format!("{plain}{last}"),
-            "hyperlink or simple field outside a field",
+            "simple field outside a field",
+        ),
+        (
+            "hyperlink holding a simple field inserted",
+            format!("{plain}{last}"),
+            format!("{plain}{linked_field}{last}"),
+            "simple field outside a field",
+        ),
+        (
+            "empty hyperlink inserted",
+            format!("{plain}{last}"),
+            format!("{plain}{empty_link}{last}"),
+            "empty hyperlink",
         ),
         (
             "bookmarked paragraph moved",
@@ -24609,6 +24895,348 @@ fn comparison_refuses_whole_paragraph_structures_word_cannot_resolve() {
         assert!(error.to_string().contains(message), "{name}: {error}");
         assert_eq!(compared.to_bytes().unwrap(), before, "{name}");
     }
+}
+
+#[test]
+fn comparison_tracks_a_whole_paragraph_holding_a_hyperlink() {
+    // A whole inserted, deleted or moved paragraph that held a hyperlink was
+    // refused, since a revision wrapper may not hold a hyperlink. A hyperlink
+    // may hold revision wrappers, as Word writes a tracked hyperlink run, so
+    // the wrappers go inside it, and resolving drops the hyperlink it empties.
+    let build = |blocks: &str| {
+        let mut document = Document::new();
+        for block in blocks.split('|') {
+            if block == "LINK" {
+                let relationship = document.add_hyperlink_relationship("https://example.com");
+                let mut paragraph = document.add_paragraph("Write to ");
+                paragraph.add_hyperlink("the team", &relationship);
+                paragraph.add_run(" for help.");
+            } else {
+                document.add_paragraph(block);
+            }
+        }
+        document.to_bytes().unwrap()
+    };
+    // Paragraphs separated by `|`, then the revision kinds that mark the
+    // paragraph changes.
+    let cases = [
+        ("inserted", "One.|Two.", "One.|LINK|Two.", "ins"),
+        ("deleted", "One.|LINK|Two.", "One.|Two.", "del"),
+        (
+            "moved",
+            "LINK|One.|Two.|Three.",
+            "One.|Two.|LINK|Three.",
+            "moveFrom moveTo",
+        ),
+        ("appended", "One.|Two.", "One.|Two.|LINK", "ins"),
+        ("last deleted", "One.|Two.|LINK", "One.|Two.", "del"),
+        (
+            "control: edited beside it",
+            "One.|LINK|Two.",
+            "One.|LINK|Two, changed.",
+            "",
+        ),
+    ];
+    let hyperlinks = |xml: &str| xml.matches("<w:hyperlink ").count();
+    for (name, original, edited, kinds) in cases {
+        let (original, edited) = (build(original), build(edited));
+        for options in [
+            rdocx::ComparisonOptions::default(),
+            rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+            rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Character,
+                ..Default::default()
+            },
+            rdocx::ComparisonOptions {
+                ignore_fields: true,
+                ..Default::default()
+            },
+            rdocx::ComparisonOptions {
+                ignore_formatting: true,
+                ..Default::default()
+            },
+            rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ignore_fields: true,
+                ignore_formatting: true,
+                ..Default::default()
+            },
+        ] {
+            let label = format!("{name} {options:?}");
+            let xml = compare_and_resolve(&original, &edited, &options);
+            for kind in kinds.split_whitespace() {
+                // The paragraph mark carries the change, and each hyperlink
+                // holds its runs inside a wrapper of the same kind.
+                assert!(
+                    xml.contains(&format!("<w:rPr><w:{kind} ")),
+                    "{label}: {xml}"
+                );
+                assert!(
+                    xml.contains(&format!(r#"<w:hyperlink r:id="rId1"><w:{kind} "#)),
+                    "{label}: {xml}"
+                );
+            }
+            for kind in ["ins", "del", "moveFrom", "moveTo"] {
+                for wrapper in xml.split(&format!("<w:{kind} ")).skip(1) {
+                    let wrapper = &wrapper[..wrapper.find(&format!("</w:{kind}>")).unwrap_or(0)];
+                    assert!(!wrapper.contains("<w:hyperlink"), "{label}: {xml}");
+                }
+            }
+            let mut compared = Document::from_bytes(&original).unwrap();
+            compared
+                .compare_with_options(
+                    &Document::from_bytes(&edited).unwrap(),
+                    "Ada",
+                    "2026-09-30T09:30:00Z",
+                    &options,
+                )
+                .unwrap();
+            let tracked = compared.to_bytes().unwrap();
+            let mut accepted = Document::from_bytes(&tracked).unwrap();
+            accepted.accept_all().unwrap();
+            let mut rejected = Document::from_bytes(&tracked).unwrap();
+            rejected.reject_all().unwrap();
+            for (resolved, expected) in [(&mut accepted, &edited), (&mut rejected, &original)] {
+                let mut expected = Document::from_bytes(expected).unwrap();
+                let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                let links = |document: &Document| {
+                    document
+                        .links()
+                        .into_iter()
+                        .map(|link| (link.text, link.url, link.anchor))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(links(&reopened), links(&expected), "{label}");
+                for link in reopened.links() {
+                    assert_eq!(link.text, "the team", "{label}");
+                    assert_eq!(link.url.as_deref(), Some("https://example.com"), "{label}");
+                }
+                assert_eq!(resolved.text(), expected.text(), "{label}");
+                assert_eq!(
+                    hyperlinks(&document_xml(resolved)),
+                    hyperlinks(&document_xml(&mut expected)),
+                    "{label}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_preserves_foreign_hyperlink_and_simple_field_children() {
+    let plain = "<w:p><w:r><w:t>One.</w:t></w:r></w:p>";
+    let last = "<w:p><w:r><w:t>Last.</w:t></w:r></w:p>";
+    for opaque in [
+        r#"<x:hyperlink xmlns:x="urn:foreign"><x:payload x:value="exact"/></x:hyperlink>"#,
+        r#"<x:fldSimple xmlns:x="urn:foreign"><x:payload x:value="exact"/></x:fldSimple>"#,
+        r#"<w:hyperlink xmlns:w="urn:foreign"><w:t>exact</w:t></w:hyperlink>"#,
+        "<!--exact retained comment-->",
+        "<?producer exact?>",
+    ] {
+        let added = format!("<w:p><w:r><w:t>Added.</w:t></w:r>{opaque}</w:p>");
+        for (left, right) in [
+            (format!("{plain}{last}"), format!("{plain}{added}{last}")),
+            (format!("{plain}{added}{last}"), format!("{plain}{last}")),
+        ] {
+            let original = document_with_content_controls(&wrap_word_body(&left))
+                .to_bytes()
+                .unwrap();
+            let edited = document_with_content_controls(&wrap_word_body(&right))
+                .to_bytes()
+                .unwrap();
+            for granularity in [
+                rdocx::ComparisonGranularity::Run,
+                rdocx::ComparisonGranularity::Word,
+                rdocx::ComparisonGranularity::Character,
+            ] {
+                let tracked = compare_and_resolve(
+                    &original,
+                    &edited,
+                    &rdocx::ComparisonOptions {
+                        granularity,
+                        ..Default::default()
+                    },
+                );
+                assert!(tracked.contains(opaque), "{opaque}: {tracked}");
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_tracks_a_whole_paragraph_hyperlink_with_a_word_namespace_alias() {
+    let plain = "<w:p><w:r><w:t>Kept</w:t></w:r></w:p>";
+    let linked = r#"<w:p><a:hyperlink xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/main" a:anchor="target"><a:r><a:t>Alias link</a:t></a:r></a:hyperlink></w:p>"#;
+    let original = document_with_content_controls(&wrap_word_body(&format!("{plain}{plain}")))
+        .to_bytes()
+        .unwrap();
+    let edited =
+        document_with_content_controls(&wrap_word_body(&format!("{plain}{linked}{plain}")))
+            .to_bytes()
+            .unwrap();
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        compare_and_resolve(
+            &original,
+            &edited,
+            &rdocx::ComparisonOptions {
+                granularity,
+                ..Default::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn comparison_refuses_nested_raw_hyperlinks_atomically_at_the_owner_boundary() {
+    let first = "<w:p><w:r><w:t>First</w:t></w:r></w:p>";
+    let last = "<w:p><w:r><w:t>Last</w:t></w:r></w:p>";
+    // With no direct run, the outer hyperlink is retained as captured paragraph
+    // XML. Foreign payload also proves the one-link raw boundary stays admitted.
+    let payload = r#"<x:keep xmlns:x="urn:foreign" x:value="exact"/>"#;
+    for depth in [1usize, 2, 257] {
+        let link = format!(
+            "{}{}{}",
+            r#"<w:hyperlink w:anchor="target">"#.repeat(depth),
+            payload,
+            "</w:hyperlink>".repeat(depth)
+        );
+        let added = format!("<w:p>{link}</w:p>");
+        let plain = document_with_content_controls(&wrap_word_body(&format!("{first}{last}")))
+            .to_bytes()
+            .unwrap();
+        let linked =
+            document_with_content_controls(&wrap_word_body(&format!("{first}{added}{last}")))
+                .to_bytes()
+                .unwrap();
+        let model = rdocx_oxml::CT_Document::from_xml(
+            document_xml(&mut Document::from_bytes(&linked).unwrap()).as_bytes(),
+        )
+        .unwrap();
+        let rdocx_oxml::document::BodyContent::Paragraph(paragraph) = &model.body.content[1] else {
+            panic!("expected paragraph")
+        };
+        assert!(
+            paragraph.hyperlinks.is_empty(),
+            "depth={depth} must exercise raw owner"
+        );
+        assert!(!paragraph.extra_xml.is_empty());
+        for (original, edited) in [(&plain, &linked), (&linked, &plain)] {
+            for granularity in [
+                rdocx::ComparisonGranularity::Run,
+                rdocx::ComparisonGranularity::Word,
+                rdocx::ComparisonGranularity::Character,
+            ] {
+                let options = rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                };
+                if depth == 1 {
+                    let tracked = compare_and_resolve(original, edited, &options);
+                    assert!(tracked.contains(payload));
+                } else {
+                    let mut compared = Document::from_bytes(original).unwrap();
+                    let before = compared.to_bytes().unwrap();
+                    let error = compared
+                        .compare_with_options(
+                            &Document::from_bytes(edited).unwrap(),
+                            "Reviewer",
+                            "2026-01-01T00:00:00Z",
+                            &options,
+                        )
+                        .expect_err("nested raw hyperlink");
+                    assert!(
+                        error.to_string().contains("nested hyperlinks"),
+                        "depth={depth} {granularity:?}: {error}"
+                    );
+                    assert_eq!(compared.to_bytes().unwrap(), before, "depth={depth}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resolving_away_a_hyperlinks_content_drops_the_hyperlink() {
+    // A hyperlink holds revision wrappers, so resolving them can leave it
+    // without content. Word reads a hyperlink as a field, and an empty one
+    // shows nothing, so the resolution drops it.
+    let paragraph = |link: &str| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:r><w:t>Kept</w:t></w:r>{link}</w:p><w:p><w:r><w:t>Next</w:t></w:r></w:p>"#
+        ))
+    };
+    let deleted = |id: u32, text: &str| {
+        format!(
+            r#"<w:del w:id="{id}" w:author="Ada"><w:r><w:delText>{text}</w:delText></w:r></w:del>"#
+        )
+    };
+    let inserted = r#"<w:ins w:id="3" w:author="Ada"><w:r><w:t>new</w:t></w:r></w:ins>"#;
+    let link = |content: &str| format!(r#"<w:hyperlink w:anchor="target">{content}</w:hyperlink>"#);
+    let cases = [
+        ("deletion accepted", link(&deleted(1, "gone")), true, false),
+        ("insertion rejected", link(inserted), false, false),
+        ("insertion accepted", link(inserted), true, true),
+        ("deletion rejected", link(&deleted(1, "gone")), false, true),
+        (
+            "deletion beside a run accepted",
+            link(&format!(
+                "<w:r><w:t>stays</w:t></w:r>{}",
+                deleted(1, "gone")
+            )),
+            true,
+            true,
+        ),
+    ];
+    for (name, link, accept, kept) in cases {
+        let mut document = document_with_content_controls(&paragraph(&link));
+        if accept {
+            document.accept_all().unwrap();
+        } else {
+            document.reject_all().unwrap();
+        }
+        let xml = document_xml(&mut document);
+        assert_eq!(xml.contains("<w:hyperlink"), kept, "{name}: {xml}");
+        assert!(xml.contains("<w:t>Kept</w:t>"), "{name}: {xml}");
+    }
+
+    // Resolving one of two wrappers keeps the hyperlink, and the second
+    // empties it.
+    let both = link(&format!("{}{}", deleted(1, "first"), deleted(2, "second")));
+    let mut document = document_with_content_controls(&paragraph(&both));
+    assert_eq!(document.accept_revision_id(1).unwrap(), 1);
+    assert!(document_xml(&mut document).contains("<w:hyperlink"));
+    assert_eq!(document.accept_revision_id(2).unwrap(), 1);
+    assert!(!document_xml(&mut document).contains("<w:hyperlink"));
+
+    // Opaque raw gaps remain content even when every modeled child is removed.
+    for raw in [
+        "<!--keep exact-->",
+        "<?producer keep?>",
+        "retained raw text",
+    ] {
+        let mut document = document_with_content_controls(&paragraph(&link(&format!(
+            "{}{raw}",
+            deleted(1, "gone")
+        ))));
+        document.accept_all().unwrap();
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let xml = document_xml(&mut reopened);
+        assert!(xml.contains("<w:hyperlink"), "{raw}: {xml}");
+        assert!(xml.contains(raw), "{raw}: {xml}");
+    }
+
+    // A hyperlink that was empty before the resolution stays.
+    let empty = format!(r#"<w:hyperlink w:anchor="target"/>{}"#, deleted(1, "gone"));
+    let mut document = document_with_content_controls(&paragraph(&empty));
+    document.accept_all().unwrap();
+    assert!(document_xml(&mut document).contains(r#"<w:hyperlink w:anchor="target"/>"#));
 }
 
 #[test]
@@ -29297,16 +29925,16 @@ fn comparison_preserves_unmodelled_story_xml_and_relationships_byte_for_byte() {
 fn a_failed_full_story_comparison_leaves_package_typed_state_and_caches_unchanged() {
     let mut original =
         document_with_comparison_header(r#"<w:p><w:r><w:t>same header</w:t></w:r></w:p>"#);
+    // The deleted final paragraph has no paragraph before it for its mark.
     let edited = document_with_comparison_header(
-        r#"<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,
+        r#"<w:sdt><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
     );
     let before = original.to_bytes().expect("serialize original");
 
-    assert!(
-        original
-            .compare(&edited, "Word", "2026-09-04T09:00:00Z")
-            .is_err()
-    );
+    let error = original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect_err("a final paragraph replaced by a control");
+    assert!(error.to_string().contains("adjacent paragraph"), "{error}");
     assert_eq!(
         original.to_bytes().expect("serialize after failure"),
         before
@@ -31540,6 +32168,612 @@ fn flat_mail_merge_output_remains_unchanged_after_rich_merge_is_added() {
     assert_eq!(separate.to_bytes().unwrap(), expected_bytes);
     let mut sectioned = document.mail_merge_sections(&records).unwrap();
     assert_eq!(sectioned.to_bytes().unwrap(), expected_bytes);
+}
+
+/// The first body paragraph of a tracked document as text with deletions
+/// written `[-...-]` and insertions `{+...+}`, and whether a field or a
+/// hyperlink sits inside a deletion or an insertion.
+fn tracked_paragraph_markup(xml: &str) -> (String, bool) {
+    let mut reader = XmlReader::from_str(xml);
+    let mut markup = String::new();
+    let mut revision = None::<&str>;
+    let mut wrapped_structure = false;
+    let mut in_text = false;
+    loop {
+        match reader.read_event().unwrap() {
+            XmlEvent::Eof => return (markup, wrapped_structure),
+            XmlEvent::Start(element) | XmlEvent::Empty(element) => {
+                match element.local_name().as_ref() {
+                    b"ins" => revision = Some("+}"),
+                    b"del" => revision = Some("-]"),
+                    b"t" | b"delText" => in_text = true,
+                    b"fldChar" | b"instrText" | b"fldSimple" | b"hyperlink" => {
+                        wrapped_structure |= revision.is_some();
+                    }
+                    _ => {}
+                }
+            }
+            XmlEvent::End(element) => match element.local_name().as_ref() {
+                b"ins" | b"del" => revision = None,
+                b"t" | b"delText" => in_text = false,
+                b"p" => return (markup, wrapped_structure),
+                _ => {}
+            },
+            XmlEvent::Text(text) if in_text => {
+                let text = text.decode().unwrap();
+                match revision {
+                    Some(close) => {
+                        let open = if close == "+}" { "{+" } else { "[-" };
+                        // Consecutive runs of one revision read as one span.
+                        if let Some(stripped) = markup.strip_suffix(close) {
+                            markup = format!("{stripped}{text}{close}");
+                        } else {
+                            markup.push_str(&format!("{open}{text}{close}"));
+                        }
+                    }
+                    None => markup.push_str(&text),
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Compare one-paragraph bodies and return the markup of the redline after
+/// checking that accepting gives the edited text and rejecting the original.
+fn granular_redline(original: &str, edited: &str, options: &rdocx::ComparisonOptions) -> String {
+    let original_xml = wrap_word_body(original);
+    let original = document_with_content_controls(&original_xml);
+    let edited = document_with_content_controls(&wrap_word_body(edited));
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(&edited, "Ada", "2026-09-04T09:00:00Z", options)
+        .unwrap();
+    let bytes = tracked.to_bytes().unwrap();
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.text(), edited.text());
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    assert_eq!(rejected.text(), original.text());
+    for (mut resolved, expected) in [(accepted, &edited), (rejected, &original)] {
+        let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.text(), expected.text());
+        let links = |document: &Document| {
+            document
+                .links()
+                .into_iter()
+                .map(|link| (link.text, link.url, link.anchor))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(links(&reopened), links(expected));
+    }
+    document_xml(&mut tracked)
+}
+
+fn granular_markup(
+    original: &str,
+    edited: &str,
+    granularity: rdocx::ComparisonGranularity,
+) -> (String, bool) {
+    tracked_paragraph_markup(&granular_redline(
+        original,
+        edited,
+        &rdocx::ComparisonOptions {
+            granularity,
+            ..Default::default()
+        },
+    ))
+}
+
+#[test]
+fn word_comparison_groups_a_rewritten_stretch_into_one_deletion_and_one_insertion() {
+    let paragraph =
+        |text: &str| format!(r#"<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#);
+    let original = paragraph(
+        "On receipt, the Sponsor inspects the material and notifies the site of any specimen \
+         that does not pass inspection, with the reason.",
+    );
+    let edited = paragraph(
+        "After receipt, the Sponsor confirms the delivery and reports to the laboratory any \
+         specimen that fails inspection.",
+    );
+    assert_eq!(
+        granular_markup(&original, &edited, rdocx::ComparisonGranularity::Word).0,
+        "[-On-]{+After+} receipt, the Sponsor [-inspects-]{+confirms+} the \
+         [-material-]{+delivery+} and [-notifies the site of-]{+reports to the laboratory+} \
+         any specimen that [-does not pass-]{+fails+} inspection[-, with the reason-]."
+    );
+    let counted = granular_redline(
+        &original,
+        &edited,
+        &rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ..Default::default()
+        },
+    );
+    let records = policy_comparison_records(&counted, "main");
+    assert_eq!(records.len(), 11, "{records:?}");
+    // Run granularity still replaces the run whole.
+    assert_eq!(
+        granular_markup(&original, &edited, rdocx::ComparisonGranularity::Run).0,
+        "[-On receipt, the Sponsor inspects the material and notifies the site of any \
+         specimen that does not pass inspection, with the reason.-]{+After receipt, the \
+         Sponsor confirms the delivery and reports to the laboratory any specimen that fails \
+         inspection.+}"
+    );
+    // Character granularity takes the same path and keeps accept and reject exact.
+    granular_markup(&original, &edited, rdocx::ComparisonGranularity::Character);
+
+    let cases = [
+        // A one-word change is unchanged by grouping.
+        (
+            "the quick brown fox",
+            "the slow brown fox",
+            "the [-quick-]{+slow+} brown fox",
+        ),
+        // An anchor with fewer words than the changes around it folds.
+        (
+            "red green and blue yellow end",
+            "cyan magenta and black white end",
+            "[-red green and blue yellow-]{+cyan magenta and black white+} end",
+        ),
+        // A long unchanged stretch stays between its changes.
+        (
+            "red green one two three four blue yellow",
+            "cyan magenta one two three four black white",
+            "[-red green-]{+cyan magenta+} one two three four [-blue yellow-]{+black white+}",
+        ),
+        // An anchor next to a pure deletion stays.
+        (
+            "keep red green and blue yellow",
+            "keep and black white",
+            "keep [-red green -]and [-blue yellow-]{+black white+}",
+        ),
+    ];
+    for (before, after, expected) in cases {
+        assert_eq!(
+            granular_markup(
+                &paragraph(before),
+                &paragraph(after),
+                rdocx::ComparisonGranularity::Word
+            )
+            .0,
+            expected
+        );
+    }
+    // The runs of an inline control group the same way.
+    let control = |text: &str| {
+        format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">Lead </w:t></w:r><w:sdt><w:sdtPr><w:alias w:val="c"/></w:sdtPr><w:sdtContent><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:sdtContent></w:sdt></w:p>"#
+        )
+    };
+    assert_eq!(
+        granular_markup(
+            &control("red green and blue yellow"),
+            &control("cyan magenta and black white"),
+            rdocx::ComparisonGranularity::Word
+        )
+        .0,
+        "Lead [-red green and blue yellow-]{+cyan magenta and black white+}"
+    );
+}
+
+#[test]
+fn word_grouping_keeps_a_one_word_edit_and_long_anchors() {
+    let paragraph =
+        |text: &str| format!(r#"<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#);
+    for anchor in ["and", "inspection"] {
+        let before =
+            format!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx {anchor} zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+        let after =
+            format!("YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY {anchor} QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ");
+        let expected = format!(
+            "[-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-]{{+YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY+}} {anchor} [-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-]{{+QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ+}}"
+        );
+        for granularity in [
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            assert_eq!(
+                granular_markup(&paragraph(&before), &paragraph(&after), granularity).0,
+                expected,
+                "{anchor} {granularity:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn word_grouping_stops_at_adjacent_changed_formatting_owners() {
+    let paragraph = |left: &str, right: &str| {
+        format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">{left} </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>{right}</w:t></w:r></w:p>"#
+        )
+    };
+    let original = paragraph("red green", "blue yellow");
+    let edited = paragraph("cyan magenta", "black white");
+    assert_eq!(
+        granular_markup(&original, &edited, rdocx::ComparisonGranularity::Word).0,
+        "[-red green-]{+cyan magenta+} [-blue yellow-]{+black white+}"
+    );
+    let xml = granular_redline(
+        &original,
+        &edited,
+        &rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ..Default::default()
+        },
+    );
+    for (accept, left, right) in [
+        (true, "cyan magenta", "black white"),
+        (false, "red green", "blue yellow"),
+    ] {
+        let mut resolved = document_with_content_controls(&xml);
+        if accept {
+            resolved.accept_all().unwrap();
+        } else {
+            resolved.reject_all().unwrap();
+        }
+        let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+        let actual = reopened
+            .paragraph(0)
+            .unwrap()
+            .runs()
+            .flat_map(|run| {
+                let bold = run.bold_value();
+                run.text()
+                    .chars()
+                    .map(|character| (character, bold))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected = format!("{left} ")
+            .chars()
+            .map(|character| (character, None))
+            .chain(right.chars().map(|character| (character, Some(true))))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn word_grouping_preserves_bookmark_comment_and_raw_boundaries() {
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    for marker in [
+        r#"<w:bookmarkStart w:id="9" w:name="kept"/><w:bookmarkEnd w:id="9"/>"#,
+        r#"<w:commentRangeStart w:id="9"/><w:commentRangeEnd w:id="9"/>"#,
+        r#"<x:keep xmlns:x="urn:producer" x:flag="exact"/>"#,
+        "<?producer exact?>",
+    ] {
+        let paragraph =
+            |left: &str, right: &str| format!("<w:p>{}{marker}{}</w:p>", run(left), run(right));
+        let before = paragraph("red green ", "blue yellow");
+        let after = paragraph("cyan magenta ", "black white");
+        let xml = granular_redline(
+            &before,
+            &after,
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        );
+        let kinds = policy_comparison_records(&xml, "main")
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["del", "ins", "del", "ins"], "{marker}: {xml}");
+        assert_eq!(xml.matches(marker).count(), 1, "{marker}: {xml}");
+        for accept in [true, false] {
+            let mut resolved = document_with_content_controls(&xml);
+            if accept {
+                resolved.accept_all().unwrap();
+            } else {
+                resolved.reject_all().unwrap();
+            }
+            let mut reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                document_xml(&mut reopened).matches(marker).count(),
+                1,
+                "{marker}"
+            );
+        }
+    }
+}
+
+#[test]
+fn word_grouping_respects_ignored_units_and_non_text_content() {
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let simple = r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#;
+    for middle in [simple, "<w:r><w:br/></w:r>"] {
+        let before = format!(
+            "<w:p>{}{middle}{}</w:p>",
+            run("red green "),
+            run("blue yellow")
+        );
+        let after = format!(
+            "<w:p>{}{middle}{}</w:p>",
+            run("cyan magenta "),
+            run("black white")
+        );
+        for ignore_fields in [false, true] {
+            let xml = granular_redline(
+                &before,
+                &after,
+                &rdocx::ComparisonOptions {
+                    granularity: rdocx::ComparisonGranularity::Word,
+                    ignore_fields,
+                    ..Default::default()
+                },
+            );
+            let kinds = policy_comparison_records(&xml, "main")
+                .into_iter()
+                .map(|record| record.kind)
+                .collect::<Vec<_>>();
+            assert_eq!(kinds, ["del", "ins", "del", "ins"], "{middle}: {xml}");
+            assert_eq!(xml.matches(middle).count(), 1, "{middle}: {xml}");
+        }
+    }
+    let before = format!("<w:p>{}</w:p>", run("red green"));
+    let after = format!("<w:p>{}</w:p>", run("cyan magenta"));
+    let xml = granular_redline(
+        &before,
+        &after,
+        &rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ignore_whitespace: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        tracked_paragraph_markup(&xml).0,
+        "[-red-]{+cyan+} [-green-]{+magenta+}"
+    );
+}
+
+#[test]
+fn word_grouping_preserves_inline_control_raw_boundaries() {
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    for marker in [
+        "<?kept boundary?>",
+        r#"<x:keep xmlns:x="urn:kept"/>"#,
+        r#"<w:bookmarkStart w:id="90" w:name="kept"/><w:bookmarkEnd w:id="90"/>"#,
+        r#"<w:commentRangeStart w:id="90"/><w:commentRangeEnd w:id="90"/>"#,
+    ] {
+        let control = |left: &str, right: &str| {
+            format!(
+                "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{}{marker}{}</w:sdtContent></w:sdt></w:p>",
+                run(left),
+                if right.is_empty() {
+                    String::new()
+                } else {
+                    run(right)
+                }
+            )
+        };
+        for (old_right, new_right) in [(" ppp qqq", " AAA BBB"), ("", " AAA BBB"), (" ppp qqq", "")]
+        {
+            let before = control("xxx zzz ", old_right);
+            let after = control("YYY QQQ ", new_right);
+            let edited = document_with_content_controls(&wrap_word_body(&after));
+            let mut default = document_with_content_controls(&wrap_word_body(&before));
+            let mut explicit_run = document_with_content_controls(&wrap_word_body(&before));
+            let default_before = default.to_bytes().unwrap();
+            let run_before = explicit_run.to_bytes().unwrap();
+            let default_result = default
+                .compare(&edited, "Ada", "2026-09-04T09:00:00Z")
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let run_result = explicit_run
+                .compare_with_options(
+                    &edited,
+                    "Ada",
+                    "2026-09-04T09:00:00Z",
+                    &rdocx::ComparisonOptions {
+                        granularity: rdocx::ComparisonGranularity::Run,
+                        ..Default::default()
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            assert_eq!(default_result, run_result);
+            if default_result.is_err() {
+                assert_eq!(default.to_bytes().unwrap(), default_before);
+                assert_eq!(explicit_run.to_bytes().unwrap(), run_before);
+            } else {
+                assert_eq!(document_xml(&mut default), document_xml(&mut explicit_run));
+            }
+            let mut expected_kinds = vec!["del", "ins"];
+            if !old_right.is_empty() {
+                expected_kinds.push("del");
+            }
+            if !new_right.is_empty() {
+                expected_kinds.push("ins");
+            }
+            for granularity in [
+                rdocx::ComparisonGranularity::Word,
+                rdocx::ComparisonGranularity::Character,
+            ] {
+                let original_xml = wrap_word_body(&before);
+                let edited = document_with_content_controls(&wrap_word_body(&after));
+                let mut tracked = document_with_content_controls(&original_xml);
+                tracked
+                    .compare_with_options(
+                        &edited,
+                        "Ada",
+                        "2026-09-04T09:00:00Z",
+                        &rdocx::ComparisonOptions {
+                            granularity,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                let xml = document_xml(&mut tracked);
+                assert_eq!(
+                    policy_comparison_records(&xml, "main")
+                        .iter()
+                        .map(|record| record.kind.as_str())
+                        .collect::<Vec<_>>(),
+                    expected_kinds,
+                    "{granularity:?}: {xml}"
+                );
+                let bytes = tracked.to_bytes().unwrap();
+                for (accept, left, right) in [
+                    (true, "YYY QQQ ", new_right),
+                    (false, "xxx zzz ", old_right),
+                ] {
+                    let mut resolved = Document::from_bytes(&bytes).unwrap();
+                    if accept {
+                        resolved.accept_all().unwrap();
+                    } else {
+                        resolved.reject_all().unwrap();
+                    }
+                    let mut reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                    let xml = document_xml(&mut reopened);
+                    assert_eq!(xml.matches(marker).count(), 1, "{xml}");
+                    let (prefix, suffix) = xml.split_once(marker).unwrap();
+                    let text = |xml: &str| {
+                        xml.split("<w:t")
+                            .skip(1)
+                            .map(|part| {
+                                let part = &part[part.find('>').unwrap() + 1..];
+                                &part[..part.find("</w:t>").unwrap()]
+                            })
+                            .collect::<String>()
+                    };
+                    assert_eq!(
+                        (text(prefix), text(suffix)),
+                        (left.to_owned(), right.to_owned()),
+                        "{granularity:?}, accept={accept}: {xml}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn word_grouping_applies_inside_an_inline_control() {
+    let control = |text: &str| {
+        format!(
+            r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="kept"/></w:sdtPr><w:sdtContent><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:sdtContent></w:sdt></w:p>"#
+        )
+    };
+    let xml = granular_redline(
+        &control("red green and blue yellow"),
+        &control("cyan magenta and black white"),
+        &rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        tracked_paragraph_markup(&xml).0,
+        "[-red green and blue yellow-]{+cyan magenta and black white+}"
+    );
+    assert_eq!(xml.matches("<w:sdt>").count(), 1);
+}
+
+#[test]
+fn word_grouping_preserves_external_hyperlink_relationships_through_reopen() {
+    let build = |before: &str, after: &str| {
+        let mut document = Document::new();
+        let relationship = document.add_hyperlink_relationship("https://example.com/kept");
+        let mut paragraph = document.add_paragraph(before);
+        paragraph.add_hyperlink("and", &relationship);
+        paragraph.add_run(after);
+        document
+    };
+    let original = build("red green ", " blue yellow");
+    let edited = build("cyan magenta ", " black white");
+    let mut tracked = build("red green ", " blue yellow");
+    tracked
+        .compare_with_options(
+            &edited,
+            "Reviewer",
+            "2026-01-01T00:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = document_xml(&mut tracked);
+    assert_eq!(
+        policy_comparison_records(&xml, "main")
+            .iter()
+            .map(|record| record.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["del", "ins", "del", "ins"]
+    );
+    let bytes = tracked.to_bytes().unwrap();
+    for (accept, expected) in [(true, &edited), (false, &original)] {
+        let mut resolved = Document::from_bytes(&bytes).unwrap();
+        if accept {
+            resolved.accept_all().unwrap();
+        } else {
+            resolved.reject_all().unwrap();
+        }
+        let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.text(), expected.text());
+        let links = reopened.links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "and");
+        assert_eq!(links[0].url.as_deref(), Some("https://example.com/kept"));
+    }
+}
+
+#[test]
+fn word_grouping_never_folds_a_field_a_hyperlink_or_a_formatting_change() {
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let bold = |text: &str| {
+        format!(r#"<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+    };
+    let link = |text: &str| {
+        format!(
+            r#"<w:hyperlink w:anchor="target">{}</w:hyperlink>"#,
+            run(text)
+        )
+    };
+    let simple = r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#;
+    let complex = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let paragraph = |anchor: &str, before: &str, after: &str| {
+        format!("<w:p>{}{anchor}{}</w:p>", run(before), run(after))
+    };
+    for (label, original_anchor, edited_anchor, expected) in [
+        (
+            "hyperlink",
+            link("and"),
+            link("and"),
+            "[-red green-]{+cyan magenta+} and [-blue yellow-]{+black white+}",
+        ),
+        (
+            "simple field",
+            simple.to_owned(),
+            simple.to_owned(),
+            "[-red green-]{+cyan magenta+} 1 [-blue yellow-]{+black white+}",
+        ),
+        (
+            "complex field",
+            complex.to_owned(),
+            complex.to_owned(),
+            "[-red green-]{+cyan magenta+} 1 [-blue yellow-]{+black white+}",
+        ),
+        (
+            "formatting change",
+            run("and"),
+            bold("and"),
+            "[-red green-]{+cyan magenta+} and [-blue yellow-]{+black white+}",
+        ),
+    ] {
+        let (markup, wrapped) = granular_markup(
+            &paragraph(&original_anchor, "red green ", " blue yellow"),
+            &paragraph(&edited_anchor, "cyan magenta ", " black white"),
+            rdocx::ComparisonGranularity::Word,
+        );
+        assert_eq!(markup, expected, "{label}");
+        assert!(!wrapped, "{label}");
+    }
 }
 
 #[test]
@@ -45513,6 +46747,337 @@ fn issue_255_word_compare_output_for_a_final_table_resolves() {
             );
             assert!(resolved.revisions().is_empty(), "{label} accept={accept}");
         }
+    }
+}
+
+/// A body where "T:text" is a one-cell table holding that text.
+fn paragraph_next_to_table_document(spec: &[&str]) -> Document {
+    let mut document = Document::new();
+    for item in spec {
+        if let Some(text) = item.strip_prefix("T:") {
+            document
+                .add_table(1, 1)
+                .cell(0, 0)
+                .expect("one-cell table")
+                .set_text(text);
+        } else {
+            document.add_paragraph(item);
+        }
+    }
+    document
+}
+
+fn paragraph_next_to_table_body(document: &Document) -> Vec<String> {
+    document
+        .body_items()
+        .map(|item| match item {
+            BodyItemRef::Paragraph(paragraph) => paragraph.text(),
+            BodyItemRef::Table(table) => {
+                format!("T:{}", table.cell(0, 0).expect("one-cell table").text())
+            }
+            _ => panic!("unexpected body item"),
+        })
+        .collect()
+}
+
+#[test]
+fn paragraph_inserted_or_deleted_before_a_table_compares() {
+    let pairs: [(&[&str], &[&str]); 12] = [
+        // The paragraph before the table is the first of the body.
+        (&["Old.", "T:Same cell.", "End."], &["T:Same cell.", "End."]),
+        (&["T:Same cell.", "End."], &["New.", "T:Same cell.", "End."]),
+        // The table changes too.
+        (
+            &["Intro.", "Old.", "T:Old cell.", "End."],
+            &["Intro.", "T:New cell.", "End."],
+        ),
+        (
+            &["Intro.", "T:Old cell.", "End."],
+            &["Intro.", "New.", "T:New cell.", "End."],
+        ),
+        // Controls that compared before.
+        (
+            &["Intro.", "Old.", "T:Same cell.", "End."],
+            &["Intro.", "T:Same cell.", "End."],
+        ),
+        (
+            &["Intro.", "Old.", "T:Cell text.", "End."],
+            &["Intro.", "T:Cell text.", "End."],
+        ),
+        (
+            &["Intro.", "Old.", "", "T:Old cell.", "End."],
+            &["Intro.", "", "T:New cell.", "End."],
+        ),
+        // Two paragraphs, and a table that is the last body item.
+        (
+            &["Old.", "Older.", "T:Same cell.", "End."],
+            &["T:Same cell.", "End."],
+        ),
+        (&["Old.", "T:Same cell."], &["T:Same cell."]),
+        (&["T:Same cell."], &["New.", "T:Same cell."]),
+        // The table goes with the paragraph, or comes with it.
+        (&["Old.", "T:Cell.", "End."], &["End."]),
+        (&["Intro.", "T:Cell.", "End."], &["Intro.", "New.", "End."]),
+    ];
+    for granularity in [
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+        rdocx::ComparisonGranularity::Run,
+    ] {
+        for ignore in [false, true] {
+            for (original, edited) in pairs {
+                let label = format!("{granularity:?} ignore={ignore} {original:?} -> {edited:?}");
+                let mut compared = paragraph_next_to_table_document(original);
+                compared
+                    .compare_with_options(
+                        &paragraph_next_to_table_document(edited),
+                        "Reviewer",
+                        "2026-01-01T00:00:00Z",
+                        &rdocx::ComparisonOptions {
+                            granularity,
+                            ignore_fields: ignore,
+                            ignore_formatting: ignore,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or_else(|error| panic!("{label}: {error}"));
+                let redline = compared.to_bytes().expect("save redline");
+                for (accept, expected) in [(true, edited), (false, original)] {
+                    let mut resolved = Document::from_bytes(&redline).expect("reopen redline");
+                    if accept {
+                        resolved.accept_all()
+                    } else {
+                        resolved.reject_all()
+                    }
+                    .unwrap_or_else(|error| panic!("{label} accept={accept}: {error}"));
+                    let resolved = Document::from_bytes(&resolved.to_bytes().unwrap())
+                        .expect("reopen resolved redline");
+                    assert_eq!(
+                        paragraph_next_to_table_body(&resolved),
+                        expected
+                            .iter()
+                            .map(|item| item.to_string())
+                            .collect::<Vec<_>>(),
+                        "{label} accept={accept}"
+                    );
+                    assert!(resolved.revisions().is_empty(), "{label} accept={accept}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn paragraph_inserted_or_deleted_before_a_table_in_a_control_compares() {
+    let document = |spec: &[&str], indent: &str| {
+        let content = spec
+            .iter()
+            .map(|item| match item.strip_prefix("T:") {
+                Some(text) => format!(
+                    r#"{indent}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+                ),
+                None => format!("{indent}<w:p><w:r><w:t>{item}</w:t></w:r></w:p>"),
+            })
+            .collect::<String>();
+        document_with_content_controls(&wrap_word_body(&format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>{content}{indent}</w:sdtContent></w:sdt><w:p/>"#
+        )))
+    };
+    // Inserted content carries no indentation, so whitespace is not compared.
+    let resolved_body = |document: &mut Document| {
+        let mut body = body_from_document(document);
+        for content in &mut body.content {
+            if let BodyContent::ContentControl(control) = content {
+                control.content.retain(|child| {
+                    !matches!(child, SdtContent::RawXml(raw) if raw.iter().all(u8::is_ascii_whitespace))
+                });
+            }
+        }
+        body
+    };
+    let pairs: [(&[&str], &[&str]); 4] = [
+        (&["Old.", "T:Same cell.", "End."], &["T:Same cell.", "End."]),
+        (&["T:Same cell.", "End."], &["New.", "T:Same cell.", "End."]),
+        (
+            &["Intro.", "Old.", "T:Old cell.", "End."],
+            &["Intro.", "T:New cell.", "End."],
+        ),
+        (&["Old.", "T:Cell.", "End."], &["End."]),
+    ];
+    for indent in ["", "\n        "] {
+        for (original, edited) in pairs {
+            let label = format!("{indent:?} {original:?} -> {edited:?}");
+            let mut compared = document(original, indent);
+            compared
+                .compare(
+                    &document(edited, indent),
+                    "Reviewer",
+                    "2026-01-01T00:00:00Z",
+                )
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            let redline = compared.to_bytes().expect("save redline");
+            for (accept, expected) in [(true, edited), (false, original)] {
+                let mut resolved = Document::from_bytes(&redline).expect("reopen redline");
+                if accept {
+                    resolved.accept_all()
+                } else {
+                    resolved.reject_all()
+                }
+                .unwrap_or_else(|error| panic!("{label} accept={accept}: {error}"));
+                assert!(resolved.revisions().is_empty(), "{label} accept={accept}");
+                assert_eq!(
+                    resolved_body(&mut resolved),
+                    resolved_body(&mut document(expected, indent)),
+                    "{label} accept={accept}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn paragraph_mark_removed_before_a_table_removes_an_emptied_paragraph() {
+    // The paragraph carries its own mark revision, as Word writes a paragraph
+    // deleted or inserted before a table.
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let marked = |kind: &str, text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:rPr><w:{kind} w:id="1" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:proofErr w:type="spellStart"/><w:{kind} w:id="2" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:r>{text}</w:r></w:{kind}><w:proofErr w:type="spellEnd"/></w:p>"#
+        )
+    };
+    let end = "<w:p><w:r><w:t>End.</w:t></w:r></w:p>";
+    let body = |document: &Document| {
+        document
+            .body_items()
+            .map(|item| match item {
+                BodyItemRef::Paragraph(paragraph) => paragraph.text(),
+                BodyItemRef::Table(_) => "T".to_owned(),
+                _ => panic!("unexpected body item"),
+            })
+            .collect::<Vec<_>>()
+    };
+    for (kind, text, removes_on_accept) in [
+        ("del", "<w:delText>Old.</w:delText>", true),
+        ("ins", "<w:t>New.</w:t>", false),
+    ] {
+        let xml = format!("{}{table}{end}", marked(kind, text));
+        for accept in [true, false] {
+            let mut resolved = document_with_content_controls(&wrap_word_body(&xml));
+            if accept {
+                resolved.accept_all()
+            } else {
+                resolved.reject_all()
+            }
+            .unwrap_or_else(|error| panic!("{kind} accept={accept}: {error}"));
+            let resolved = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+            let kept = if kind == "del" { "Old." } else { "New." };
+            let expected = if accept == removes_on_accept {
+                vec!["T", "End."]
+            } else {
+                vec![kept, "T", "End."]
+            };
+            assert_eq!(body(&resolved), expected, "{kind} accept={accept}");
+            assert!(resolved.revisions().is_empty(), "{kind} accept={accept}");
+        }
+    }
+    // Opaque elements and meaningful raw gaps cannot disappear with a removed mark.
+    for opaque in [
+        r#"<x:keep xmlns:x="urn:foreign"/>"#,
+        "<!--exact retained comment-->",
+        "<?producer exact?>",
+        "meaningful gap",
+    ] {
+        let paragraph = marked("del", "<w:delText>Old.</w:delText>")
+            .replace("</w:p>", &format!("{opaque}</w:p>"));
+        let mut document =
+            document_with_content_controls(&wrap_word_body(&format!("{paragraph}{table}{end}")));
+        let before = document.to_bytes().unwrap();
+        let error = document
+            .accept_all()
+            .expect_err("opaque paragraph payload before retained table");
+        assert!(
+            error.to_string().contains("no content left"),
+            "{opaque}: {error}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{opaque}");
+    }
+    // A paragraph that keeps content has nothing to merge into.
+    let kept = format!(
+        r#"<w:p><w:pPr><w:rPr><w:del w:id="1" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr><w:r><w:t>Kept.</w:t></w:r></w:p>{table}{end}"#
+    );
+    let mut document = document_with_content_controls(&wrap_word_body(&kept));
+    let error = document.accept_all().expect_err("content before a table");
+    assert!(error.to_string().contains("no content left"), "{error}");
+}
+
+#[test]
+fn paragraph_deleted_before_a_table_carries_its_own_mark() {
+    let mut compared = paragraph_next_to_table_document(&["Intro.", "Old.", "T:Cell.", "End."]);
+    compared
+        .compare(
+            &paragraph_next_to_table_document(&["Intro.", "T:Cell.", "End."]),
+            "Reviewer",
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("compare");
+    let package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(compared.to_bytes().unwrap()))
+            .unwrap();
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let paragraph = |text: &str| {
+        let at = xml.find(text).expect("paragraph text");
+        &xml[xml[..at].rfind("<w:p>").expect("paragraph start")..at]
+    };
+    assert!(!paragraph("<w:t>Intro.</w:t>").contains("<w:del "), "{xml}");
+    assert!(
+        paragraph("<w:delText>Old.</w:delText>").starts_with("<w:p><w:pPr><w:rPr><w:del "),
+        "{xml}"
+    );
+    let table = &xml[xml.find("<w:tbl>").unwrap()..xml.find("</w:tbl>").unwrap()];
+    assert!(!table.contains("<w:del "), "{xml}");
+}
+
+#[test]
+fn table_edited_beside_a_deleted_paragraph_compares_in_place() {
+    // The gap holds "Old." and the old table on one side and the new table on
+    // the other. The tables pair, so only the cell text is revised.
+    for (original, edited) in [
+        (
+            &["Intro.", "Old.", "T:Old cell.", "End."][..],
+            &["Intro.", "T:New cell.", "End."][..],
+        ),
+        (
+            &["Intro.", "T:Old cell.", "End."][..],
+            &["Intro.", "New.", "T:New cell.", "End."][..],
+        ),
+    ] {
+        let mut compared = paragraph_next_to_table_document(original);
+        compared
+            .compare(
+                &paragraph_next_to_table_document(edited),
+                "Reviewer",
+                "2026-01-01T00:00:00Z",
+            )
+            .expect("compare");
+        let package =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(compared.to_bytes().unwrap()))
+                .unwrap();
+        let xml =
+            String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+        assert_eq!(xml.matches("<w:tbl>").count(), 1, "{xml}");
+        let table = &xml[xml.find("<w:tbl>").unwrap()..xml.find("</w:tbl>").unwrap()];
+        assert!(!table.contains("<w:trPr>"), "{xml}");
+        assert!(!table.contains("<w:pPr>"), "{xml}");
+        assert_eq!(
+            (
+                table.matches("<w:del ").count(),
+                table.matches("<w:ins ").count()
+            ),
+            (1, 1),
+            "{xml}"
+        );
+        assert!(table.contains("<w:delText>Old cell.</w:delText>"), "{xml}");
+        assert!(table.contains("<w:t>New cell.</w:t>"), "{xml}");
     }
 }
 

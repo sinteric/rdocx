@@ -1992,7 +1992,9 @@ impl Importer<'_> {
         let paragraphs = self.collect_paragraphs(element, style)?;
         let has_text = paragraphs.iter().any(|paragraph| {
             paragraph.pieces.iter().any(|piece| match piece {
-                InlinePiece::Text { text, .. } => !text.trim().is_empty(),
+                InlinePiece::Text { text, .. } => !text
+                    .trim_matches(|c: char| c.is_ascii_whitespace())
+                    .is_empty(),
                 InlinePiece::Break => true,
             })
         });
@@ -2412,6 +2414,10 @@ fn write_paragraphs(frame: &mut TextFrame<'_>, paragraphs: &[ParagraphModel]) ->
         }
         let mut pending_space = false;
         let mut emitted = false;
+        // The formatting of the text the pending collapsed space was written
+        // in, and whether the last run was written in that same text.
+        let mut space_properties: Option<CT_TextCharacterProperties> = None;
+        let mut space_ends_last_run = false;
         for piece in &model.pieces {
             match piece {
                 InlinePiece::Break => {
@@ -2426,17 +2432,53 @@ fn write_paragraphs(frame: &mut TextFrame<'_>, paragraphs: &[ParagraphModel]) ->
                     style,
                     target,
                 } => {
-                    let text = collapse_text(text, &mut pending_space, emitted);
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let mut run = CT_RegularTextRun::new(text);
                     let mut properties = character_properties(style)?;
                     if let Some(relationship_id) = target {
                         let mut hyperlink = TextHyperlink::default();
                         hyperlink.relationship_id = Some(relationship_id.clone());
                         properties.hyperlink_click = Some(hyperlink);
                     }
+                    // A collapsed space before differently formatted text
+                    // stays with the text it was written in, as a browser
+                    // lays it out, rather than becoming the first character
+                    // of an underlined, struck or linked run. The whitespace
+                    // this text starts with continues the same sequence, so
+                    // it adds no second space.
+                    let mut text = text.as_str();
+                    if pending_space
+                        && emitted
+                        && let Some(space) = space_properties.take_if(|space| {
+                            *space != properties
+                                && text
+                                    .chars()
+                                    .any(|character| !character.is_ascii_whitespace())
+                        })
+                    {
+                        if space_ends_last_run
+                            && let Some(TextRun::Run(last)) = paragraph.runs.last_mut()
+                        {
+                            last.text.value.push(' ');
+                        } else {
+                            let mut run = CT_RegularTextRun::new(" ");
+                            if space != CT_TextCharacterProperties::default() {
+                                run.properties = Some(space);
+                            }
+                            paragraph.runs.push(TextRun::Run(run));
+                        }
+                        pending_space = false;
+                        text = text
+                            .trim_start_matches(|character: char| character.is_ascii_whitespace());
+                    }
+                    let was_pending = pending_space;
+                    let text = collapse_text(text, &mut pending_space, emitted);
+                    if pending_space && (!was_pending || !text.is_empty()) {
+                        space_ends_last_run = !text.is_empty();
+                        space_properties = Some(properties.clone());
+                    }
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let mut run = CT_RegularTextRun::new(text);
                     if properties != CT_TextCharacterProperties::default() {
                         run.properties = Some(properties);
                     }
@@ -2823,13 +2865,22 @@ fn is_block_element(name: &str) -> bool {
 
 #[cfg(feature = "default-template")]
 fn element_has_visible_content(element: ElementRef<'_>) -> bool {
-    element.value().name() == "img" || element.text().any(|text| !text.trim().is_empty())
+    element.value().name() == "img"
+        || element.text().any(|text| {
+            !text
+                .trim_matches(|c: char| c.is_ascii_whitespace())
+                .is_empty()
+        })
 }
 
 #[cfg(feature = "default-template")]
 fn unsupported_element_has_presence(element: ElementRef<'_>, style: &ComputedStyle) -> bool {
     style.position_absolute
-        || element.text().any(|text| !text.trim().is_empty())
+        || element.text().any(|text| {
+            !text
+                .trim_matches(|c: char| c.is_ascii_whitespace())
+                .is_empty()
+        })
         || matches!(
             element.value().name(),
             "audio"
@@ -2935,7 +2986,7 @@ fn collapse_text(text: &str, pending_space: &mut bool, emitted: bool) -> String 
     let mut output = String::new();
     let mut emitted = emitted;
     for character in text.chars() {
-        if character.is_whitespace() {
+        if character.is_ascii_whitespace() {
             *pending_space = true;
         } else {
             if *pending_space && emitted {

@@ -10542,3 +10542,43 @@ def test_fx211c_table_collections_keep_owner_authority_and_retire_indexed_grid_v
         assert "First invalidated by ShapeCollection.remove " in str(error.value)
         assert prs.to_bytes() == stable
     assert other.text == "unrelated sibling" and other.element.xml == other_xml
+
+
+def test_fx231_installed_presentation_imported_whitespace_roundtrip(tmp_path):
+    import os
+    import rpptx
+
+    source = os.environ.get("FX231_INSTALLED_INPUT")
+    if source is None:
+        # The ordinary suite independently constructs a read/save control.
+        # The equipped story gate instead supplies actual native HTML output.
+        source = tmp_path / "source.pptx"
+        control = rpptx.Presentation()
+        slide = control.slides.add_slide(control.slide_layouts[6])
+        frame = slide.shapes.add_textbox(0, 0, 4_000_000, 2_000_000).text_frame
+        paragraph = frame.paragraphs[0]
+        paragraph.add_run("a ")
+        control.slides[0].shapes[0].text_frame.paragraphs[0].add_run("b ").font.bold = True
+        control.slides[0].shapes[0].text_frame.paragraphs[0].add_run("c\u00a0\u00a0d")
+        linked = control.slides[0].shapes[0].text_frame.add_paragraph()
+        linked.add_run("x ").hyperlink.address = "https://example.test/"
+        control.slides[0].shapes[0].text_frame.paragraphs[1].add_run("y")
+        control.save(source)
+    with open(source, "rb") as stream:
+        data = stream.read()
+    for deck in (rpptx.Presentation(source), rpptx.Presentation.from_bytes(data)):
+        paragraph = deck.slides[0].shapes[0].text_frame.paragraphs[0]
+        assert [(run.text, run.font.bold) for run in paragraph.runs] == [
+            ("a ", None), ("b ", True), ("c\u00a0\u00a0d", None)
+        ]
+        assert all(run.hyperlink.address is None for run in paragraph.runs)
+        output = tmp_path / "saved.pptx"
+        deck.save(output)
+        reopened = rpptx.Presentation(output)
+        paragraph = reopened.slides[0].shapes[0].text_frame.paragraphs[0]
+        assert [(run.text, run.font.bold) for run in paragraph.runs] == [
+            ("a ", None), ("b ", True), ("c\u00a0\u00a0d", None)
+        ]
+
+    linked = reopened.slides[0].shapes[0].text_frame.paragraphs[1]
+    assert [(run.text, run.hyperlink.address) for run in linked.runs] == [("x ", "https://example.test/"), ("y", None)]

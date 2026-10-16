@@ -4791,6 +4791,247 @@ mod tests {
         parse_mhtml, preflight_markup, read_bounded, to_mhtml_with_limits,
     };
 
+    /// The text and the underline, strike, bold and italic of each run.
+    fn fx231_word_marked_runs(
+        paragraph: &crate::paragraph::ParagraphRef<'_>,
+    ) -> Vec<(String, [bool; 4])> {
+        (0..paragraph.run_count())
+            .map(|index| paragraph.run(index).unwrap())
+            .map(|run| {
+                (
+                    run.text(),
+                    [
+                        run.is_underline(),
+                        run.is_strike(),
+                        run.is_bold(),
+                        run.is_italic(),
+                    ],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fx231_word_advanced_whitespace_equivalence() {
+        const PLAIN: [bool; 4] = [false; 4];
+        const U: [bool; 4] = [true, false, false, false];
+        const S: [bool; 4] = [false, true, false, false];
+        const B: [bool; 4] = [false, false, true, false];
+        const I: [bool; 4] = [false, false, false, true];
+        let html = Document::from_html(
+            "<p>see <u>u</u> then <s>s</s> then <b>b</b> then <i>i</i> end</p>\
+         <p><u>u</u> <s>s</s></p><p><u>u </u>tail</p>",
+        )
+        .unwrap()
+        .document;
+        // "see " then each span followed by " then ", the last by " end".
+        let expected = |spans: &[(&str, [bool; 4])]| {
+            let mut runs = vec![("see ".to_owned(), PLAIN)];
+            for (index, (text, mark)) in spans.iter().enumerate() {
+                runs.push(((*text).to_owned(), *mark));
+                let after = if index + 1 == spans.len() {
+                    " end"
+                } else {
+                    " then "
+                };
+                runs.push((after.to_owned(), PLAIN));
+            }
+            runs
+        };
+        let all = [("u", U), ("s", S), ("b", B), ("i", I)];
+        assert_eq!(
+            fx231_word_marked_runs(&html.paragraph(0).unwrap()),
+            expected(&all)
+        );
+        // A space between two spans is in neither of them.
+        assert_eq!(
+            fx231_word_marked_runs(&html.paragraph(1).unwrap()),
+            [
+                ("u".to_owned(), U),
+                (" ".to_owned(), PLAIN),
+                ("s".to_owned(), S)
+            ]
+        );
+        // A space written inside the span stays in it, as a browser draws it.
+        assert_eq!(
+            fx231_word_marked_runs(&html.paragraph(2).unwrap()),
+            [("u ".to_owned(), U), ("tail".to_owned(), PLAIN)]
+        );
+
+        let root = std::env::temp_dir().join(format!("fx231-word-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("source.html");
+        std::fs::write(
+            &path,
+            "<p>see <u>u</u> then <s>s</s> then <b>b</b> then <i>i</i> end</p>",
+        )
+        .unwrap();
+        let mut opened = Document::open_html(&path).unwrap().document;
+        let reopened = Document::from_bytes(&opened.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            fx231_word_marked_runs(&reopened.paragraph(0).unwrap()),
+            expected(&all)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        let mut html = html;
+        let reopened = Document::from_bytes(&html.to_bytes().unwrap()).unwrap();
+        for index in 0..html.paragraph_count() {
+            assert_eq!(
+                fx231_word_marked_runs(&reopened.paragraph(index).unwrap()),
+                fx231_word_marked_runs(&html.paragraph(index).unwrap())
+            );
+        }
+
+        // Markdown has no underline: strike, bold and italic.
+        let md = Document::from_markdown("see ~~s~~ then **b** then *i* end\n")
+            .unwrap()
+            .document;
+        assert_eq!(
+            fx231_word_marked_runs(&md.paragraph(0).unwrap()),
+            expected(&all[1..])
+        );
+
+        // Inserting a fragment builds its paragraphs the same way.
+        let mut inserted = Document::new();
+        let body = inserted
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == crate::StoryKind::Body)
+            .unwrap();
+        inserted
+            .insert_html_fragment(
+                &crate::ContentLocation::end(body),
+                "<p>see <u>u</u> then <s>s</s> then <b>b</b> then <i>i</i> end</p>",
+                &[],
+            )
+            .unwrap();
+        let inserted = Document::from_bytes(&inserted.to_bytes().unwrap()).unwrap();
+        let last = inserted.paragraph_count() - 1;
+        assert_eq!(
+            fx231_word_marked_runs(&inserted.paragraph(last).unwrap()),
+            expected(&all)
+        );
+    }
+
+    #[test]
+    fn fx231_word_repeated_edges_nbsp_and_links_are_equivalent() {
+        const PLAIN: [bool; 4] = [false; 4];
+        const U: [bool; 4] = [true, false, false, false];
+        const S: [bool; 4] = [false, true, false, false];
+        const B: [bool; 4] = [false, false, true, false];
+        const I: [bool; 4] = [false, false, false, true];
+        const BI: [bool; 4] = [false, false, true, true];
+        let runs = |items: &[(&str, [bool; 4])]| {
+            items
+                .iter()
+                .map(|(text, marks)| ((*text).to_owned(), *marks))
+                .collect::<Vec<_>>()
+        };
+        let html = |source: &str| Document::from_html(source).unwrap().document;
+        // The one space stays where the whitespace sequence starts: at the end
+        // of the span when it ends one, before the span when it starts one.
+        for (tag, mark) in [("u", U), ("s", S), ("b", B), ("i", I)] {
+            let ending = html(&format!("<p>a <{tag}>b </{tag}> c</p>"));
+            assert_eq!(
+                fx231_word_marked_runs(&ending.paragraph(0).unwrap()),
+                runs(&[("a ", PLAIN), ("b ", mark), ("c", PLAIN)]),
+                "{tag} end"
+            );
+            let starting = html(&format!("<p>and <{tag}> that</{tag}></p>"));
+            assert_eq!(
+                fx231_word_marked_runs(&starting.paragraph(0).unwrap()),
+                runs(&[("and ", PLAIN), ("that", mark)]),
+                "{tag} start"
+            );
+        }
+        // Nested spans, and a span that holds only whitespace between two edges.
+        let nested = html(
+            "<p>a <b>b <i> c</i></b> d</p><p><b>x <i>y </i></b> z</p><p>a <s>b </s><i> </i> c</p>",
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&nested.paragraph(0).unwrap()),
+            runs(&[("a ", PLAIN), ("b ", B), ("c", BI), (" d", PLAIN)])
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&nested.paragraph(1).unwrap()),
+            runs(&[("x ", B), ("y ", BI), ("z", PLAIN)])
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&nested.paragraph(2).unwrap()),
+            runs(&[("a ", PLAIN), ("b ", S), ("c", PLAIN)])
+        );
+        // A non-breaking space is not collapsible and stays as written.
+        let kept = html("<p>a&nbsp;&nbsp;<s>b</s></p><p>a <s>b </s>&nbsp;c</p>");
+        assert_eq!(kept.paragraph(0).unwrap().text(), "a\u{a0}\u{a0}b");
+        assert_eq!(kept.paragraph(1).unwrap().text(), "a b \u{a0}c");
+
+        // A link keeps the space it ends with, and the text after it none.
+        let link_texts = |document: &Document| {
+            document
+                .links()
+                .into_iter()
+                .map(|link| link.text)
+                .collect::<Vec<_>>()
+        };
+        let linked = html(
+            "<p>a <a href=\"https://example.test/\">b </a> c</p>\
+         <p>a <a href=\"https://example.test/\"> b</a></p>",
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&linked.paragraph(0).unwrap()),
+            runs(&[("a ", PLAIN), ("b ", PLAIN), ("c", PLAIN)])
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&linked.paragraph(1).unwrap()),
+            runs(&[("a ", PLAIN), ("b", PLAIN)])
+        );
+        assert_eq!(link_texts(&linked), ["b ", "b"]);
+
+        // Markdown writes the span edges with links, also inside a strong span.
+        let md = Document::from_markdown(
+            "a [b ](https://example.test/) c\n\na [ b](https://example.test/)\n\n\
+         **b [c ](https://example.test/)** d\n",
+        )
+        .unwrap()
+        .document;
+        assert_eq!(
+            fx231_word_marked_runs(&md.paragraph(0).unwrap()),
+            runs(&[("a ", PLAIN), ("b ", PLAIN), ("c", PLAIN)])
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&md.paragraph(1).unwrap()),
+            runs(&[("a ", PLAIN), ("b", PLAIN)])
+        );
+        assert_eq!(
+            fx231_word_marked_runs(&md.paragraph(2).unwrap()),
+            runs(&[("b ", B), ("c ", B), ("d", PLAIN)])
+        );
+        assert_eq!(link_texts(&md), ["b ", "b", "c "]);
+
+        // Inserting a fragment builds its paragraphs the same way.
+        let mut inserted = Document::new();
+        let body = inserted
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == crate::StoryKind::Body)
+            .unwrap();
+        inserted
+            .insert_html_fragment(
+                &crate::ContentLocation::end(body),
+                "<p>a <s>b </s> c</p>",
+                &[],
+            )
+            .unwrap();
+        let inserted = Document::from_bytes(&inserted.to_bytes().unwrap()).unwrap();
+        let last = inserted.paragraph_count() - 1;
+        assert_eq!(
+            fx231_word_marked_runs(&inserted.paragraph(last).unwrap()),
+            runs(&[("a ", PLAIN), ("b ", S), ("c", PLAIN)])
+        );
+    }
+
     #[test]
     fn fx217_markdown_all_supported_constructs() {
         let markdown = "# Heading\n\n**bold** *em* ~~strike~~ `a  b`\n\n> First\n>\n> Second\n\n3. Third\n4. Fourth\n\n| Head | Right |\n| --- | ---: |\n| A | B |\n\n[link](https://example.com)\n";
