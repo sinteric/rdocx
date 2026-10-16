@@ -14,6 +14,17 @@ exactly one as its test gate.
 | `golden` | Byte or pixel comparison against a recorded baseline | the hash harness |
 | `differential` | Compared against an external oracle | LibreOffice for renders, python-docx and python-pptx for the bindings |
 
+The zero-radius preset corner gate requires the official round2SameRect and
+round2DiagRect defaults to retain two rounded corners, finite coordinates and
+closure. A point arc must leave the pen unchanged before a following positive
+arc. Negative, single-zero-axis and non-finite radius forms remain rejected,
+and positive arcs retain their segment limit. The Presentation rider authors
+both direct slide and shared layout shapes, comparing complete resolved state
+against explicit equivalent defaults. It requires concrete curved geometry,
+unchanged paint, stroke, bounds and source text, with no fallback diagnostic.
+The 186-name default probe and real-file reproduction are scoped evidence,
+not native PowerPoint certification.
+
 The cached complex-field snapshot regression uses compiled source-built
 packages to compare bulk snapshots with existing direct reads. Coverage spans
 sibling runs, same-run and nested fields, supported body and related story
@@ -1193,6 +1204,12 @@ entity-decoded settings, unsupported colour and media diagnostics, atomic
 rejection, and margin-relative centering. No sample authors a watermark, so the
 49-entry hash harness remains unchanged.
 
+The shorthand-watermark regression compares complete owned page output and
+diagnostics against equivalent six-digit RGB, including mixed, black and white
+values. It requires a visible watermark, exact colour, unchanged body text and
+identical warm output. Unsupported lengths and non-hexadecimal forms remain
+rejected. The existing watermark golden and selection assertions stay intact.
+
 The advanced table geometry golden gate is
 `fixed_autofit_and_nested_table_geometry_matches_reviewed_word_pages`. It
 builds one document in code holding a fixed-grid table, an auto-width autofit
@@ -1826,6 +1843,25 @@ alone, that redaction still steps over `w:ruby` now that it is modelled, that a
 run split before an annotation carries the span with it rather than leaving it
 on the neighbouring run, and that a marked run advances exactly as far as an
 unmarked one.
+
+## Selected-story vertical continuation gate
+
+Deterministic renderer tests select unequal first, even and default headers
+and footers. Every body's non-space endpoints must fit its selected band, with
+the established terminal-space allowance. The nine tall-story paragraph/table
+alignment cases, accepted paragraph joins and section isolation remain gates.
+A split percentage-table row conserves indexed Unicode cell text, source ranges,
+short-cell content and list markers across changes in measure. Cold and warm
+layouts, source maps and numbering results must match, including a changed story.
+A split cell with percentage spacing derives its half-gap from each selected
+story width while preserving every indexed Unicode source range exactly once.
+A fractional landscape gate restores the full selected table band, preserves
+body source ranges and verifies four exact-width cold builds and warm hits.
+Footnote references on three distinct story measures each retain their note on
+the reference page. Keep-next lookahead prices the selected measure.
+Shared cursor tests cover rich bidi order, empty text, generated hyphens, markers,
+tabs, figures, explicit breaks and invalid cursors. These geometry and source
+checks do not claim native Word rendering fidelity.
 
 ## The grid and vertical geometry golden gate
 

@@ -152,6 +152,8 @@ pub(crate) enum SharedLayoutBlock {
     },
     Table {
         block: Arc<TableBlock>,
+        /// Finite active story measures share the same logical semantics.
+        variants: Vec<(f64, Arc<TableBlock>)>,
         semantics: TableSemantics,
         body_index: Option<usize>,
     },
@@ -218,6 +220,10 @@ impl Deref for TableView<'_> {
 pub(crate) trait LayoutBlockLike {
     fn paragraph(&self) -> Option<ParagraphView<'_>>;
     fn table(&self) -> Option<TableView<'_>>;
+
+    fn table_for_measure(&self, _width: f64) -> Option<TableView<'_>> {
+        self.table()
+    }
 
     fn body_index(&self) -> Option<usize> {
         None
@@ -308,6 +314,22 @@ impl LayoutBlockLike for SharedLayoutBlock {
                 semantics: Some(semantics),
             }),
         }
+    }
+
+    fn table_for_measure(&self, width: f64) -> Option<TableView<'_>> {
+        if let Self::Table {
+            variants,
+            semantics,
+            ..
+        } = self
+            && let Some((_, block)) = variants.iter().find(|(measure, _)| *measure == width)
+        {
+            return Some(TableView {
+                block,
+                semantics: Some(semantics),
+            });
+        }
+        self.table()
     }
 
     fn body_index(&self) -> Option<usize> {
