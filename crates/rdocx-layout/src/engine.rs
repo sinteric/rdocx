@@ -11074,13 +11074,21 @@ fn render_word_chart(
         height,
     };
     let rendered = match input.charts.get(relationship_id) {
-        Some(Ok(chart)) => oxml_chart::render_chart(
+        Some(Ok(chart)) => oxml_chart::render_chart_with_legend_notice(
             &chart.chart,
             bounds,
             &input.chart_theme,
             &input.chart_color_map,
             fm,
         )
+        .map(|(group, notice)| {
+            if let Some(notice) = notice {
+                diagnostics.push(Diagnostic {
+                    message: format!("{notice} source=word:{relationship_id}"),
+                });
+            }
+            group
+        })
         .map_err(|error| error.to_string()),
         Some(Err(message)) => Err(message.clone()),
         None => Err("relationship was not resolved from the document part".to_owned()),

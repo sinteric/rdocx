@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use oxml_chart::{render_chart, render_chart_placeholder};
+use oxml_chart::{render_chart_placeholder, render_chart_with_legend_notice};
 use oxml_drawing::color::{ColorChoice, ColorMap, ColorMapSlot, RgbColor, resolve_color};
 use oxml_drawing::effect::CT_OuterShadowEffect;
 use oxml_drawing::fill::{
@@ -1302,14 +1302,23 @@ impl<'a> ResolveCtx<'a> {
                     width: bounds.width,
                     height: bounds.height,
                 };
-                match render_chart(
+                match render_chart_with_legend_notice(
                     &chart_space.chart,
                     local_bounds,
                     self.theme,
                     &self.color_map,
                     fonts,
                 ) {
-                    Ok(group) => {
+                    Ok((group, notice)) => {
+                        if let Some(notice) = notice {
+                            diagnostics.push(Diagnostic {
+                                message: format!(
+                                    "{notice} source={}:{}",
+                                    flattened_source_name(source),
+                                    relationship_id.unwrap_or_default()
+                                ),
+                            });
+                        }
                         return Ok((ResolvedContent::Group(group), None, false));
                     }
                     Err(error) => error.to_string(),
