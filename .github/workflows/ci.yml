@@ -629,7 +629,7 @@ jobs:
           cargo doc --workspace --no-deps --all-features
           --exclude rdocx-py --exclude rpptx-py
       - name: Check README Rust examples
-        run: python3 scripts/readme_doctests.py
+        run: python3 scripts/fork_readme_doctests.py
 
   package-oxml-layout:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true) }}
