@@ -25,7 +25,7 @@ use rdocx::{
     StoryRunRange, StyleBuilder, StyleType, TableRef, TcField, TocEntrySelection, TocField,
     TocRebuildReport, UnderlineStyle, UnsupportedXmlRef, WordCreationProfile, WordPackageClass,
 };
-use rdocx_oxml::content_control::SdtContent;
+use rdocx_oxml::content_control::{SdtContent, SdtType};
 use rdocx_oxml::document::{BodyContent, CT_Body, CT_SectPr};
 use rdocx_oxml::namespace::W_NS;
 use rdocx_oxml::text::{CT_P, CT_R};
@@ -18970,6 +18970,182 @@ fn document_xml(document: &mut Document) -> String {
         oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
             .unwrap();
     String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap()
+}
+
+#[test]
+fn fx249_typed_date_and_dropdown_bind_atomically() {
+    let xml = wrap_word_body(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="date"/><w:showingPlcHdr/><w:date w:fullDate="2026-09-15T00:00:00Z"><w:dateFormat w:val="dd/MM/yyyy"/><w:storeMappedDataAs w:val="dateTime"/></w:date></w:sdtPr><w:sdtContent><w:p><w:r><w:t>date</w:t></w:r></w:p></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="choice"/><w:showingPlcHdr/><w:dropDownList w:lastValue="one"><w:listItem w:displayText="One" w:value="one"/><w:listItem w:displayText="Two" w:value="two"/></w:dropDownList></w:sdtPr><w:sdtContent><w:p><w:r><w:t>One</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let mut document = document_with_content_controls(&xml);
+    assert_eq!(
+        document
+            .set_content_control_value_by_tag("date", "2026-10-31")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        document
+            .set_content_control_value_by_tag("choice", "two")
+            .unwrap(),
+        1
+    );
+    assert_eq!(document.content_controls()[0].text(), "31/10/2026");
+    assert_eq!(document.content_controls()[1].text(), "Two");
+    let output = document_xml(&mut document);
+    assert!(output.contains("w:fullDate=\"2026-10-31T00:00:00Z\""));
+    assert!(!output.contains("showingPlcHdr"));
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .set_content_control_value_by_tag("date", "2026-02-29")
+            .is_err()
+    );
+    assert!(
+        document
+            .set_content_control_value_by_tag("choice", "missing")
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        document
+            .set_content_control_value_by_tag("missing", "value")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn fx249_bound_modes_late_failures_and_exact_noops() {
+    let binding = |xpath: &str| {
+        format!(
+            r#"<w:dataBinding w:storeItemID="{{11111111-1111-1111-1111-111111111111}}" w:xpath="{xpath}"/>"#
+        )
+    };
+    let control = |tag: &str, properties: &str, text: &str| {
+        format!(
+            r#"<w:sdt><w:sdtPr><w:tag w:val="{tag}"/>{properties}</w:sdtPr><w:sdtContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+        )
+    };
+    for (mapping, expected) in [
+        ("", "31/10/2026"),
+        ("<w:storeMappedDataAs/>", "31/10/2026"),
+        ("<w:storeMappedDataAs w:val=\"text\"/>", "31/10/2026"),
+        ("<w:storeMappedDataAs w:val=\"date\"/>", "2026-10-31"),
+        (
+            "<w:storeMappedDataAs w:val=\"dateTime\"/>",
+            "2026-10-31T00:00:00Z",
+        ),
+    ] {
+        let properties = format!(
+            "{}<w:showingPlcHdr/><w:date w:fullDate=\"2026-09-15T00:00:00Z\"><w:dateFormat w:val=\"dd/MM/yyyy\"/>{mapping}</w:date>",
+            binding("/root/date")
+        );
+        let xml = wrap_word_body(&control("date", &properties, "date"));
+        let mut document =
+            document_with_bound_content_controls(&xml, Some("<root><date>old</date></root>"));
+        assert_eq!(
+            document
+                .set_content_control_value_by_tag("date", "2026-10-31")
+                .unwrap(),
+            1
+        );
+        let bytes = document.to_bytes().unwrap();
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+        let store = std::str::from_utf8(package.get_part("/customXml/item1.xml").unwrap()).unwrap();
+        assert!(
+            store.contains(&format!("<date>{expected}</date>")),
+            "{store}"
+        );
+        assert_eq!(document.content_controls()[0].text(), "31/10/2026");
+        assert_eq!(
+            document
+                .set_content_control_value_by_tag("date", "2026-10-31")
+                .unwrap(),
+            1
+        );
+        assert_eq!(document.to_bytes().unwrap(), bytes);
+        let mut reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            reopened
+                .set_content_control_value_by_tag("date", "2026-10-31")
+                .unwrap(),
+            1
+        );
+        assert_eq!(reopened.to_bytes().unwrap(), bytes);
+    }
+    let good = "<w:date><w:dateFormat w:val=\"yyyy-MM-dd\"/></w:date>";
+    for bad in [
+        "<w:date><w:dateFormat w:val=\"unsupported\"/></w:date>".to_owned(),
+        format!("{}{good}", binding("/root/missing")),
+        format!(
+            r#"{good}<x:checkbox xmlns:x="http://schemas.microsoft.com/office/word/2010/wordml"/>"#
+        ),
+        format!(
+            r#"{good}<x:repeatingSection xmlns:x="http://schemas.microsoft.com/office/word/2012/wordml"/>"#
+        ),
+    ] {
+        let xml = wrap_word_body(&(control("both", good, "old") + &control("both", &bad, "old")));
+        let mut document =
+            document_with_bound_content_controls(&xml, Some("<root><date>old</date></root>"));
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .set_content_control_value_by_tag("both", "2026-10-31")
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+    let xml = wrap_word_body(&control(
+        "choice",
+        &format!(
+            "{}<w:dropDownList><w:listItem w:displayText=\"Two\" w:value=\"two\"/></w:dropDownList>",
+            binding("/root/date")
+        ),
+        "old",
+    ));
+    let mut document =
+        document_with_bound_content_controls(&xml, Some("<root><date>old</date></root>"));
+    assert_eq!(
+        document
+            .set_content_control_value_by_tag("choice", "Two")
+            .unwrap(),
+        1
+    );
+    let bytes = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+    assert_eq!(
+        package.get_part("/customXml/item1.xml").unwrap(),
+        b"<root><date>two</date></root>"
+    );
+}
+
+#[test]
+fn fx249_selected_extension_controls_keep_their_expanded_type() {
+    for (kind, expected) in [
+        ("repeatingSection", SdtType::RepeatingSection),
+        ("repeatingSectionItem", SdtType::RepeatingSectionItem),
+    ] {
+        let xml = wrap_word_body(&format!(
+            r#"<w:sdt><w:sdtPr><w:tag w:val="selected"/><w:showingPlcHdr/><w15:{kind} xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>old</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+        ));
+        let mut document = document_with_content_controls(&xml);
+        assert_eq!(
+            document
+                .set_content_control_value_by_tag("selected", "filled")
+                .unwrap(),
+            1
+        );
+        assert_eq!(document.content_controls()[0].text(), "filled");
+        let output = document_xml(&mut document);
+        assert!(output.contains(&format!("<w15:{kind} ")), "{output}");
+        assert!(!output.contains("showingPlcHdr"));
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.content_controls()[0].control_type(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

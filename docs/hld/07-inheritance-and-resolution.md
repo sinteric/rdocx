@@ -309,8 +309,8 @@ order:
 
 1. **Background.** Slide `p:bg`, else layout `p:bg`, else master `p:bg`. An
    absent background at all three levels produces no background paint.
-2. **The master's non-placeholder shapes**, if the layout's `showMasterSp` is
-   not `0`.
+2. **The master's non-placeholder shapes**, if both slide and layout
+   `showMasterSp` flags are not `0`.
 3. **The layout's non-placeholder shapes**, if the slide's `showMasterSp` is not
    `0`.
 4. **The slide's own `p:spTree`**, in document order.
@@ -366,8 +366,8 @@ scope, which is not yet present in `ScopedMediaIds`. It remains absent with a
 precise diagnostic. A colliding relationship ID in the master scope must not
 satisfy it.
 
-The layout `showMasterSp` controls only the master non-placeholder pass. The
-slide `showMasterSp` controls only the layout non-placeholder pass. An absent
+The layout `showMasterSp` gates the master non-placeholder pass. The slide
+`showMasterSp` gates both master and layout non-placeholder passes. An absent
 value means true. Ordinary master and layout placeholders remain templates and
 are omitted. An occupied latent placeholder has nonempty field or run text.
 Latent placeholders match by type across the level-specific indices used by
@@ -550,3 +550,10 @@ header-footer policy is asserted on the Rust result because python-pptx exposes
 raw placeholder collections rather than native visibility. The native
 PowerPoint acceptance record fixes the reviewed application build and original
 corpus paths in the integration test.
+
+The independent four-flag visibility fixture pins PowerPoint 16.113.4 build
+16.113.26100421 and LibreOffice 26.2.5.2. Both render master/layout/slide ordinary
+shapes as 111 for true/true,001 for false/true,011 for true/false and001 for
+false/false. Occupied slide placeholders remain visible with inherited layout
+geometry and styling. Uninstantiated master and layout placeholders remain
+unpainted. Explicit true and absent flags have the same effective meaning.

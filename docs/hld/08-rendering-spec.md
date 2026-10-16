@@ -2705,8 +2705,11 @@ Checkbox display runs bind the selected checkedState or uncheckedState scalar an
 
 Rendering resolves current persisted master, layout and theme owners through
 the same inheritance chain as imported decks. Master pictures appear on linked
-slides unless layout or slide showMasterSp suppresses them. Layout pictures
-remain layout-owned. Master paragraph defaults and actual theme colour/font
+slides only when both effective layout and slide showMasterSp flags permit
+them. Ordinary layout pictures require the effective slide flag. Slide-owned
+shapes and occupied placeholders remain visible, including inherited geometry
+and styling. Uninstantiated master and layout placeholders remain unpainted.
+Layout pictures remain layout-owned. Master paragraph defaults and actual theme colour/font
 resources affect inherited properties without replacing explicit slide values.
 
 Background detachment preserves the current effective fill and its image scope.

@@ -9,6 +9,39 @@ use crate::{color_hex, color_object, enum_object, length_object, stale_to_pyerr}
 
 type BorderSnapshot = (String, Option<u32>, Option<Py<PyAny>>);
 
+// These two Word spacing properties share EMU storage but have different signs.
+fn checked_spacing_length(
+    py: Python<'_>,
+    value: Option<&Bound<'_, PyAny>>,
+    name: &str,
+    signed: bool,
+) -> PyResult<Option<rdocx::Length>> {
+    value.map(|value| {
+        if value.is_instance_of::<pyo3::types::PyBool>()
+            || !value.is_instance_of::<pyo3::types::PyInt>()
+        {
+            return Err(PyTypeError::new_err(format!(
+                "{name} requires integer EMU or Length, not bool or other types; use Pt, Twips or Emu"
+            )));
+        }
+        let emu = value.extract::<i64>()?;
+        let twips = emu / 635;
+        let explicit = value.is_instance(&py.import("rdocx.shared")?.getattr("Length")?)?;
+        if emu != 0 && twips == 0 && !explicit {
+            return Err(PyValueError::new_err(format!(
+                "{name} bare integer EMU would store zero twips; use Pt, Twips or explicit Emu"
+            )));
+        }
+        if !signed && emu < 0 {
+            return Err(PyValueError::new_err(format!("{name} must be nonnegative; use Pt or Twips")));
+        }
+        i32::try_from(twips).map_err(|_| PyValueError::new_err(format!(
+            "{name} exceeds signed twip range; use a representable Pt, Twips or Emu Length"
+        )))?;
+        Ok(rdocx::Length::emu(emu))
+    }).transpose()
+}
+
 pub(crate) fn tab_alignment_from_int(value: i32) -> PyResult<rdocx::TabAlignment> {
     match value {
         0 => Ok(rdocx::TabAlignment::Left),
@@ -469,6 +502,19 @@ impl PyFont {
     }
     #[setter]
     fn set_language(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        if let Some(value) = value
+            && (!value
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic())
+                || !value.split('-').all(|subtag| {
+                    !subtag.is_empty() && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                }))
+        {
+            return Err(PyValueError::new_err(
+                "language tag must begin with an ASCII letter and contain nonempty ASCII alphanumeric subtags separated by single hyphens",
+            ));
+        }
         self.apply(py, FontUpdate::Language(value))
     }
 
@@ -516,17 +562,13 @@ impl PyFont {
             .transpose()
     }
     #[setter]
-    fn set_character_spacing(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
-        // Validate before edit_run stages or publishes its accepted-run replacement.
-        if let Some(emu) = value {
-            i32::try_from(emu / 635).map_err(|_| {
-                PyValueError::new_err("Font.character_spacing exceeds signed twip range")
-            })?;
-        }
-        self.apply(
-            py,
-            FontUpdate::CharacterSpacing(value.map(rdocx::Length::emu)),
-        )
+    fn set_character_spacing(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let value = checked_spacing_length(py, value, "Font.character_spacing", true)?;
+        self.apply(py, FontUpdate::CharacterSpacing(value))
     }
 
     #[getter]
@@ -762,19 +804,26 @@ impl PyColorFormat {
     }
 
     #[getter(r#type)]
-    fn color_type(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
+    fn color_type(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let snapshot = self.font(py).snapshot(py)?;
-        Ok(if snapshot.color_theme.is_some() {
-            Some("theme")
+        let kind = if snapshot.color_theme.is_some() {
+            Some(2)
         } else {
             snapshot.color.as_deref().map(|value| {
                 if value.eq_ignore_ascii_case("auto") {
-                    "auto"
+                    101
                 } else {
-                    "rgb"
+                    1
                 }
             })
+        };
+        kind.map(|kind| {
+            py.import("rdocx.enum.dml")?
+                .getattr("MSO_COLOR_TYPE")?
+                .call1((kind,))
+                .map(Bound::unbind)
         })
+        .transpose()
     }
 
     #[getter]
@@ -973,6 +1022,12 @@ impl PyTabStop {
     fn alignment(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         enum_object(py, "WD_TAB_ALIGNMENT", tab_alignment_to_int(self.alignment))
     }
+    #[setter]
+    fn set_alignment(&self, _value: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "TabStop is a snapshot. First delete tabs[index], then readd with tabs.add_tab_stop(tab.position, alignment, tab.leader), preserving position and leader",
+        ))
+    }
     #[getter]
     fn leader(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         enum_object(py, "WD_TAB_LEADER", tab_leader_to_int(self.leader))
@@ -1064,8 +1119,23 @@ impl PyTabStops {
             })?;
         let alignment = tab_alignment_from_int(alignment)?;
         let leader = tab_leader_from_int(leader)?;
-        self.format(py)
-            .apply(py, ParagraphUpdate::AddTab(alignment, position, leader))?;
+        let format = self.format(py);
+        let location = format.validate(py)?;
+        let duplicate = location
+            .read(&self.document.borrow(py).inner, |paragraph| {
+                (0..paragraph.tab_stop_count()).any(|index| {
+                    paragraph
+                        .tab_stop(index)
+                        .is_some_and(|tab| tab.position() == position)
+                })
+            })
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        if duplicate {
+            return Err(PyValueError::new_err(
+                "a tab stop already exists at this stored position",
+            ));
+        }
+        format.apply(py, ParagraphUpdate::AddTab(alignment, position, leader))?;
         Ok(PyTabStop {
             position,
             alignment,
@@ -1299,11 +1369,9 @@ impl PyParagraphFormat {
     }
 
     #[setter]
-    fn set_space_after(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
-        self.apply(
-            py,
-            ParagraphUpdate::SpaceAfter(value.map(rdocx::Length::emu)),
-        )
+    fn set_space_after(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let value = checked_spacing_length(py, value, "ParagraphFormat.space_after", false)?;
+        self.apply(py, ParagraphUpdate::SpaceAfter(value))
     }
 
     #[getter]
@@ -1373,17 +1441,42 @@ impl PyParagraphFormat {
 
     #[setter]
     fn set_line_spacing(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        match value {
-            None => self.apply(py, ParagraphUpdate::LineSpacing(None)),
-            Some(value) if value.is_none() => self.apply(py, ParagraphUpdate::LineSpacing(None)),
-            Some(value) if value.is_instance_of::<pyo3::types::PyFloat>() => {
-                self.apply(py, ParagraphUpdate::LineSpacingMultiple(value.extract()?))
-            }
-            Some(value) => self.apply(
-                py,
-                ParagraphUpdate::LineSpacing(Some(rdocx::Length::emu(value.extract()?))),
-            ),
+        let Some(value) = value.filter(|value| !value.is_none()) else {
+            return self.apply(py, ParagraphUpdate::LineSpacing(None));
+        };
+        if value.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyTypeError::new_err(
+                "line_spacing rejects bool; use a numeric line multiple or Pt/Length",
+            ));
         }
+        if value.is_instance(&py.import("rdocx.shared")?.getattr("Length")?)? {
+            let emu = value.extract::<i64>()?;
+            i32::try_from(emu / 635).map_err(|_| {
+                PyValueError::new_err(
+                    "absolute line_spacing must fit signed twips; use a representable Pt/Length",
+                )
+            })?;
+            return self.apply(
+                py,
+                ParagraphUpdate::LineSpacing(Some(rdocx::Length::emu(emu))),
+            );
+        }
+        if !value.is_instance_of::<pyo3::types::PyInt>()
+            && !value.is_instance_of::<pyo3::types::PyFloat>()
+        {
+            return Err(PyTypeError::new_err(
+                "line_spacing requires a numeric line multiple or Pt/Length",
+            ));
+        }
+        let multiple = value.extract::<f64>()?;
+        let scaled = multiple * 240.0;
+        let twips = scaled.trunc();
+        if !scaled.is_finite() || twips < i32::MIN as f64 || twips > i32::MAX as f64 {
+            return Err(PyValueError::new_err(
+                "line_spacing multiple must be finite and fit signed twips; use a representable multiple or Pt/Length",
+            ));
+        }
+        self.apply(py, ParagraphUpdate::LineSpacingMultiple(multiple))
     }
 
     #[getter]

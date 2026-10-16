@@ -156,6 +156,7 @@ pub struct CT_SdtPr {
     extra_attributes: Vec<(String, String)>,
     slots: Vec<PropertySlot>,
     type_element: Option<TypeElement>,
+    source_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +168,12 @@ struct TypeElement {
     namespace_bindings: Vec<(String, String)>,
 }
 
+struct ValueChild {
+    name: Vec<u8>,
+    value: Option<String>,
+    display: Option<String>,
+}
+
 struct CheckboxChild {
     value: Option<Range<usize>>,
     font: Option<Range<usize>>,
@@ -174,6 +181,327 @@ struct CheckboxChild {
 }
 
 impl CT_SdtPr {
+    /// Resolve the bounded text, dropdown and Gregorian date value conventions.
+    pub fn prepare_text_value(&self, value: &str) -> Result<(String, String, Option<String>)> {
+        oxml_core::xml::reject_non_xml_characters("content-control value", value)?;
+        match self.control_type {
+            Some(SdtType::Date) => {
+                let (year, month, day) = civil_date(value)?;
+                let children = self.value_children()?;
+                let metadata = |name: &[u8]| -> Result<Option<&str>> {
+                    let mut matches = children.iter().filter(|child| child.name == name);
+                    let first = matches.next();
+                    if matches.next().is_some() {
+                        return Err(OxmlError::InvalidValue(
+                            "duplicate date metadata".to_owned(),
+                        ));
+                    }
+                    Ok(first.and_then(|child| child.value.as_deref()))
+                };
+                if !matches!(metadata(b"calendar")?, None | Some("gregorian")) {
+                    return Err(OxmlError::InvalidValue(
+                        "unsupported date calendar".to_owned(),
+                    ));
+                }
+                let display = match metadata(b"dateFormat")? {
+                    Some("yyyy-MM-dd") => value.to_owned(),
+                    Some("dd/MM/yyyy") => format!("{day:02}/{month:02}/{year:04}"),
+                    _ => {
+                        return Err(OxmlError::InvalidValue(
+                            "unsupported or missing date format".to_owned(),
+                        ));
+                    }
+                };
+                let full_date = format!("{value}T00:00:00Z");
+                let bound = match metadata(b"storeMappedDataAs")? {
+                    None | Some("text") => display.clone(),
+                    Some("date") => value.to_owned(),
+                    Some("dateTime") => full_date.clone(),
+                    _ => {
+                        return Err(OxmlError::InvalidValue(
+                            "unsupported date storage mapping".to_owned(),
+                        ));
+                    }
+                };
+                Ok((display, bound, Some(full_date)))
+            }
+            Some(SdtType::DropDownList) => {
+                let children = self.value_children()?;
+                let items: Vec<_> = children
+                    .iter()
+                    .filter(|child| child.name == b"listItem")
+                    .collect();
+                let choices: Vec<_> = items
+                    .iter()
+                    .filter_map(|item| item.display.as_deref().or(item.value.as_deref()))
+                    .collect();
+                let mut selected = None;
+                for item in items {
+                    let display = item.display.as_deref().or(item.value.as_deref());
+                    if item.value.as_deref() == Some(value) || display == Some(value) {
+                        let pair = match (display, item.value.as_deref()) {
+                            (Some(display), Some(bound)) => (display.to_owned(), bound.to_owned()),
+                            _ => {
+                                return Err(OxmlError::InvalidValue(format!(
+                                    "dropdown item has no value, choices: {choices:?}"
+                                )));
+                            }
+                        };
+                        if selected.as_ref().is_some_and(|previous| previous != &pair) {
+                            return Err(OxmlError::InvalidValue(format!(
+                                "ambiguous dropdown value, choices: {choices:?}"
+                            )));
+                        }
+                        selected = Some(pair);
+                    }
+                }
+                let (display, bound) = selected.ok_or_else(|| {
+                    OxmlError::InvalidValue(format!(
+                        "unknown dropdown value {value:?}, choices: {choices:?}"
+                    ))
+                })?;
+                Ok((display, bound, None))
+            }
+            _ => Ok((value.to_owned(), value.to_owned(), None)),
+        }
+    }
+
+    /// Remove qualified placeholder metadata and optionally set a selected date.
+    pub fn set_value_metadata(&mut self, full_date: Option<&str>) -> Result<()> {
+        let date_attribute = if let Some(value) = full_date {
+            if self.control_type != Some(SdtType::Date)
+                || value.len() != 20
+                || !value.ends_with("T00:00:00Z")
+            {
+                return Err(OxmlError::InvalidValue(
+                    "fullDate must be a selected Gregorian UTC midnight".to_owned(),
+                ));
+            }
+            civil_date(&value[..10])?;
+            let element = self.type_element.as_ref().ok_or_else(|| {
+                OxmlError::InvalidValue("date type payload is missing".to_owned())
+            })?;
+            let mut start = BytesStart::new(element.name.as_str());
+            for (name, value) in &element.attributes {
+                start.push_attribute((name.as_str(), value.as_str()));
+            }
+            let prefixes = word_prefixes_at(&start, &self.source_prefixes)?;
+            let matching: Vec<_> = element
+                .attributes
+                .iter()
+                .enumerate()
+                .filter(|(_, (name, _))| is_word_attribute(name.as_bytes(), b"fullDate", &prefixes))
+                .map(|(index, _)| index)
+                .collect();
+            if matching.len() > 1 {
+                return Err(OxmlError::InvalidValue(
+                    "duplicate qualified fullDate attribute".to_owned(),
+                ));
+            }
+            let prefix = prefixes
+                .iter()
+                .find(|prefix| !prefix.is_empty() && !prefix.starts_with('\0'))
+                .cloned();
+            Some((matching.first().copied(), prefix))
+        } else {
+            None
+        };
+        let type_name = self
+            .type_element
+            .as_ref()
+            .map(|element| -> Result<Option<String>> {
+                let mut start = BytesStart::new(element.name.as_str());
+                for (name, value) in &element.attributes {
+                    start.push_attribute((name.as_str(), value.as_str()));
+                }
+                let prefixes = word_prefixes_at(&start, &self.source_prefixes)?;
+                let local = element
+                    .control_type
+                    .element_name()
+                    .split_once(':')
+                    .unwrap()
+                    .1;
+                if !matches!(
+                    element.control_type,
+                    SdtType::CheckBox | SdtType::RepeatingSection | SdtType::RepeatingSectionItem
+                ) && !is_word_element(element.name.as_bytes(), local.as_bytes(), &prefixes)
+                {
+                    let prefix = prefixes
+                        .iter()
+                        .find(|prefix| !prefix.starts_with('\0'))
+                        .ok_or_else(|| {
+                            OxmlError::InvalidValue(
+                                "selected type has no qualified Word prefix".to_owned(),
+                            )
+                        })?;
+                    Ok(Some(if prefix.is_empty() {
+                        local.to_owned()
+                    } else {
+                        format!("{prefix}:{local}")
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+            .transpose()?
+            .flatten();
+        let mut remove = Vec::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            if let PropertySlot::Raw(raw) = slot {
+                let mut reader = Reader::from_reader(raw.as_slice());
+                if let Event::Start(start) | Event::Empty(start) = reader.read_event()? {
+                    let prefixes = word_prefixes_at(&start, &self.source_prefixes)?;
+                    if is_word_element(start.name().as_ref(), b"showingPlcHdr", &prefixes) {
+                        remove.push(index);
+                    }
+                }
+            }
+        }
+        if let (Some(value), Some((existing, prefix))) = (full_date, date_attribute) {
+            let element = self.type_element.as_mut().unwrap();
+            if let Some(index) = existing {
+                element.attributes[index].1 = value.to_owned();
+            } else if let Some(prefix) = prefix {
+                element
+                    .attributes
+                    .push((format!("{prefix}:fullDate"), value.to_owned()));
+            } else {
+                let mut prefix = "rdocxW".to_owned();
+                while element
+                    .namespace_bindings
+                    .iter()
+                    .any(|(bound, _)| bound == &prefix)
+                    || element
+                        .attributes
+                        .iter()
+                        .any(|(name, _)| name == &format!("xmlns:{prefix}"))
+                {
+                    prefix.push('W');
+                }
+                element
+                    .attributes
+                    .push((format!("xmlns:{prefix}"), W_NS.to_owned()));
+                element
+                    .namespace_bindings
+                    .push((prefix.clone(), W_NS.to_owned()));
+                element
+                    .attributes
+                    .push((format!("{prefix}:fullDate"), value.to_owned()));
+            }
+        }
+        if let Some(name) = type_name {
+            self.type_element.as_mut().unwrap().name = name;
+        }
+        for index in remove.into_iter().rev() {
+            self.slots.remove(index);
+        }
+        Ok(())
+    }
+
+    fn type_children_xml(&self) -> Result<(Vec<u8>, usize)> {
+        let element = self.type_element.as_ref().ok_or_else(|| {
+            OxmlError::InvalidValue("content-control type payload is missing".to_owned())
+        })?;
+        let mut bindings = element.namespace_bindings.clone();
+        for prefix in &self.source_prefixes {
+            if !prefix.starts_with('\0') && !bindings.iter().any(|(bound, _)| bound == prefix) {
+                bindings.push((prefix.clone(), W_NS.to_owned()));
+            }
+        }
+        let mut start = BytesStart::new("scope");
+        for (prefix, namespace) in bindings {
+            let name = if prefix.is_empty() {
+                "xmlns".to_owned()
+            } else {
+                format!("xmlns:{prefix}")
+            };
+            start.push_attribute((name.as_str(), namespace.as_str()));
+        }
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(start))?;
+        let offset = writer.get_ref().len();
+        writer.get_mut().extend_from_slice(&element.children);
+        writer.write_event(Event::End(BytesEnd::new("scope")))?;
+        Ok((writer.into_inner(), offset))
+    }
+
+    fn value_children(&self) -> Result<Vec<ValueChild>> {
+        for slot in &self.slots {
+            if let PropertySlot::Raw(raw) = slot {
+                let mut reader = Reader::from_reader(raw.as_slice());
+                if let Event::Start(start) | Event::Empty(start) = reader.read_event()? {
+                    let prefixes = word_prefixes_at(&start, &self.source_prefixes)?;
+                    let local = start.local_name();
+                    if is_supported_type_element(start.name().as_ref(), local.as_ref(), &prefixes)
+                        && SdtType::from_element(local.as_ref()).is_some()
+                    {
+                        return Err(OxmlError::InvalidValue(
+                            "conflicting content-control type metadata".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        let (xml, _) = self.type_children_xml()?;
+        let mut reader = NsReader::from_reader(xml.as_slice());
+        let mut depth = 0usize;
+        let mut children = Vec::new();
+        let is_word_namespace = |namespace: quick_xml::name::ResolveResult<'_>| {
+            matches!(namespace, quick_xml::name::ResolveResult::Bound(ns)
+                if std::str::from_utf8(ns.as_ref()).ok()
+                    .and_then(|uri| quick_xml::escape::unescape(uri).ok())
+                    .is_some_and(|uri| uri == W_NS))
+        };
+        loop {
+            let (namespace, event) = reader.read_resolved_event()?;
+            let qualified = is_word_namespace(namespace);
+            let (child, empty) = match event {
+                Event::Start(child) => (child, false),
+                Event::Empty(child) => (child, true),
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                    continue;
+                }
+                Event::Eof => return Ok(children),
+                _ => continue,
+            };
+            if depth == 1 && qualified {
+                let mut record = ValueChild {
+                    name: child.local_name().as_ref().to_vec(),
+                    value: None,
+                    display: None,
+                };
+                for attribute in child.attributes() {
+                    let attribute = attribute?;
+                    let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                    if !is_word_namespace(namespace) {
+                        continue;
+                    }
+                    let destination = match local.as_ref() {
+                        b"val" if record.name != b"listItem" => &mut record.value,
+                        b"value" if record.name == b"listItem" => &mut record.value,
+                        b"displayText" => &mut record.display,
+                        _ => continue,
+                    };
+                    if destination.is_some() {
+                        return Err(OxmlError::InvalidValue(
+                            "duplicate qualified value metadata attribute".to_owned(),
+                        ));
+                    }
+                    *destination = Some(
+                        attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, child.decoder())?
+                            .into_owned(),
+                    );
+                }
+                children.push(record);
+            }
+            if !empty {
+                depth += 1;
+            }
+        }
+    }
+
     /// The selected checkbox glyph and its physical state font travel together.
     pub fn checkbox_state(&self, checked: bool) -> Result<(char, String)> {
         let name = if checked {
@@ -279,24 +607,7 @@ impl CT_SdtPr {
                 "only a checkbox has a checked state".to_owned(),
             ));
         }
-        let element = self.type_element.as_ref().ok_or_else(|| {
-            OxmlError::InvalidValue("checkbox type payload is missing".to_owned())
-        })?;
-        let mut start = BytesStart::new("scope");
-        for (prefix, namespace) in &element.namespace_bindings {
-            let name = if prefix.is_empty() {
-                "xmlns".to_owned()
-            } else {
-                format!("xmlns:{prefix}")
-            };
-            start.push_attribute((name.as_str(), namespace.as_str()));
-        }
-        let mut writer = Writer::new(Vec::new());
-        writer.write_event(Event::Start(start))?;
-        let offset = writer.get_ref().len();
-        writer.get_mut().extend_from_slice(&element.children);
-        writer.write_event(Event::End(BytesEnd::new("scope")))?;
-        let xml = writer.into_inner();
+        let (xml, offset) = self.type_children_xml()?;
         let mut reader = NsReader::from_reader(xml.as_slice());
         let mut depth = 0usize;
         let mut found = None;
@@ -363,6 +674,7 @@ impl CT_SdtPr {
         let prefixes = word_prefixes_at(start, inherited)?;
         let mut properties = Self {
             extra_attributes: capture_attributes(start, &prefixes, &[])?,
+            source_prefixes: prefixes.clone(),
             ..Self::default()
         };
         let mut buffer = Vec::new();
@@ -395,11 +707,7 @@ impl CT_SdtPr {
                                 },
                                 attributes: capture_attributes(&child, &child_prefixes, &[])?,
                                 children: children.to_vec(),
-                                namespace_bindings: if control_type == SdtType::CheckBox {
-                                    namespace_bindings(&child_prefixes)
-                                } else {
-                                    Vec::new()
-                                },
+                                namespace_bindings: namespace_bindings(&child_prefixes),
                             });
                         } else {
                             reader.read_to_end_into(child.name(), &mut Vec::new())?;
@@ -425,11 +733,7 @@ impl CT_SdtPr {
                                 },
                                 attributes: capture_attributes(&child, &child_prefixes, &[])?,
                                 children: Vec::new(),
-                                namespace_bindings: if control_type == SdtType::CheckBox {
-                                    namespace_bindings(&child_prefixes)
-                                } else {
-                                    Vec::new()
-                                },
+                                namespace_bindings: namespace_bindings(&child_prefixes),
                             });
                         }
                     } else {
@@ -1846,6 +2150,40 @@ fn required_word_attribute(
     )))
 }
 
+fn civil_date(value: &str) -> Result<(u16, u8, u8)> {
+    let bytes = value.as_bytes();
+    let invalid = || {
+        OxmlError::InvalidValue(format!(
+            "expected a Gregorian YYYY-MM-DD date, got {value:?}"
+        ))
+    };
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| index != 4 && index != 7 && !byte.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let year: u16 = value[..4].parse().map_err(|_| invalid())?;
+    let month: u8 = value[5..7].parse().map_err(|_| invalid())?;
+    let day: u8 = value[8..].parse().map_err(|_| invalid())?;
+    let leap = year.is_multiple_of(400) || year.is_multiple_of(4) && !year.is_multiple_of(100);
+    let maximum = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(invalid()),
+    };
+    if year == 0 || day == 0 || day > maximum {
+        return Err(invalid());
+    }
+    Ok((year, month, day))
+}
+
 fn is_word_attribute(key: &[u8], local: &[u8], prefixes: &[String]) -> bool {
     let Some(separator) = key.iter().position(|byte| *byte == b':') else {
         return false;
@@ -2004,6 +2342,401 @@ mod tests {
             }
             buffer.clear();
         }
+    }
+
+    #[test]
+    fn fx249_review_d1_local_namespace_entities_are_decoded_once() {
+        let make = |kind: &str, children: &str| {
+            parse_standalone_control(&format!(
+                r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><w:{kind}>{children}</w:{kind}></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#
+            ))
+        };
+        for child in [
+            r#"<a:dateFormat xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;" a:val="yyyy-MM-dd"/>"#,
+            r#"<w:dateFormat xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;" a:val="yyyy-MM-dd"/>"#,
+            r#"<dateFormat xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;" xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;" a:val="yyyy-MM-dd"/>"#,
+        ] {
+            assert!(
+                make("date", child)
+                    .properties
+                    .unwrap()
+                    .prepare_text_value("2026-10-31")
+                    .is_ok(),
+                "{child}"
+            );
+        }
+        for child in [
+            r#"<a:listItem xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;" a:displayText="Two" a:value="two"/>"#,
+            r#"<w:listItem xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&#110;" a:displayText="Two" a:value="two"/>"#,
+        ] {
+            assert_eq!(
+                make("dropDownList", child)
+                    .properties
+                    .unwrap()
+                    .prepare_text_value("two")
+                    .unwrap(),
+                ("Two".into(), "two".into(), None)
+            );
+        }
+        for child in [
+            r#"<a:dateFormat xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&amp;#110;" a:val="yyyy-MM-dd"/>"#,
+            r#"<w:dateFormat xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&amp;#110;" a:val="yyyy-MM-dd"/>"#,
+        ] {
+            assert!(
+                make("date", child)
+                    .properties
+                    .unwrap()
+                    .prepare_text_value("2026-10-31")
+                    .is_err(),
+                "decoded twice: {child}"
+            );
+        }
+        let opaque = r#"<a:dateFormat xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/mai&amp;#110;" a:val="foreign"/>"#;
+        let mut control = make(
+            "date",
+            &format!(r#"{opaque}<w:dateFormat w:val="yyyy-MM-dd"/>"#),
+        );
+        assert!(
+            control
+                .properties
+                .as_ref()
+                .unwrap()
+                .prepare_text_value("2026-10-31")
+                .is_ok()
+        );
+        control
+            .properties
+            .as_mut()
+            .unwrap()
+            .set_value_metadata(Some("2026-10-31T00:00:00Z"))
+            .unwrap();
+        let mut saved = Vec::new();
+        control.to_xml(&mut Writer::new(&mut saved)).unwrap();
+        assert!(String::from_utf8(saved).unwrap().contains(opaque));
+    }
+
+    #[test]
+    fn fx249_review_d2_supported_extension_type_conflicts_refuse() {
+        for kind in ["date", "dropDownList"] {
+            let children = if kind == "date" {
+                r#"<w:dateFormat w:val="yyyy-MM-dd"/>"#
+            } else {
+                r#"<w:listItem w:value="2026-10-31"/>"#
+            };
+            for conflict in [
+                r#"<a:checkbox xmlns:a="http://schemas.microsoft.com/office/word/2010/wordml"/>"#,
+                r#"<a:repeatingSection xmlns:a="http://schemas.microsoft.com/office/word/2012/wordml"/>"#,
+                r#"<a:repeatingSectionItem xmlns:a="http://schemas.microsoft.com/office/word/2012/wordml"/>"#,
+            ] {
+                let control = parse_standalone_control(&format!(
+                    r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><w:{kind}>{children}</w:{kind}>{conflict}</w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#
+                ));
+                let properties = control.properties.unwrap();
+                let before = properties.clone();
+                assert!(
+                    properties.prepare_text_value("2026-10-31").is_err(),
+                    "{kind} + {conflict}"
+                );
+                assert_eq!(properties, before);
+            }
+            let foreign =
+                r#"<a:checkbox xmlns:a="urn:foreign"/><a:repeatingSection xmlns:a="urn:foreign"/>"#;
+            let mut control = parse_standalone_control(&format!(
+                r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><w:{kind}>{children}</w:{kind}>{foreign}</w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#
+            ));
+            assert!(
+                control
+                    .properties
+                    .as_ref()
+                    .unwrap()
+                    .prepare_text_value("2026-10-31")
+                    .is_ok()
+            );
+            control
+                .properties
+                .as_mut()
+                .unwrap()
+                .set_value_metadata(if kind == "date" {
+                    Some("2026-10-31T00:00:00Z")
+                } else {
+                    None
+                })
+                .unwrap();
+            let mut saved = Vec::new();
+            control.to_xml(&mut Writer::new(&mut saved)).unwrap();
+            assert!(String::from_utf8(saved).unwrap().contains(foreign));
+        }
+    }
+
+    #[test]
+    fn fx249_review_d3_selected_extension_metadata_preserves_kind() {
+        for kind in ["repeatingSection", "repeatingSectionItem"] {
+            let mut control = parse_standalone_control(&format!(
+                r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:sdtPr><w:showingPlcHdr/><w15:{kind}/></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#
+            ));
+            let expected = control.properties.as_ref().unwrap().control_type;
+            control
+                .properties
+                .as_mut()
+                .unwrap()
+                .set_value_metadata(None)
+                .unwrap();
+            let mut saved = Vec::new();
+            control.to_xml(&mut Writer::new(&mut saved)).unwrap();
+            let saved = String::from_utf8(saved).unwrap();
+            assert!(saved.contains(&format!("<w15:{kind}/>")), "{saved}");
+            assert!(!saved.contains("showingPlcHdr"));
+            assert_eq!(
+                parse_standalone_control(&saved)
+                    .properties
+                    .unwrap()
+                    .control_type,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fx249_qualified_value_metadata_preserves_opaque_slots() {
+        let xml = r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:p="urn:producer&amp;amp;"><w:sdtPr><p:before exact='yes'/><q:showingPlcHdr/><p:showingPlcHdr/><showingPlcHdr/><w:showingPlcHdr xmlns:w="urn:foreign"/><w:date p:fullDate="foreign" q:fullDate="old"><p:dateFormat p:val="unknown"/><q:dateFormat q:val="dd/MM/yyyy"/><q:calendar/><q:storeMappedDataAs/><p:opaque exact='yes'/></w:date><p:after/></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#;
+        let mut control = parse_standalone_control(xml);
+        let properties = control.properties.as_mut().unwrap();
+        assert_eq!(
+            properties.prepare_text_value("2026-10-31").unwrap(),
+            (
+                "31/10/2026".into(),
+                "31/10/2026".into(),
+                Some("2026-10-31T00:00:00Z".into())
+            )
+        );
+        let before = properties.clone();
+        assert!(
+            properties
+                .set_value_metadata(Some("2026-02-29T00:00:00Z"))
+                .is_err()
+        );
+        assert_eq!(*properties, before);
+        properties
+            .set_value_metadata(Some("2026-10-31T00:00:00Z"))
+            .unwrap();
+        let mut output = Vec::new();
+        control.to_xml(&mut Writer::new(&mut output)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("<q:showingPlcHdr"));
+        for raw in [
+            "<p:before exact='yes'/>",
+            "<p:showingPlcHdr/>",
+            "<showingPlcHdr/>",
+            "<w:showingPlcHdr xmlns:w=\"urn:foreign\"/>",
+            "<p:opaque exact='yes'/>",
+            "<p:after/>",
+        ] {
+            assert!(output.contains(raw), "missing {raw}");
+        }
+        assert!(output.contains("p:fullDate=\"foreign\" q:fullDate=\"2026-10-31T00:00:00Z\""));
+        assert!(output.find("<p:before").unwrap() < output.find("<w:date ").unwrap());
+        assert!(output.find("<w:date ").unwrap() < output.find("<p:after").unwrap());
+        assert!(output.contains("urn:producer&amp;amp;"));
+        let mut reopened = parse_standalone_control(&output);
+        assert_eq!(
+            reopened
+                .properties
+                .as_ref()
+                .unwrap()
+                .prepare_text_value("2026-10-31")
+                .unwrap()
+                .1,
+            "31/10/2026"
+        );
+        reopened
+            .properties
+            .as_mut()
+            .unwrap()
+            .set_value_metadata(Some("2026-10-31T00:00:00Z"))
+            .unwrap();
+        let mut second = Vec::new();
+        reopened.to_xml(&mut Writer::new(&mut second)).unwrap();
+        assert_eq!(second, output.as_bytes());
+    }
+
+    #[test]
+    fn fx249_selected_type_alias_survives_local_shadowing() {
+        let mut control = parse_standalone_control(
+            r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><q:date xmlns:w="urn:foreign" q:fullDate="old"><w:dateFormat w:val="foreign"/><q:dateFormat q:val="yyyy-MM-dd"/></q:date></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#,
+        );
+        let properties = control.properties.as_mut().unwrap();
+        assert!(properties.prepare_text_value("2026-10-31").is_ok());
+        properties
+            .set_value_metadata(Some("2026-10-31T00:00:00Z"))
+            .unwrap();
+        let mut output = Vec::new();
+        control.to_xml(&mut Writer::new(&mut output)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("<q:date xmlns:w=\"urn:foreign\" q:fullDate=\"2026-10-31T00:00:00Z\"")
+        );
+        assert!(
+            parse_standalone_control(&output)
+                .properties
+                .unwrap()
+                .prepare_text_value("2026-10-31")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn fx249_default_word_type_scope_adds_only_selected_full_date_prefix() {
+        let mut control = parse_standalone_control(
+            r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><date xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:foreign"><dateFormat xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/main" a:val="yyyy-MM-dd"/></date></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#,
+        );
+        let properties = control.properties.as_mut().unwrap();
+        assert!(properties.prepare_text_value("2026-10-31").is_ok());
+        properties
+            .set_value_metadata(Some("2026-10-31T00:00:00Z"))
+            .unwrap();
+        let mut output = Vec::new();
+        control.to_xml(&mut Writer::new(&mut output)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("rdocxW:fullDate=\"2026-10-31T00:00:00Z\""));
+        assert!(
+            parse_standalone_control(&output)
+                .properties
+                .unwrap()
+                .prepare_text_value("2026-10-31")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn fx249_date_admission_and_storage_are_finite() {
+        let make = |metadata: &str| {
+            parse_standalone_control(&format!(
+                r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><w:date>{metadata}</w:date></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#
+            ))
+        };
+        for (mapping, expected) in [
+            ("", "29/02/2000"),
+            ("<w:storeMappedDataAs/>", "29/02/2000"),
+            ("<w:storeMappedDataAs w:val=\"text\"/>", "29/02/2000"),
+            ("<w:storeMappedDataAs w:val=\"date\"/>", "2000-02-29"),
+            (
+                "<w:storeMappedDataAs w:val=\"dateTime\"/>",
+                "2000-02-29T00:00:00Z",
+            ),
+        ] {
+            let control = make(&format!("<w:dateFormat w:val=\"dd/MM/yyyy\"/>{mapping}"));
+            let properties = control.properties.unwrap();
+            assert_eq!(
+                properties.prepare_text_value("2000-02-29").unwrap().1,
+                expected
+            );
+            for invalid in [
+                "1900-02-29",
+                "2026-02-29",
+                "0000-01-01",
+                "10000-01-01",
+                "2026-13-01",
+                "2026-04-31",
+                "2026-01-00",
+                "2026-1-01",
+                " 2026-01-01",
+                "2026-01-01T00:00:00Z",
+                "２０２６-01-01",
+            ] {
+                assert!(
+                    properties.prepare_text_value(invalid).is_err(),
+                    "accepted {invalid}"
+                );
+            }
+            for valid in ["0001-01-01", "9999-12-31", "2024-02-29"] {
+                assert!(properties.prepare_text_value(valid).is_ok());
+            }
+        }
+        for metadata in [
+            "",
+            "<w:dateFormat/>",
+            "<w:dateFormat w:val=\"\"/>",
+            "<w:dateFormat w:val=\"MM/dd/yyyy\"/>",
+            "<w:dateFormat w:val=\"yyyy-MM-dd\"/><w:calendar w:val=\"hijri\"/>",
+            "<w:dateFormat w:val=\"yyyy-MM-dd\"/><w:storeMappedDataAs w:val=\"unknown\"/>",
+            "<w:dateFormat w:val=\"yyyy-MM-dd\"/><w:dateFormat w:val=\"yyyy-MM-dd\"/>",
+            "<w:dateFormat w:val=\"yyyy-MM-dd\"/><w:calendar/><w:calendar/>",
+        ] {
+            assert!(
+                make(metadata)
+                    .properties
+                    .unwrap()
+                    .prepare_text_value("2026-10-31")
+                    .is_err(),
+                "accepted {metadata}"
+            );
+        }
+        for calendar in ["", "<w:calendar/>", "<w:calendar w:val=\"gregorian\"/>"] {
+            assert!(
+                make(&format!("<w:dateFormat w:val=\"yyyy-MM-dd\"/>{calendar}"))
+                    .properties
+                    .unwrap()
+                    .prepare_text_value("2026-10-31")
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn fx249_dropdown_selection_preserves_absence_and_rejects_ambiguity() {
+        let make = |items: &str, kind: &str| {
+            parse_standalone_control(&format!(
+                r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:f="urn:foreign"><w:sdtPr><w:{kind} w:lastValue="producer">{items}</w:{kind}></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#
+            ))
+        };
+        let control = make(
+            r#"<f:listItem w:value="foreign"/><w:listItem w:displayText="Two" w:value="two"/><w:listItem w:value="alpha"/><w:listItem w:displayText="" w:value="empty"/><w:listItem w:displayText="Missing"/>"#,
+            "dropDownList",
+        );
+        let properties = control.properties.as_ref().unwrap();
+        for input in ["Two", "two"] {
+            assert_eq!(
+                properties.prepare_text_value(input).unwrap(),
+                ("Two".into(), "two".into(), None)
+            );
+        }
+        assert_eq!(
+            properties.prepare_text_value("alpha").unwrap(),
+            ("alpha".into(), "alpha".into(), None)
+        );
+        for input in ["empty", ""] {
+            assert_eq!(
+                properties.prepare_text_value(input).unwrap(),
+                ("".into(), "empty".into(), None)
+            );
+        }
+        for input in ["Missing", "foreign", "TWO", " two", "two "] {
+            assert!(properties.prepare_text_value(input).is_err());
+        }
+        for items in [
+            r#"<w:listItem w:displayText="Same" w:value="a"/><w:listItem w:displayText="Same" w:value="b"/>"#,
+            r#"<w:listItem w:displayText="Same" w:value="a"/><w:listItem w:displayText="a" w:value="b"/>"#,
+        ] {
+            assert!(
+                make(items, "dropDownList")
+                    .properties
+                    .unwrap()
+                    .prepare_text_value(if items.contains("displayText=\"a\"") {
+                        "a"
+                    } else {
+                        "Same"
+                    })
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            make("", "comboBox")
+                .properties
+                .unwrap()
+                .prepare_text_value("free")
+                .unwrap(),
+            ("free".into(), "free".into(), None)
+        );
     }
 
     #[test]

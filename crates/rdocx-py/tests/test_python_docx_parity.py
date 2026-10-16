@@ -1,4 +1,5 @@
 import importlib.metadata
+import io
 import hashlib
 import os
 import re
@@ -1681,3 +1682,140 @@ def test_fx238_stream_save_preserves_signed_forms_and_refusal_authority():
     assert not refused.closed and document.to_bytes() == before
     assert paragraph.text == "held stream owner"
     assert document.verify_signatures()[0]["cryptographically_valid"]
+
+
+@pytest.mark.parametrize('value', [2, 2.0, 1.75, 0, -1, None, 'absolute'])
+def test_fx256_numeric_units_match_pinned_python_docx_and_named_refusals(value):
+    import rdocx
+    import docx
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version('python-docx') == '1.2.0'
+    observations = []
+    for module in (rdocx, docx):
+        document = module.Document()
+        paragraph = document.add_paragraph('oracle control')
+        shared = __import__(module.__name__+'.shared', fromlist=['Pt'])
+        paragraph.paragraph_format.line_spacing = shared.Pt(18) if value == 'absolute' else value
+        stream = io.BytesIO()
+        document.save(stream)
+        with zipfile.ZipFile(io.BytesIO(stream.getvalue())) as package:
+            root = ET.fromstring(package.read('word/document.xml'))
+        w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        spacing = root.find('.//'+w+'spacing')
+        observations.append({} if spacing is None else {k: spacing.get(w+k) for k in ['line', 'lineRule'] if spacing.get(w+k) is not None})
+    assert observations[0] == observations[1]
+
+
+def test_fx256_line_multiple_preserves_named_native_truncation():
+    import rdocx
+    import docx
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version('python-docx') == '1.2.0'
+    observed = []
+    for module in (rdocx, docx):
+        document = module.Document()
+        document.add_paragraph('off-grid').paragraph_format.line_spacing = 1.0021
+        stream = io.BytesIO()
+        document.save(stream)
+        with zipfile.ZipFile(io.BytesIO(stream.getvalue())) as package:
+            root = ET.fromstring(package.read('word/document.xml'))
+        w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        spacing = root.find('.//'+w+'spacing')
+        assert spacing is not None and spacing.get(w+'lineRule') == 'auto'
+        observed.append(spacing.get(w+'line'))
+    assert observed == ['240', '241'], 'native truncation and pinned oracle rounding are deliberate distinct contracts'
+
+
+def test_fx256_tiny_bare_space_refusal_is_an_explicit_oracle_divergence():
+    import rdocx
+    import docx
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version('python-docx') == '1.2.0'
+    document = rdocx.Document()
+    held = document.add_paragraph('held')
+    before = document.to_bytes()
+    with pytest.raises(ValueError, match='Pt|Twips|Emu'):
+        held.paragraph_format.space_after = 6
+    assert document.to_bytes() == before and held.text == 'held'
+    oracle = docx.Document()
+    oracle.add_paragraph('held').paragraph_format.space_after = 6
+    stream = io.BytesIO()
+    oracle.save(stream)
+    with zipfile.ZipFile(io.BytesIO(stream.getvalue())) as package:
+        root = ET.fromstring(package.read('word/document.xml'))
+    w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    assert root.find('.//'+w+'spacing').get(w+'after') == '0'
+
+
+@pytest.mark.parametrize('kind', ['absent', 'rgb', 'theme', 'auto'])
+def test_fx257_pinned_word_color_source_and_enum_values(kind):
+    import docx
+    import rdocx
+    from docx.enum.dml import MSO_COLOR_TYPE as OracleColorType
+    from rdocx.enum.dml import MSO_COLOR_TYPE
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version('python-docx') == '1.2.0'
+    assert {item.name: item.value for item in MSO_COLOR_TYPE} == {item.name: item.value for item in OracleColorType}
+    oracle = docx.Document()
+    oracle.add_paragraph('source color')
+    stream = io.BytesIO();oracle.save(stream)
+    w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    attrs = {'rgb': {w+'val': '123456'},
+             'theme': {w+'val': '123456', w+'themeColor': 'accent1', w+'themeTint': '80', w+'themeShade': '40'},
+             'auto': {w+'val': 'auto'}}
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(stream.getvalue())) as source, zipfile.ZipFile(output, 'w') as target:
+        for entry in source.infolist():
+            data = source.read(entry.filename)
+            if entry.filename == 'word/document.xml' and kind != 'absent':
+                root = ET.fromstring(data);run = root.find('.//'+w+'r')
+                properties = ET.Element(w+'rPr');properties.append(ET.Element(w+'color', attrs[kind]));run.insert(0, properties)
+                data = ET.tostring(root, encoding='utf-8')
+            target.writestr(entry, data)
+    source = output.getvalue()
+    native = rdocx.Document.from_bytes(source)
+    oracle = docx.Document(io.BytesIO(source))
+    actual, expected = native.paragraphs[0].runs[0].font.color.type, oracle.paragraphs[0].runs[0].font.color.type
+    assert (None if actual is None else actual.value) == (None if expected is None else expected.value)
+    assert actual is None if kind == 'absent' else actual is MSO_COLOR_TYPE[kind.upper()]
+    before = native.to_bytes();_ = native.paragraphs[0].runs[0].font.color.type
+    assert native.to_bytes() == before
+    roots = []
+    for document in [native, oracle]:
+        saved = io.BytesIO();document.save(saved)
+        with zipfile.ZipFile(io.BytesIO(saved.getvalue())) as package:
+            node = ET.fromstring(package.read('word/document.xml')).find('.//'+w+'color')
+        roots.append(None if node is None else node.attrib)
+    assert roots[0] == roots[1] == attrs.get(kind)
+
+
+def test_fx257_supported_providers_match_oracle_and_snapshot_divergences_are_explicit():
+    import docx
+    import rdocx
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version('python-docx') == '1.2.0'
+    observed = []
+    for module in [rdocx, docx]:
+        document = module.Document();paragraph = document.add_paragraph('providers')
+        shared = __import__(module.__name__+'.shared', fromlist=['Inches', 'RGBColor'])
+        paragraph.runs[0].font.color.rgb = shared.RGBColor(0x12, 0x34, 0x56)
+        (document.section(0) if module is rdocx else document.sections[0]).left_margin = shared.Inches(2)
+        tabs = paragraph.paragraph_format.tab_stops
+        tabs.add_tab_stop(shared.Inches(1))
+        if module is rdocx:
+            with pytest.raises(NotImplementedError):
+                tabs[0].alignment = rdocx.WD_TAB_ALIGNMENT.RIGHT
+            position, leader = tabs[0].position, tabs[0].leader
+            del tabs[0];tabs.add_tab_stop(position, rdocx.WD_TAB_ALIGNMENT.RIGHT, leader)
+            with pytest.raises(NotImplementedError):
+                _ = document.sections[0].left_margin
+        else:
+            from docx.enum.text import WD_TAB_ALIGNMENT
+            tabs[0].alignment = WD_TAB_ALIGNMENT.RIGHT
+            assert not hasattr(document, 'custom_properties'), 'our checked mapping is an explicit extension'
+        saved = io.BytesIO();document.save(saved)
+        with zipfile.ZipFile(io.BytesIO(saved.getvalue())) as package:
+            root = ET.fromstring(package.read('word/document.xml'))
+        w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        observed.append((root.find('.//'+w+'color').attrib, root.find('.//'+w+'pgMar').get(w+'left'), root.find('.//'+w+'tab').attrib))
+    assert observed[0] == observed[1]

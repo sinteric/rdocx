@@ -5,7 +5,9 @@
 //! single target.
 
 use oxml_py_support::ContentPath;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyAttributeError, PyIndexError, PyNotImplementedError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use rpptx::{GradientFill, GradientGeometry, PathGradientKind};
@@ -1295,21 +1297,42 @@ impl PyColorFormat {
     }
 
     #[getter(r#type)]
-    fn color_type(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
-        Ok(self.color(py)?.map(|color| match color {
-            rpptx::ColorChoice::Srgb { .. } => "rgb",
-            rpptx::ColorChoice::Scheme { .. } => "theme",
-            rpptx::ColorChoice::System { .. } => "system",
-            rpptx::ColorChoice::Preset { .. } => "preset",
-        }))
+    fn color_type(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.color(py)?
+            .map(|color| {
+                let value = match color {
+                    rpptx::ColorChoice::Srgb { .. } => 1,
+                    rpptx::ColorChoice::Scheme { .. } => 2,
+                    rpptx::ColorChoice::System { .. } => 104,
+                    rpptx::ColorChoice::Preset { .. } => 102,
+                };
+                dml_enum(py, "MSO_COLOR_TYPE", value)
+            })
+            .transpose()
     }
 
     #[getter]
-    fn theme_color(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(match self.color(py)? {
-            Some(rpptx::ColorChoice::Scheme { value, .. }) => Some(value),
-            _ => None,
-        })
+    fn theme_color(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let color = self.color(py)?.ok_or_else(|| {
+            PyAttributeError::new_err(format!(
+                "{} has no direct color; assign a theme reference before reading theme_color",
+                self.parameter("theme_color")
+            ))
+        })?;
+        let value = match color {
+            rpptx::ColorChoice::Scheme { value, .. } => THEME_COLORS
+                .iter()
+                .position(|token| *token == value)
+                .map(|index| index as i32 + 1)
+                .ok_or_else(|| {
+                    PyNotImplementedError::new_err(format!(
+                        "{} cannot project scheme token {value:?}; inspect preserved source through the owning element.xml or assign a supported theme_color string",
+                        self.parameter("theme_color")
+                    ))
+                })?,
+            _ => 0,
+        };
+        dml_enum(py, "MSO_THEME_COLOR", value)
     }
 
     #[setter]

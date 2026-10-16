@@ -3462,8 +3462,8 @@ fn read_font_file(path: &Path) -> Result<Vec<u8>> {
     }
 }
 pub fn font_embed(file: &Path, options: &FontEmbedOptions<'_>) -> Result<()> {
-    ensure_output_paths_allowed(&[options.output.to_path_buf()], file, false)?;
-    ensure_output_paths_allowed(&[options.output.to_path_buf()], options.font, false)?;
+    ensure_output_paths_allowed(&[options.output.to_path_buf()], file, true)?;
+    ensure_output_paths_allowed(&[options.output.to_path_buf()], options.font, true)?;
     ensure_output_paths_available(&[options.output.to_path_buf()])?;
     if !options.license_authorized || options.license_identity.trim().is_empty() {
         return Err(
@@ -3501,7 +3501,7 @@ pub fn font_remove(
     output: &Path,
     as_json: bool,
 ) -> Result<()> {
-    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, true)?;
     ensure_output_paths_available(&[output.to_path_buf()])?;
     let mut document = Document::open(file)?;
     let removed = if let Some(kind) = kind {
@@ -3552,7 +3552,7 @@ pub fn font_settings(
         );
     }
     if let Some(output) = output {
-        ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+        ensure_output_paths_allowed(&[output.to_path_buf()], file, true)?;
         ensure_output_paths_available(&[output.to_path_buf()])?;
     }
     let mut document = Document::open(file)?;

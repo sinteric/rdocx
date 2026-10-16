@@ -180,7 +180,7 @@ MSO_THEME_COLOR_INDEX = MSO_THEME_COLOR
 
 
 class MSO_COLOR_TYPE(IntEnum):
-    """Import-compatible color kind values, independent of ColorFormat.type."""
+    """Office color kind values returned by ColorFormat.type."""
 
     RGB = 1
     SCHEME = 2

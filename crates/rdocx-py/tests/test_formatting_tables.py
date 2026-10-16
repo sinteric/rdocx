@@ -1,3 +1,4 @@
+from rdocx.enum.dml import MSO_COLOR_TYPE
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -1294,7 +1295,7 @@ def test_word_theme_colour_view_retains_cached_rgb_modifiers_and_opaque_source()
     document = Document.from_bytes(output.getvalue())
     colour = document.paragraphs[0].runs[0].font.color
     before = document.to_bytes()
-    assert colour.type == "theme" and colour.theme_color == "accent1"
+    assert colour.type is MSO_COLOR_TYPE.THEME and colour.theme_color == "accent1"
     assert colour.rgb == RGBColor(0x12, 0x34, 0x56)
     assert document.to_bytes() == before
     colour.theme_color = MSO_THEME_COLOR.ACCENT_2
@@ -1313,7 +1314,7 @@ def test_word_theme_colour_view_retains_cached_rgb_modifiers_and_opaque_source()
             colour.theme_color = invalid
         assert document.to_bytes() == before
     colour.theme_color = None
-    assert colour.type == "rgb" and colour.rgb == RGBColor(0x12, 0x34, 0x56)
+    assert colour.type is MSO_COLOR_TYPE.RGB and colour.rgb == RGBColor(0x12, 0x34, 0x56)
 
 
 @pytest.mark.parametrize("surface", ["font-shading", "table-borders", "table-border", "cell-border", "cell-shading"])
@@ -1332,7 +1333,7 @@ def test_word_supported_theme_enum_values_round_trip_without_invented_rgb(code, 
     document = Document()
     colour = document.add_paragraph("").add_run("theme").font.color
     colour.theme_color = MSO_THEME_COLOR(code)
-    assert colour.rgb is None and colour.type == "theme"
+    assert colour.rgb is None and colour.type is MSO_COLOR_TYPE.THEME
     assert colour.theme_color == token
     assert Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0].font.color.theme_color == token
 
@@ -1437,8 +1438,13 @@ def test_fx200_tabs_owned_snapshots_stable_insert_delete_and_clear(cell_owned):
     assert document.to_bytes() == before
     retained = tabs.add_tab_stop(Inches(2), WD_TAB_ALIGNMENT.END, WD_TAB_LEADER.MIDDLE_DOT)
     tabs.add_tab_stop(Inches(-1), WD_TAB_ALIGNMENT.START)
-    tabs.add_tab_stop(Inches(2), WD_TAB_ALIGNMENT.LIST, WD_TAB_LEADER.HEAVY)
-    assert [tab.position for tab in tabs] == [Inches(-1), Inches(2), Inches(2)]
+    before_duplicate = document.to_bytes()
+    with pytest.raises(ValueError, match="position"):
+        tabs.add_tab_stop(Inches(2), WD_TAB_ALIGNMENT.LIST, WD_TAB_LEADER.HEAVY)
+    assert document.to_bytes() == before_duplicate
+    assert retained.position == Inches(2) and paragraph.text == ("" if cell_owned else "tabs")
+    tabs.add_tab_stop(Inches(3), WD_TAB_ALIGNMENT.LIST, WD_TAB_LEADER.HEAVY)
+    assert [tab.position for tab in tabs] == [Inches(-1), Inches(2), Inches(3)]
     assert tabs[-1].alignment == WD_TAB_ALIGNMENT.LIST
     del tabs[-1]
     assert retained.position == Inches(2) and retained.alignment == WD_TAB_ALIGNMENT.END

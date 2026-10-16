@@ -6983,7 +6983,7 @@ raise once, preserving explicit position shifts. Native typeface substitution
 and print-background preferences are reported separately from deterministic
 repository paint.
 
-The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the full-range DrawingML text opacity work in S95.1. Legacy VML text opacity and DrawingML image opacity remain unchanged.
+The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the full-range DrawingML text opacity work in S95.11. Legacy VML text opacity and DrawingML image opacity remain unchanged.
 
 **Depends on**: F-X206.
 **Test gate**: regression. Reproduce each missing operation or reported defect
@@ -7879,7 +7879,7 @@ Resolve Issue362 and assess PR363 at immutable0b9a3cccc1b31bac7ec4108c923faa176b
 **Depends on**: F-X220
 **Test gate**: differential
 
-Investigate native Word use of distinct embedded regular, bold, italic and bold-italic faces for an uninstalled family against the documented MS-OE376 one-font-per-name boundary. Preserve F-X220 API and renderer contracts. Require exact prepared font glyph and metric proof before and after native save and normal reopen, absent host installation, fresh family/key controls and recorded native normalization. A workaround must preserve document semantics and source ownership. Do not claim synthetic bold is genuine bold or rewrite family names without an approved design. This interoperability work is planned for S95.1 under the 2026-10-13 deferral. It does not gate S91 closure.
+Investigate native Word use of distinct embedded regular, bold, italic and bold-italic faces for an uninstalled family against the documented MS-OE376 one-font-per-name boundary. Preserve F-X220 API and renderer contracts. Require exact prepared font glyph and metric proof before and after native save and normal reopen, absent host installation, fresh family/key controls and recorded native normalization. A workaround must preserve document semantics and source ownership. Do not claim synthetic bold is genuine bold or rewrite family names without an approved design. This interoperability work is planned for S95.11 under the 2026-10-13 deferral. It does not gate S91 closure.
 
 ### F-X224, Repair hosted release tool and stack routing
 
@@ -8349,3 +8349,107 @@ Run the exact pinned parameterized tests, both frame kinds and flip axes,
 valid schema and native controls, and separate CLI failure/atomicity controls.
 Design the bounded admission contract and split this story if actual work
 exceeds its estimate, without dropping any of these acceptance criteria.
+
+### F-X255, Prepare Word 0.16.2 and PowerPoint 0.14.2 patch releases
+
+**Size**: L
+**Depends on**: F-X221, F-X248, F-X249, F-X251, F-X252, F-X253, F-X256, F-X257, F-X258
+**Test gate**: release regression
+**Spec reference**: `10-bindings-spec.md`, Packaging, and `15-build-and-toolchain.md`, Packaging, Publishing and Release process.
+
+At the user's end-S95 release request, prepare the exact seven-package Word
+Rust/CLI family and Python distribution at0.16.2 and the exact fifteen-package
+shared/PowerPoint Rust/CLI family and Python distribution at0.14.2. Preserve
+the existing version lines, unified allowlists and release workflow. Align
+binding manifests, internal pins, lockfile, current version assertions and
+metadata. Keep the unpublished PowerPoint WASM carrier at0.12.1 and preserve
+historical release notes, registry records and performance observations.
+
+Authenticate the contribution inventory since the actual published0.16.1 and
+0.14.1 tags. Write family-specific notes with included issue/PR links, actual
+contributor credit, direct or hardened-equivalent provenance and bounded
+acceptance claims. Disclose the approved Rust rendering struct source changes,
+ZIP9 public error type boundary and newly refused authored inputs. Patch
+numbering does not imply full source compatibility. Do not claim whole
+Issue385 or Issue386 closure, future form authoring, or deferred native interoperability.
+
+Qualify all22 genuine locally patched publication dry-runs, exact archive
+inventories below10MiB and newly measured current README rows. Inspect fresh
+installed artifacts, metadata and priority runtime under clean Python3.9 and
+3.12, with strict typing and stub checks under3.12. Retain both WASM graphs,
+deterministic hashes and pixels. Run the actual both-family hosted build-only
+rehearsal at the reviewed source SHA and authenticate its downloaded six wheels
+and source distribution per family. Preserve separate actual observer outcomes
+and immutable historical evidence. Preparation does not publish. Final full
+verification, independent sprint review and close precede `/release` from the
+exact reviewed main merge SHA, shared/PowerPoint first, with separate final
+approval per family before tags or registry publication.
+
+### F-X256, Refuse ambiguous Word numeric units and preserve line spacing
+
+**Size**: M
+**Depends on**: F-X239
+**Test gate**: regression
+**Spec reference**: `10-bindings-spec.md`, Python API shape and the relevant Word or PowerPoint checked operations, and `12-testing-strategy.md`, Binding tests and Integrated Python compatibility qualification.
+
+Own Issue386's Word space_after=6, font.character_spacing=2,
+update_section(margin_top=1440) and line_spacing=2 cases. Design the finite
+bare-number and typed Length contract before changing semantics. Match the
+pinned python-docx behavior or refuse before mutation with the supported
+Pt, Twips or multiple-spacing route named explicitly. Section geometry is a
+unit-interpretation issue even when a tiny EMU value remains nonzero. Preserve
+intentional zero, None, supported signed character spacing, truncation,
+absolute typed spacing and valid section dimensions. Cover finite/nonfinite,
+bool/type, save/reopen, held-owner and before/after package controls. Do not
+expand this into a generic unit engine or silently alter all integer setters.
+
+The acceptance source is [Issue386](https://github.com/tensorbee/rdocx/issues/386), reported against main d44a69af. Pin its original body and script separately from the existing Issue385 twelve-case union. Its self-catching script exit status is not acceptance. Report actual row outcomes and independent saved-package observations. A reported Python3.14 environment is not a new runtime qualification claim. This story is included in active S95 at the user's explicit request and gates F-X255 final release preparation. Completion alone does not authorize issue closure.
+
+### F-X257, Complete remaining Word names and legacy dropdown diagnostics
+
+**Size**: L
+**Depends on**: F-X238, F-X241, F-X252
+**Test gate**: regression
+**Spec reference**: `10-bindings-spec.md`, Python API shape and the relevant Word or PowerPoint checked operations, and `12-testing-strategy.md`, Binding tests and Integrated Python compatibility qualification.
+
+Own Issue386's newly named Word compatibility surfaces: frozen section
+left_margin guidance, enum.dml.MSO_COLOR_TYPE and color.type comparison,
+TabStop.alignment assignment, custom_properties set/delete/membership, and
+paragraph._p plus run._r and run._element diagnostics. Match the pinned
+python-docx behavior or refuse before mutation naming the actual supported
+route. Keep frozen snapshots distinct from live document.section handles.
+Design existing string-return compatibility before selecting enum returns.
+Private XML names must guide callers to existing xml/checked replacement
+providers, without an lxml graph or a second owner model.
+
+Repair the legacy FORMDROPDOWN string diagnostic so it names the actual
+received type and supported nonnegative index/entry route. This is distinct
+from F-X249's typed SDT value/display behavior and must retain atomic refusal.
+Default List Bullet/List Number and one-dimension picture refusal already have
+qualified actionable alternatives under F-X238. Do not duplicate that work or
+claim new default-template numbering or native aspect-ratio semantics.
+Retain the exact reproduction, independently observed returns and saved XML,
+existing consumers/stubs, source/handle atomicity and positive provider controls.
+
+The acceptance source is [Issue386](https://github.com/tensorbee/rdocx/issues/386), reported against main d44a69af. Pin its original body and script separately from the existing Issue385 twelve-case union. Its self-catching script exit status is not acceptance. Report actual row outcomes and independent saved-package observations. A reported Python3.14 environment is not a new runtime qualification claim. This story is included in active S95 at the user's explicit request and gates F-X255 final release preparation. Completion alone does not authorize issue closure.
+
+### F-X258, Complete remaining PowerPoint names color and language contracts
+
+**Size**: M
+**Depends on**: F-X239, F-X211b
+**Test gate**: regression
+**Spec reference**: `10-bindings-spec.md`, Python API shape and the relevant Word or PowerPoint checked operations, and `12-testing-strategy.md`, Binding tests and Integrated Python compatibility qualification.
+
+Own Issue386's slide.slide_id, color.type and theme_color enum comparisons,
+enum.lang.MSO_LANGUAGE_ID and font.language_id, shape._element and
+text_frame._txBody requests. Match the pinned python-pptx behavior or refuse
+before mutation with the existing native route named. F-X239's import-only
+color enum acceptance did not promise enum-valued returns. Design concrete
+return compatibility and finite language/identifier mappings before changing
+existing string consumers. Do not imply a full LCID/locale engine or introduce
+a second XML owner or lxml object graph. Preserve imported identities, chart
+and layout/master owners, source XML, saved/reopened values and current stubs.
+Qualify every named row individually, with before/after bytes and held-owner
+checks for assignments and explicit supported controls.
+
+The acceptance source is [Issue386](https://github.com/tensorbee/rdocx/issues/386), reported against main d44a69af. Pin its original body and script separately from the existing Issue385 twelve-case union. Its self-catching script exit status is not acceptance. Report actual row outcomes and independent saved-package observations. A reported Python3.14 environment is not a new runtime qualification claim. This story is included in active S95 at the user's explicit request and gates F-X255 final release preparation. Completion alone does not authorize issue closure.

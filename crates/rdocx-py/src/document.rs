@@ -6,7 +6,7 @@ use oxml_py_support::{
     ContentPath, PathSeg, PreparedRevision, RevisionCounter, RevisionScope, RevisionState,
     StaleElementError, revision_to_pyerr,
 };
-use pyo3::exceptions::{PyIndexError, PyOverflowError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{
     PyAny, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMapping, PyString, PyTuple,
@@ -1267,44 +1267,46 @@ impl PySectionHandle {
 
     fn geometry(&mut self, py: Python<'_>, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
         self.validate(py)?;
-        let value = checked_section_length(Some(&value), name)?;
+        let value = checked_section_length(Some(&value), name)?
+            .map(|emu| crate::length_object(py, rdocx::Length::emu(emu)))
+            .transpose()?;
         let mut document = self.document.borrow_mut(py);
         document.update_section(
             py,
             self.index,
             None,
             if name == "page_width" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "page_height" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "margin_top" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "margin_right" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "margin_bottom" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "margin_left" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "gutter" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
@@ -1312,12 +1314,12 @@ impl PySectionHandle {
             None,
             None,
             if name == "header_distance" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
             if name == "footer_distance" {
-                value.map(|v| v.into_pyobject(py).unwrap().into_any())
+                value.as_ref().map(|value| value.bind(py).clone())
             } else {
                 None
             },
@@ -2534,6 +2536,14 @@ impl PySection {
 #[pymethods]
 impl PySection {
     #[getter]
+    fn left_margin(&self) -> PyResult<()> {
+        self.live_section_alternative("left_margin")
+    }
+    #[setter]
+    fn set_left_margin(&self, _value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.live_section_alternative("left_margin")
+    }
+    #[getter]
     fn header(&self) -> PyResult<()> {
         self.live_section_alternative("header")
     }
@@ -3275,6 +3285,19 @@ pub struct PyCustomProperties {
 
 #[pymethods]
 impl PyCustomProperties {
+    fn __setitem__(&self, py: Python<'_>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.set(py, name, value)
+    }
+    fn __delitem__(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+        if name.is_empty() || !self.delete(py, name)? {
+            Err(pyo3::exceptions::PyKeyError::new_err(name.to_owned()))
+        } else {
+            Ok(())
+        }
+    }
+    fn __contains__(&self, py: Python<'_>, name: &str) -> bool {
+        !name.is_empty() && self.get(py, name).is_some()
+    }
     fn get(&self, py: Python<'_>, name: &str) -> Option<PyCustomProperty> {
         self.document
             .borrow(py)
@@ -5754,13 +5777,26 @@ impl PyDocument {
         value: &str,
         by_tag: bool,
     ) -> PyResult<usize> {
+        let missing = if by_tag {
+            self.inner.content_controls_by_tag(name).is_empty()
+        } else {
+            self.inner.content_controls_by_alias(name).is_empty()
+        };
+        if missing {
+            return Err(PyKeyError::new_err(name.to_owned()));
+        }
         let mut candidate = self.inner.clone_for_staging();
         let count = if by_tag {
             candidate.set_content_control_value_by_tag(name, value)
         } else {
             candidate.set_content_control_value_by_alias(name, value)
         }
-        .map_err(|e| rdocx_to_pyerr(py, e))?;
+        .map_err(|error| match error {
+            rdocx::Error::Oxml(rdocx_oxml::OxmlError::InvalidValue(message)) => {
+                PyValueError::new_err(message)
+            }
+            other => rdocx_to_pyerr(py, other),
+        })?;
         self.publish_api_candidate(py, candidate, "Document.set_content_control_value")?;
         Ok(count)
     }
@@ -6425,6 +6461,32 @@ pub(crate) fn checked_section_length(
         .transpose()
 }
 
+// Public update_section has an explicit-unit contract. Other consumers of
+// checked_section_length, including live Section setters, keep their EMU API.
+fn checked_update_section_length(
+    py: Python<'_>,
+    value: Option<&Bound<'_, PyAny>>,
+    name: &str,
+) -> PyResult<Option<i64>> {
+    if let Some(value) = value
+        && !value.is_instance_of::<pyo3::types::PyInt>()
+    {
+        return Err(PyTypeError::new_err(format!(
+            "{name} requires Length or zero; use Twips or Emu"
+        )));
+    }
+    let emu = checked_section_length(value, name)?;
+    if let Some(value) = value
+        && emu != Some(0)
+        && !value.is_instance(&py.import("rdocx.shared")?.getattr("Length")?)?
+    {
+        return Err(PyValueError::new_err(format!(
+            "update_section {name} nonzero geometry requires explicit Length; use Twips(1440) or Emu(value)"
+        )));
+    }
+    Ok(emu)
+}
+
 fn section_snapshot(section: rdocx::SectionRef<'_>) -> PySection {
     let (page_width, page_height) = section.page_size().map_or((None, None), |(width, height)| {
         (Some(width.to_emu()), Some(height.to_emu()))
@@ -6700,6 +6762,15 @@ impl PyDocument {
 
     fn save(&mut self, path: &Bound<'_, PyAny>, py: Python<'_>) -> PyResult<()> {
         if let Ok(path) = path.extract::<PathBuf>() {
+            if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+            {
+                return Err(PyValueError::new_err(
+                    "use to_pdf() to export a PDF instead of save()",
+                ));
+            }
             return py
                 .detach(|| self.inner.save(path))
                 .map_err(|error| rdocx_to_pyerr(py, error));
@@ -6950,9 +7021,10 @@ impl PyDocument {
             }
             rdocx::LegacyFormFieldKind::DropDownList => {
                 if !value.is_instance_of::<PyInt>() || value.is_instance_of::<PyBool>() {
-                    return Err(PyTypeError::new_err(
-                        "legacy dropdown requires nonnegative int, not bool",
-                    ));
+                    return Err(PyTypeError::new_err(format!(
+                        "legacy dropdown received {}. Use a nonnegative integer index, not bool, from document.legacy_form_fields() snapshot choices",
+                        value.get_type().name()?,
+                    )));
                 }
                 rdocx::LegacyFormFieldValue::SelectedIndex(value.extract::<usize>()?)
             }
@@ -7851,16 +7923,21 @@ impl PyDocument {
         different_first_page: Option<bool>,
         break_type: Option<&str>,
     ) -> PyResult<PySection> {
-        let page_width = checked_section_length(page_width.as_ref(), "page_width")?;
-        let page_height = checked_section_length(page_height.as_ref(), "page_height")?;
-        let margin_top = checked_section_length(margin_top.as_ref(), "margin_top")?;
-        let margin_right = checked_section_length(margin_right.as_ref(), "margin_right")?;
-        let margin_bottom = checked_section_length(margin_bottom.as_ref(), "margin_bottom")?;
-        let margin_left = checked_section_length(margin_left.as_ref(), "margin_left")?;
-        let gutter = checked_section_length(gutter.as_ref(), "gutter")?;
-        let column_spacing = checked_section_length(column_spacing.as_ref(), "column_spacing")?;
-        let header_distance = checked_section_length(header_distance.as_ref(), "header_distance")?;
-        let footer_distance = checked_section_length(footer_distance.as_ref(), "footer_distance")?;
+        let page_width = checked_update_section_length(py, page_width.as_ref(), "page_width")?;
+        let page_height = checked_update_section_length(py, page_height.as_ref(), "page_height")?;
+        let margin_top = checked_update_section_length(py, margin_top.as_ref(), "margin_top")?;
+        let margin_right =
+            checked_update_section_length(py, margin_right.as_ref(), "margin_right")?;
+        let margin_bottom =
+            checked_update_section_length(py, margin_bottom.as_ref(), "margin_bottom")?;
+        let margin_left = checked_update_section_length(py, margin_left.as_ref(), "margin_left")?;
+        let gutter = checked_update_section_length(py, gutter.as_ref(), "gutter")?;
+        let column_spacing =
+            checked_update_section_length(py, column_spacing.as_ref(), "column_spacing")?;
+        let header_distance =
+            checked_update_section_length(py, header_distance.as_ref(), "header_distance")?;
+        let footer_distance =
+            checked_update_section_length(py, footer_distance.as_ref(), "footer_distance")?;
         let orientation = orientation
             .map(|value| {
                 ST_PageOrientation::from_str(value)

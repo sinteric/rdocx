@@ -2276,18 +2276,32 @@ fn paragraph_visibility_from_main_source(
                     && admitted_parent
                     && matches!(event, Event::Start(_))
                 {
-                    let prefixes = reader
-                        .resolver()
-                        .bindings()
-                        .filter(|(_, namespace)| namespace.as_ref() == W_NS.as_bytes())
-                        .map(|(prefix, _)| match prefix {
-                            PrefixDeclaration::Default => Ok(String::new()),
-                            PrefixDeclaration::Named(prefix) => {
-                                std::str::from_utf8(prefix).map(str::to_owned)
+                    let prefixes = reader.resolver().bindings().try_fold(
+                        Vec::new(),
+                        |mut scope, (declaration, namespace)| {
+                            let prefix = match declaration {
+                                PrefixDeclaration::Default => "",
+                                PrefixDeclaration::Named(prefix) => std::str::from_utf8(prefix)
+                                    .map_err(rdocx_oxml::OxmlError::from)?,
+                            };
+                            // Resolver bindings retain raw namespace attribute bytes.
+                            // The SDT scope carrier and serializer use semantic URIs.
+                            let namespace = quick_xml::events::attributes::Attribute {
+                                key: quick_xml::name::QName(b"xmlns"),
+                                value: Cow::Borrowed(namespace.as_ref()),
                             }
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()
-                        .map_err(|error| Error::Other(error.to_string()))?;
+                            .decoded_and_normalized_value(
+                                XmlVersion::Implicit1_0,
+                                element.decoder(),
+                            )
+                            .map_err(rdocx_oxml::OxmlError::from)?;
+                            scope.push(format!("\0{prefix}\0{namespace}"));
+                            if namespace == W_NS {
+                                scope.push(prefix.to_owned());
+                            }
+                            Ok::<_, Error>(scope)
+                        },
+                    )?;
                     let owner = if in_paragraph {
                         StorySdtOwner::Inline
                     } else {
@@ -7640,6 +7654,543 @@ fn changed_story_namespace_scope(
         }
     }
     Ok(None)
+}
+
+// This is the finite edited CT_P boundary, not a recursive Word schema.
+// ECMA-376 fifth edition wml.xsd CT_P/EG_PContent expands to these 35 names.
+fn edited_paragraph_schema_child(namespace: &str, local: &str) -> bool {
+    (namespace == M_NS && matches!(local, "oMath" | "oMathPara"))
+        || (namespace == W_NS
+            && matches!(
+                local,
+                "pPr"
+                    | "customXml"
+                    | "smartTag"
+                    | "sdt"
+                    | "dir"
+                    | "bdo"
+                    | "r"
+                    | "fldSimple"
+                    | "hyperlink"
+                    | "subDoc"
+                    | "proofErr"
+                    | "permStart"
+                    | "permEnd"
+                    | "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "moveFromRangeStart"
+                    | "moveFromRangeEnd"
+                    | "moveToRangeStart"
+                    | "moveToRangeEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "customXmlInsRangeStart"
+                    | "customXmlInsRangeEnd"
+                    | "customXmlDelRangeStart"
+                    | "customXmlDelRangeEnd"
+                    | "customXmlMoveFromRangeStart"
+                    | "customXmlMoveFromRangeEnd"
+                    | "customXmlMoveToRangeStart"
+                    | "customXmlMoveToRangeEnd"
+                    | "ins"
+                    | "del"
+                    | "moveFrom"
+                    | "moveTo"
+            ))
+}
+
+#[cfg(test)]
+thread_local! {
+    static FX252_RETAINED_ROUTE_ENTRIES: Cell<usize> = const { Cell::new(0) };
+    static FX252_RETAINED_SCOPE_ENTRIES: Cell<usize> = const { Cell::new(0) };
+    static FX252_RETAINED_NAMESPACE_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+#[derive(Clone, Default)]
+struct EditedParagraphContext {
+    namespaces: BTreeMap<String, String>,
+    ignorable: HashSet<String>,
+}
+
+#[derive(Default)]
+struct EditedParagraphScopeChanges {
+    namespaces: Vec<(String, Option<String>)>,
+    ignorable: Vec<String>,
+}
+
+impl EditedParagraphContext {
+    fn expanded_name(&self, name: &[u8], attribute: bool) -> Result<(&str, String)> {
+        let name = std::str::from_utf8(name).map_err(|error| Error::Other(error.to_string()))?;
+        let (prefix, local) = name.split_once(':').unwrap_or(("", name));
+        let uri = if prefix == "xml" {
+            "http://www.w3.org/XML/1998/namespace"
+        } else if prefix.is_empty() && attribute {
+            ""
+        } else {
+            match self.namespaces.get(prefix) {
+                Some(uri) => uri,
+                None if prefix.is_empty() => "",
+                None => {
+                    return Err(Error::Other(format!(
+                        "replace_paragraph_xml has an unbound prefix in {name}"
+                    )));
+                }
+            }
+        };
+        Ok((uri, local.to_owned()))
+    }
+
+    fn enter(&mut self, element: &BytesStart<'_>) -> Result<EditedParagraphScopeChanges> {
+        let mut changes = EditedParagraphScopeChanges::default();
+        for attribute in element.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let name = attribute.key.as_ref();
+            let prefix = if name == b"xmlns" {
+                ""
+            } else if let Some(prefix) = name.strip_prefix(b"xmlns:") {
+                std::str::from_utf8(prefix).map_err(|error| Error::Other(error.to_string()))?
+            } else {
+                continue;
+            };
+            changes
+                .namespaces
+                .push((prefix.to_owned(), self.namespaces.remove(prefix)));
+        }
+        update_story_namespace_scope(&mut self.namespaces, element)?;
+        for attribute in element.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            if attribute.key.as_ref() == b"xmlns" || attribute.key.as_ref().starts_with(b"xmlns:") {
+                continue;
+            }
+            let (uri, local) = self.expanded_name(attribute.key.as_ref(), true)?;
+            if uri == MC_NS && local == "Ignorable" {
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                    .map_err(|error| Error::Other(error.to_string()))?;
+                for prefix in value.split_ascii_whitespace() {
+                    let uri = self
+                        .namespaces
+                        .get(prefix)
+                        .filter(|uri| uri.as_str() != MC_NS)
+                        .ok_or_else(|| {
+                            Error::Other(format!(
+                                "replace_paragraph_xml has invalid mc:Ignorable prefix {prefix}"
+                            ))
+                        })?;
+                    if !self.ignorable.contains(uri) {
+                        self.ignorable.insert(uri.clone());
+                        changes.ignorable.push(uri.clone());
+                    }
+                }
+            }
+        }
+        Ok(changes)
+    }
+
+    fn leave(&mut self, changes: EditedParagraphScopeChanges) {
+        for uri in changes.ignorable {
+            self.ignorable.remove(&uri);
+        }
+        for (prefix, previous) in changes.namespaces.into_iter().rev() {
+            self.namespaces.remove(&prefix);
+            if let Some(uri) = previous {
+                self.namespaces.insert(prefix, uri);
+            }
+        }
+    }
+}
+
+// Original and replacement scans share these IDs. A route keeps one parent ID,
+// expanded name and sibling ordinal, never a copy of every ancestor route.
+#[derive(Default)]
+struct EditedParagraphRoutes {
+    namespaces: HashMap<String, usize>,
+    routes: HashMap<(usize, usize, String, usize), usize>,
+}
+
+impl EditedParagraphRoutes {
+    fn namespace(&mut self, uri: &str) -> usize {
+        let next = self.namespaces.len();
+        *self.namespaces.entry(uri.to_owned()).or_insert(next)
+    }
+
+    fn child(&mut self, parent: usize, uri: &str, local: &str, ordinal: usize) -> usize {
+        let namespace = self.namespace(uri);
+        let next = self.routes.len() + 1;
+        *self
+            .routes
+            .entry((parent, namespace, local.to_owned(), ordinal))
+            .or_insert(next)
+    }
+}
+
+fn edited_paragraph_ancestor_context(xml: &[u8], offset: usize) -> Result<EditedParagraphContext> {
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut ancestors = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event().map_err(rdocx_oxml::OxmlError::from)? {
+            Event::Start(element) | Event::Empty(element) if before == offset => {
+                // Do not inherit the original paragraph's own declarations into
+                // a replacement that removed or rebound them.
+                let _ = element;
+                let mut context = EditedParagraphContext::default();
+                for ancestor in &ancestors {
+                    context.enter(ancestor)?;
+                }
+                return Ok(context);
+            }
+            Event::Start(element) => {
+                ancestors.push(element.into_owned());
+            }
+            Event::Empty(_) => {}
+            Event::End(_) => {
+                ancestors.pop();
+            }
+            Event::Eof => {
+                return Err(Error::Other(
+                    "replace_paragraph_xml source ancestry was not found".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct EditedParagraphIsland {
+    // Expanded ancestor names and ordered element occurrences belong to this
+    // selected physical owner. Equal raw bytes elsewhere are no authority.
+    route: usize,
+    name: (usize, String),
+    raw: Vec<u8>,
+    meaning: Vec<(usize, String, bool)>,
+    authored_ignorable: bool,
+}
+
+fn edited_paragraph_complex_mc(
+    element: &BytesStart<'_>,
+    context: &EditedParagraphContext,
+) -> Result<bool> {
+    let (uri, _) = context.expanded_name(element.name().as_ref(), false)?;
+    if uri == MC_NS {
+        return Ok(true);
+    }
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        if attribute.key.as_ref() == b"xmlns" || attribute.key.as_ref().starts_with(b"xmlns:") {
+            continue;
+        }
+        let (uri, local) = context.expanded_name(attribute.key.as_ref(), true)?;
+        if uri == MC_NS && local != "Ignorable" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+struct EditedParagraphMeaning {
+    names: Vec<(usize, String, bool)>,
+    complex_mc: bool,
+}
+
+fn edited_paragraph_island_meaning(
+    xml: &[u8],
+    context: &mut EditedParagraphContext,
+    routes: &mut EditedParagraphRoutes,
+) -> Result<EditedParagraphMeaning> {
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut scopes = Vec::new();
+    let mut meaning = Vec::new();
+    let mut complex = false;
+    loop {
+        let event = reader.read_event().map_err(rdocx_oxml::OxmlError::from)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let changes = context.enter(element)?;
+                let (uri, local) = context.expanded_name(element.name().as_ref(), false)?;
+                let mc_choice = uri == MC_NS && local == "Choice";
+                meaning.push((
+                    routes.namespace(uri),
+                    local,
+                    context.ignorable.contains(uri),
+                ));
+                complex |= edited_paragraph_complex_mc(element, context)?;
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+                    if attribute.key.as_ref() == b"xmlns"
+                        || attribute.key.as_ref().starts_with(b"xmlns:")
+                    {
+                        continue;
+                    }
+                    let (uri, local) = context.expanded_name(attribute.key.as_ref(), true)?;
+                    meaning.push((
+                        routes.namespace(uri),
+                        format!("@{local}"),
+                        context.ignorable.contains(uri),
+                    ));
+                    // Opaque QName-valued producer attributes retain any
+                    // in-scope prefix meanings they actually mention.
+                    let value = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                        .map_err(|error| Error::Other(error.to_string()))?;
+                    for token in value.split_ascii_whitespace() {
+                        let prefix = token.split_once(':').map(|(prefix, _)| prefix);
+                        if let Some(prefix) = prefix
+                            && let Some(uri) = context.namespaces.get(prefix)
+                        {
+                            meaning.push((routes.namespace(uri), format!("value:{prefix}"), false));
+                        }
+                        if (uri == MC_NS || (mc_choice && uri.is_empty() && local == "Requires"))
+                            && let Some(uri) = context.namespaces.get(token)
+                        {
+                            meaning.push((routes.namespace(uri), format!("mc:{token}"), false));
+                        }
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    scopes.push(changes);
+                } else {
+                    context.leave(changes);
+                }
+            }
+            Event::End(_) => {
+                context.leave(scopes.pop().expect("open island element"));
+            }
+            Event::Eof => {
+                return Ok(EditedParagraphMeaning {
+                    names: meaning,
+                    complex_mc: complex,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct EditedParagraphMcAttribute {
+    route: usize,
+    name: String,
+    raw_value: Vec<u8>,
+    meaning: Vec<(String, Option<usize>, bool)>,
+}
+
+struct EditedParagraphAdmission {
+    islands: Vec<EditedParagraphIsland>,
+    mc_attributes: Vec<EditedParagraphMcAttribute>,
+}
+
+fn edited_paragraph_admission(
+    xml: &[u8],
+    inherited: &EditedParagraphContext,
+    routes: &mut EditedParagraphRoutes,
+) -> Result<EditedParagraphAdmission> {
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut context = inherited.clone();
+    let mut frames = vec![(EditedParagraphScopeChanges::default(), 0usize, 0usize)];
+    let mut islands = Vec::new();
+    let mut mc_attributes = Vec::new();
+    let mut ppr = false;
+    let mut content = false;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader.read_event().map_err(rdocx_oxml::OxmlError::from)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let (_, parent_route, next) = frames.last_mut().expect("initial frame");
+                let changes = context.enter(element)?;
+                let (uri, local) = context.expanded_name(element.name().as_ref(), false)?;
+                let route = routes.child(*parent_route, uri, &local, *next);
+                *next += 1;
+                let direct = frames.len() == 2;
+                let schema = edited_paragraph_schema_child(uri, &local);
+                if direct && schema {
+                    if uri == W_NS && local == "pPr" {
+                        if ppr || content {
+                            return Err(Error::Other(format!(
+                                "replace_paragraph_xml requires a single first {{{W_NS}}}pPr child"
+                            )));
+                        }
+                        ppr = true;
+                    } else {
+                        content = true;
+                    }
+                }
+                if (!direct
+                    && uri == W_NS
+                    && matches!(local.as_str(), "drawing" | "pict" | "object"))
+                    || (schema && uri == M_NS)
+                {
+                    // Existing native providers own supported foreign payloads,
+                    // math and their established compatibility routes.
+                    if matches!(event, Event::Start(_)) {
+                        reader
+                            .read_to_end(element.name())
+                            .map_err(rdocx_oxml::OxmlError::from)?;
+                    }
+                    context.leave(changes);
+                    continue;
+                }
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+                    if attribute.key.as_ref() == b"xmlns"
+                        || attribute.key.as_ref().starts_with(b"xmlns:")
+                    {
+                        continue;
+                    }
+                    let (attribute_uri, attribute_local) =
+                        context.expanded_name(attribute.key.as_ref(), true)?;
+                    if attribute_uri != MC_NS || attribute_local == "Ignorable" {
+                        continue;
+                    }
+                    let value = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                        .map_err(|error| Error::Other(error.to_string()))?;
+                    let meaning = value
+                        .split_ascii_whitespace()
+                        .map(|token| {
+                            let prefix = token.split_once(':').map_or(token, |(prefix, _)| prefix);
+                            let uri = if prefix == "xml" {
+                                Some("http://www.w3.org/XML/1998/namespace")
+                            } else {
+                                context.namespaces.get(prefix).map(String::as_str)
+                            };
+                            let ignored = uri.is_some_and(|uri| context.ignorable.contains(uri));
+                            (
+                                token.to_owned(),
+                                uri.map(|uri| routes.namespace(uri)),
+                                ignored,
+                            )
+                        })
+                        .collect();
+                    mc_attributes.push(EditedParagraphMcAttribute {
+                        route,
+                        name: attribute_local,
+                        raw_value: attribute.value.as_ref().to_vec(),
+                        meaning,
+                    });
+                }
+                if (direct && !schema) || uri == MC_NS {
+                    let end = story_element_end(xml, start)?;
+                    let raw = &xml[start..end];
+                    let ignored_foreign = !uri.is_empty()
+                        && uri != W_NS
+                        && uri != M_NS
+                        && uri != MC_NS
+                        && context.ignorable.contains(uri);
+                    let name = (routes.namespace(uri), local);
+                    let meaning = edited_paragraph_island_meaning(raw, &mut context, routes)?;
+                    let authored_ignorable = ignored_foreign && !meaning.complex_mc;
+                    islands.push(EditedParagraphIsland {
+                        route,
+                        name,
+                        raw: raw.to_vec(),
+                        meaning: meaning.names,
+                        authored_ignorable,
+                    });
+                    if matches!(event, Event::Start(_)) {
+                        reader
+                            .read_to_end(element.name())
+                            .map_err(rdocx_oxml::OxmlError::from)?;
+                    }
+                } else if matches!(event, Event::Start(_)) {
+                    frames.push((changes, route, 0));
+                    continue;
+                }
+                context.leave(changes);
+            }
+            Event::End(_) => {
+                let (changes, _, _) = frames.pop().expect("open paragraph element");
+                context.leave(changes);
+            }
+            Event::Eof => {
+                return Ok(EditedParagraphAdmission {
+                    islands,
+                    mc_attributes,
+                });
+            }
+            _ => {}
+        }
+        #[cfg(test)]
+        {
+            let retained = frames.len() + routes.routes.len() + islands.len() + mc_attributes.len();
+            let namespace_bytes = routes.namespaces.keys().map(String::len).sum::<usize>()
+                + islands
+                    .iter()
+                    .map(|island| std::mem::size_of_val(&island.name.0))
+                    .sum::<usize>();
+            FX252_RETAINED_NAMESPACE_BYTES
+                .set(FX252_RETAINED_NAMESPACE_BYTES.get().max(namespace_bytes));
+            FX252_RETAINED_ROUTE_ENTRIES.set(FX252_RETAINED_ROUTE_ENTRIES.get().max(retained));
+            let scope_entries = context.namespaces.len()
+                + context.ignorable.len()
+                + frames
+                    .iter()
+                    .map(|(changes, _, _)| changes.namespaces.len() + changes.ignorable.len())
+                    .sum::<usize>();
+            FX252_RETAINED_SCOPE_ENTRIES.set(FX252_RETAINED_SCOPE_ENTRIES.get().max(scope_entries));
+        }
+    }
+}
+
+fn admit_edited_paragraph(
+    original: &[u8],
+    incoming: &[u8],
+    inherited: &EditedParagraphContext,
+) -> Result<()> {
+    let mut routes = EditedParagraphRoutes::default();
+    let original = edited_paragraph_admission(original, inherited, &mut routes)?;
+    let incoming = edited_paragraph_admission(incoming, inherited, &mut routes)?;
+    let mut original_counts = HashMap::new();
+    let mut incoming_counts = HashMap::new();
+    for island in &original.islands {
+        *original_counts.entry(island).or_insert(0usize) += 1;
+    }
+    for island in &incoming.islands {
+        *incoming_counts.entry(island).or_insert(0usize) += 1;
+    }
+    for island in original
+        .islands
+        .iter()
+        .chain(incoming.islands.iter())
+        .filter(|island| !island.authored_ignorable)
+    {
+        if original_counts.get(island) != Some(&1) || incoming_counts.get(island) != Some(&1) {
+            let (namespace, local) = &island.name;
+            let uri = routes
+                .namespaces
+                .iter()
+                .find_map(|(uri, id)| (id == namespace).then_some(uri))
+                .expect("interned island namespace");
+            return Err(Error::Other(format!(
+                "replace_paragraph_xml refuses new or reinterpreted opaque child {{{uri}}}{local}"
+            )));
+        }
+    }
+    let mut original_attributes = HashMap::new();
+    let mut incoming_attributes = HashMap::new();
+    for attribute in &original.mc_attributes {
+        *original_attributes.entry(attribute).or_insert(0usize) += 1;
+    }
+    for attribute in &incoming.mc_attributes {
+        *incoming_attributes.entry(attribute).or_insert(0usize) += 1;
+    }
+    for attribute in original
+        .mc_attributes
+        .iter()
+        .chain(incoming.mc_attributes.iter())
+    {
+        if original_attributes.get(attribute) != Some(&1)
+            || incoming_attributes.get(attribute) != Some(&1)
+        {
+            return Err(Error::Other(format!(
+                "replace_paragraph_xml refuses changed unsupported {{{MC_NS}}}{} declaration",
+                attribute.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn story_namespace_scope_at(
@@ -22126,6 +22677,9 @@ impl Document {
             return Ok(());
         }
         let paragraph = CT_P::from_xml_fragment_checked(xml.as_bytes())?;
+        let (source, item) = self.story_range_paragraph_source(location)?;
+        let context = edited_paragraph_ancestor_context(&source.xml, item.full.start)?;
+        admit_edited_paragraph(selected.xml(), xml.as_bytes(), &context)?;
         validate_element_owner_relationships(
             self,
             &location.story,
@@ -38043,7 +38597,7 @@ fn valid_authored_sfnt(data: &[u8]) -> bool {
             return false;
         }
     }
-    true
+    tags.contains(b"name".as_slice())
 }
 
 /// The two candidate XOR keys for ODTTF deobfuscation, most likely first.
@@ -38129,6 +38683,28 @@ fn has_consistent_sfnt_header(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx251_native_equal_position_tab_insertion_stays_supported() {
+        let mut document = Document::new();
+        let mut paragraph = document.add_paragraph("native contract");
+        assert_eq!(
+            paragraph
+                .try_add_tab_stop(crate::TabAlignment::Left, Length::twips(10), None)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            paragraph
+                .try_add_tab_stop(crate::TabAlignment::Right, Length::twips(10), None)
+                .unwrap(),
+            1
+        );
+        assert!(paragraph.tab_stop(0).is_some() && paragraph.tab_stop(1).is_some());
+        assert!(paragraph.tab_stop(2).is_none());
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.paragraph(0).unwrap().tab_stop_count(), 2);
+    }
+
     #[test]
     #[ignore = "Owned release-mode same-host performance qualification"]
     fn fx222_release_scaling_and_output_equivalence() {
@@ -40720,6 +41296,681 @@ mod tests {
     }
 
     #[test]
+    fn fx252_independent_mc_and_opaque_inputs_follow_physical_ancestry() {
+        // Independently authored primary Part3/provenance inputs. These are
+        // code-built package parts, not a new fixture or native Word oracle.
+        let cases = [
+            (
+                r###"opaque-exact-noop"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                true,
+            ),
+            (
+                r###"opaque-valid-scalar"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                true,
+            ),
+            (
+                r###"opaque-copy"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                false,
+            ),
+            (
+                r###"opaque-move"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                0,
+                r###"<w:p><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><w:r><w:t>new</w:t></w:r></w:p>"###,
+                false,
+            ),
+            (
+                r###"opaque-swapped-order"###,
+                r###" "###,
+                r###"<w:p><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><y:opaque key="second"/><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p><y:opaque key="second"/><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><w:r><w:t>new</w:t></w:r></w:p>"###,
+                false,
+            ),
+            (
+                r###"opaque-collapse-duplicates"###,
+                r###" "###,
+                r###"<w:p><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque><w:r><w:t>new</w:t></w:r></w:p>"###,
+                false,
+            ),
+            (
+                r###"opaque-changed-ancestry"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><w:hyperlink><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:hyperlink></w:p>"###,
+                false,
+            ),
+            (
+                r###"opaque-reinterpreted-uri"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                0,
+                r###"<w:p xmlns:x="urn:s95:opaque-b"><w:r><w:t>new</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                false,
+            ),
+            (
+                r###"opaque-other-owner"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p><w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                1,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><x:opaque key="retain"><x:nested>verbatim</x:nested></x:opaque></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-self-grant"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="x"><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-ancestor-grant"###,
+                r###" mc:Ignorable="x""###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-local-blank-accumulates"###,
+                r###" mc:Ignorable="x""###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="  "><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-child-adds-uri"###,
+                r###" mc:Ignorable="x""###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="y"><w:r><w:t>new</w:t></w:r><x:new/><y:new/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-foreign-child-self-grant"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><y:new mc:Ignorable="y"/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-sibling-restore"###,
+                r###" "###,
+                r###"<w:p mc:Ignorable="x"><w:r><w:t>old</w:t></w:r></w:p><w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                1,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-rebind-not-retarget"###,
+                r###" mc:Ignorable="a""###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p xmlns:a="urn:s95:opaque-b"><w:r><w:t>new</w:t></w:r><a:new/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-rebind-old-uri-alias"###,
+                r###" mc:Ignorable="a""###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p xmlns:a="urn:s95:opaque-b"><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-rebind-add-current-uri"###,
+                r###" mc:Ignorable="a""###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p xmlns:a="urn:s95:opaque-b" mc:Ignorable="a"><w:r><w:t>new</w:t></w:r><a:new/><x:new/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-default-child-uri"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="x"><w:r><w:t>new</w:t></w:r><new xmlns="urn:s95:opaque-a"/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-wrong-unqualified-attribute"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p Ignorable="x"><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-wrong-foreign-attribute"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p y:Ignorable="x"><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-unbound-declaration"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="unbound"><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-child-binding-not-retroactive"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="late"><w:r><w:t>new</w:t></w:r><late:new xmlns:late="urn:s95:opaque-a"/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-understood-word-no-waiver"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="w"><w:r><w:t>new</w:t></w:r><w:bogus/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-uri-numeric-once"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p xmlns:z="urn:s95:ex&#116;" mc:Ignorable="z"><w:r><w:t>new</w:t></w:r><q:new xmlns:q="urn:s95:ext"/></w:p>"###,
+                true,
+            ),
+            (
+                r###"mc-uri-literal-entity-not-twice"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p xmlns:z="urn:s95:ex&amp;#116;" mc:Ignorable="z"><w:r><w:t>new</w:t></w:r><q:new xmlns:q="urn:s95:ext"/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-new-alternate-content"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p><w:r><w:t>new</w:t></w:r><mc:AlternateContent><mc:Choice Requires="x"><w:r><w:t>choice</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>old</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-new-process-content"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:Ignorable="x" mc:ProcessContent="x:new"><w:r><w:t>new</w:t></w:r><x:new/></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-new-must-understand"###,
+                r###" "###,
+                r###"<w:p><w:r><w:t>old</w:t></w:r></w:p>"###,
+                0,
+                r###"<w:p mc:MustUnderstand="x"><w:r><w:t>new</w:t></w:r></w:p>"###,
+                false,
+            ),
+            (
+                r###"mc-imported-complex-exact-noop"###,
+                r###" "###,
+                r###"<w:p><mc:AlternateContent><mc:Choice Requires="x"><w:r><w:t>choice</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>old</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p>"###,
+                0,
+                r###"<w:p><mc:AlternateContent><mc:Choice Requires="x"><w:r><w:t>choice</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>old</w:t></w:r></mc:Fallback></mc:AlternateContent></w:p>"###,
+                true,
+            ),
+        ];
+        for (name, attributes, body, selected, replacement, accepted) in cases {
+            let mut document = Document::new();
+            let source = format!(
+                r#"<w:document xmlns:w="{W_NS}" xmlns:mc="{MC_NS}" xmlns:x="urn:s95:opaque-a" xmlns:y="urn:s95:opaque-b" xmlns:a="urn:s95:opaque-a"{attributes}><w:body>{body}<w:sectPr/></w:body></w:document>"#
+            );
+            document
+                .package
+                .set_part(&document.doc_part_name.clone(), source.into_bytes());
+            let mut document = Document::from_package(document.package).unwrap();
+            let location = document.story_item_snapshots().unwrap()[selected]
+                .location()
+                .clone();
+            let selected_xml = document.paragraph_element_xml(&location).unwrap();
+            // Preserve the public namespace-complete fragment contract. The
+            // untouched input pairs themselves intentionally inherit xmlns.
+            let mut reader = quick_xml::Reader::from_reader(selected_xml.as_slice());
+            let root = match reader.read_event().unwrap() {
+                Event::Start(root) | Event::Empty(root) => root,
+                _ => panic!("selected paragraph root"),
+            };
+            let mut scope = BTreeMap::new();
+            update_story_namespace_scope(&mut scope, &root).unwrap();
+            let replacement =
+                close_content_fragment_namespaces(replacement.as_bytes(), &scope).unwrap();
+            let replacement = std::str::from_utf8(&replacement).unwrap();
+            let before = document.to_bytes().unwrap();
+            let result = document.replace_paragraph_xml(&location, replacement);
+            assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+            if !accepted || name.contains("exact-noop") {
+                assert_eq!(document.to_bytes().unwrap(), before, "{name}");
+            } else {
+                let bytes = document.to_bytes().unwrap();
+                let reopened = Document::from_bytes(&bytes).unwrap();
+                assert!(reopened.paragraph(selected).is_some(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn fx252_edited_paragraph_direct_children_follow_schema() {
+        let mut document = Document::new();
+        document.add_paragraph("keep");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let original = std::str::from_utf8(&original).unwrap();
+        let before = document.to_bytes().unwrap();
+        // Exact official CT_P particle expansion, independently authenticated
+        // in the retained fifth-edition XSD receipt. Helper admission alone
+        // does not claim required attributes or range pairing are validated.
+        let context = EditedParagraphContext::default();
+        let schema_names = [
+            "bdo",
+            "bookmarkEnd",
+            "bookmarkStart",
+            "commentRangeEnd",
+            "commentRangeStart",
+            "customXml",
+            "customXmlDelRangeEnd",
+            "customXmlDelRangeStart",
+            "customXmlInsRangeEnd",
+            "customXmlInsRangeStart",
+            "customXmlMoveFromRangeEnd",
+            "customXmlMoveFromRangeStart",
+            "customXmlMoveToRangeEnd",
+            "customXmlMoveToRangeStart",
+            "del",
+            "dir",
+            "fldSimple",
+            "hyperlink",
+            "ins",
+            "moveFrom",
+            "moveFromRangeEnd",
+            "moveFromRangeStart",
+            "moveTo",
+            "moveToRangeEnd",
+            "moveToRangeStart",
+            "pPr",
+            "permEnd",
+            "permStart",
+            "proofErr",
+            "r",
+            "sdt",
+            "smartTag",
+            "subDoc",
+        ];
+        for name in schema_names {
+            let xml = format!(r#"<w:p xmlns:w="{W_NS}"><w:{name}/></w:p>"#);
+            admit_edited_paragraph(original.as_bytes(), xml.as_bytes(), &context).unwrap();
+        }
+        for name in ["oMath", "oMathPara"] {
+            let xml = format!(r#"<w:p xmlns:w="{W_NS}" xmlns:m="{M_NS}"><m:{name}/></w:p>"#);
+            admit_edited_paragraph(original.as_bytes(), xml.as_bytes(), &context).unwrap();
+        }
+        for children in [
+            "<w:pPr/><w:pPr/>",
+            "<w:r/><w:pPr/>",
+            "<w:t/>",
+            "<w:tbl/>",
+            "<w:drawing/>",
+            "<w:sectPr/>",
+            "<m:f/>",
+            "<m:r/>",
+            "<x:r/>",
+        ] {
+            let xml = format!(
+                r#"<w:p xmlns:w="{W_NS}" xmlns:m="{M_NS}" xmlns:x="urn:foreign">{children}</w:p>"#
+            );
+            assert!(
+                admit_edited_paragraph(original.as_bytes(), xml.as_bytes(), &context).is_err(),
+                "{children}"
+            );
+        }
+        for child in ["<w:bogus/>", "<x:foo xmlns:x=\"urn:example\"/>"] {
+            let xml = original.replace("</w:p>", &format!("{child}</w:p>"));
+            assert!(
+                document.replace_paragraph_xml(&location, &xml).is_err(),
+                "new child {child}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn fx252_existing_nested_host_routes_remain_delegated() {
+        for contents in [
+            "<w:hyperlink><w:r><w:t>keep</w:t></w:r><x:island keep='exact'/></w:hyperlink>",
+            "<w:r><w:t>keep</w:t><x:island keep='exact'/></w:r>",
+            "<x:island keep='exact'/><x:island keep='exact'/><w:r><w:t>keep</w:t></w:r>",
+        ] {
+            let mut document = Document::new();
+            let source = format!(
+                r#"<w:document xmlns:w="{W_NS}" xmlns:x="urn:producer"><w:body><w:p>{contents}</w:p><w:sectPr/></w:body></w:document>"#
+            );
+            document
+                .package
+                .set_part(&document.doc_part_name.clone(), source.into_bytes());
+            let mut document = Document::from_package(document.package).unwrap();
+            let location = document.story_item_snapshots().unwrap()[0]
+                .location()
+                .clone();
+            let original = document.paragraph_element_xml(&location).unwrap();
+            let original = std::str::from_utf8(&original).unwrap();
+            let changed = original.replace(">keep<", ">changed<");
+            document.replace_paragraph_xml(&location, &changed).unwrap();
+            let saved = document.to_bytes().unwrap();
+            let mut reopened = Document::from_bytes(&saved).unwrap();
+            assert_eq!(reopened.paragraph(0).unwrap().text(), "changed");
+            let location = reopened.story_item_snapshots().unwrap()[0]
+                .location()
+                .clone();
+            let xml = reopened.paragraph_element_xml(&location).unwrap();
+            let xml = std::str::from_utf8(&xml).unwrap();
+            let copied = xml.replace("</w:p>", "<x:island keep='exact'/></w:p>");
+            assert!(reopened.replace_paragraph_xml(&location, &copied).is_err());
+            assert_eq!(reopened.to_bytes().unwrap(), saved);
+        }
+        // Existing nested foreign host routes are not a new recursive grammar.
+        let mut document = Document::new();
+        document.add_paragraph("keep");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let xml = format!(
+            r#"<w:p xmlns:w="{W_NS}" xmlns:x="urn:hook"><w:r><w:t>keep</w:t></w:r><w:customXml><x:hostHook/></w:customXml></w:p>"#
+        );
+        document.replace_paragraph_xml(&location, &xml).unwrap();
+    }
+
+    #[test]
+    fn fx252_typed_sdt_metadata_remains_editable_around_opaque_source() {
+        let opaque = r#"<f:keep xmlns:f="urn:metadata" data='exact'/>"#;
+        let mut document = Document::new();
+        let source = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:sdt><w:sdtPr><w:id w:val="10"/><w:alias w:val="Alias"/><w:tag w:val="key"/><w:date w:fullDate="2026-10-16T00:00:00Z"><w:dateFormat w:val="yyyy-MM-dd"/></w:date>{opaque}</w:sdtPr><w:sdtContent><w:r><w:t>held</w:t></w:r></w:sdtContent></w:sdt></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        document
+            .package
+            .set_part(&document.doc_part_name.clone(), source.into_bytes());
+        let mut document = Document::from_package(document.package).unwrap();
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let original = std::str::from_utf8(&original).unwrap();
+        let changed = original
+            .replace("w:val=\"Alias\"", "w:val=\"Changed\"")
+            .replace("yyyy-MM-dd", "dd/MM/yyyy");
+        assert_ne!(changed, original);
+        document.replace_paragraph_xml(&location, &changed).unwrap();
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let xml = reopened.story_item_snapshots().unwrap()[0].xml().to_vec();
+        let xml = std::str::from_utf8(&xml).unwrap();
+        assert!(
+            xml.contains("w:val=\"Changed\"") && xml.contains("dd/MM/yyyy") && xml.contains(opaque)
+        );
+    }
+
+    #[test]
+    fn fx252_unchanged_complex_mc_attribute_does_not_freeze_typed_metadata() {
+        let opaque = r#"<f:keep xmlns:f="urn:metadata" data='exact'/>"#;
+        let mut document = Document::new();
+        let source = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:sdt><w:sdtPr xmlns:mc="{MC_NS}" mc:MustUnderstand="w"><w:id w:val="10"/><w:alias w:val="Alias"/><w:tag w:val="key"/><w:date w:fullDate="2026-10-16T00:00:00Z"><w:dateFormat w:val="yyyy-MM-dd"/></w:date>{opaque}</w:sdtPr><w:sdtContent><w:r><w:t>held</w:t></w:r></w:sdtContent></w:sdt></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        document
+            .package
+            .set_part(&document.doc_part_name.clone(), source.into_bytes());
+        let mut document = Document::from_package(document.package).unwrap();
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let original = std::str::from_utf8(&original).unwrap();
+        let changed = original
+            .replace("w:val=\"Alias\"", "w:val=\"Changed\"")
+            .replace("yyyy-MM-dd", "dd/MM/yyyy");
+        assert_ne!(changed, original);
+        document.replace_paragraph_xml(&location, &changed).unwrap();
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let xml = reopened.story_item_snapshots().unwrap()[0].xml().to_vec();
+        let xml = std::str::from_utf8(&xml).unwrap();
+        assert!(
+            xml.contains("w:val=\"Changed\"") && xml.contains("dd/MM/yyyy") && xml.contains(opaque)
+        );
+    }
+
+    #[test]
+    fn fx252_unselected_invalid_mc_declarations_do_not_become_ancestors() {
+        let mut document = Document::new();
+        let source = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:mc="{MC_NS}"><w:body><w:p mc:Ignorable="mc"><w:r><w:t>sibling</w:t></w:r></w:p><w:p><w:r><w:t>keep</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        document
+            .package
+            .set_part(&document.doc_part_name.clone(), source.into_bytes());
+        let mut document = Document::from_package(document.package).unwrap();
+        let location = document.story_item_snapshots().unwrap()[1]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let changed = std::str::from_utf8(&original)
+            .unwrap()
+            .replace(">keep<", ">changed<");
+        document.replace_paragraph_xml(&location, &changed).unwrap();
+        assert_eq!(document.paragraph(0).unwrap().text(), "sibling");
+        assert_eq!(document.paragraph(1).unwrap().text(), "changed");
+    }
+
+    #[test]
+    fn fx252_retained_choice_requires_keeps_declaration_meaning() {
+        let island = r#"<mc:AlternateContent><mc:Choice Requires="x"><w:r><w:t>choice</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>fallback</w:t></w:r></mc:Fallback></mc:AlternateContent>"#;
+        let mut document = Document::new();
+        let source = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:mc="{MC_NS}" xmlns:x="urn:s95:opaque-a"><w:body><w:p><w:r><w:t>old</w:t></w:r>{island}</w:p><w:sectPr/></w:body></w:document>"#
+        );
+        document
+            .package
+            .set_part(&document.doc_part_name.clone(), source.into_bytes());
+        let mut document = Document::from_package(document.package).unwrap();
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let original = std::str::from_utf8(&original).unwrap();
+        let positive = original.replace(">old<", ">changed<");
+        document
+            .replace_paragraph_xml(&location, &positive)
+            .unwrap();
+        let before = document.to_bytes().unwrap();
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let selected = document.paragraph_element_xml(&location).unwrap();
+        let selected = std::str::from_utf8(&selected).unwrap();
+        let reinterpreted = selected
+            .replace("urn:s95:opaque-a", "urn:s95:opaque-b")
+            .replace(">changed<", ">later<");
+        assert_ne!(reinterpreted, selected);
+        assert!(
+            document
+                .replace_paragraph_xml(&location, &reinterpreted)
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn fx252_delegated_opaque_depth_retains_linear_route_storage() {
+        let depth = 64;
+        let mut document = Document::new();
+        document.add_paragraph("old");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let nested = format!("{}{}", "<x:n>".repeat(depth), "</x:n>".repeat(depth));
+        let incoming = format!(
+            r#"<w:p xmlns:w="{W_NS}" xmlns:x="urn:delegated"><w:r><w:t>changed</w:t></w:r><w:customXml>{nested}</w:customXml></w:p>"#
+        );
+        FX252_RETAINED_ROUTE_ENTRIES.set(0);
+        admit_edited_paragraph(
+            &original,
+            incoming.as_bytes(),
+            &EditedParagraphContext::default(),
+        )
+        .unwrap();
+        assert!(
+            FX252_RETAINED_ROUTE_ENTRIES.get() <= 4 * (depth + 8),
+            "actual retained structural entries: {}",
+            FX252_RETAINED_ROUTE_ENTRIES.get()
+        );
+        document
+            .replace_paragraph_xml(&location, &incoming)
+            .unwrap();
+    }
+
+    #[test]
+    fn fx252_deep_namespace_declarations_keep_only_scope_deltas() {
+        let depth = 64;
+        let nested = (0..depth)
+            .map(|index| {
+                format!(r#"<x:n xmlns:n{index}="urn:depth:{index}" mc:Ignorable="n{index}">"#)
+            })
+            .collect::<String>()
+            + &"</x:n>".repeat(depth);
+        let incoming = format!(
+            r#"<w:p xmlns:w="{W_NS}" xmlns:x="urn:delegated" xmlns:mc="{MC_NS}"><w:customXml>{nested}</w:customXml><w:r><w:t>changed</w:t></w:r></w:p>"#
+        );
+        let mut document = Document::new();
+        document.add_paragraph("old");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        FX252_RETAINED_SCOPE_ENTRIES.set(0);
+        admit_edited_paragraph(
+            &original,
+            incoming.as_bytes(),
+            &EditedParagraphContext::default(),
+        )
+        .unwrap();
+        assert!(
+            FX252_RETAINED_SCOPE_ENTRIES.get() <= 4 * (depth + 8),
+            "actual retained namespace and grant entries: {}",
+            FX252_RETAINED_SCOPE_ENTRIES.get()
+        );
+        document
+            .replace_paragraph_xml(&location, &incoming)
+            .unwrap();
+    }
+
+    #[test]
+    fn fx252_many_ignored_islands_share_long_namespace_storage() {
+        let namespace = format!("urn:producer:{}", "n".repeat(1024));
+        let incoming = format!(
+            r#"<w:p xmlns:w="{W_NS}" xmlns:x="{namespace}" xmlns:mc="{MC_NS}" mc:Ignorable="x">{}<w:r><w:t>changed</w:t></w:r></w:p>"#,
+            "<x:n/>".repeat(64)
+        );
+        let mut document = Document::new();
+        document.add_paragraph("old");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        // Applicable ignored foreign children remain an actual public positive.
+        document
+            .replace_paragraph_xml(&location, &incoming)
+            .unwrap();
+        FX252_RETAINED_NAMESPACE_BYTES.set(0);
+        let mut routes = EditedParagraphRoutes::default();
+        let admission = edited_paragraph_admission(
+            incoming.as_bytes(),
+            &EditedParagraphContext::default(),
+            &mut routes,
+        )
+        .unwrap();
+        assert_eq!(admission.islands.len(), 64);
+        println!(
+            "retained namespace bytes {}, input bytes {}",
+            FX252_RETAINED_NAMESPACE_BYTES.get(),
+            incoming.len()
+        );
+        assert!(
+            FX252_RETAINED_NAMESPACE_BYTES.get() <= 2 * incoming.len(),
+            "actual retained namespace bytes: {}, input bytes: {}",
+            FX252_RETAINED_NAMESPACE_BYTES.get(),
+            incoming.len()
+        );
+    }
+
+    #[test]
+    fn fx252_ignorable_uris_follow_declaration_ancestry() {
+        let mut document = Document::new();
+        document.add_paragraph("keep");
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let before = document.to_bytes().unwrap();
+        let xml = format!(
+            r#"<w:p xmlns:w="{WORD_NAMESPACE}" xmlns:mc="{MC_NS}" mc:Ignorable="w"><w:r><w:t>keep</w:t></w:r><w:bogus/></w:p>"#
+        );
+        assert!(document.replace_paragraph_xml(&location, &xml).is_err());
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn fx252_unchanged_opaque_islands_require_physical_correspondence() {
+        let mut document = Document::new();
+        let source = format!(
+            r#"<w:document xmlns:w="{WORD_NAMESPACE}" xmlns:x="urn:producer"><w:body><w:p><x:island keep='exact'/><w:r><w:t>keep</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        document
+            .package
+            .set_part(&document.doc_part_name.clone(), source.into_bytes());
+        let mut document = Document::from_package(document.package).unwrap();
+        let location = document.story_item_snapshots().unwrap()[0]
+            .location()
+            .clone();
+        let original = document.paragraph_element_xml(&location).unwrap();
+        let original = std::str::from_utf8(&original).unwrap();
+        let before = document.to_bytes().unwrap();
+        let moved = original
+            .replace("<x:island keep='exact'/>", "")
+            .replace("</w:p>", "<x:island keep='exact'/></w:p>");
+        assert!(document.replace_paragraph_xml(&location, &moved).is_err());
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
     fn fx211_selected_paragraph_xml_stages_noops_and_late_refusals() {
         let mut document = Document::new();
         document.add_paragraph("before");
@@ -40743,8 +41994,9 @@ mod tests {
         assert!(error.to_string().contains("relationship"), "{error}");
         assert_eq!(document.to_bytes().unwrap(), before);
         let opaque = r#"<x:payload xmlns:x="urn:producer" x:key='keep'><x:item/></x:payload>"#;
-        let xml =
-            format!(r#"<q:p xmlns:q="{WORD_NAMESPACE}"><q:r><q:t>after</q:t></q:r>{opaque}</q:p>"#);
+        let xml = format!(
+            r#"<q:p xmlns:q="{WORD_NAMESPACE}" xmlns:mc="{MC_NS}" xmlns:x="urn:producer" mc:Ignorable="x"><q:r><q:t>after</q:t></q:r>{opaque}</q:p>"#
+        );
         document.replace_paragraph_xml(&location, &xml).unwrap();
         let saved = document.to_bytes().unwrap();
         let mut reopened = Document::from_bytes(&saved).unwrap();
@@ -48981,6 +50233,106 @@ mod tests {
     }
 
     #[test]
+    fn fx248_identified_block_control_scope_matches_model_and_preserves_source() {
+        let producer = "http://schemas.microsoft.com/office/word/2010/wordml";
+        let opaque = r#"<x:witness x:value="&amp;">keep &amp; exact</x:witness>"#;
+        for attributes in [
+            r#"p:paraId="00AABBCC""#,
+            r#"p:textId="00DDEEFF""#,
+            r#"p:paraId="00AABBCC" p:textId="00DDEEFF""#,
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="{W_NS}" xmlns:p="{producer}" xmlns:x="urn:opaque"><w:body><w:p {attributes}><w:r><w:t>ordinary</w:t></w:r></w:p><w:sdt><w:sdtPr>{opaque}</w:sdtPr><w:sdtContent><w:p {attributes}><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>contents</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:sdt><w:sdtPr/><w:sdtContent><w:p {attributes}><w:r><w:t>nested</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt><w:sectPr/></w:body></w:document>"#
+            );
+            let mut original = Document::new();
+            original
+                .package
+                .set_part(&original.doc_part_name, xml.into_bytes());
+            let mut input = std::io::Cursor::new(Vec::new());
+            original.package.write_to(&mut input).unwrap();
+            let mut document = Document::from_bytes(input.get_ref()).unwrap();
+            assert_eq!(document.paragraph_count(), 3, "{attributes}");
+            assert_eq!(document.paragraph_visibility().unwrap(), vec![true; 3]);
+            document.validate().unwrap();
+            let bytes = document.to_bytes().unwrap();
+            let package = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+            let saved =
+                std::str::from_utf8(package.get_part(&document.doc_part_name).unwrap()).unwrap();
+            assert!(saved.contains(opaque), "{saved}");
+            for attribute in attributes.split_whitespace() {
+                assert_eq!(saved.matches(attribute).count(), 3, "{saved}");
+            }
+            let reopened = Document::from_bytes(&bytes).unwrap();
+            assert_eq!(reopened.paragraph_visibility().unwrap(), vec![true; 3]);
+            reopened.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn fx248_effective_namespace_scope_preserves_producer_attributes() {
+        let xml = format!(
+            r#"<q:document xmlns:q="{W_NS}" xmlns="urn:unused" xmlns:id="urn:outer&amp;producer"><q:body><q:sdt xmlns=""><q:sdtPr/><q:sdtContent><q:p id:stamp="outer"><q:r><q:t>outer</q:t></q:r></q:p><q:sdt xmlns:id="urn:inner&amp;producer"><q:sdtPr/><q:sdtContent><q:p id:stamp="inner"><q:r><q:t>inner</q:t></q:r></q:p></q:sdtContent></q:sdt><q:p id:stamp="restored"><q:r><q:t>restored</q:t></q:r></q:p></q:sdtContent></q:sdt><q:sectPr/></q:body></q:document>"#
+        );
+        let mut original = Document::new();
+        original
+            .package
+            .set_part(&original.doc_part_name, xml.into_bytes());
+        let mut input = std::io::Cursor::new(Vec::new());
+        original.package.write_to(&mut input).unwrap();
+        let mut document = Document::from_bytes(input.get_ref()).unwrap();
+        assert_eq!(document.paragraph_count(), 3);
+        assert_eq!(document.paragraph_visibility().unwrap(), vec![true; 3]);
+        document.validate().unwrap();
+        let bytes = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.paragraph_visibility().unwrap(), vec![true; 3]);
+        reopened.validate().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+        let saved =
+            std::str::from_utf8(package.get_part(&document.doc_part_name).unwrap()).unwrap();
+        assert!(saved.contains("urn:outer&amp;producer"), "{saved}");
+        assert!(saved.contains("urn:inner&amp;producer"), "{saved}");
+        assert!(!saved.contains("&amp;amp;"), "{saved}");
+        let mut reader = NsReader::from_reader(saved.as_bytes());
+        let mut buffer = Vec::new();
+        let mut stamps = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer).unwrap() {
+                Event::Start(element) | Event::Empty(element) => {
+                    for attribute in element.attributes() {
+                        let attribute = attribute.unwrap();
+                        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                        if local.as_ref() == b"stamp" {
+                            let ResolveResult::Bound(Namespace(namespace)) = namespace else {
+                                panic!("saved producer attribute lost its namespace");
+                            };
+                            let value = attribute
+                                .decoded_and_normalized_value(
+                                    XmlVersion::Implicit1_0,
+                                    element.decoder(),
+                                )
+                                .unwrap();
+                            // This parser's namespace resolver exposes raw URI bytes.
+                            stamps.push((namespace.to_vec(), value.into_owned()));
+                        }
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        assert_eq!(
+            stamps,
+            vec![
+                (b"urn:outer&amp;producer".to_vec(), "outer".to_owned()),
+                (b"urn:inner&amp;producer".to_vec(), "inner".to_owned()),
+                (b"urn:outer&amp;producer".to_vec(), "restored".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn visible_content_does_not_hide_malformed_remaining_xml() {
         for ending in ["", "</w:r></w:body></w:document>"] {
             let xml = format!(
@@ -53413,6 +54765,84 @@ mod reader_fact_tests {
 #[cfg(test)]
 mod odttf_tests {
     use super::*;
+
+    #[test]
+    fn fx251_authored_font_requires_name_table_before_key_or_part() {
+        let licensed = include_bytes!("../../oxml-layout/fonts/Caladea-Regular.ttf");
+        let mut malformed = licensed.to_vec();
+        let count = u16::from_be_bytes([malformed[4], malformed[5]]) as usize;
+        let record = (0..count)
+            .map(|index| 12 + index * 16)
+            .find(|offset| &malformed[*offset..*offset + 4] == b"name")
+            .unwrap();
+        malformed[record..record + 4].copy_from_slice(b"nam_");
+        malformed.extend_from_slice(b"name");
+        let head = (0..count)
+            .map(|index| 12 + index * 16)
+            .find(|offset| &malformed[*offset..*offset + 4] == b"head")
+            .unwrap();
+        let adjustment =
+            u32::from_be_bytes(malformed[head + 8..head + 12].try_into().unwrap()) as usize + 8;
+        malformed[adjustment..adjustment + 4].fill(0);
+        let checksum = malformed.chunks(4).fold(0u32, |sum, chunk| {
+            let mut word = [0u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            sum.wrapping_add(u32::from_be_bytes(word))
+        });
+        malformed[adjustment..adjustment + 4]
+            .copy_from_slice(&0xB1B0_AFBAu32.wrapping_sub(checksum).to_be_bytes());
+        assert!(malformed.windows(4).any(|bytes| bytes == b"name"));
+        assert!(derive_font_key(&malformed).is_err());
+        let mut document = Document::new();
+        document.add_paragraph("held source");
+        let before = document.to_bytes().unwrap();
+        let make = |data| {
+            EmbeddedFont::new(
+                EmbeddedFontKind::Regular,
+                data,
+                "{00112233-4455-6677-8899-AABBCCDDEEFF}",
+                FontEmbeddingLicense::new(true, "Apache-2.0: Caladea"),
+            )
+        };
+        assert!(
+            document
+                .embed_font("Refused font", make(malformed.clone()))
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+        assert!(
+            document
+                .fonts()
+                .iter()
+                .all(|font| font.embedded_fonts.is_empty())
+        );
+        assert!(derive_font_key(licensed).is_ok());
+        document
+            .embed_font("Licensed font", make(licensed.to_vec()))
+            .unwrap();
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert!(reopened.fonts().iter().any(|font| font.name == "Licensed font" && font.embedded_fonts[0].data == licensed));
+        // Imported unsupported font bodies remain opaque through unrelated work.
+        let reference = document
+            .font_table
+            .as_ref()
+            .unwrap()
+            .fonts()
+            .iter()
+            .find(|font| font.name == "Licensed font")
+            .unwrap()
+            .embedded_fonts[0]
+            .clone();
+        let (part, _) = document.checked_embedded_font_source(&reference).unwrap();
+        let stored =
+            obfuscate_odttf_with_key(&malformed, &font_key_bytes(&reference.font_key).unwrap());
+        document.package.set_part(&part, stored.clone());
+        let mut imported = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        imported.add_paragraph("unrelated edit");
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(imported.to_bytes().unwrap())).unwrap();
+        assert_eq!(package.get_part(&part).unwrap(), stored);
+    }
 
     #[test]
     fn fx220_missing_record_embedding_is_one_native_transaction() {

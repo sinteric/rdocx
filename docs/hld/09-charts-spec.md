@@ -776,7 +776,7 @@ foreign and retired owners refuse without changing the document.
 
 PowerPoint `slide.shapes.add_chart(chart_type, left, top, width, height,
 chart_data)` returns an owned graphic frame through the existing shape handle.
-Its `has_chart` and live `chart` expose kind, category and ordered series
+Its `has_chart` and live `chart` expose type, category and ordered series
 snapshots. Native reads and `replace_chart_data` resolve unique shape IDs,
 including nested groups. Unsupported projections remain explicit errors.
 
@@ -786,3 +786,23 @@ axes, title, legend, aliases, foreign attributes and unmodeled children. Both
 bindings stage candidates and allocate returned handles before prepared
 publication. True no-op and allocation or validation failures preserve package
 bytes, revisions and existing owners.
+
+`oxml_chart::read_chart_type` and `Presentation::chart_type` return a bounded
+optional XL_CHART_TYPE integer from qualified direct plot metadata. Type reads
+do not require dense caches or an embedded workbook, do not publish revisions,
+and retain source bytes. Physical frame, unique shape id, chart relationship
+and chart content type remain mandatory. Data reads and replacements retain
+their stronger workbook and projection checks.
+
+Horizontal and column stacked plots return 58 and 52. A direct qualified series
+marker symbol of none selects marker-free line 4 for standard grouping. An
+otherwise authored standard line remains 65, including plot-level marker=false.
+Direct series explosion presence selects pie 69 even when its value is 0.
+Foreign, rebound and nested lookalikes do not supply these values. Existing
+authored area 1, column 51, doughnut -4120, line 65, pie 5, radar 81 and scatter 74
+remain stable. Valid unsupported styles and combination plots return None
+rather than a coarse family guess. Invalid selected metadata or malformed XML
+is an error. This is a bounded projection, not exhaustive chart classification.
+
+Direct-child indexing and an explicit four-visits-per-node lookup budget keep
+sparse series metadata inspection linear in the source node inventory.

@@ -1,6 +1,6 @@
 use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::PyClass;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyFloat, PyList, PySlice, PyString};
 use rpptx::{
@@ -366,6 +366,14 @@ type Insets = (Option<Emu>, Option<Emu>, Option<Emu>, Option<Emu>);
 
 #[pymethods]
 impl PyTextFrame {
+    #[getter(_txBody)]
+    fn tx_body(&self, py: Python<'_>) -> PyResult<()> {
+        self.validate(py)?;
+        Err(PyNotImplementedError::new_err(
+            "TextFrame._txBody does not expose lxml; use text_frame.element.xml to inspect XML or text_frame.element.replace_xml(...) for checked replacement",
+        ))
+    }
+
     #[getter]
     fn element(&self, py: Python<'_>) -> PyResult<Py<crate::presentation::PyPptElement>> {
         self.validate(py)?;
@@ -2378,6 +2386,26 @@ impl PyFont {
             })
             .transpose()?;
         self.update(py, |properties| properties.spacing = spacing)
+    }
+
+    #[getter]
+    fn language_id(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let tag = self.language(py)?;
+        py.import("rpptx.enum.lang")?
+            .getattr("_from_tag")?
+            .call1((tag,))
+            .map(Bound::unbind)
+    }
+
+    #[setter]
+    fn set_language_id(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.validate(py)?;
+        let tag = py
+            .import("rpptx.enum.lang")?
+            .getattr("_to_tag")?
+            .call1((value,))?
+            .extract::<Option<String>>()?;
+        self.update(py, |properties| properties.set_language(tag.as_deref()))
     }
 
     /// The language tag of the text, such as `en-US` or `fr-FR`, which

@@ -69,6 +69,7 @@ struct ControlValue {
     display: String,
     bound: String,
     checkbox: Option<(bool, String)>,
+    full_date: Option<String>,
 }
 
 fn prepare_control_value(control: &CT_Sdt, value: &str) -> Result<ControlValue> {
@@ -95,6 +96,7 @@ fn prepare_control_value(control: &CT_Sdt, value: &str) -> Result<ControlValue> 
             display: glyph.to_string(),
             bound: checked.to_string(),
             checkbox: Some((checked, font)),
+            full_date: None,
         });
     }
     if matches!(kind, Some(SdtType::Picture | SdtType::Group)) {
@@ -102,10 +104,16 @@ fn prepare_control_value(control: &CT_Sdt, value: &str) -> Result<ControlValue> 
             "selected content-control kind does not support a text value".to_owned(),
         ));
     }
+    let (display, bound, full_date) = if let Some(properties) = &control.properties {
+        properties.prepare_text_value(value)?
+    } else {
+        (value.to_owned(), value.to_owned(), None)
+    };
     Ok(ControlValue {
-        display: value.to_owned(),
-        bound: value.to_owned(),
+        display,
+        bound,
         checkbox: None,
+        full_date,
     })
 }
 
@@ -322,11 +330,18 @@ fn replace_one_control(
     index: &mut usize,
 ) -> Result<()> {
     if let Some(value) = replacements.get(index) {
-        replace_display_text(
-            control,
-            &value.display,
-            value.checkbox.as_ref().map(|(_, font)| font.as_str()),
-        )?;
+        let mut current = String::new();
+        collect_sdt_text(control, &mut current);
+        if current != value.display || value.checkbox.is_some() {
+            replace_display_text(
+                control,
+                &value.display,
+                value.checkbox.as_ref().map(|(_, font)| font.as_str()),
+            )?;
+        }
+        if let Some(properties) = &mut control.properties {
+            properties.set_value_metadata(value.full_date.as_deref())?;
+        }
         if let Some((checked, _)) = &value.checkbox {
             control
                 .properties

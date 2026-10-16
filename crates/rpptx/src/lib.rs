@@ -11997,12 +11997,12 @@ impl Presentation {
             .map_err(|error| invalid_chart_mutation("read chart data", error.to_string()))
     }
 
-    fn chart_owner(
+    fn chart_source_owner(
         &self,
         slide_index: usize,
         shape_id: u32,
         operation: &'static str,
-    ) -> Result<(Vec<usize>, String, String, String, String)> {
+    ) -> Result<(Vec<usize>, String, String)> {
         let owner = ShapeOwner::Slide(slide_index);
         let data = self.owner_data(owner)?;
         if chart_shape_id_count(&data.shape_tree.children, shape_id) != 1 {
@@ -12040,6 +12040,26 @@ impl Presentation {
                 "chart target has an invalid content type",
             ));
         }
+        Ok((path, relationship_id.to_owned(), chart_part))
+    }
+
+    /// Reads precise supported chart metadata without requiring cached data or a workbook.
+    /// Valid unsupported chart types return None. Invalid physical owners are errors.
+    pub fn chart_type(&self, slide_index: usize, shape_id: u32) -> Result<Option<i64>> {
+        let (_, _, chart_part) =
+            self.chart_source_owner(slide_index, shape_id, "read chart type")?;
+        oxml_chart::read_chart_type(required_part(&self.package, &chart_part)?)
+            .map_err(|error| invalid_chart_mutation("read chart type", error.to_string()))
+    }
+
+    fn chart_owner(
+        &self,
+        slide_index: usize,
+        shape_id: u32,
+        operation: &'static str,
+    ) -> Result<(Vec<usize>, String, String, String, String)> {
+        let (path, relationship_id, chart_part) =
+            self.chart_source_owner(slide_index, shape_id, operation)?;
         let chart_xml = required_part(&self.package, &chart_part)?;
         let workbook_id = oxml_chart::chart_workbook_relationship_id(chart_xml)
             .map_err(|error| invalid_chart_mutation(operation, error.to_string()))?
@@ -12074,7 +12094,7 @@ impl Presentation {
         }
         Ok((
             path,
-            relationship_id.to_owned(),
+            relationship_id,
             chart_part,
             workbook_id,
             workbook_part,
@@ -29570,6 +29590,73 @@ mod write_tests {
                 .unwrap()
                 .validate()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn fx253_chart_type_read_is_sparse_and_owner_checked() {
+        let (mut deck, id, _) = fx215_native_deck();
+        let (_, _, chart, _, _) = deck.chart_owner(0, id, "test").unwrap();
+        let sparse = format!(
+            r#"<c:chartSpace xmlns:c="{}"><c:chart><c:plotArea><c:barChart><c:barDir val="bar"/><c:grouping val="stacked"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>Sheet1!$B$2:$B$5</c:f></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+            oxml_chart::C_NS
+        );
+        deck.package.set_part(&chart, sparse.into_bytes());
+        let before = deck.to_bytes().unwrap();
+        assert_eq!(deck.chart_type(0, id).unwrap(), Some(58));
+        assert!(
+            deck.chart_data(0, id).is_err(),
+            "data still requires an embedded workbook reference"
+        );
+        assert_eq!(deck.to_bytes().unwrap(), before);
+        let reopened = Presentation::from_bytes(&before).unwrap();
+        assert_eq!(reopened.chart_type(0, id).unwrap(), Some(58));
+        let unsupported = format!(
+            r#"<c:chartSpace xmlns:c="{}"><c:chart><c:plotArea><c:bubbleChart/></c:plotArea></c:chart></c:chartSpace>"#,
+            oxml_chart::C_NS
+        );
+        let mut unknown = deck.clone();
+        unknown.package.set_part(&chart, unsupported.into_bytes());
+        assert_eq!(unknown.chart_type(0, id).unwrap(), None);
+        let mut invalid = deck.clone();
+        invalid.package.set_part(&chart, b"<broken".to_vec());
+        assert!(invalid.chart_type(0, id).is_err());
+        let mut wrong_type = deck.clone();
+        wrong_type
+            .package
+            .content_types
+            .add_override(&chart, "application/xml");
+        assert!(wrong_type.chart_type(0, id).is_err());
+        assert!(deck.chart_type(99, id).is_err());
+        assert!(deck.chart_type(0, 999).is_err());
+        let child = deck.slides[0]
+            .slide
+            .common_slide_data
+            .shape_tree
+            .children
+            .pop()
+            .unwrap();
+        let mut group = rpptx_oxml::shape_tree::CT_GroupShape::new_empty(100, "Chart group");
+        group.children.push(child);
+        deck.slides[0]
+            .slide
+            .common_slide_data
+            .shape_tree
+            .children
+            .push(ShapeTreeChild::GroupShape(Box::new(group)));
+        assert_eq!(deck.chart_type(0, id).unwrap(), Some(58));
+        let duplicate = deck.slides[0].slide.common_slide_data.shape_tree.children[0].clone();
+        deck.slides[0]
+            .slide
+            .common_slide_data
+            .shape_tree
+            .children
+            .push(duplicate);
+        assert!(
+            deck.chart_type(0, id)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
         );
     }
 

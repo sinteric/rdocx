@@ -39,7 +39,7 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 66,411 compressed bytes, 305,091 member bytes, 8 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
+| Crates.io archive: rpptx-cli | 67,009 compressed bytes, 307,385 member bytes, 8 members | 0.14.2 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 
 ## Use it when
 
@@ -52,7 +52,7 @@ It uses `oxml-cli-support` for shared command conventions and the real `rpptx` f
 ## Example
 
 ```sh
-cargo install rpptx-cli --version '^0.14.1'
+cargo install rpptx-cli --version '^0.14.2'
 rpptx inspect deck.pptx --json
 rpptx text deck.pptx --json
 rpptx outline deck.pptx --notes

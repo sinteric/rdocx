@@ -40,6 +40,15 @@ First retirement records the exact public operation label for later stale
 errors. The native facades retain ownership of relationships, geometry and
 package authoring, while bindings reuse that publication protocol.
 
+Word binding admission refuses PDF save paths, duplicate stored tab positions,
+page breaks in actual physical headers and malformed authored language values
+before publication or output. Header ancestry follows the relationship-resolved
+native story graph, including cell descendants. Native font admission requires
+the exact name directory entry before key derivation or package allocation.
+Word font CLI mutation preflight composes identity and file-kind checks with
+nonreplacement availability and staged publication. These checks preserve
+source bytes and captured authority on refusal.
+
 ## Three families, one workspace
 
 ```

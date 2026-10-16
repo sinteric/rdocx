@@ -694,6 +694,14 @@ impl PyParagraph {
     }
 
     #[getter]
+    fn _p(&self, py: Python<'_>) -> PyResult<()> {
+        self.validate(py)?;
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "read paragraph.xml and write paragraph.replace_xml(xml) instead of lxml",
+        ))
+    }
+
+    #[getter]
     fn _element(&self, py: Python<'_>) -> PyResult<()> {
         self.validate(py)?;
         Err(pyo3::exceptions::PyNotImplementedError::new_err(

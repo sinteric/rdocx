@@ -1,5 +1,91 @@
 # Changelog
 
+## v0.16.2
+
+### Highlights
+
+Word 0.16.2 brings readable tracked comparisons, legal revision rendering, stronger formula layout and the bounded Python, signing and form repairs completed since v0.16.1. The exact seven Rust packages, CLI and `rdocx` Python distribution share this version. This patch release includes approved Rust and Python source compatibility changes described below.
+
+### Added
+
+- Legal revision styling selects blue insertions, red deletions and green moves through Rust, Python and CLI options. Plain remains the default, and stored formatting is unchanged.
+- Python adds supported heading, break, paragraph, run and stream aliases, typed section enums and actionable alternatives where native semantics differ from python-docx. Default-template List Bullet and List Number still require the explicit numbering APIs. One-dimension picture sizing still names the supported two-dimension call.
+- Python and `rdocx sign` / `verify-signatures` expose existing native package signing with DER or strict PEM inputs. Reports inspect the current staged package, including fill-then-sign and sign-then-fill operations. This is OOXML package signing, not PDF signing.
+- Callable form snapshots, atomic value binding and `rdocx fill --values` cover supported plain-text, checkbox, drop-down and date controls plus legacy text fields. Typed SDT fills remove the qualified showingPlcHdr flag, write supported date metadata, resolve declared item values/display strings and refuse missing individual selectors.
+- Python CustomProperties supports item assignment, deletion and membership with strict string keys. Section and TabStop snapshots retain immutable fields with live section or delete/re-add alternatives. Private paragraph and run XML names point to checked XML providers, and legacy drop-down selection names its integer index contract.
+- Native nullable run width-scale and position setters clear their direct overrides. Native Word and Python chart legend controls expose visibility, position and overlay through the shared renderer.
+
+### Fixed
+
+- Comparisons preserve complete hyperlinks and chart/workbook resources, handle table-adjacent, empty and trailing paragraphs, and group consecutive word replacements without losing equal anchors or source ownership. Unsupported nested hyperlink cases remain explicit refusals.
+- Paragraph border thickness and spacing participate in flow, joined/split borders and table reconstruction. The missing original border file was qualified through the approved inferred 15-point and `w:sz="15"` controls, not claimed as an exact replay of an unavailable input.
+- Finite LaTeX conversion and selected-face ink/MATH metrics improve the reported symbols, fractions, scripts, radicals, integrals and baselines. The 73-input follow-up retains its independently observed degree fallback and unsupported diagnostics. This is not unrestricted TeX or whole-page native font parity.
+- Repeated owner-inventory work during Python table access and scalar edits is reduced. The measured repair is not a universal timing or total cell-fill complexity promise. Six measured Rust inline annotations retain existing setter bodies and signatures.
+- Identified paragraphs inside block controls validate without stripping `w14:paraId` or `w14:textId`. Newly invalid direct paragraph XML refuses atomically while supported inherited namespace/MC authority, original opaque exceptions and unchanged no-ops retain their bounded source-owned checks.
+- Python tiny bare paragraph space-after and character-spacing values refuse before zero quantization. Integer and float `line_spacing` values denote line multiples, while explicit Length values denote absolute spacing. Public `update_section` requires Length for every nonzero geometry argument, with bare zero retained and the live section EMU route unchanged.
+- DOCX save to a PDF path, duplicate stored tab stops, header page breaks, malformed language tags and authored fonts without a valid name table refuse before publication. Valid streams, ordinary fonts, language tags and body breaks remain supported. Word font CLI errors no longer suggest an unavailable `--force`.
+
+### Compatibility
+
+Update exhaustive Rust literals for `RenderOptions.revision_style` and `LayoutInput.revision_style`. `ParagraphBlock.has_visible_revision: bool` becomes `change_bar: Option<Color>`. `NoteLayout.revision_ranges` contains `(Range<usize>, Color)` pairs. Select `RevisionStyle::Plain` for the default paint style. These approved source breaks remain real despite the 0.16.x version line.
+
+ZIP 9.0.3 changes the upstream error type carried by `OpcError::Zip`. Native signing features and WASM exclusions retain their existing boundaries. Python `font.size` now refuses nonzero integer EMU inputs that would store zero and names explicit units. New refusals do not redefine the truncating unit constructors. Python 3.14 is not qualified by the 3.9/3.12 release matrix.
+
+Python source compatibility changes include `ColorFormat.type` returning `rdocx.enum.dml.MSO_COLOR_TYPE | None` instead of strings. Compare against enum members. Word `theme_color` remains `str | None`, and supported string setters, native color math and stored formatting remain unchanged.
+
+The completed Issue 386 numeric, mapping, name and diagnostic repairs retain the documented default-list and two-dimension-picture alternatives. Whole-issue acceptance and closure require the actual final paired untouched 19-attempt reporter replay and independent 16-group semantic companion. A self-catching script exit zero alone is insufficient.
+
+Prior intentional comparison grouping, legal/double-underline paint, border flow and legend layout changes remain attributed to their reviewed repairs. The S93 union changed eighteen hash entries and four pixel buffers. Version preparation introduces no further paint change. Native formula/border observations have the limits above. Issue 385 is partially addressed: chart read-back, display equations, list restart/font and note APIs plus remaining PowerPoint admission/CLI repairs remain in S95.11. Bibliography, navigation, fillable PDF, full-range watermark and Word multi-face native interoperability are excluded.
+
+### Contributors
+
+- [@Andrewkoro105](https://github.com/Andrewkoro105) reported the nullable setter inconsistency in [Issue 364](https://github.com/tensorbee/rdocx/issues/364), formula rendering in [Issue 365](https://github.com/tensorbee/rdocx/issues/365), borders in [Issue 366](https://github.com/tensorbee/rdocx/issues/366) and measured setters in [Issue 367](https://github.com/tensorbee/rdocx/issues/367).
+- [@hadim](https://github.com/hadim), Hadrien Mary, supplied the comparison reports [368](https://github.com/tensorbee/rdocx/issues/368), [369](https://github.com/tensorbee/rdocx/issues/369), [370](https://github.com/tensorbee/rdocx/issues/370), [371](https://github.com/tensorbee/rdocx/issues/371) and [372](https://github.com/tensorbee/rdocx/issues/372), plus [PR 374](https://github.com/tensorbee/rdocx/pull/374). Selected donor slices and reviewed hardened equivalents landed. The closed PR was not merged unchanged.
+- Hadrien reported legal revision styling in [Issue 373](https://github.com/tensorbee/rdocx/issues/373) and supplied [PR 375](https://github.com/tensorbee/rdocx/pull/375). Its adapted styling and source-preservation work retain the approved compatibility boundaries. The closed PR was not merged unchanged.
+- Hadrien supplied [PR 376](https://github.com/tensorbee/rdocx/pull/376), adapted into job-local test optimization and bounded corpus/dependency routing without shortening acceptance suites. He reported table owner costs in [Issue 378](https://github.com/tensorbee/rdocx/issues/378), Python compatibility in [Issue 379](https://github.com/tensorbee/rdocx/issues/379), signing/forms in [Issue 380](https://github.com/tensorbee/rdocx/issues/380), chart-resource comparison in [Issue 382](https://github.com/tensorbee/rdocx/issues/382) and legend rendering in [Issue 383](https://github.com/tensorbee/rdocx/issues/383).
+- Hadrien supplied the control-validation reproduction in [Issue 384](https://github.com/tensorbee/rdocx/issues/384) and the typed-fill, invalid-value and raw-XML groups of [Issue 385](https://github.com/tensorbee/rdocx/issues/385). Only the named groups are included here. The issue remains partially addressed.
+- Hadrien reported the numeric, mapping, compatibility-name, color and legacy drop-down cases in [Issue 386](https://github.com/tensorbee/rdocx/issues/386). The implemented Word repairs and supported alternatives are described above.
+- Atul Sharma maintained the release preparation and hardened integration. Publication retains its separate approval and verification.
+
+## rpptx-v0.14.2
+
+### Highlights
+
+The exact fifteen shared OOXML and PowerPoint Rust packages, CLI and `rpptx` Python distribution prepare 0.14.2. Imported chart subtypes and master visibility now have independent native/LibreOffice controls, alongside bounded notes, signing and legend APIs.
+
+### Added
+
+- Python notes use `has_notes_slide` and owner-bound `notes_slide.notes_text_frame`. The existing color enum module adds `MSO_COLOR_TYPE` and the identity alias `MSO_THEME_COLOR_INDEX`.
+- Python and CLI package signing/verification accept DER and strict PEM inputs, preserve staged package state and return owned reports. The approved ZIP 9.0.3 dependency is shared with Word. This adds callable surfaces over existing native signing, not PDF signing or AcroForm authoring.
+- Python exposes registered slide IDs, checked-Element alternatives for private shape/text-body names and the 216-member `MSO_LANGUAGE_ID` module. `Font.language_id` maps declared language tags, with `None` or `NONE` clearing the direct override and existing `Font.language` string admission retained. Unsupported imported tags remain preserved and require explicit source inspection.
+- Native and Python chart legend controls expose visibility, position and overlay. Shared drawing honors the corresponding plot-space reservation with absent overlay false.
+
+### Fixed
+
+- Imported stacked horizontal bars, stacked columns, marker-free lines and exploded pies report exact chart types 58, 52, 4 and 69. Valid unsupported forms return `None`, while invalid metadata refuses. Data, plot order and opaque chart XML survive save/reopen.
+- Hidden master shapes are suppressed consistently in PDF, PNG, `convert` and `render`. Actual PowerPoint and LibreOffice controls distinguish master, layout and slide shapes, placeholders, styles and backgrounds. Master paint requires both slide and layout flags, while layout paint follows the slide flag.
+- Four PowerPoint zero-value spacing assignments now refuse before mutation and name explicit units or positive line multiples. Existing valid zero before/after spacing, typed lengths and supported negative character spacing retain their contracts.
+- Native presentation HTML import preserves whitespace, links, rich span edges and nonbreaking spaces. This is the new PowerPoint increment from the existing reference contribution, not a new Python or CLI HTML importer.
+- Job-local test optimization and reviewed corpus/dependency routing retain the full acceptance scope without a universal timing claim.
+
+### Compatibility
+
+Python chart types are `int | None`. Python source compatibility changes include `ColorFormat.type` returning PowerPoint's `MSO_COLOR_TYPE | None` and `theme_color` returning `MSO_THEME_COLOR` instead of strings. A direct nonscheme color returns `NOT_THEME_COLOR`, absent direct color raises `AttributeError`, and unknown or `phClr` scheme tokens refuse projection with preserved-source inspection guidance. Existing supported string setters and native color math remain intact. The unpublished `rpptx-wasm` carrier stays 0.12.1 with its separate npm authority.
+
+The completed Issue 386 color, language and name repairs retain checked owner identities. Whole-issue acceptance and closure require the actual final paired untouched 19-attempt reporter replay and independent 16-group semantic companion. A self-catching script exit zero alone is insufficient.
+
+ZIP 9.0.3 changes the upstream `OpcError::Zip` payload type. Word's approved rendering-structure changes are documented in its separate 0.16.2 notes. Shared double-underline and legend layout corrections are intentional prior rendering changes, with no new paint delta from version preparation. The native empty-legend disagreement and font/whole-page parity limits remain explicit.
+
+Issue 385 is partially addressed by the chart-type and master-render groups. Wrong-format saves, dimensions/flips/styles, checked PowerPoint XML, replacement-map and remaining font CLI repairs belong to S95.11. No full Issue 385 closure, full-range watermark interoperability, Word multi-face native interoperability, fillable PDF, Python 3.14 qualification or npm publication is claimed. Shared/PowerPoint publication precedes Word where its internal pins require it, with separate final approval per family.
+
+### Contributors
+
+- [@hadim](https://github.com/hadim), Hadrien Mary, supplied [PR 359](https://github.com/tensorbee/rdocx/pull/359). Only its new presentation HTML whitespace increment is credited here. The earlier Word import outcome already shipped.
+- Hadrien supplied [PR 376](https://github.com/tensorbee/rdocx/pull/376), adapted into the bounded test/corpus routing work. The closed PR was not merged unchanged.
+- Hadrien reported legend rendering in [Issue 383](https://github.com/tensorbee/rdocx/issues/383), notes/enum names and silent unit loss in [Issue 379](https://github.com/tensorbee/rdocx/issues/379), and Python/CLI signing in [Issue 380](https://github.com/tensorbee/rdocx/issues/380).
+- Hadrien supplied the imported-chart and master-logo controls in [Issue 385](https://github.com/tensorbee/rdocx/issues/385). The remaining groups are excluded from this release's acceptance claim.
+- Hadrien reported the PowerPoint name, color and language cases in [Issue 386](https://github.com/tensorbee/rdocx/issues/386). The implemented repairs are described above.
+- Atul Sharma maintained the release preparation and hardened integration. Publication retains its separate approval and verification.
 
 ## v0.16.1
 

@@ -36,6 +36,9 @@ opaque package content.
 
 `CT_Slide` and `CT_SlideLayout` expose the presence-sensitive
 `show_master_shapes` root attribute. An absent `showMasterSp` means true.
+Ordinary master shapes paint only when both slide and layout flags are true.
+Ordinary layout shapes require only the slide flag. These flags do not suppress
+slide-owned content or placeholder geometry and formatting inheritance.
 `CT_SlideLayout` and `CT_SlideMaster` expose their optional `p:hf` as
 `CT_HeaderFooter`, with presence-sensitive slide-number, header, footer, and
 date-time flags. Each absent flag means true. Boolean inputs accept both XML

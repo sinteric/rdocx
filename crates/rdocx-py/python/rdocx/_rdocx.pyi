@@ -7,6 +7,7 @@ from typing import Literal as _Literal, NoReturn as _Never, final as _final, ove
 
 from . import shared as _shared
 from .enum import MSO_THEME_COLOR as _MSO_THEME_COLOR
+from .enum import dml as _dml
 from .enum import section as _section
 from .enum import table as _table
 from .enum import text as _text
@@ -655,6 +656,10 @@ class Settings:
 @_final
 class Section:
     @property
+    def left_margin(self) -> _Never: ...
+    @left_margin.setter
+    def left_margin(self, value: int) -> None: ...
+    @property
     def header(self) -> _Never: ...
     @property
     def footer(self) -> _Never: ...
@@ -1081,18 +1086,18 @@ class Document:
         index: int,
         *,
         orientation: _Literal["portrait", "landscape"] | None = None,
-        page_width: int | None = None,
-        page_height: int | None = None,
-        margin_top: int | None = None,
-        margin_right: int | None = None,
-        margin_bottom: int | None = None,
-        margin_left: int | None = None,
-        gutter: int | None = None,
+        page_width: _shared.Length | _Literal[0] | None = None,
+        page_height: _shared.Length | _Literal[0] | None = None,
+        margin_top: _shared.Length | _Literal[0] | None = None,
+        margin_right: _shared.Length | _Literal[0] | None = None,
+        margin_bottom: _shared.Length | _Literal[0] | None = None,
+        margin_left: _shared.Length | _Literal[0] | None = None,
+        gutter: _shared.Length | _Literal[0] | None = None,
         column_count: int | None = None,
-        column_spacing: int | None = None,
+        column_spacing: _shared.Length | _Literal[0] | None = None,
         page_number_start: int | None = None,
-        header_distance: int | None = None,
-        footer_distance: int | None = None,
+        header_distance: _shared.Length | _Literal[0] | None = None,
+        footer_distance: _shared.Length | _Literal[0] | None = None,
         different_first_page: bool | None = None,
         break_type: _Literal[
             "nextPage", "continuous", "evenPage", "oddPage", "nextColumn"
@@ -1344,6 +1349,8 @@ class Document:
 @_final
 class Paragraph:
     @property
+    def _p(self) -> _Never: ...
+    @property
     def _element(self) -> _Never: ...
     def insert_paragraph_before(self, text: str = "", style: str | None = None) -> Paragraph: ...
     @property
@@ -1404,6 +1411,10 @@ class ParagraphCollection:
 @_final
 class Run:
     @property
+    def _r(self) -> _Never: ...
+    @property
+    def _element(self) -> _Never: ...
+    @property
     def bold(self) -> bool | None: ...
     @bold.setter
     def bold(self, value: bool | None) -> None: ...
@@ -1457,7 +1468,7 @@ class ColorFormat:
     @rgb.setter
     def rgb(self, value: _shared.RGBColor | tuple[int, int, int] | str | None) -> None: ...
     @property
-    def type(self) -> _Literal["rgb", "theme", "auto"] | None: ...
+    def type(self) -> _dml.MSO_COLOR_TYPE | None: ...
     @property
     def theme_color(self) -> str | None: ...
     @theme_color.setter
@@ -1575,6 +1586,8 @@ class TabStop:
     def position(self) -> _shared.Length: ...
     @property
     def alignment(self) -> _text.WD_TAB_ALIGNMENT: ...
+    @alignment.setter
+    def alignment(self, value: _text.WD_TAB_ALIGNMENT) -> None: ...
     @property
     def leader(self) -> _text.WD_TAB_LEADER: ...
 
@@ -1984,6 +1997,9 @@ class CustomProperty:
 @_final
 class CustomProperties:
     def __new__(cls) -> _Never: ...
+    def __setitem__(self, name: str, value: str | int | float | bool | CustomFileTime, /) -> None: ...
+    def __delitem__(self, name: str, /) -> None: ...
+    def __contains__(self, name: str, /) -> bool: ...
     def get(self, name: str) -> CustomProperty | None: ...
     def set(self, name: str, value: str | int | float | bool | CustomFileTime) -> None: ...
     def delete(self, name: str) -> bool: ...

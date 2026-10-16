@@ -17,7 +17,7 @@ resource state into owned shapes with concrete visual properties.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-layout | 97,656 compressed bytes, 566,294 member bytes, 11 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
+| Crates.io archive: rpptx-layout | 98,292 compressed bytes, 568,720 member bytes, 11 members | 0.14.2 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 
 ## Use it when
 
@@ -37,4 +37,4 @@ let media = ScopedMediaIds::default();
 assert_eq!(media.get(FlattenedSource::Slide, "rId1"), None);
 ```
 
-Add `rpptx-layout = "0.14.1"` to your dependencies. See the [resolver API](https://docs.rs/rpptx-layout) for the resolved-slide contract.
+Add `rpptx-layout = "0.14.2"` to your dependencies. See the [resolver API](https://docs.rs/rpptx-layout) for the resolved-slide contract.

@@ -337,6 +337,193 @@ pub fn read_chart_data(chart_xml: &[u8]) -> Result<(ChartKind, ChartData)> {
     ))
 }
 
+/// Reads a bounded XL_CHART_TYPE value from one owned ChartML plot.
+/// Valid unsupported or combination plots return None. Reading does not project
+/// dense caches, resolve an embedded workbook, or rewrite retained source.
+pub fn read_chart_type(chart_xml: &[u8]) -> Result<Option<i64>> {
+    oxml_core::xml::validate_strict_xml_1_0(chart_xml)
+        .map_err(|error| invalid_authoring_value(format!("invalid chart XML: {error:?}")))?;
+    let nodes = chart_source_nodes(chart_xml)?;
+    if !nodes
+        .first()
+        .is_some_and(|node| node.qualified && node.local == b"chartSpace")
+        || nodes.iter().filter(|node| node.parent.is_none()).count() != 1
+    {
+        return Err(invalid_authoring_value("owned chartSpace required"));
+    }
+    let chart = chart_child_node(&nodes, 0, b"chart")?;
+    let area = chart_child_node(&nodes, chart, b"plotArea")?;
+    let mut plots = nodes.iter().enumerate().filter(|(_, node)| {
+        node.parent == Some(area) && node.qualified && node.local.ends_with(b"Chart")
+    });
+    let Some((source_plot, plot)) = plots.next() else {
+        return Ok(None);
+    };
+    if plots.next().is_some() {
+        return Ok(None);
+    }
+    // Index physical children once. Each direct child is visited at most twice
+    // for series metadata and twice for plot scalars, independently of series count.
+    let mut children = vec![Vec::new(); nodes.len()];
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(parent) = node.parent {
+            children[parent].push(index);
+        }
+    }
+    let mut remaining_work = nodes.len().saturating_mul(4);
+    let mut marker_none = false;
+    let mut exploded = false;
+    for (index, _) in nodes.iter().enumerate().filter(|(_, node)| {
+        node.parent == Some(source_plot) && node.qualified && node.local == b"ser"
+    }) {
+        if let Some(marker) =
+            chart_optional_child_node(&nodes, &children, index, b"marker", &mut remaining_work)?
+            && let Some(symbol) = chart_optional_child_node(
+                &nodes,
+                &children,
+                marker,
+                b"symbol",
+                &mut remaining_work,
+            )?
+        {
+            let symbol = chart_type_scalar(chart_xml, &nodes[symbol])?;
+            if !matches!(
+                symbol.as_str(),
+                "auto"
+                    | "circle"
+                    | "dash"
+                    | "diamond"
+                    | "dot"
+                    | "none"
+                    | "picture"
+                    | "plus"
+                    | "square"
+                    | "star"
+                    | "triangle"
+                    | "x"
+            ) {
+                return Err(invalid_authoring_value("invalid marker symbol"));
+            }
+            marker_none |= symbol == "none";
+        }
+        if let Some(explosion) =
+            chart_optional_child_node(&nodes, &children, index, b"explosion", &mut remaining_work)?
+        {
+            chart_type_scalar(chart_xml, &nodes[explosion])?
+                .parse::<u32>()
+                .map_err(|_| invalid_authoring_value("invalid series explosion"))?;
+            exploded = true;
+        }
+    }
+    let mut scalar = |local: &[u8]| -> Result<Option<String>> {
+        chart_optional_child_node(&nodes, &children, source_plot, local, &mut remaining_work)?
+            .map(|index| chart_type_scalar(chart_xml, &nodes[index]))
+            .transpose()
+    };
+    Ok(match plot.local.as_slice() {
+        b"barChart" => {
+            let direction =
+                scalar(b"barDir")?.ok_or_else(|| ChartError::MissingElement("c:barDir".into()))?;
+            let direction = BarDirection::parse(&direction)
+                .ok_or_else(|| invalid_authoring_value("invalid bar direction"))?;
+            let grouping = scalar(b"grouping")?.unwrap_or_else(|| "standard".into());
+            let grouping = BarGrouping::parse(&grouping)
+                .ok_or_else(|| invalid_authoring_value("invalid bar grouping"))?;
+            match (direction, grouping) {
+                (BarDirection::Bar, BarGrouping::Clustered) => Some(57),
+                (BarDirection::Bar, BarGrouping::Stacked) => Some(58),
+                (BarDirection::Bar, BarGrouping::PercentStacked) => Some(59),
+                (BarDirection::Column, BarGrouping::Clustered) => Some(51),
+                (BarDirection::Column, BarGrouping::Stacked) => Some(52),
+                (BarDirection::Column, BarGrouping::PercentStacked) => Some(53),
+                (_, BarGrouping::Standard) => None,
+            }
+        }
+        b"lineChart" | b"areaChart" => {
+            let grouping = scalar(b"grouping")?.unwrap_or_else(|| "standard".into());
+            let grouping = Grouping::parse(&grouping)
+                .ok_or_else(|| invalid_authoring_value("invalid chart grouping"))?;
+            Some(if plot.local == b"areaChart" {
+                match grouping {
+                    Grouping::Standard => 1,
+                    Grouping::Stacked => 76,
+                    Grouping::PercentStacked => 77,
+                }
+            } else {
+                match (grouping, marker_none) {
+                    (Grouping::Standard, true) => 4,
+                    (Grouping::Stacked, true) => 63,
+                    (Grouping::PercentStacked, true) => 64,
+                    (Grouping::Standard, false) => 65,
+                    (Grouping::Stacked, false) => 66,
+                    (Grouping::PercentStacked, false) => 67,
+                }
+            })
+        }
+        b"pieChart" => Some(if exploded { 69 } else { 5 }),
+        b"doughnutChart" => Some(if exploded { 80 } else { -4120 }),
+        b"scatterChart" => {
+            let value = scalar(b"scatterStyle")?
+                .ok_or_else(|| ChartError::MissingElement("c:scatterStyle".into()))?;
+            let style = ScatterStyle::parse(&value)
+                .ok_or_else(|| invalid_authoring_value("invalid scatter style"))?;
+            (style == ScatterStyle::LineMarker && !marker_none).then_some(74)
+        }
+        b"radarChart" => {
+            let value = scalar(b"radarStyle")?
+                .ok_or_else(|| ChartError::MissingElement("c:radarStyle".into()))?;
+            let style = RadarStyle::parse(&value)
+                .ok_or_else(|| invalid_authoring_value("invalid radar style"))?;
+            (style == RadarStyle::Standard && !marker_none).then_some(81)
+        }
+        _ => None,
+    })
+}
+
+fn chart_optional_child_node(
+    nodes: &[ChartSourceNode],
+    children: &[Vec<usize>],
+    parent: usize,
+    local: &[u8],
+    remaining_work: &mut usize,
+) -> Result<Option<usize>> {
+    let mut found = None;
+    for &index in &children[parent] {
+        *remaining_work = remaining_work
+            .checked_sub(1)
+            .ok_or_else(|| invalid_authoring_value("chart metadata work limit"))?;
+        let node = &nodes[index];
+        if node.qualified && node.local == local && found.replace(index).is_some() {
+            return Err(ChartError::DuplicateElement(format!(
+                "c:{}",
+                String::from_utf8_lossy(local)
+            )));
+        }
+    }
+    Ok(found)
+}
+
+fn chart_type_scalar(xml: &[u8], node: &ChartSourceNode) -> Result<String> {
+    let mut reader = Reader::from_reader(&xml[node.start..node.end]);
+    let value = match reader.read_event().map_err(OxmlError::from)? {
+        Event::Start(element) | Event::Empty(element) => attribute_value(&element, b"val")?
+            .ok_or_else(|| invalid_authoring_value("chart type scalar requires val"))?,
+        _ => return Err(invalid_authoring_value("chart type scalar root")),
+    };
+    loop {
+        match reader.read_event().map_err(OxmlError::from)? {
+            Event::End(_) | Event::Comment(_) | Event::PI(_) => {}
+            Event::Text(text) if text.iter().all(u8::is_ascii_whitespace) => {}
+            Event::Eof => return Ok(value),
+            _ => {
+                return Err(invalid_authoring_value(
+                    "chart type scalar has non-scalar content",
+                ));
+            }
+        }
+    }
+}
+
 fn chart_dense_numbers(data: &NumericData) -> Result<Vec<f64>> {
     let (count, indexes) = cache_layout(&data.markup, data.values.len())?;
     let count = chart_projection_count(count)?;
@@ -17644,7 +17831,7 @@ mod tests {
     fn oxml_chart_is_an_explicit_publication_candidate() {
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains("name = \"oxml-chart\""));
-        assert!(manifest.contains("version = \"0.14.1\""));
+        assert!(manifest.contains("version = \"0.14.2\""));
         assert!(manifest.contains("publish = true"));
         for dependency in [
             "oxml-core.workspace",
@@ -18487,6 +18674,141 @@ mod tests {
         assert_eq!(pixels.len(), width * height * 3, "PPM pixel length");
         (width, height, pixels)
     }
+    #[test]
+    fn fx253_invalid_selected_metadata_is_distinct_from_valid_unsupported_styles() {
+        for (plot, scalar, valid, expected) in [
+            ("scatterChart", "scatterStyle", "smoothMarker", None),
+            ("radarChart", "radarStyle", "filled", None),
+            ("lineChart", "grouping", "standard", Some(65)),
+        ] {
+            let shell = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:{plot}><c:{scalar} val="{valid}"/></c:{plot}></c:plotArea></c:chart></c:chartSpace>"#
+            );
+            assert_eq!(super::read_chart_type(shell.as_bytes()).unwrap(), expected);
+            let invalid = shell.replace(&format!("val=\"{valid}\""), "val=\"garbage\"");
+            assert!(super::read_chart_type(invalid.as_bytes()).is_err());
+        }
+        for symbol in ["none", "circle", "auto", "garbage"] {
+            let shell = format!(
+                r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:lineChart><c:ser><c:marker><c:symbol val="{symbol}"/></c:marker></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#
+            );
+            let actual = super::read_chart_type(shell.as_bytes());
+            if symbol == "garbage" {
+                assert!(actual.is_err());
+            } else {
+                assert_eq!(actual.unwrap(), Some(if symbol == "none" { 4 } else { 65 }));
+            }
+        }
+    }
+
+    #[test]
+    fn fx253_many_sparse_series_fit_the_linear_metadata_work_budget() {
+        let series = "<c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:marker><c:symbol val=\"none\"/></c:marker></c:ser>".repeat(10_000);
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/>{series}</c:lineChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        // The getter has an explicit four-visits-per-node metadata budget.
+        // Global rescans for each series exhaust it instead of hiding quadratic work.
+        assert_eq!(super::read_chart_type(xml.as_bytes()).unwrap(), Some(4));
+        let nodes = super::chart_source_nodes(xml.as_bytes()).unwrap();
+        let mut children = vec![Vec::new(); nodes.len()];
+        for (index, node) in nodes.iter().enumerate() {
+            if let Some(parent) = node.parent {
+                children[parent].push(index);
+            }
+        }
+        assert!(super::chart_optional_child_node(&nodes, &children, 0, b"chart", &mut 0).is_err());
+    }
+
+    #[test]
+    fn fx253_imported_chart_types_use_direct_qualified_metadata() {
+        let data = ChartData {
+            categories: vec!["1".into(), "2".into()],
+            series: vec![("Series".into(), vec![1.0, 2.0])],
+            ..ChartData::default()
+        };
+        for (kind, expected) in [
+            (ChartKind::Bar, 51),
+            (ChartKind::Line, 65),
+            (ChartKind::Pie, 5),
+            (ChartKind::Doughnut, -4120),
+            (ChartKind::Area, 1),
+            (ChartKind::Scatter, 74),
+            (ChartKind::Radar, 81),
+        ] {
+            let (xml, _) = authored_chart_parts(kind, &data, "rIdWorkbook").unwrap();
+            let source = String::from_utf8(xml).unwrap();
+            assert_eq!(
+                super::read_chart_type(source.as_bytes()).unwrap(),
+                Some(expected)
+            );
+            let changed = match kind {
+                ChartKind::Bar => source
+                    .replace("val=\"col\"", "val=\"bar\"")
+                    .replace("val=\"clustered\"", "val=\"stacked\""),
+                ChartKind::Line => source.replace(
+                    "</c:ser>",
+                    "<c:marker><c:symbol val=\"none\"/></c:marker></c:ser>",
+                ),
+                ChartKind::Pie => source.replace("</c:ser>", "<c:explosion val=\"0\"/></c:ser>"),
+                _ => continue,
+            };
+            let expected = match kind {
+                ChartKind::Bar => 58,
+                ChartKind::Line => 4,
+                _ => 69,
+            };
+            assert_eq!(
+                super::read_chart_type(changed.as_bytes()).unwrap(),
+                Some(expected)
+            );
+            if kind == ChartKind::Bar {
+                let column = changed.replace("val=\"bar\"", "val=\"col\"");
+                assert_eq!(super::read_chart_type(column.as_bytes()).unwrap(), Some(52));
+            }
+            let alias = changed.replace("xmlns:c=", "xmlns:q=").replace("c:", "q:");
+            assert_eq!(
+                super::read_chart_type(alias.as_bytes()).unwrap(),
+                Some(expected)
+            );
+            let foreign = changed
+                .replace("<c:marker>", "<c:marker xmlns:c=\"urn:foreign\">")
+                .replace("<c:explosion ", "<c:explosion xmlns:c=\"urn:foreign\" ");
+            if kind != ChartKind::Bar {
+                assert_eq!(
+                    super::read_chart_type(foreign.as_bytes()).unwrap(),
+                    Some(if kind == ChartKind::Line { 65 } else { 5 })
+                );
+                let nested = source.replace("</c:ser>", "<c:extLst><c:ext uri=\"control\"><c:marker><c:symbol val=\"none\"/></c:marker><c:explosion val=\"0\"/></c:ext></c:extLst></c:ser>");
+                assert_eq!(
+                    super::read_chart_type(nested.as_bytes()).unwrap(),
+                    Some(if kind == ChartKind::Line { 65 } else { 5 })
+                );
+            }
+        }
+        let shell = format!(
+            "<c:chartSpace xmlns:c=\"{C_NS}\"><c:chart><c:plotArea><c:bubbleChart/></c:plotArea></c:chart></c:chartSpace>"
+        );
+        assert_eq!(super::read_chart_type(shell.as_bytes()).unwrap(), None);
+        assert!(super::read_chart_type(b"<c:chartSpace").is_err());
+        let mixed = shell.replace("<c:bubbleChart/>", "<c:pieChart/><c:barChart/>");
+        assert_eq!(super::read_chart_type(mixed.as_bytes()).unwrap(), None);
+        let foreign = shell
+            .replace("xmlns:c=", "xmlns:foreign=")
+            .replace("c:", "foreign:")
+            .replace(C_NS, "urn:foreign");
+        assert!(super::read_chart_type(foreign.as_bytes()).is_err());
+        let invalid = shell.replace(
+            "<c:bubbleChart/>",
+            "<c:barChart><c:barDir val=\"invalid\"/></c:barChart>",
+        );
+        assert!(super::read_chart_type(invalid.as_bytes()).is_err());
+        let duplicate = invalid
+            .replace("val=\"invalid\"", "val=\"col\"")
+            .replace("</c:barChart>", "<c:barDir val=\"bar\"/></c:barChart>");
+        assert!(super::read_chart_type(duplicate.as_bytes()).is_err());
+    }
+
     #[test]
     fn fx215_existing_chart_data_projection() {
         let data = ChartData {

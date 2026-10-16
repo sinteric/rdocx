@@ -18,7 +18,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-core | 21,804 compressed bytes, 104,428 member bytes, 15 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-core` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-14 |
+| Crates.io archive: oxml-core | 21,806 compressed bytes, 104,428 member bytes, 15 members | 0.14.2 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-core` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 
 ## Use it when
 
@@ -40,4 +40,4 @@ let page_width = Length::inches(8.5);
 assert_eq!(page_width.to_twips(), 12_240);
 ```
 
-Add `oxml-core = "0.14.1"` to your dependencies. See the [API documentation](https://docs.rs/oxml-core) for XML and property types.
+Add `oxml-core = "0.14.2"` to your dependencies. See the [API documentation](https://docs.rs/oxml-core) for XML and property types.

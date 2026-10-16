@@ -280,7 +280,8 @@ impl<'a> ResolveCtx<'a> {
             master_children,
             PassRules {
                 source: FlattenedSource::Master,
-                emit_non_placeholders: self.layout.show_master_shapes.unwrap_or(true),
+                emit_non_placeholders: self.slide.show_master_shapes.unwrap_or(true)
+                    && self.layout.show_master_shapes.unwrap_or(true),
             },
             &mut flattened,
         );
@@ -5973,6 +5974,67 @@ mod tests {
     }
 
     #[test]
+    fn fx253_native_visibility_truth_table_preserves_distinct_layers() {
+        for slide_flag in [None, Some(true), Some(false)] {
+            for layout_flag in [None, Some(true), Some(false)] {
+                let flag = |value: Option<bool>| {
+                    value.map_or(String::new(), |v| {
+                        format!("showMasterSp=\"{}\"", u8::from(v))
+                    })
+                };
+                let fixture = Fixture::from_xml(
+                    &slide_xml_with(
+                        &flag(slide_flag),
+                        "",
+                        &[
+                            shape_with_text(None, None, "slide"),
+                            shape_with_text(Some("body"), Some(1), "occupied"),
+                        ]
+                        .join(""),
+                    ),
+                    &layout_xml_with(
+                        &flag(layout_flag),
+                        "",
+                        &[
+                            shape_with_text(None, None, "layout"),
+                            shape_with_text(Some("body"), Some(1), "layout template"),
+                        ]
+                        .join(""),
+                        "",
+                    ),
+                    &master_xml_with(
+                        "",
+                        &[
+                            shape_with_text(None, None, "master"),
+                            shape_with_text(Some("title"), Some(2), "master template"),
+                        ]
+                        .join(""),
+                        "",
+                    ),
+                );
+                let texts: Vec<_> = fixture
+                    .context()
+                    .flatten()
+                    .iter()
+                    .filter_map(item_text)
+                    .collect();
+                let mut expected = Vec::new();
+                if slide_flag.unwrap_or(true) && layout_flag.unwrap_or(true) {
+                    expected.push("master");
+                }
+                if slide_flag.unwrap_or(true) {
+                    expected.push("layout");
+                }
+                expected.extend(["slide", "occupied"]);
+                assert_eq!(
+                    texts, expected,
+                    "slide={slide_flag:?} layout={layout_flag:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn show_master_shapes_suppresses_the_owned_pass() {
         let master_suppressed = Fixture::from_xml(
             &slide_xml_with("", "", &shape_with_text(None, None, "slide")),
@@ -6008,7 +6070,7 @@ mod tests {
             .collect();
 
         assert_eq!(master_suppressed_texts, ["layout", "slide"]);
-        assert_eq!(layout_suppressed_texts, ["master", "slide"]);
+        assert_eq!(layout_suppressed_texts, ["slide"]);
     }
 
     #[test]

@@ -654,10 +654,10 @@ that inherit `[workspace.package].version`, including the unpublished
 `rdocx-wasm`, `rdocx-py`, and `oxml-py-support` packages, use cargo-release's
 effective `workspace` shared-version group and the `v{{version}}` tag template.
 That shared-version group, the `rdocx` Python project, and rdocx WASM
-contract literals are prepared at0.16.1, together with the exact seven-package
-stable family and its `v0.16.1` release notes. The prepared stable packages
-require shared OOXML0.14.1. The previous complete unified stable release is
-immutable `v0.16.0` at733ce6f7b2b816c5760692abf5c99d68b29ae897. The historical
+contract literals are prepared at0.16.2, together with the exact seven-package
+stable family and its `v0.16.2` release notes. The prepared stable packages
+require shared OOXML0.14.2. The previous complete unified stable release is
+immutable `v0.16.1` at80117123c1073b826392b06a6e6601311a929b44. The historical
 S73 family retains its immutable annotated `v0.14.0` tag at reviewed SHA
 `58ca5a279277f7cd8de0b8f250fb4650de14371b`. Its published archives
 require shared 0.12.1. The unpublished 0.13.2 crates.io train is superseded
@@ -675,11 +675,11 @@ immutable registry releases, including the complete 0.12.0 family, remain
 available. No binding, WASM, Python, npm, or
 incubating package gained publication authority from the stable release.
 The 15 publishable `oxml-*` and `rpptx*` package manifests and the unpublished
-`rpptx-py` binding crate use explicit version0.14.1, the named `incubating`
+`rpptx-py` binding crate use explicit version0.14.2, the named `incubating`
 group, and the `rpptx-v{{version}}` template. The unpublished `rpptx-wasm`
 crate remains at 0.12.1 with its separate npm boundary. The crates.io
 allowlist remains exactly15 packages. The previous complete unified family is
-immutable `rpptx-v0.14.0` at733ce6f7b2b816c5760692abf5c99d68b29ae897. The
+immutable `rpptx-v0.14.1` at80117123c1073b826392b06a6e6601311a929b44. The
 historical S73 family retains the immutable `rpptx-v0.12.1` release at reviewed SHA
 `58ca5a279277f7cd8de0b8f250fb4650de14371b`, and earlier registry releases
 remain available. The stable 0.10.1 historical graph proof authenticates the
@@ -700,7 +700,7 @@ and source distributions for both families run clean Python3.9/3.12 runtime and
 Python3.12 typing checks. Both WASM bindings and current npm carrier contracts
 retain their existing separate authority. Final integrated full verification,
 sprint review and SHA-bound hosted build-only rehearsal remain mandatory before
-close. The shared0.14.1 family publishes before Word0.16.1 where the verified
+close. The shared0.14.2 family publishes before Word0.16.2 where the verified
 internal pins require it, each with its own approval at reviewed main.
 External release actions remain owned by `/release`.
 
@@ -743,11 +743,15 @@ explicit approval is required immediately before each family tag is created.
 The tag points to the reviewed `main` merge SHA. `/close-sprint` alone owns
 main merges and sprint tags.
 
-The manual `wheels.yml` build-only preflight runs at the final reviewed sprint
-SHA after the sprint push and before sprint close. Its exact selected artifacts
-and metadata are validated, installed and tested in Python 3.9 and 3.12.
+The manual `wheels.yml` build-only preflight runs at a reviewed canonical
+sprint SHA before sprint close. When actual hosted acceptance needs remote
+source, the source availability checkpoint follows passing local checks and
+independent review. Preparation remains approved and in-progress until the
+named SHA-bound external gates pass. Downloaded artifacts and metadata are
+validated, installed and tested in Python3.9 and3.12. Final integrated full
+verification and sprint review remain due after preparation.
 Bare native and musllinux wheel runners execute one exact positive inventory
-of78 installed priority and compatibility cases, partitioned into37 Word and41
+of86 installed priority and compatibility cases, partitioned into42 Word and44
 PowerPoint nodes. Both paths pass the family list as structured pytest
 arguments. Missing or renamed nodes fail collection, and policy checks reject
 missing, additional or duplicate inventory entries. Metadata, native imports
@@ -767,17 +771,15 @@ remain historical records. New releases use the two unified family tags.
 
 When a later sprint wave depends on an integrated and reviewed F-ID that is not
 completed, `/run-sprint` uses a resumable dependency-prefix checkpoint before
-that consumer. It verifies and completes the prefix, commits the clean review
-file, records review at the resulting HEAD, reruns full verification, and
-returns the same state to implementation. It does not add a confirmation review
-solely because the review file was committed. A release dependency extends the
-ordinary route through a reviewed release preparation F-ID. It does not
-publish during the sprint. After `/close-sprint` has merged the reviewed
+that consumer. Passing scoped evidence and focused integration reconciliation
+complete the prefix and its delivery records before dependent work begins.
+The checkpoint does not run full workspace verification or sprint review.
+A release preparation dependency follows that ordinary completion route and
+does not publish during the sprint. After `/close-sprint` merges the reviewed
 sprint source, `/release` checks the exact main SHA, runs full verification
-and requests a separate final approval before each family tag. Full
-verification repeats after every tracked evidence commit and again over the
-final integrated sprint. Earlier checkpoint evidence never satisfies a later
-HEAD.
+and requests separate approval before each family tag. Final integrated
+verification and review remain bound to their actual HEAD, and earlier
+checkpoint evidence cannot qualify a changed final source.
 
 `sprint_workflow.py init --resume` treats `CURRENT_SPRINT.md` as the canonical
 source for each F-ID's title and size. It refreshes those fields and adds newly

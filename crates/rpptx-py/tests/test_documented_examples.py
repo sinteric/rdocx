@@ -10,6 +10,8 @@ import zlib
 
 import pytest
 
+from rpptx.enum.dml import MSO_COLOR_TYPE, MSO_THEME_COLOR
+
 
 def _png_chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
@@ -5140,12 +5142,12 @@ def test_powerpoint_font_colour_format_preserves_theme_and_transform_sources():
     assert colour.rgb is None
     colour.theme_color = "accent1"
     colour.brightness = 0.25
-    assert colour.type == "theme"
-    assert colour.theme_color == "accent1"
+    assert colour.type is MSO_COLOR_TYPE.SCHEME
+    assert colour.theme_color is MSO_THEME_COLOR.ACCENT_1
     assert colour.rgb is None
     reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
     actual = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
-    assert actual.theme_color == "accent1"
+    assert actual.theme_color is MSO_THEME_COLOR.ACCENT_1
     assert actual.brightness == 0.25
 
 
@@ -5197,7 +5199,7 @@ def test_powerpoint_brightness_strict_finite_policy_errors_are_atomic(surface, v
     with pytest.raises(error_type, match="brightness"):
         colour.brightness = value
     assert prs.to_bytes() == before
-    assert colour.theme_color == "accent1"
+    assert colour.theme_color is MSO_THEME_COLOR.ACCENT_1
 
 
 @pytest.mark.parametrize("surface", ["font-run-rgb", "font-default-rgb", "font-cell-rgb", "cell-fill", "cell-top", "shape-shadow"])
@@ -5261,7 +5263,7 @@ def test_powerpoint_colour_replacement_preserves_family_specific_transforms_and_
     else:
         colour = shape.shadow.color
     before = prs.to_bytes()
-    assert colour.type == ("rgb" if source_kind == "rgb" else "theme")
+    assert colour.type is (MSO_COLOR_TYPE.RGB if source_kind == "rgb" else MSO_COLOR_TYPE.SCHEME)
     _ = colour.rgb, colour.theme_color, colour.brightness
     assert prs.to_bytes() == before
     for raw in _F_X197_RAW_COLOUR_CHILDREN:
@@ -5306,7 +5308,9 @@ def test_powerpoint_unset_font_colour_reads_and_clears_do_not_create_properties(
     prs = _textbox_presentation(rpptx)
     setter, colour = _f_x197_ppt_colour_surface(prs, surface)
     before = prs.to_bytes()
-    assert (colour.rgb, colour.type, colour.theme_color, colour.brightness) == (None, None, None, None)
+    assert (colour.rgb, colour.type, colour.brightness) == (None, None, None)
+    with pytest.raises(AttributeError, match="no direct color"):
+        _ = colour.theme_color
     assert prs.to_bytes() == before
     colour.rgb = None
     assert prs.to_bytes() == before
@@ -5379,7 +5383,7 @@ def test_powerpoint_theme_and_brightness_reach_deterministic_pdf_and_raster_pixe
         reopened = rpptx.Presentation.from_bytes(_package_bytes(parts))
         if theme is not None:
             colour = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
-            assert colour.rgb is None and colour.theme_color == theme
+            assert colour.rgb is None and colour.theme_color is {"accent1": MSO_THEME_COLOR.ACCENT_1, "accent2": MSO_THEME_COLOR.ACCENT_2}[theme]
             assert colour.brightness == pytest.approx(brightness)
         png = Image.open(io.BytesIO(reopened.render_slide_to_png(0, dpi=72))).convert("RGB")
         pdf = reopened.to_pdf()
@@ -5421,10 +5425,11 @@ def test_powerpoint_supported_theme_enum_values_round_trip_without_invented_rgb(
     prs = _textbox_presentation(rpptx)
     colour = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
     colour.theme_color = MSO_THEME_COLOR(code)
-    assert colour.rgb is None and colour.type == "theme"
-    assert colour.theme_color == token
+    assert colour.rgb is None and colour.type is MSO_COLOR_TYPE.SCHEME
+    assert colour.theme_color is MSO_THEME_COLOR(code)
+    assert ('val="' + token + '"').encode() in _package_parts(prs.to_bytes())["ppt/slides/slide1.xml"]
     reopened = rpptx.Presentation.from_bytes(prs.to_bytes())
-    assert reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color.theme_color == token
+    assert reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color.theme_color is MSO_THEME_COLOR(code)
 
 
 def test_powerpoint_fill_foreground_prerequisite_and_shadow_default_opacity_remain_intact():
@@ -5472,8 +5477,8 @@ def test_powerpoint_imported_colour_kind_reads_do_not_invent_rgb_or_materialize_
     prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
     colour = prs.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
     before = prs.to_bytes()
-    assert colour.type == type_token
-    assert colour.theme_color == ("accent1" if kind == "schemeClr" else None)
+    assert colour.type is {"rgb": MSO_COLOR_TYPE.RGB, "theme": MSO_COLOR_TYPE.SCHEME, "preset": MSO_COLOR_TYPE.PRESET, "system": MSO_COLOR_TYPE.SYSTEM}[type_token]
+    assert colour.theme_color is (MSO_THEME_COLOR.ACCENT_1 if kind == "schemeClr" else MSO_THEME_COLOR.NOT_THEME_COLOR)
     if kind == "srgbClr":
         assert str(colour.rgb) == "123456"
     else:
@@ -10739,7 +10744,7 @@ def test_fx239_theme_alias_and_color_import_scope_are_explicit():
     *_, font = _fx239_text_owner()
     assert font.color.type is None
     font.color.rgb = rpptx.RGBColor(0x12, 0x34, 0x56)
-    assert font.color.type == "rgb" and not isinstance(font.color.type, actual.MSO_COLOR_TYPE)
+    assert font.color.type is actual.MSO_COLOR_TYPE.RGB
 
 
 def _fx239_notes_variant(kind):
@@ -11049,3 +11054,351 @@ def test_fx238_slide_xml_hack_refuses_with_remove_pointer():
     with pytest.raises(NotImplementedError, match="slides.remove"):
         presentation.slides._sldIdLst
     assert presentation.to_bytes() == before
+
+
+@pytest.mark.parametrize("authored,expected,old,new", [
+    (51, 58, b'<c:barDir val="col"/>', b'<c:barDir val="bar"/>'),
+    (51, 52, b'<c:grouping val="clustered"/>', b'<c:grouping val="stacked"/>'),
+    (65, 4, b'</c:ser>', b'<c:marker><c:symbol val="none"/></c:marker></c:ser>'),
+    (5, 69, b'</c:ser>', b'<c:explosion val="0"/></c:ser>'),
+])
+def test_fx253_imported_chart_types_are_exact_after_reopen(authored, expected, old, new):
+    from rpptx import Presentation, CategoryChartData, Inches, StaleElementError
+    data = CategoryChartData()
+    data.categories = ["A", "B"]
+    data.add_series("Series", [3.0, 7.0])
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    frame = slide.shapes.add_chart(authored, Inches(1), Inches(1), Inches(3), Inches(2), data)
+    parts = _package_parts(deck.to_bytes())
+    part = next(name for name in parts if re.fullmatch(r"ppt/charts/chart[0-9]+.xml", name))
+    assert old in parts[part]
+    parts[part] = parts[part].replace(old, new)
+    if expected == 58:
+        parts[part] = parts[part].replace(b'val="clustered"', b'val="stacked"')
+    source = _package_bytes(parts)
+    imported = Presentation.from_bytes(source)
+    chart = imported.slides[0].shapes[0].chart
+    before = imported.to_bytes()
+    assert chart.chart_type == expected
+    assert chart.categories == ("A", "B") and chart.series[0].values == [3.0, 7.0]
+    assert chart.chart_type == expected and imported.to_bytes() == before
+    assert _package_parts(imported.to_bytes())[part] == parts[part]
+    reopened = Presentation.from_bytes(imported.to_bytes())
+    assert reopened.slides[0].shapes[0].chart.chart_type == expected
+    grouped = imported.slides[0].shapes.group([imported.slides[0].shapes[0]])
+    assert chart.chart_type == expected and grouped.shapes[0].chart.chart_type == expected
+    imported.slides[0].shapes.remove(grouped)
+    with pytest.raises(StaleElementError):
+        _ = chart.chart_type
+
+
+def test_fx253_unknown_chart_type_is_none_without_requiring_cached_data_or_workbook():
+    from rpptx import Presentation, CategoryChartData, Inches
+    data = CategoryChartData()
+    data.categories = ["A"]
+    data.add_series("Series", [3.0])
+    deck = Presentation()
+    deck.slides.add_slide(deck.slide_layouts[6]).shapes.add_chart(51, Inches(1), Inches(1), Inches(3), Inches(2), data)
+    parts = _package_parts(deck.to_bytes())
+    part = next(name for name in parts if re.fullmatch(r"ppt/charts/chart[0-9]+.xml", name))
+    shell = b'<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea>BODY</c:plotArea></c:chart></c:chartSpace>'
+    for plot, expected in [(b'<c:bubbleChart/>', None), (b'<c:barChart><c:barDir val="bar"/><c:grouping val="stacked"/></c:barChart>', 58)]:
+        parts[part] = shell.replace(b'BODY', plot)
+        imported = Presentation.from_bytes(_package_bytes(parts))
+        before = imported.to_bytes()
+        assert imported.slides[0].shapes[0].chart.chart_type == expected
+        assert imported.to_bytes() == before
+
+
+@pytest.mark.parametrize("plot,scalar,valid", [("scatterChart", "scatterStyle", "smoothMarker"), ("radarChart", "radarStyle", "filled")])
+def test_fx253_invalid_selected_styles_raise_while_valid_unsupported_styles_are_none(plot, scalar, valid):
+    from rpptx import Presentation, CategoryChartData, Inches, RpptxError
+    data = CategoryChartData()
+    data.categories = ["A"]
+    data.add_series("Series", [3.0])
+    deck = Presentation()
+    deck.slides.add_slide(deck.slide_layouts[6]).shapes.add_chart(51, Inches(1), Inches(1), Inches(3), Inches(2), data)
+    parts = _package_parts(deck.to_bytes())
+    part = next(name for name in parts if re.fullmatch(r"ppt/charts/chart[0-9]+.xml", name))
+    for value in [valid, "garbage"]:
+        parts[part] = f'<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:{plot}><c:{scalar} val="{value}"/></c:{plot}></c:plotArea></c:chart></c:chartSpace>'.encode()
+        imported = Presentation.from_bytes(_package_bytes(parts))
+        before = imported.to_bytes()
+        if value == valid:
+            assert imported.slides[0].shapes[0].chart.chart_type is None
+        else:
+            with pytest.raises(RpptxError, match="invalid.*style"):
+                _ = imported.slides[0].shapes[0].chart.chart_type
+        assert imported.to_bytes() == before
+
+
+def test_fx258_slide_id_uses_registered_source_identity():
+    import rpptx
+    from xml.etree import ElementTree as ET
+    presentation, *_ = _fx239_text_owner()
+    presentation.slides.add_slide(presentation.slide_layouts[6])
+    parts = _package_parts(presentation.to_bytes())
+    root = ET.fromstring(parts["ppt/presentation.xml"])
+    ids = root.findall("{http://schemas.openxmlformats.org/presentationml/2006/main}sldIdLst/{http://schemas.openxmlformats.org/presentationml/2006/main}sldId")
+    for node, value in zip(ids, (700, 999)):
+        node.set("id", str(value))
+    parts["ppt/presentation.xml"] = ET.tostring(root)
+    presentation = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    first, second = presentation.slides
+    before = presentation.to_bytes()
+    assert (first.slide_id, second.slide_id) == (700, 999)
+    assert presentation.to_bytes() == before
+    presentation.slides.move(0, 1)
+    assert (first.slide_id, second.slide_id) == (700, 999)
+    assert [slide.slide_id for slide in presentation.slides] == [999, 700]
+    reopened = rpptx.Presentation.from_bytes(presentation.to_bytes())
+    assert [slide.slide_id for slide in reopened.slides] == [999, 700]
+    presentation.slides.remove(first)
+    with pytest.raises(rpptx.StaleElementError, match="stale"):
+        _ = first.slide_id
+    assert second.slide_id == 999
+
+
+def test_fx258_powerpoint_color_getters_match_pinned_enums():
+    import rpptx
+    *_, font = _fx239_text_owner()
+    assert font.color.type is None
+    with pytest.raises(AttributeError, match="theme_color"):
+        _ = font.color.theme_color
+    font.color.rgb = "123456"
+    assert font.color.type is MSO_COLOR_TYPE.RGB
+    assert font.color.theme_color is MSO_THEME_COLOR.NOT_THEME_COLOR
+    font.color.theme_color = "accent2"
+    assert font.color.type is MSO_COLOR_TYPE.SCHEME
+    assert font.color.theme_color is MSO_THEME_COLOR.ACCENT_2
+    font.color.theme_color = None
+    assert font.color.type is None
+
+
+@pytest.mark.parametrize("token", ["phClr", "unknown-slot"])
+def test_fx258_unknown_theme_projection_preserves_source(token):
+    import rpptx
+    presentation, _, _, _, font = _fx239_text_owner()
+    font.color.theme_color = "accent1"
+    parts = _package_parts(presentation.to_bytes())
+    parts["ppt/slides/slide1.xml"] = parts["ppt/slides/slide1.xml"].replace(b'val="accent1"', ('val="' + token + '"').encode())
+    presentation = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    shape = presentation.slides[0].shapes[0]
+    font = shape.text_frame.paragraphs[0].runs[0].font
+    before = presentation.to_bytes()
+    assert font.color.type is MSO_COLOR_TYPE.SCHEME
+    with pytest.raises(NotImplementedError, match="element.xml"):
+        _ = font.color.theme_color
+    assert presentation.to_bytes() == before and token in shape.element.xml
+    font.color.theme_color = "accent2"
+    assert font.color.theme_color is MSO_THEME_COLOR.ACCENT_2
+
+
+@pytest.mark.parametrize("surface", _F_X197_PPT_COLOUR_SURFACES)
+def test_fx258_color_projection_preserves_all_existing_owners(surface):
+    import rpptx
+    presentation = _textbox_presentation(rpptx)
+    setter, color = _f_x197_ppt_colour_surface(presentation, surface)
+    setter("123456")
+    before = presentation.to_bytes()
+    assert color.type is MSO_COLOR_TYPE.RGB
+    assert color.theme_color is MSO_THEME_COLOR.NOT_THEME_COLOR
+    assert presentation.to_bytes() == before
+    color.theme_color = "accent1"
+    color.brightness = .25
+    before = presentation.to_bytes()
+    assert color.type is MSO_COLOR_TYPE.SCHEME
+    assert color.theme_color is MSO_THEME_COLOR.ACCENT_1
+    assert color.brightness == .25
+    assert presentation.to_bytes() == before
+    reopened = rpptx.Presentation.from_bytes(before)
+    assert _package_parts(reopened.to_bytes()) == _package_parts(before)
+
+
+@pytest.mark.parametrize("choice", ["gradient", "pattern"])
+def test_fx258_gradient_and_pattern_color_projection(choice):
+    presentation, _, shape, *_ = _fx239_text_owner()
+    fill = shape.fill
+    if choice == "gradient":
+        fill.gradient()
+        colors = [stop.color for stop in fill.gradient_stops]
+    else:
+        fill.patterned()
+        colors = [fill.fore_color, fill.back_color]
+    for color in colors:
+        color.rgb = "123456"
+        assert color.type is MSO_COLOR_TYPE.RGB
+        assert color.theme_color is MSO_THEME_COLOR.NOT_THEME_COLOR
+        color.theme_color = "accent2"
+        before = presentation.to_bytes()
+        assert color.theme_color is MSO_THEME_COLOR.ACCENT_2
+        assert presentation.to_bytes() == before
+
+
+def test_fx258_language_id_uses_finite_pinned_mapping():
+    import pptx.enum.lang as oracle
+    from rpptx.enum.lang import MSO_LANGUAGE_ID
+    assert importlib.metadata.version("python-pptx") == "1.0.2"
+    assert {name: int(member) for name, member in MSO_LANGUAGE_ID.__members__.items()} == {name: int(member) for name, member in oracle.MSO_LANGUAGE_ID.__members__.items()}
+    assert len(MSO_LANGUAGE_ID.__members__) == 216
+    presentation, _, shape, _, font = _fx239_text_owner()
+    before = presentation.to_bytes()
+    assert font.language_id is MSO_LANGUAGE_ID.NONE and font.language is None
+    assert presentation.to_bytes() == before
+    for name, expected in oracle.MSO_LANGUAGE_ID.__members__.items():
+        if name == "MIXED":
+            continue
+        font.language_id = MSO_LANGUAGE_ID[name]
+        if name == "NONE":
+            assert font.language is None and font.language_id is MSO_LANGUAGE_ID.NONE
+            continue
+        assert font.language == expected.xml_value
+        assert int(font.language_id) == int(oracle.MSO_LANGUAGE_ID.from_xml(expected.xml_value))
+        assert shape.text_frame.text == "kept"
+    font.language_id = MSO_LANGUAGE_ID.NONE
+    assert font.language is None
+    font.language_id = MSO_LANGUAGE_ID.FRENCH
+    font.language_id = None
+    assert font.language is None
+
+
+@pytest.mark.parametrize("value,error", [(True, TypeError), ("en-US", TypeError), (1.5, TypeError), (object(), TypeError), (-2, ValueError), (999999, ValueError), (2**80, ValueError)])
+def test_fx258_language_id_refuses_without_publishing(value, error):
+    from rpptx.enum.lang import MSO_LANGUAGE_ID
+    presentation, slide, shape, _, font = _fx239_text_owner()
+    font.language = "fr-FR"
+    before = presentation.to_bytes()
+    with pytest.raises(error, match="Font.language_id"):
+        font.language_id = value
+    assert presentation.to_bytes() == before
+    assert font.language == "fr-FR" and font.language_id is MSO_LANGUAGE_ID.FRENCH
+    assert shape.text_frame.text == "kept" and slide.slide_id >= 256
+    font.language_id = MSO_LANGUAGE_ID.ENGLISH_US
+    assert font.language == "en-US"
+
+
+def test_fx258_unknown_language_id_keeps_existing_string_route():
+    from rpptx.enum.lang import MSO_LANGUAGE_ID
+    presentation, _, shape, _, font = _fx239_text_owner()
+    font.language = "zz-Unknown"
+    before = presentation.to_bytes()
+    with pytest.raises(NotImplementedError, match="Font.language"):
+        _ = font.language_id
+    assert font.language == "zz-Unknown" and presentation.to_bytes() == before
+    assert shape.text_frame.text == "kept"
+    font.language_id = MSO_LANGUAGE_ID.FRENCH
+    assert font.language == "fr-FR"
+
+
+@pytest.mark.parametrize("name", ["_element", "_txBody"])
+def test_fx258_private_powerpoint_names_point_to_checked_element(name):
+    import rpptx
+    presentation, slide, shape, *_ = _fx239_text_owner()
+    frame = shape.text_frame
+    target = shape if name == "_element" else frame
+    before = presentation.to_bytes()
+    with pytest.raises(NotImplementedError, match="element.*xml.*replace_xml"):
+        getattr(target, name)
+    assert presentation.to_bytes() == before and frame.text == "kept"
+    element = target.element
+    element.replace_xml(element.xml.replace("kept", "edited"))
+    assert presentation.slides[0].shapes[0].text_frame.text == "edited"
+    presentation.slides.remove(presentation.slides[0])
+    with pytest.raises(rpptx.StaleElementError, match="stale"):
+        getattr(target, name)
+
+
+@pytest.mark.parametrize("tag", ["en-US", "fr-FR"])
+def test_fx258_language_saved_packages_agree_with_pinned_python_pptx(tag):
+    import pptx
+    import rpptx
+    from pptx.enum.lang import MSO_LANGUAGE_ID as OracleLanguage
+    from rpptx.enum.lang import MSO_LANGUAGE_ID
+    assert importlib.metadata.version("python-pptx") == "1.0.2"
+    presentation, _, _, _, font = _fx239_text_owner()
+    expected = OracleLanguage.from_xml(tag)
+    font.language_id = MSO_LANGUAGE_ID(int(expected))
+    saved = presentation.to_bytes()
+    oracle = pptx.Presentation(io.BytesIO(saved))
+    oracle_font = oracle.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+    assert oracle_font.language_id is expected
+    oracle_font.language_id = OracleLanguage.FRENCH if tag == "en-US" else OracleLanguage.ENGLISH_US
+    data = io.BytesIO(); oracle.save(data)
+    reopened = rpptx.Presentation.from_bytes(data.getvalue())
+    actual = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
+    assert int(actual.language_id) == int(oracle_font.language_id)
+    assert actual.language == oracle_font.language_id.xml_value
+
+
+@pytest.mark.parametrize("owner", ["master-style", "master-shape", "layout-shape", "cell-default"])
+def test_fx258_language_and_color_keep_master_layout_and_cell_owners(owner):
+    import rpptx
+    from rpptx.enum.lang import MSO_LANGUAGE_ID
+    presentation, slide, *_ = _fx239_text_owner()
+    if owner == "master-style":
+        font = presentation.slide_master.text_styles.body.level(1).font
+    else:
+        if owner == "master-shape":
+            shapes = presentation.slide_master.shapes
+        elif owner == "layout-shape":
+            shapes = presentation.slide_layouts[6].shapes
+        else:
+            shapes = slide.shapes
+        if owner == "cell-default":
+            frame = shapes.add_table(1, 1, 0, 0, 100, 100).table.cell(0, 0).text_frame
+        else:
+            frame = shapes.add_textbox(0, 0, 100, 100).text_frame
+        font = frame.paragraphs[0].font
+    font.language_id = MSO_LANGUAGE_ID.FRENCH
+    font.color.theme_color = "accent2"
+    before = presentation.to_bytes()
+    assert font.language_id is MSO_LANGUAGE_ID.FRENCH
+    assert font.language == "fr-FR"
+    assert font.color.type is MSO_COLOR_TYPE.SCHEME
+    assert font.color.theme_color is MSO_THEME_COLOR.ACCENT_2
+    assert presentation.to_bytes() == before
+    reopened = rpptx.Presentation.from_bytes(before)
+    assert _package_parts(reopened.to_bytes()) == _package_parts(before)
+
+
+def test_fx258_removed_text_body_keeps_causal_owner_error():
+    import rpptx
+    presentation, _, shape, *_ = _fx239_text_owner()
+    frame = shape.text_frame
+    element = shape.element
+    xml, count = re.subn(r"<p:txBody\b[^>]*>.*?</p:txBody>", "", element.xml, flags=re.S)
+    assert count == 1
+    element.replace_xml(xml)
+    before = presentation.to_bytes()
+    with pytest.raises(rpptx.StaleElementError, match="stale"):
+        _ = frame._txBody
+    assert presentation.to_bytes() == before
+
+
+def test_fx258_color_saved_packages_agree_with_pinned_python_pptx():
+    import pptx
+    import rpptx
+    from pptx.enum.dml import MSO_THEME_COLOR as OracleTheme
+    assert importlib.metadata.version("python-pptx") == "1.0.2"
+    presentation, _, _, _, font = _fx239_text_owner()
+    for code in range(1, 17):
+        font.color.theme_color = MSO_THEME_COLOR(code)
+        font.color.brightness = .25
+        oracle = pptx.Presentation(io.BytesIO(presentation.to_bytes()))
+        color = oracle.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+        assert int(color.type) == int(font.color.type)
+        assert int(color.theme_color) == code
+        assert color.brightness == font.color.brightness
+        color.theme_color = OracleTheme(code)
+        data = io.BytesIO(); oracle.save(data)
+        reopened = rpptx.Presentation.from_bytes(data.getvalue())
+        actual = reopened.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+        assert actual.theme_color is MSO_THEME_COLOR(code)
+        assert actual.type is MSO_COLOR_TYPE.SCHEME
+        assert actual.brightness == .25
+    font.color.rgb = "123456"
+    oracle = pptx.Presentation(io.BytesIO(presentation.to_bytes()))
+    color = oracle.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
+    assert int(color.type) == int(font.color.type)
+    assert int(color.theme_color) == int(font.color.theme_color) == 0

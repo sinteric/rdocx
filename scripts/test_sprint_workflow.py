@@ -124,20 +124,94 @@ class SprintWorkflowTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     evaluate("workflow_dispatch", archive_format, duplicate_name)
 
+    def test_s95_patch_release_families_match_reviewed_targets(self) -> None:
+        targets = {"rdocx": ("0.16.2", "v0.16.2", 7),
+                   "rpptx": ("0.14.2", "rpptx-v0.14.2", 15)}
+        workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
+        self.assertEqual(workspace["workspace"]["package"]["version"], "0.16.2")
+        locked = {(p["name"], p["version"]) for p in
+                  tomllib.loads((workflow.REPO / "Cargo.lock").read_text())["package"]}
+        changelog = (workflow.REPO / "CHANGELOG.md").read_text()
+        for distribution, (version, tag, count) in targets.items():
+            with self.subTest(distribution=distribution):
+                family = workflow.validate_unified_release_family(tag)
+                self.assertEqual(family["version"], version)
+                self.assertEqual(len(workflow.RELEASE_CRATES[distribution]), count)
+                for name in (*workflow.RELEASE_CRATES[distribution], f"{distribution}-py"):
+                    self.assertIn((name, version), locked)
+                notes = workflow.render_release_notes(changelog, tag)
+                for section in ("Highlights", "Added", "Fixed", "Compatibility", "Contributors"):
+                    self.assertIn(f"### {section}", notes)
+                self.assertIn("https://github.com/hadim", notes)
+                self.assertIn("https://github.com/tensorbee/rdocx/issues/385", notes)
+                self.assertIn("partially addressed", notes)
+                self.assertEqual(notes.count("https://github.com/tensorbee/rdocx/issues/386"), 1)
+        word = workflow.render_release_notes(changelog, "v0.16.2")
+        for detail in ("RenderOptions", "LayoutInput", "ParagraphBlock", "NoteLayout",
+                       "OpcError::Zip", "Plain", "stored formatting"):
+            self.assertIn(detail, word)
+        self.assertIn("https://github.com/Andrewkoro105", word)
+        wasm = tomllib.loads((workflow.REPO / "crates/rpptx-wasm/Cargo.toml").read_text())
+        self.assertEqual(wasm["package"]["version"], "0.12.1")
+        self.assertFalse(wasm["package"]["publish"])
+
+    def test_s95_patch_notes_keep_family_contributions_and_scope(self) -> None:
+        changelog = (workflow.REPO / "CHANGELOG.md").read_text()
+        expected = {
+            "v0.16.2": ({364, 365, 366, 367, 368, 369, 370, 371, 372, 373,
+                         378, 379, 380, 382, 383, 384, 385, 386}, {374, 375, 376}),
+            "rpptx-v0.14.2": ({379, 380, 383, 385, 386}, {359, 376}),
+        }
+        for tag, (issues, pulls) in expected.items():
+            with self.subTest(tag=tag):
+                notes = workflow.render_release_notes(changelog, tag)
+                self.assertEqual({int(n) for n in re.findall(r"rdocx/issues/(\d+)", notes)}, issues)
+                self.assertEqual({int(n) for n in re.findall(r"rdocx/pull/(\d+)", notes)}, pulls)
+                self.assertIn("not merged unchanged", notes)
+                self.assertIn("S95.11", notes)
+                self.assertIn("Issue 386", notes)
+                self.assertIn("partially addressed", notes)
+        word = workflow.render_release_notes(changelog, "v0.16.2")
+        for clause in ("0.16.x version line", "stored formatting is unchanged",
+                       "source breaks", "eighteen hash entries", "four pixel buffers"):
+            self.assertIn(clause, word)
+        ppt = workflow.render_release_notes(changelog, "rpptx-v0.14.2")
+        self.assertIn("new presentation HTML whitespace increment", ppt)
+        self.assertIn("MSO_COLOR_TYPE", ppt)
+        self.assertIn("MSO_THEME_COLOR", ppt)
+        self.assertIn("NOT_THEME_COLOR", ppt)
+        self.assertIn("AttributeError", ppt)
+        self.assertIn("216", ppt)
+        self.assertIn("string setters", ppt)
+        self.assertNotIn("requests in Issue 386 remain pending", ppt)
+        for clause in ("MSO_COLOR_TYPE", "theme_color", "str | None", "CustomProperties",
+                       "line_spacing", "Length", "snapshot", "index"):
+            self.assertIn(clause, word)
+        for notes in (word, ppt):
+            self.assertIn("Python source compatibility", notes)
+            self.assertIn("19-attempt", notes)
+            self.assertIn("16-group", notes)
+            self.assertIn("final paired", notes)
+            self.assertNotIn("Issue 386 remain pending", notes)
+        self.assertIn("carrier stays 0.12.1", ppt)
+
     def test_s91_release_families_match_reviewed_versions(self) -> None:
         expected = {"rdocx": ("0.16.1", "v0.16.1", 7),
                     "rpptx": ("0.14.1", "rpptx-v0.14.1", 15)}
         workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
-        self.assertEqual(workspace["workspace"]["package"]["version"], "0.16.1")
         locked = {(p["name"], p["version"]) for p in
                   tomllib.loads((workflow.REPO / "Cargo.lock").read_text())["package"]}
         changelog = (workflow.REPO / "CHANGELOG.md").read_text()
         for distribution, (version, tag, count) in expected.items():
             with self.subTest(distribution=distribution):
                 self.assertEqual(len(workflow.RELEASE_CRATES[distribution]), count)
-                self.assertEqual(workflow.validate_unified_release_family(tag)["version"], version)
+                current_version = (workspace["workspace"]["package"]["version"]
+                                   if distribution == "rdocx" else
+                                   tomllib.loads((workflow.REPO / "crates/rpptx/Cargo.toml").read_text())["package"]["version"])
+                current_tag = ("v" if distribution == "rdocx" else "rpptx-v") + current_version
+                self.assertEqual(workflow.validate_unified_release_family(current_tag)["version"], current_version)
                 for name in (*workflow.RELEASE_CRATES[distribution], f"{distribution}-py"):
-                    self.assertIn((name, version), locked)
+                    self.assertIn((name, current_version), locked)
                 notes = workflow.render_release_notes(changelog, tag)
                 for section in ("Highlights", "Added", "Fixed", "Compatibility", "Contributors"):
                     self.assertIn(f"### {section}", notes)
@@ -2848,7 +2922,7 @@ class SprintWorkflowTests(unittest.TestCase):
             "wasm-pack build --target bundler --scope tensorbee --release "
             '--out-dir "$package_root/rpptx-wasm" crates/rpptx-wasm --locked',
             'verify_package "$package_root/rdocx-wasm" "@tensorbee/rdocx-wasm" '
-            '"0.16.1" "rdocx_wasm"',
+            '"0.16.2" "rdocx_wasm"',
             'verify_package "$package_root/rpptx-wasm" "@tensorbee/rpptx-wasm" '
             '"0.12.1" "rpptx_wasm"',
             "npm install --prefix \"$consumer_root\" --cache \"$npm_cache\" "
@@ -4357,7 +4431,7 @@ class SprintWorkflowTests(unittest.TestCase):
         return notes
 
     def test_stable_release_family_is_prepared_at_0_15_0(self) -> None:
-        expected_version = "0.16.1"
+        expected_version = "0.16.2"
         stable_members = (
             "oxml-py-support",
             "rdocx-opc",
@@ -4452,7 +4526,7 @@ class SprintWorkflowTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(rpptx_pyproject["project"]["version"], "0.14.1")
+        self.assertEqual(rpptx_pyproject["project"]["version"], "0.14.2")
 
         migration = (
             workflow.REPO / "docs/hld/11-migration-plan.md"
@@ -4487,13 +4561,13 @@ class SprintWorkflowTests(unittest.TestCase):
             )
 
         readme_requirements = {
-            "README.md": ('rdocx = "0.16.1"', 'version = "0.16.1"'),
-            "crates/rdocx-cli/README.md": ("--version '^0.16.1'",),
-            "crates/rdocx-html/README.md": ('rdocx-html = "0.16.1"',),
-            "crates/rdocx-layout/README.md": ('rdocx-layout = "0.16.1"',),
-            "crates/rdocx-opc/README.md": ('rdocx-opc = "0.16.1"',),
-            "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.16.1"',),
-            "crates/rdocx-pdf/README.md": ('rdocx-pdf = "0.16.1"',),
+            "README.md": ('rdocx = "0.16.2"', 'version = "0.16.2"'),
+            "crates/rdocx-cli/README.md": ("--version '^0.16.2'",),
+            "crates/rdocx-html/README.md": ('rdocx-html = "0.16.2"',),
+            "crates/rdocx-layout/README.md": ('rdocx-layout = "0.16.2"',),
+            "crates/rdocx-opc/README.md": ('rdocx-opc = "0.16.2"',),
+            "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.16.2"',),
+            "crates/rdocx-pdf/README.md": ('rdocx-pdf = "0.16.2"',),
         }
         for path, requirements in readme_requirements.items():
             text = (workflow.REPO / path).read_text(encoding="utf-8")
@@ -4513,7 +4587,7 @@ class SprintWorkflowTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            expected_incubating_version = "0.12.1" if name == "rpptx-wasm" else "0.14.1"
+            expected_incubating_version = "0.12.1" if name == "rpptx-wasm" else "0.14.2"
             self.assertEqual(manifest["package"]["version"], expected_incubating_version, name)
             self.assertIs(
                 manifest["package"].get("publish", True),
@@ -4625,8 +4699,8 @@ class SprintWorkflowTests(unittest.TestCase):
     def test_s73_release_contract_requires_four_version_aligned_families(
         self,
     ) -> None:
-        stable_version = "0.16.1"
-        incubating_version = "0.14.1"
+        stable_version = "0.16.2"
+        incubating_version = "0.14.2"
         stable_publishable = {
             "rdocx-opc",
             "rdocx-oxml",
@@ -5346,13 +5420,13 @@ class SprintWorkflowTests(unittest.TestCase):
         readme = (workflow.REPO / "README.md").read_text(encoding="utf-8")
         self.assertTrue(readme_doctests.validate_root_versions(readme, metadata))
         for requirement in (
-            'rdocx = "0.16.1"',
-            'rdocx = { version = "0.16.1", default-features = false }',
-            "cargo install rdocx-cli --version '^0.16.1'",
+            'rdocx = "0.16.2"',
+            'rdocx = { version = "0.16.2", default-features = false }',
+            "cargo install rdocx-cli --version '^0.16.2'",
         ):
             with self.subTest(requirement=requirement):
                 mutation = readme.replace(
-                    requirement, requirement.replace("0.16.1", "9.9.9")
+                    requirement, requirement.replace("0.16.2", "9.9.9")
                 )
                 self.assertFalse(
                     readme_doctests.validate_root_versions(mutation, metadata)
@@ -5526,7 +5600,7 @@ class SprintWorkflowTests(unittest.TestCase):
         mutations = (
             text.replace("| 2026-09-19 |", "|  |", 1),
             text.replace("| 2026-09-19 |", "| 19 September 2026 |", 1),
-            text.replace("| 0.16.1 |", "| 9.9.9 |", 1),
+            text.replace("| 0.16.2 |", "| 9.9.9 |", 1),
             text.replace("| rdocx 0.14.0 |", "| rdocx 9.9.9 |", 1),
         )
         self.assertFalse(readme_doctests.valid_measurement_date("2026-99-99"))
@@ -5733,9 +5807,9 @@ class SprintWorkflowTests(unittest.TestCase):
             "rpptx-cli",
         )
         preparation_packages = (*incubating_packages, "rpptx-wasm")
-        expected_version = "0.14.1"
+        expected_version = "0.14.2"
         root = tomllib.loads((workflow.REPO / "Cargo.toml").read_text(encoding="utf-8"))
-        self.assertEqual(root["workspace"]["package"]["version"], "0.16.1")
+        self.assertEqual(root["workspace"]["package"]["version"], "0.16.2")
         dependencies = root["workspace"]["dependencies"]
         lock = tomllib.loads((workflow.REPO / "Cargo.lock").read_text(encoding="utf-8"))
         lock_versions = {
@@ -5768,21 +5842,21 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertEqual(lock_versions["rpptx-wasm"], "0.12.1")
 
         readme_requirements = {
-            "crates/oxml-core/README.md": ('oxml-core = "0.14.1"',),
-            "crates/oxml-drawing/README.md": ('oxml-drawing = "0.14.1"',),
-            "crates/oxml-layout/README.md": ('version = "0.14.1"',),
-            "crates/oxml-media/README.md": ('oxml-media = "0.14.1"',),
-            "crates/oxml-opc/README.md": ('oxml-opc = "0.14.1"',),
+            "crates/oxml-core/README.md": ('oxml-core = "0.14.2"',),
+            "crates/oxml-drawing/README.md": ('oxml-drawing = "0.14.2"',),
+            "crates/oxml-layout/README.md": ('version = "0.14.2"',),
+            "crates/oxml-media/README.md": ('oxml-media = "0.14.2"',),
+            "crates/oxml-opc/README.md": ('oxml-opc = "0.14.2"',),
             "crates/oxml-pdf/README.md": (
-                'oxml-pdf = "0.14.1"',
-                'oxml-layout = "0.14.1"',
+                'oxml-pdf = "0.14.2"',
+                'oxml-layout = "0.14.2"',
             ),
-            "crates/oxml-chart/README.md": ('oxml-chart = "0.14.1"',),
-            "crates/rpptx-chart/README.md": ('rpptx-chart = "0.14.1"',),
-            "crates/rpptx-cli/README.md": ("--version '^0.14.1'",),
-            "crates/rpptx-layout/README.md": ('rpptx-layout = "0.14.1"',),
-            "crates/rpptx-oxml/README.md": ('rpptx-oxml = "0.14.1"',),
-            "crates/rpptx-render/README.md": ('rpptx-render = "0.14.1"',),
+            "crates/oxml-chart/README.md": ('oxml-chart = "0.14.2"',),
+            "crates/rpptx-chart/README.md": ('rpptx-chart = "0.14.2"',),
+            "crates/rpptx-cli/README.md": ("--version '^0.14.2'",),
+            "crates/rpptx-layout/README.md": ('rpptx-layout = "0.14.2"',),
+            "crates/rpptx-oxml/README.md": ('rpptx-oxml = "0.14.2"',),
+            "crates/rpptx-render/README.md": ('rpptx-render = "0.14.2"',),
         }
         for path, requirements in readme_requirements.items():
             text = (workflow.REPO / path).read_text(encoding="utf-8")
@@ -5791,29 +5865,29 @@ class SprintWorkflowTests(unittest.TestCase):
 
         source_requirements = {
             "crates/oxml-chart/src/lib.rs": (
-                'manifest.contains("version = \\"0.14.1\\"")',
+                'manifest.contains("version = \\"0.14.2\\"")',
             ),
             "crates/oxml-drawing/src/lib.rs": (
-                'manifest.contains("version = \\"0.14.1\\"")',
+                'manifest.contains("version = \\"0.14.2\\"")',
             ),
             "crates/rdocx-wasm/src/lib.rs": (
                 'oxml-layout = { path = \\"crates/oxml-layout\\", '
-                'version = \\"0.14.1\\", default-features = false }',
+                'version = \\"0.14.2\\", default-features = false }',
             ),
             "crates/rpptx-oxml/tests/integration.rs": (
-                'manifest.contains("version = \\"0.14.1\\"")',
+                'manifest.contains("version = \\"0.14.2\\"")',
             ),
             "crates/rpptx-render/src/lib.rs": (
-                'manifest.contains("version = \\"0.14.1\\"")',
+                'manifest.contains("version = \\"0.14.2\\"")',
             ),
             "crates/rpptx-wasm/src/lib.rs": (
-                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.1\\", '
+                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.2\\", '
                 'default-features = false }',
             ),
             "crates/rpptx/tests/integration.rs": (
-                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.1\\", '
+                'rpptx = { path = \\"crates/rpptx\\", version = \\"0.14.2\\", '
                 'default-features = false }',
-                'manifest.contains("version = \\"0.14.1\\"")',
+                'manifest.contains("version = \\"0.14.2\\"")',
             ),
         }
         for path, requirements in source_requirements.items():
@@ -6246,8 +6320,8 @@ class SprintWorkflowTests(unittest.TestCase):
         self,
     ) -> None:
         expected = {
-            "rdocx": ("rdocx-py", "0.16.1", "v0.16.1"),
-            "rpptx": ("rpptx-py", "0.14.1", "rpptx-v0.14.1"),
+            "rdocx": ("rdocx-py", "0.16.2", "v0.16.2"),
+            "rpptx": ("rpptx-py", "0.14.2", "rpptx-v0.14.2"),
         }
         workspace = tomllib.loads(
             (workflow.REPO / "Cargo.toml").read_text(encoding="utf-8")
@@ -6372,9 +6446,9 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assertIn("## Project links", readme)
 
     def test_rdocx_v0_15_0_unified_family_contract(self) -> None:
-        family = workflow.validate_unified_release_family("v0.16.1")
+        family = workflow.validate_unified_release_family("v0.16.2")
         self.assertEqual(family["distribution"], "rdocx")
-        self.assertEqual(family["version"], "0.16.1")
+        self.assertEqual(family["version"], "0.16.2")
         self.assertEqual(
             set(workflow.RELEASE_CRATES["rdocx"]),
             {
@@ -6385,7 +6459,7 @@ class SprintWorkflowTests(unittest.TestCase):
         project = tomllib.loads(
             (workflow.REPO / "crates/rdocx-py/pyproject.toml").read_text()
         )
-        self.assertEqual(project["project"]["version"], "0.16.1")
+        self.assertEqual(project["project"]["version"], "0.16.2")
 
     def test_unified_release_family_rejects_mismatched_version_carriers(self) -> None:
         workspace = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
@@ -6449,9 +6523,9 @@ class SprintWorkflowTests(unittest.TestCase):
                     workflow.validate_unified_release_family(f"v{stable}")
 
     def test_rpptx_v0_13_1_unified_family_contract(self) -> None:
-        family = workflow.validate_unified_release_family("rpptx-v0.14.1")
+        family = workflow.validate_unified_release_family("rpptx-v0.14.2")
         self.assertEqual(family["distribution"], "rpptx")
-        self.assertEqual(family["version"], "0.14.1")
+        self.assertEqual(family["version"], "0.14.2")
         self.assertEqual(len(workflow.RELEASE_CRATES["rpptx"]), 15)
         self.assertTrue(set(workflow.RELEASE_CRATES["rpptx"]).isdisjoint(
             workflow.RELEASE_CRATES["rdocx"]
@@ -7439,7 +7513,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertIn("crates/oxml-chart", root["members"])
         self.assertEqual(
             root["dependencies"]["oxml-chart"],
-            {"path": "crates/oxml-chart", "version": "0.14.1"},
+            {"path": "crates/oxml-chart", "version": "0.14.2"},
         )
 
         shim = tomllib.loads(
@@ -7534,7 +7608,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertEqual(normalized(b"reviewed\r\ntext\r\n"), b"reviewed\ntext\n")
         self.assertNotEqual(normalized(b"changed\r\ntext\r\n"), b"reviewed\ntext\n")
 
-        expected_version = "0.14.1"
+        expected_version = "0.14.2"
         for member in (
             "oxml-core",
             "oxml-opc",
@@ -8315,7 +8389,7 @@ Pedro Assumpcao and the rdocx maintainers.
             ),
             "version": (
                 claude.replace(
-                    "prepared at\n  0.16.1",
+                    "prepared at\n  0.16.2",
                     "prepared at\n  0.2.0",
                     1,
                 ),

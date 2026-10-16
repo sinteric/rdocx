@@ -2393,6 +2393,48 @@ fn validation_qualified_display_content_and_field_controls_preserve_source() {
 }
 
 #[test]
+fn fx248_validate_reporter_identified_block_control() {
+    let temp = TempWorkspace::new("validate-identified-control");
+    let input = temp.path.join("identified.docx");
+    write_document(&input, &["Before"]);
+    let mut package = OpcPackage::open(&input).unwrap();
+    let part = package.main_document_part().unwrap();
+    let xml = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+    let producer = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let xml = xml.replace(
+        "<w:document ",
+        &format!("<w:document xmlns:producer=\"{producer}\" "),
+    );
+    let control = concat!(
+        "<w:sdt><w:sdtPr><w:id w:val=\"1\"/></w:sdtPr><w:sdtContent>",
+        "<w:p producer:paraId=\"388B6825\" producer:textId=\"00AABBCC\">",
+        "<w:r><w:t>Inside</w:t></w:r></w:p></w:sdtContent></w:sdt>",
+    );
+    package.set_part(
+        &part,
+        xml.replace("<w:sectPr", &format!("{control}<w:sectPr"))
+            .into_bytes(),
+    );
+    package.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    assert_success(
+        &cli(&["validate", path_text(&input)]),
+        "validate identified block control",
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+    let output = temp.path.join("reopened.docx");
+    Document::open(&input).unwrap().save(&output).unwrap();
+    assert_success(
+        &cli(&["validate", path_text(&output)]),
+        "validate saved identified block control",
+    );
+    let package = OpcPackage::open(&output).unwrap();
+    let xml = std::str::from_utf8(package.get_part(&part).unwrap()).unwrap();
+    assert!(xml.contains("producer:paraId=\"388B6825\""), "{xml}");
+    assert!(xml.contains("producer:textId=\"00AABBCC\""), "{xml}");
+}
+
+#[test]
 fn validation_preserves_recursive_block_control_and_table_paragraph_scope() {
     let temp = TempWorkspace::new("validate-control-scope");
     let input = temp.path.join("controls.docx");
@@ -6459,6 +6501,91 @@ fn fx220_cli_font_settings_keep_absence_and_false_distinct() {
 }
 
 #[test]
+fn fx251_font_existing_output_diagnostic_has_no_unavailable_force() {
+    let workspace = TempWorkspace::new("fx251-font-collision");
+    let source = workspace.path.join("source.docx");
+    Document::new().save(&source).unwrap();
+    let font = workspace.path.join("font.ttf");
+    fs::write(
+        &font,
+        include_bytes!("../../oxml-layout/fonts/Caladea-Regular.ttf"),
+    )
+    .unwrap();
+    let output = workspace.path.join("existing.docx");
+    fs::write(&output, b"retain existing output").unwrap();
+    let before_source = fs::read(&source).unwrap();
+    let before_font = fs::read(&font).unwrap();
+    let commands = [
+        vec![
+            "font",
+            "embed",
+            path_text(&source),
+            "--name",
+            "Licensed",
+            "--font",
+            path_text(&font),
+            "--license-authorized",
+            "--license-identity",
+            "Apache-2.0: Caladea",
+        ],
+        vec!["font", "remove", path_text(&source), "--name", "Licensed"],
+        vec![
+            "font",
+            "settings",
+            path_text(&source),
+            "--embed-true-type-fonts",
+            "true",
+        ],
+    ];
+    for command in &commands {
+        for collision in [&output, &source] {
+            let result = cli(&[&command[..], &["--output", path_text(collision)]].concat());
+            assert!(!result.status.success());
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert!(!error.contains("--force"), "{error}");
+            assert_eq!(fs::read(&output).unwrap(), b"retain existing output");
+            assert_eq!(fs::read(&source).unwrap(), before_source);
+        }
+    }
+    let result = cli(&[&commands[0][..], &["--output", path_text(&font)]].concat());
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("--force"));
+    assert_eq!(fs::read(&font).unwrap(), before_font);
+    #[cfg(unix)]
+    {
+        let doc_symlink = workspace.path.join("document-symlink.docx");
+        let doc_hardlink = workspace.path.join("document-hardlink.docx");
+        let font_symlink = workspace.path.join("font-symlink.docx");
+        let font_hardlink = workspace.path.join("font-hardlink.docx");
+        std::os::unix::fs::symlink(&source, &doc_symlink).unwrap();
+        fs::hard_link(&source, &doc_hardlink).unwrap();
+        std::os::unix::fs::symlink(&font, &font_symlink).unwrap();
+        fs::hard_link(&font, &font_hardlink).unwrap();
+        for command in &commands {
+            for collision in [&doc_symlink, &doc_hardlink] {
+                let result = cli(&[&command[..], &["--output", path_text(collision)]].concat());
+                assert!(!result.status.success());
+                assert!(!String::from_utf8_lossy(&result.stderr).contains("--force"));
+            }
+        }
+        for collision in [&font_symlink, &font_hardlink] {
+            let result = cli(&[&commands[0][..], &["--output", path_text(collision)]].concat());
+            assert!(!result.status.success());
+            assert!(!String::from_utf8_lossy(&result.stderr).contains("--force"));
+        }
+        assert_eq!(fs::read(&source).unwrap(), before_source);
+        assert_eq!(fs::read(&font).unwrap(), before_font);
+    }
+    assert!(fs::read_dir(&workspace.path).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
+}
+
+#[test]
 fn fx220_cli_font_refusals_preserve_inputs_and_existing_outputs() {
     let workspace = TempWorkspace::new("fx220-refusals");
     let source = workspace.path.join("source.docx");
@@ -6685,11 +6812,11 @@ fn fx241_cli_fill_five_kinds_preserves_order_source_and_old_tag_contract() {
         .iter()
         .map(|x| x.text())
         .collect::<Vec<_>>();
-    assert_eq!(texts, ["Ada", "☒", "two", "2026-10-16"]);
+    assert_eq!(texts, ["Ada", "☒", "Two", "2026-10-16"]);
     let xml = package_part_text(&output, "/word/document.xml");
     assert!(xml.contains("w14:checked w14:val=\"1\""));
     assert!(xml.contains("MS Gothic"));
-    assert!(xml.contains("2026-09-15T00:00:00Z"));
+    assert!(xml.contains("2026-10-16T00:00:00Z"));
     assert!(xml.contains("yyyy-MM-dd"));
     assert!(xml.contains("w:default w:val=\"filled\""));
     assert_eq!(
@@ -6710,6 +6837,93 @@ fn fx241_cli_fill_five_kinds_preserves_order_source_and_old_tag_contract() {
     ]);
     assert_eq!(conflict.status.code(), Some(2));
     assert!(!output.exists());
+}
+
+#[test]
+fn fx249_fill_typed_values_match_python_after_reopen() {
+    let temp = TempWorkspace::new("fx249-typed");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let values = temp.path.join("values.json");
+    let text = "<w:p><w:r><w:t>old</w:t></w:r></w:p>";
+    let binding = r#"<w:dataBinding w:storeItemID="{11111111-1111-1111-1111-111111111111}" w:xpath="/root/date"/>"#;
+    let date = format!(
+        r#"{binding}<w:showingPlcHdr/><p:showingPlcHdr/><w:date w:fullDate="2026-09-15T00:00:00Z"><w:dateFormat w:val="dd/MM/yyyy"/><w:storeMappedDataAs w:val="date"/></w:date>"#
+    );
+    let body = [fx241_control("date", &date, text), fx241_control("choice", r#"<w:alias w:val="Choice alias"/><w:showingPlcHdr/><w:dropDownList><w:listItem w:displayText="Draft" w:value="draft"/><w:listItem w:displayText="Final" w:value="final"/></w:dropDownList>"#, text)].concat();
+    fx241_template(&input, &body);
+    let mut package = OpcPackage::open(&input).unwrap();
+    package.set_part(
+        "/customXml/data249.xml",
+        b"<root><date>old</date></root>".to_vec(),
+    );
+    package.set_part("/customXml/props249.xml", br#"<ds:datastoreItem xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml" ds:itemID="{11111111-1111-1111-1111-111111111111}"><ds:schemaRefs/></ds:datastoreItem>"#.to_vec());
+    package.get_or_create_part_rels("/word/document.xml").add(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+        "../customXml/data249.xml",
+    );
+    package
+        .get_or_create_part_rels("/customXml/data249.xml")
+        .add(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps",
+            "props249.xml",
+        );
+    package.content_types.add_override(
+        "/customXml/props249.xml",
+        "application/vnd.openxmlformats-officedocument.customXmlProperties+xml",
+    );
+    package.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    fs::write(&values, r#"{"date":"2026-10-31","Choice alias":"final"}"#).unwrap();
+    assert_success(
+        &fx241_fill(&input, &values, &output),
+        "typed date/list fill",
+    );
+    let reopened = Document::open(&output).unwrap();
+    assert_eq!(
+        reopened
+            .content_controls()
+            .iter()
+            .map(|control| control.text())
+            .collect::<Vec<_>>(),
+        ["31/10/2026", "Final"]
+    );
+    let xml = package_part_text(&output, "/word/document.xml");
+    assert!(xml.contains("w:fullDate=\"2026-10-31T00:00:00Z\""));
+    assert!(!xml.contains("<w:showingPlcHdr"));
+    assert!(xml.contains("<p:showingPlcHdr/>"));
+    assert_eq!(
+        package_part_text(&output, "/customXml/data249.xml"),
+        "<root><date>2026-10-31</date></root>"
+    );
+    assert_eq!(
+        package_part_text(&output, "/customXml/opaque.xml"),
+        "<opaque exact='yes'/>"
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+    fs::remove_file(&output).unwrap();
+    for invalid in [
+        r#"{"date":"2026-10-31","choice":"Archived"}"#,
+        r#"{"date":"2026-02-29","choice":"final"}"#,
+    ] {
+        fs::write(&values, invalid).unwrap();
+        let failed = fx241_fill(&input, &values, &output);
+        assert!(!failed.status.success());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+    // A late binding refusal cannot publish an earlier selected display.
+    let mut package = OpcPackage::open(&input).unwrap();
+    package.set_part(
+        "/customXml/data249.xml",
+        b"<root><other>old</other></root>".to_vec(),
+    );
+    package.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    fs::write(&values, r#"{"choice":"final","date":"2026-10-31"}"#).unwrap();
+    assert!(!fx241_fill(&input, &values, &output).status.success());
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
 }
 
 #[test]

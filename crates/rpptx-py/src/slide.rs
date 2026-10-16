@@ -454,6 +454,17 @@ impl PySlide {
 #[pymethods]
 impl PySlide {
     #[getter]
+    fn slide_id(&self, py: Python<'_>) -> PyResult<u32> {
+        let index = self.validate(py)?;
+        self.presentation
+            .borrow(py)
+            .inner
+            .slide(index)
+            .map(|slide| slide.id())
+            .ok_or_else(|| PyIndexError::new_err("slide owner is absent"))
+    }
+
+    #[getter]
     fn element(&self, py: Python<'_>) -> PyResult<Py<crate::presentation::PyPptElement>> {
         let index = self.validate(py)?;
         let path = self
