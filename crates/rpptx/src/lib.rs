@@ -21,6 +21,7 @@ use std::path::Path;
 #[cfg(feature = "render")]
 use diagram::{DiagramResources, ScopedDiagramResources};
 use oxml_chart::CT_ChartSpace;
+pub use oxml_chart::{CHART_LEGEND_OMITTED, ChartLegendOmitted, LegendOmissionReason};
 pub use oxml_chart::{ChartData, ChartKind, LegendPosition, LegendSettings, RgbColor};
 use oxml_core::OxmlError;
 pub use oxml_core::app_properties::AppProperties;
@@ -29166,6 +29167,61 @@ mod write_tests {
             number_format: Some("0.00%".into()),
             ..ChartData::default()
         }
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn small_korean_pie_reports_omitted_legend_diagnostic() {
+        let data = ChartData {
+            categories: [
+                "구독 서비스 매출",
+                "라이선스",
+                "유지보수 및 기술 지원",
+                "교육",
+                "컨설팅 프로젝트",
+                "기타 수익",
+                "하드웨어 판매",
+                "클라우드 호스팅",
+                "광고",
+                "파트너 수수료",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            series: vec![(
+                "매출".to_owned(),
+                (1..=10).map(f64::from).collect::<Vec<_>>(),
+            )],
+            ..ChartData::default()
+        };
+        let notices = |width: i64, height: i64| {
+            let mut deck = Presentation::new().unwrap();
+            deck.add_slide(6).unwrap();
+            deck.add_chart(
+                0,
+                ChartKind::Pie,
+                Emu(0),
+                Emu(0),
+                Emu(width),
+                Emu(height),
+                &data,
+            )
+            .unwrap();
+            let (_, layout) = deck.render_deterministic().unwrap();
+            layout
+                .diagnostics
+                .iter()
+                .filter_map(|diagnostic| {
+                    crate::ChartLegendOmitted::from_diagnostic_message(&diagnostic.message)
+                        .map(|notice| (notice, diagnostic.message.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let small = notices(2_540_000, 1_778_000);
+        assert_eq!(small.len(), 1, "{small:?}");
+        assert_eq!(small[0].0.entry_count, 10);
+        assert_eq!(small[0].0.width_pt, 200.0);
+        assert!(small[0].1.contains(" source="), "{}", small[0].1);
+        assert!(notices(5_486_400, 3_200_400).is_empty());
     }
 
     fn fx215_native_deck() -> (Presentation, u32, ChartData) {

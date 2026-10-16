@@ -45847,6 +45847,63 @@ mod tests {
     }
 
     #[test]
+    fn small_korean_pie_reports_omitted_legend_diagnostic() {
+        let data = ChartData {
+            categories: [
+                "구독 서비스 매출",
+                "라이선스",
+                "유지보수 및 기술 지원",
+                "교육",
+                "컨설팅 프로젝트",
+                "기타 수익",
+                "하드웨어 판매",
+                "클라우드 호스팅",
+                "광고",
+                "파트너 수수료",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            series: vec![(
+                "매출".to_owned(),
+                (1..=10).map(f64::from).collect::<Vec<_>>(),
+            )],
+            ..ChartData::default()
+        };
+        let mut small = Document::new();
+        small
+            .add_chart(ChartKind::Pie, Length::pt(200.0), Length::pt(140.0), &data)
+            .expect("author small pie");
+        let layout = deterministic_chart_layout(&small);
+        let notices = layout
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| {
+                crate::ChartLegendOmitted::from_diagnostic_message(&diagnostic.message)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1, "{:?}", layout.diagnostics);
+        assert_eq!(notices[0].entry_count, 10);
+        assert_eq!(
+            notices[0].reason,
+            crate::LegendOmissionReason::EntriesExceedHeight
+        );
+        assert!(layout.diagnostics[0].message.contains(" source=word:rId"));
+        let (paths, _, images) = chart_leaf_counts(&layout);
+        assert!(paths > 0 && images == 0, "the pie itself must still render");
+
+        let mut fitting = Document::new();
+        fitting
+            .add_chart(
+                ChartKind::Pie,
+                Length::inches(6.0),
+                Length::inches(3.5),
+                &data,
+            )
+            .expect("author fitting pie");
+        assert!(deterministic_chart_layout(&fitting).diagnostics.is_empty());
+    }
+
+    #[test]
     fn inline_word_chart_renders_backend_neutral_group() {
         let mut document = Document::new();
         document

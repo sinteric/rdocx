@@ -101,6 +101,7 @@ pub use math::{
     equation_to_latex, equation_to_mathml,
 };
 pub use odt::{OdtDiagnostic, OdtReadResult, OdtWriteResult};
+pub use oxml_chart::{CHART_LEGEND_OMITTED, ChartLegendOmitted, LegendOmissionReason};
 pub use oxml_chart::{ChartData, ChartKind, LegendPosition, LegendSettings, RgbColor};
 pub use oxml_core::app_properties::AppProperties;
 pub use oxml_core::core_properties::CoreProperties;

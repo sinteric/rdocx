@@ -3396,6 +3396,131 @@ fn layout_legend(
     })
 }
 
+/// Diagnostic code carried by [`ChartLegendOmitted`] messages.
+pub const CHART_LEGEND_OMITTED: &str = "chart-legend-omitted";
+
+/// Which measured legend limit caused a pie or doughnut category legend to be
+/// omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegendOmissionReason {
+    /// The legend rows are taller than the chart allows.
+    EntriesExceedHeight,
+    /// One legend label is wider than the chart allows.
+    LabelExceedsWidth,
+    /// Reserving legend space leaves no room for the plot margins.
+    ChartTooSmall,
+}
+
+impl LegendOmissionReason {
+    /// Stable kebab-case token used in diagnostic messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EntriesExceedHeight => "entries-exceed-height",
+            Self::LabelExceedsWidth => "label-exceeds-width",
+            Self::ChartTooSmall => "chart-too-small",
+        }
+    }
+
+    fn from_error(error: &ChartError) -> Option<Self> {
+        match error {
+            ChartError::InvalidValue { value, .. } => match value.as_str() {
+                "legend entries exceed chart height" => Some(Self::EntriesExceedHeight),
+                "legend label exceeds chart width" => Some(Self::LabelExceedsWidth),
+                "chart is too small for the fixed plot margins" => Some(Self::ChartTooSmall),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        [
+            Self::EntriesExceedHeight,
+            Self::LabelExceedsWidth,
+            Self::ChartTooSmall,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_str() == token)
+    }
+}
+
+/// A pie or doughnut category legend that was omitted so the plot could render.
+///
+/// Its [`Display`](fmt::Display) form is the stable diagnostic message prefix
+/// `chart-legend-omitted reason=<reason> width_pt=<w> height_pt=<h> entries=<n>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartLegendOmitted {
+    /// The limit that fired.
+    pub reason: LegendOmissionReason,
+    /// Chart frame width in points.
+    pub width_pt: f64,
+    /// Chart frame height in points.
+    pub height_pt: f64,
+    /// Number of category legend entries that did not fit.
+    pub entry_count: usize,
+}
+
+impl ChartLegendOmitted {
+    /// Recover the notice from a diagnostic message produced by rdocx or rpptx.
+    /// Text after the structured fields (such as the chart source) is ignored.
+    pub fn from_diagnostic_message(message: &str) -> Option<Self> {
+        let mut fields = message
+            .strip_prefix(CHART_LEGEND_OMITTED)?
+            .split_whitespace();
+        let mut value = |key: &str| fields.next()?.strip_prefix(key)?.strip_prefix('=');
+        Some(Self {
+            reason: LegendOmissionReason::parse(value("reason")?)?,
+            width_pt: value("width_pt")?.parse().ok()?,
+            height_pt: value("height_pt")?.parse().ok()?,
+            entry_count: value("entries")?.parse().ok()?,
+        })
+    }
+}
+
+impl fmt::Display for ChartLegendOmitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{CHART_LEGEND_OMITTED} reason={} width_pt={} height_pt={} entries={}",
+            self.reason.as_str(),
+            self.width_pt,
+            self.height_pt,
+            self.entry_count
+        )
+    }
+}
+
+/// [`render_chart`] plus a notice when a pie or doughnut category legend was
+/// omitted because it exceeded the measured legend limits.
+pub fn render_chart_with_legend_notice(
+    chart: &CT_Chart,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    let group = render_chart(chart, bounds, theme, color_map, fonts)?;
+    let notice = match chart.plot_area.plots()?.first() {
+        Some(plot @ (Plot::Pie { .. } | Plot::Doughnut { .. })) if chart.legend.is_some() => {
+            match layout_legend(chart, plot, bounds, fonts) {
+                Err(error) => LegendOmissionReason::from_error(&error)
+                    .map(|reason| -> Result<_> {
+                        Ok(ChartLegendOmitted {
+                            reason,
+                            width_pt: bounds.width,
+                            height_pt: bounds.height,
+                            entry_count: legend_entry_names(plot)?.len(),
+                        })
+                    })
+                    .transpose()?,
+                Ok(_) => None,
+            }
+        }
+        _ => None,
+    };
+    Ok((group, notice))
+}
+
 /// Fork policy: a pie or doughnut category legend that cannot fit the
 /// measured legend limits is omitted so the plot still renders. Other plots
 /// keep upstream's errors unchanged.
@@ -3421,15 +3546,7 @@ fn layout_legend_or_omit_category_legend(
 }
 
 fn is_legend_size_limit(error: &ChartError) -> bool {
-    matches!(
-        error,
-        ChartError::InvalidValue { value, .. } if matches!(
-            value.as_str(),
-            "legend entries exceed chart height"
-                | "legend label exceeds chart width"
-                | "chart is too small for the fixed plot margins"
-        )
-    )
+    LegendOmissionReason::from_error(error).is_some()
 }
 
 /// Legend entries in paint order. Varied pie and doughnut plots list their
@@ -12997,6 +13114,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn render_with_notice(
+        chart: &CT_ChartSpace,
+        bounds: Rect,
+    ) -> Option<super::ChartLegendOmitted> {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        super::render_chart_with_legend_notice(
+            &chart.chart,
+            bounds,
+            &CT_OfficeStyleSheet::office_default(),
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap()
+        .1
+    }
+
+    #[test]
+    fn omitted_korean_pie_legend_reports_a_structured_notice() {
+        for (count, long, reason) in [
+            (10, false, super::LegendOmissionReason::EntriesExceedHeight),
+            (3, true, super::LegendOmissionReason::ChartTooSmall),
+        ] {
+            let chart = pie_chart_fixture(
+                "pieChart",
+                r#"<q:varyColors val="1"/>"#,
+                &korean_pie_series(count, long),
+            );
+            let notice = render_with_notice(&chart, chart_bounds()).expect("legend notice");
+            assert_eq!(
+                notice,
+                super::ChartLegendOmitted {
+                    reason,
+                    width_pt: 200.0,
+                    height_pt: 140.0,
+                    entry_count: count,
+                }
+            );
+            let message = format!("{notice} source=word:rId4");
+            assert!(message.starts_with(super::CHART_LEGEND_OMITTED));
+            assert_eq!(
+                super::ChartLegendOmitted::from_diagnostic_message(&message),
+                Some(notice)
+            );
+        }
+    }
+
+    #[test]
+    fn fitting_or_legendless_charts_report_no_legend_notice() {
+        let fitting = pie_chart_fixture(
+            "doughnutChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(10, true),
+        );
+        let large = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 432.0,
+            height: 252.0,
+        };
+        assert_eq!(render_with_notice(&fitting, large), None);
+        let small = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(3, false),
+        );
+        assert_eq!(render_with_notice(&small, chart_bounds()), None);
+        assert_eq!(
+            super::ChartLegendOmitted::from_diagnostic_message("Word chart relationship rId1: x"),
+            None
+        );
     }
 
     #[test]
