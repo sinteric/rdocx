@@ -3959,6 +3959,8 @@ fn rebreak_paragraph(
     );
     let mut adjusted = para.clone();
     adjusted.lines = lines;
+    // Fresh line-breaker output has no paragraph border bands.
+    adjusted.add_border_padding();
     adjusted.reflow.as_mut()?.params = params;
     Some((adjusted, consumption))
 }
@@ -6679,6 +6681,69 @@ mod tests {
             reflow: None,
             content_offset_top: 0.0,
         }
+    }
+
+    #[test]
+    fn rebreaking_a_bordered_paragraph_keeps_its_border_bands() {
+        use rdocx_oxml::borders::{CT_BorderEdge, CT_PBdr};
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm
+            .resolve_font(Some("Liberation Sans"), false, false)
+            .unwrap();
+        let text = "bordered words ".repeat(40);
+        let mut segment = directional_test_segment(&text, TextDirection::Auto, None, None);
+        let shaped = fm.shape_text(id, &text, 12.0).unwrap();
+        segment.font_id = id;
+        segment.glyph_ids = shaped.glyph_ids;
+        segment.advances = shaped.advances;
+        segment.width = shaped.width;
+        let params = oxml_layout::LineBreakParams {
+            available_width: 408.0,
+            ..Default::default()
+        };
+        let edge = CT_BorderEdge {
+            val: ST_Border::Single,
+            sz: Some(8),
+            space: Some(4),
+            color: Some("000000".to_string()),
+            extra_attributes: Vec::new(),
+            source_xml: None,
+        };
+        let mut para = make_para(1, 14.0);
+        para.borders = Some(CT_PBdr {
+            top: Some(edge.clone()),
+            bottom: Some(edge),
+            ..Default::default()
+        });
+        para.lines = break_into_lines(
+            &[oxml_layout::InlineItem::Text(segment.clone())],
+            &params,
+            &fm,
+        )
+        .unwrap();
+        para.reflow = Some(Box::new(crate::block::ParagraphReflow {
+            items: vec![oxml_layout::InlineItem::Text(segment.clone())],
+            params: params.clone(),
+            grid_line_pitch_pt: None,
+            paragraph_mark: None,
+        }));
+        para.add_border_padding();
+        let bands =
+            crate::block::paragraph_border_padding(para.borders.as_ref().unwrap().top.as_ref())
+                + crate::block::paragraph_border_padding(
+                    para.borders.as_ref().unwrap().bottom.as_ref(),
+                );
+        assert!(bands > 0.0);
+        let mut unbordered = para.clone();
+        unbordered.borders = None;
+        let plain = rebreak_paragraph(&unbordered, TextDirection::Auto, 200.0, &fm)
+            .unwrap()
+            .0;
+        let rebroken = rebreak_paragraph(&para, TextDirection::Auto, 200.0, &fm)
+            .unwrap()
+            .0;
+        assert_eq!(rebroken.lines.len(), plain.lines.len());
+        assert!((rebroken.content_height() - (plain.content_height() + bands)).abs() < 1e-9);
     }
 
     #[test]
