@@ -1168,7 +1168,7 @@ pub fn render_chart(
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
     let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
-    let legend_layout = layout_legend(chart, plot, bounds, fonts)?;
+    let legend_layout = layout_legend_or_omit_category_legend(chart, plot, bounds, fonts)?;
     let legend_colours = if chart.legend.is_some() {
         legend_entries(plot, &colours)?
             .into_iter()
@@ -3394,6 +3394,42 @@ fn layout_legend(
         labels,
         keys,
     })
+}
+
+/// Fork policy: a pie or doughnut category legend that cannot fit the
+/// measured legend limits is omitted so the plot still renders. Other plots
+/// keep upstream's errors unchanged.
+fn layout_legend_or_omit_category_legend(
+    chart: &CT_Chart,
+    plot: &Plot,
+    bounds: Rect,
+    fonts: &mut FontManager,
+) -> Result<LegendLayout> {
+    match layout_legend(chart, plot, bounds, fonts) {
+        Err(error)
+            if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. })
+                && is_legend_size_limit(&error) =>
+        {
+            Ok(LegendLayout {
+                plot: geometry_plot_bounds(bounds)?,
+                labels: Vec::new(),
+                keys: Vec::new(),
+            })
+        }
+        result => result,
+    }
+}
+
+fn is_legend_size_limit(error: &ChartError) -> bool {
+    matches!(
+        error,
+        ChartError::InvalidValue { value, .. } if matches!(
+            value.as_str(),
+            "legend entries exceed chart height"
+                | "legend label exceeds chart width"
+                | "chart is too small for the fixed plot margins"
+        )
+    )
 }
 
 /// Legend entries in paint order. Varied pie and doughnut plots list their
@@ -12902,6 +12938,104 @@ mod tests {
                 vec![Color::from_hex("156082")]
             );
         }
+    }
+
+    fn korean_pie_series(count: usize, long: bool) -> String {
+        let names = [
+            "구독 서비스 매출",
+            "라이선스",
+            "유지보수 및 기술 지원",
+            "교육",
+            "컨설팅 프로젝트",
+            "기타 수익",
+            "하드웨어 판매",
+            "클라우드 호스팅",
+            "광고",
+            "파트너 수수료",
+        ];
+        let mut categories = String::new();
+        let mut values = String::new();
+        for (index, name) in names.iter().take(count).enumerate() {
+            let name = if long {
+                format!("{name} ({}분기 실적 합계)", index + 1)
+            } else {
+                (*name).to_owned()
+            };
+            categories.push_str(&format!(r#"<q:pt idx="{index}"><q:v>{name}</q:v></q:pt>"#));
+            values.push_str(&format!(
+                r#"<q:pt idx="{index}"><q:v>{}</q:v></q:pt>"#,
+                index + 1
+            ));
+        }
+        format!(
+            r#"<q:ser><q:idx val="0"/><q:order val="0"/><q:cat><q:strRef><q:f>S!A1</q:f><q:strCache><q:ptCount val="{count}"/>{categories}</q:strCache></q:strRef></q:cat><q:val><q:numRef><q:f>S!B1</q:f><q:numCache><q:ptCount val="{count}"/>{values}</q:numCache></q:numRef></q:val></q:ser>"#
+        )
+    }
+
+    #[test]
+    fn small_korean_pie_and_doughnut_omit_oversized_category_legends() {
+        for kind in ["pieChart", "doughnutChart"] {
+            for (count, long) in [(8, false), (10, false), (3, true), (10, true)] {
+                let chart = pie_chart_fixture(
+                    kind,
+                    r#"<q:varyColors val="1"/>"#,
+                    &korean_pie_series(count, long),
+                );
+                let mut fonts = FontManager::new_deterministic().unwrap();
+                let group = render_chart(&chart.chart, chart_bounds(), &mut fonts)
+                    .unwrap_or_else(|error| panic!("{kind} {count} {long}: {error}"));
+                assert!(
+                    !group
+                        .children
+                        .iter()
+                        .any(|element| matches!(element, PositionedElement::Text(_))),
+                    "{kind} {count} {long} kept an oversized legend"
+                );
+                assert_eq!(
+                    path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()).len(),
+                    count
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fitting_korean_pie_legend_keeps_every_category() {
+        let chart = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(10, true),
+        );
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 432.0,
+            height: 252.0,
+        };
+        let group = render_chart(&chart.chart, bounds, &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter(|element| matches!(element, PositionedElement::Text(_)))
+            .count();
+        assert_eq!(labels, 10);
+    }
+
+    #[test]
+    fn oversized_series_legends_keep_upstream_errors() {
+        let series = (0..12).map(plot_series).collect::<String>();
+        let plot = format!(
+            r#"<q:barChart><q:barDir val="col"/><q:grouping val="clustered"/>{series}<q:axId val="-1884094432"/><q:axId val="-1884097184"/></q:barChart>"#
+        );
+        let xml = chart_with_optional_axes(&plot, true).replace(
+            "</q:plotArea></q:chart>",
+            "</q:plotArea><q:legend/></q:chart>",
+        );
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let error = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap_err();
+        assert!(super::is_legend_size_limit(&error), "{error}");
     }
 
     #[test]
