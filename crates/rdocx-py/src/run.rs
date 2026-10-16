@@ -7,6 +7,29 @@ use crate::document::PyDocument;
 use crate::paragraph::{ParagraphLocation, paragraph_location};
 use crate::{normalize_index, stale_to_pyerr};
 
+fn checked_break_kind(value: &Bound<'_, PyAny>) -> PyResult<&'static str> {
+    if !value.is_instance_of::<pyo3::types::PyBool>() {
+        if let Ok(name) = value.extract::<String>() {
+            match name.as_str() {
+                "line" => return Ok("line"),
+                "page" => return Ok("page"),
+                "column" => return Ok("column"),
+                _ => {}
+            }
+        } else if let Ok(number) = value.extract::<i64>() {
+            match number {
+                6 => return Ok("line"),
+                7 => return Ok("page"),
+                8 => return Ok("column"),
+                _ => {}
+            }
+        }
+    }
+    Err(PyValueError::new_err(
+        "use WD_BREAK.LINE/PAGE/COLUMN or line/page/column strings",
+    ))
+}
+
 #[pyclass(name = "Run")]
 pub struct PyRun {
     document: Py<PyDocument>,
@@ -310,7 +333,11 @@ impl PyRun {
     }
 
     #[pyo3(signature = (kind = "line"))]
-    fn add_break(&self, py: Python<'_>, kind: &str) -> PyResult<()> {
+    fn add_break(
+        &self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = checked_break_kind)] kind: &str,
+    ) -> PyResult<()> {
         let kind = match kind {
             "line" => rdocx::BreakKind::Line,
             "page" => rdocx::BreakKind::Page,
@@ -366,6 +393,31 @@ impl PyRun {
         document.commit_word_revision(prepared)?;
         document.inner = candidate;
         Ok(())
+    }
+
+    #[getter]
+    fn bold(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.font(py)?.borrow(py).bold(py)
+    }
+    #[setter]
+    fn set_bold(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.font(py)?.borrow(py).set_bold(py, value)
+    }
+    #[getter]
+    fn italic(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.font(py)?.borrow(py).italic(py)
+    }
+    #[setter]
+    fn set_italic(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.font(py)?.borrow(py).set_italic(py, value)
+    }
+    #[getter]
+    fn underline(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.font(py)?.borrow(py).underline(py)
+    }
+    #[setter]
+    fn set_underline(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        self.font(py)?.borrow(py).set_underline(py, value)
     }
 
     #[getter]

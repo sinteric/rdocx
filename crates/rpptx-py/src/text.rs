@@ -92,7 +92,13 @@ fn points_spacing(emu: i64) -> PyResult<TextSpacing> {
             "spacing must be from 0 to 1584 points",
         ));
     }
-    Ok(TextSpacing::Points((emu / EMU_PER_CENTIPOINT) as i32))
+    let centipoints = emu / EMU_PER_CENTIPOINT;
+    if emu != 0 && centipoints == 0 {
+        return Err(PyValueError::new_err(
+            "spacing bare int is EMU; storage is 0.01 point; use rpptx.util.Pt(6) or an explicit float line multiple",
+        ));
+    }
+    Ok(TextSpacing::Points(centipoints as i32))
 }
 
 fn lines_spacing(lines: f64) -> PyResult<TextSpacing> {
@@ -787,6 +793,9 @@ fn paragraph_spacing(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<TextSp
     match value {
         None => Ok(None),
         Some(value) if value.is_none() => Ok(None),
+        Some(value) if value.is_instance_of::<PyBool>() => Err(PyTypeError::new_err(
+            "spacing rejects bool as EMU; use rpptx.util.Pt(6) or an explicit float line multiple",
+        )),
         Some(value) if value.is_instance_of::<PyFloat>() => {
             lines_spacing(value.extract()?).map(Some)
         }
@@ -1057,11 +1066,24 @@ impl PyParagraph {
         let spacing = match value {
             None => None,
             Some(value) if value.is_none() => None,
+            Some(value) if value.is_instance_of::<PyBool>() => {
+                return Err(PyTypeError::new_err(
+                    "line_spacing rejects bool; use a positive line multiple such as 1.5 or rpptx.util.Pt(18)",
+                ));
+            }
             Some(value) if value.is_instance(&py.import("rpptx")?.getattr("Length")?)? => {
                 Some(points_spacing(value.extract()?)?)
             }
             Some(value) => Some(lines_spacing(value.extract()?)?),
         };
+        if spacing.as_ref().is_some_and(|spacing| match spacing {
+            TextSpacing::Points(value) => *value <= 0,
+            TextSpacing::Percent(value) => value == "0",
+        }) {
+            return Err(PyValueError::new_err(
+                "line_spacing must store a positive value; use a positive line multiple such as 1.5 or rpptx.util.Pt(18)",
+            ));
+        }
         self.update(py, |properties| properties.line_spacing = spacing)
     }
 
@@ -2335,10 +2357,17 @@ impl PyFont {
     }
 
     #[setter]
-    fn set_spacing(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+    fn set_spacing(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let spacing = value
-            .map(|emu| {
+            .map(|value| -> PyResult<TextPointValue> {
+                if value.is_instance_of::<PyBool>() {
+                    return Err(PyTypeError::new_err("character spacing rejects bool as EMU; use rpptx.util.Pt(2)"));
+                }
+                let emu = value.extract::<i64>()?;
                 let centipoints = emu / EMU_PER_CENTIPOINT;
+                if emu != 0 && centipoints == 0 {
+                    return Err(PyValueError::new_err("character spacing bare int is EMU; storage is 0.01 point; use rpptx.util.Pt(2), with signed Length values supported"));
+                }
                 if (-MAX_FONT_SIZE..=MAX_FONT_SIZE).contains(&centipoints) {
                     Ok(TextPointValue::Centipoints(centipoints as i32))
                 } else {

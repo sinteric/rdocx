@@ -663,6 +663,57 @@ impl PySlide {
     }
 
     #[getter]
+    fn has_notes_slide(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.notes_text(py)?.is_some())
+    }
+
+    #[getter]
+    fn notes_slide(&self, py: Python<'_>) -> PyResult<Py<PyNotesSlide>> {
+        let index = self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        if presentation
+            .inner
+            .slide(index)
+            .is_some_and(|slide| slide.notes_text().is_some())
+        {
+            return Py::new(
+                py,
+                PyNotesSlide {
+                    presentation: self.presentation.clone_ref(py),
+                    path: self.path.clone(),
+                },
+            );
+        }
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .set_notes_text(index, "")
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        let survivors = presentation.text_changed_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "Slide.notes_slide",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        let path = presentation.capture_prepared_path(
+            &prepared,
+            smallvec![PathSeg::Slide(index)],
+            None,
+        )?;
+        let result = Py::new(
+            py,
+            PyNotesSlide {
+                presentation: self.presentation.clone_ref(py),
+                path,
+            },
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(result)
+    }
+
+    #[getter]
     fn notes_text(&self, py: Python<'_>) -> PyResult<Option<String>> {
         let index = self.validate(py)?;
         Ok(self
@@ -1456,6 +1507,14 @@ impl PySlideCollection {
             single: false,
         };
         Ok(self.publish_import(py, request)?.output)
+    }
+
+    #[getter(_sldIdLst)]
+    fn unsupported_slide_xml_list(&self, py: Python<'_>) -> PyResult<()> {
+        self.len(py)?;
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "use prs.slides.remove(slide) to delete a slide and prs.slides.move(old_index, new_index) to reorder",
+        ))
     }
 
     /// Removes one slide of this presentation with its notes and owned media.
@@ -2544,6 +2603,97 @@ impl PySlideTransition {
             )?;
             presentation.publish_owners(candidate, prepared)?;
         }
+        Ok(())
+    }
+}
+
+/// The notes owner of one checked physical slide.
+#[pyclass(name = "NotesSlide")]
+pub struct PyNotesSlide {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+#[pymethods]
+impl PyNotesSlide {
+    #[getter]
+    fn notes_text_frame(&self, py: Python<'_>) -> PyResult<Option<Py<PyNotesTextFrame>>> {
+        let index =
+            PySlide::new(self.presentation.clone_ref(py), self.path.clone()).validate(py)?;
+        let presentation = self.presentation.borrow(py);
+        let text = presentation
+            .inner
+            .slide(index)
+            .ok_or_else(|| PyIndexError::new_err("slide owner is absent"))?
+            .notes_text_frame_text()
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        text.map(|_| {
+            Py::new(
+                py,
+                PyNotesTextFrame {
+                    presentation: self.presentation.clone_ref(py),
+                    path: self.path.clone(),
+                },
+            )
+        })
+        .transpose()
+    }
+}
+
+/// A scalar frame admitted only for one exact direct notes-body owner.
+#[pyclass(name = "NotesTextFrame")]
+pub struct PyNotesTextFrame {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+impl PyNotesTextFrame {
+    fn validated_text(&self, py: Python<'_>) -> PyResult<(usize, String)> {
+        let index =
+            PySlide::new(self.presentation.clone_ref(py), self.path.clone()).validate(py)?;
+        let presentation = self.presentation.borrow(py);
+        let text = presentation.inner.slide(index).ok_or_else(|| PyIndexError::new_err("slide owner is absent"))?
+            .notes_text_frame_text().map_err(|error| crate::rpptx_to_pyerr(py, error))?
+            .ok_or_else(|| PyValueError::new_err("notes body is absent; inspect slide.notes_slide.notes_text_frame again or use Slide.notes_text"))?;
+        Ok((index, text))
+    }
+}
+
+#[pymethods]
+impl PyNotesTextFrame {
+    #[getter]
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        self.validated_text(py).map(|(_, text)| text)
+    }
+
+    #[setter]
+    fn set_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        let (index, _) = self.validated_text(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut candidate = presentation.inner.clone();
+        candidate
+            .set_notes_text(index, text)
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        if candidate
+            .to_bytes()
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?
+            == presentation
+                .inner
+                .to_bytes()
+                .map_err(|error| crate::rpptx_to_pyerr(py, error))?
+        {
+            return Ok(());
+        }
+        let survivors = presentation.text_changed_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "NotesTextFrame.text",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
         Ok(())
     }
 }

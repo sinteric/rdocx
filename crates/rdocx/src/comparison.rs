@@ -10197,14 +10197,15 @@ mod tests {
             let mut member = archive.by_index(index).unwrap();
             let mut bytes = Vec::new();
             member.read_to_end(&mut bytes).unwrap();
-            if member.name() == "xl/worksheets/sheet1.xml" {
+            let name = member.name().unwrap().into_owned();
+            if name == "xl/worksheets/sheet1.xml" {
                 let xml = String::from_utf8(bytes).unwrap();
                 assert!(xml.contains("<v>14</v>"));
                 bytes = xml.replace("<v>14</v>", "<v>18</v>").into_bytes();
                 changed = true;
             }
             writer
-                .start_file(member.name(), zip::write::SimpleFileOptions::default())
+                .start_file(name, zip::write::SimpleFileOptions::default())
                 .unwrap();
             writer.write_all(&bytes).unwrap();
         }

@@ -321,5 +321,215 @@
       ]
     },
     "exact_word_box_count": 15
+  },
+  "fx247": {
+    "fixture": "F-X247-finite73-source-built",
+    "status": "native exports captured",
+    "case_list_sha256": "7288e75fd28f588e1af81625ea762e1a9d0a01362027293a63827f222f091eba",
+    "cases": [
+      "\\alpha + \\beta",
+      "\\pi r^2",
+      "\\theta",
+      "\\lambda",
+      "\\mu",
+      "\\sigma",
+      "\\omega",
+      "\\varepsilon",
+      "\\phi",
+      "\\varphi",
+      "\\Delta x",
+      "\\Sigma",
+      "\\Omega",
+      "\\Gamma",
+      "a \\le b",
+      "a \\leq b",
+      "a \\ge b",
+      "a \\geq b",
+      "a \\ne b",
+      "a \\neq b",
+      "a \\approx b",
+      "a \\equiv b",
+      "a \\sim b",
+      "a \\propto b",
+      "x \\in A",
+      "A \\subset B",
+      "a \\times b",
+      "a \\cdot b",
+      "a \\div b",
+      "a \\pm b",
+      "a \\mp b",
+      "A \\cup B",
+      "A \\cap B",
+      "a \\to b",
+      "a \\rightarrow b",
+      "a \\Rightarrow b",
+      "a \\leftarrow b",
+      "\\infty",
+      "\\partial f",
+      "\\nabla f",
+      "\\forall x",
+      "\\exists x",
+      "\\degree",
+      "\\ldots",
+      "\\cdots",
+      "\\lim_{x \\to 0} x",
+      "\\sin x",
+      "\\log x",
+      "\\ln x",
+      "\\exp x",
+      "\\operatorname{tr} A",
+      "\\mathrm{d}x",
+      "\\text{if } x",
+      "\\binom{n}{k}",
+      "\\dfrac{1}{2}",
+      "\\tfrac{1}{2}",
+      "a\\quad b",
+      "\\frac{1}{2}",
+      "\\sqrt{2}",
+      "\\sqrt[3]{x}",
+      "\\sum_{i=1}^{n} i",
+      "\\prod_{i=1}^{n} i",
+      "\\int_0^1 x\\,dx",
+      "\\oint",
+      "\\left( x \\right)",
+      "\\overline{x}",
+      "\\hat{x}",
+      "\\bar{x}",
+      "\\vec{v}",
+      "\\dot{x}",
+      "a\\;b",
+      "M = \\frac{4\\pi^{2} a^{3}}{G T^{2}}",
+      "M = \\frac{4π^{2} a^{3}}{G T^{2}}"
+    ],
+    "canonicalization": "frac/dfrac/tfrac are stacked Bar, forced TeX styles are not preserved; semicolon Unicode approximation U+2004",
+    "pandoc_identity": "pandoc 3.11",
+    "pandoc_sha256": "23908d6bc347072befa2bfe312f2c1c44a7c9c2e9e60bb5d41069245454b3236",
+    "pandoc_emitted_per_context": 72,
+    "pandoc_unsupported_row": 43,
+    "word_identity": "Microsoft Word 16.114 build 16.114.26101123",
+    "word_application": {
+      "info_plist": "/Applications/Microsoft Word.app/Contents/Info.plist",
+      "sha256": "fe6396858dac28d7b5bf9a6b2fab89e077285cd85dc5c195af7cbfa7e2d11a49",
+      "identity": {
+        "CFBundleIdentifier": "com.microsoft.Word",
+        "CFBundleShortVersionString": "16.114",
+        "CFBundleVersion": "16.114.26101123"
+      }
+    },
+    "poppler_identity": "pdftoppm version 26.09.0",
+    "font_files": {
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambria.ttc": {
+        "sha256": "ca2a527ab14967b1c7170a97329ed29f38af51b71c8c2073d89d1c055de22de1",
+        "bytes": 1328244,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambria.ttc"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriai.ttf": {
+        "sha256": "926b632b6ad114075c083539e3db300accdfac3afe2eabbec3e7e4792f3526ec",
+        "bytes": 692332,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriai.ttf"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriab.ttf": {
+        "sha256": "5f686e13ff1b0f4616d6f3e24bd4b916df671cfb44397f7ddfba3ee03eeee10a",
+        "bytes": 644284,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriab.ttf"
+      },
+      "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriaz.ttf": {
+        "sha256": "dd7fc00fe4c8bd7755788d30632c16c81769f37459b0c9c2813c9c3ff3447c8a",
+        "bytes": 682840,
+        "realpath": "/Applications/Microsoft Word.app/Contents/Resources/DFonts/Cambriaz.ttf"
+      }
+    },
+    "tools": {
+      "/opt/homebrew/bin/pdftoppm": {
+        "sha256": "9a44364d0fa42a43c3efdb2cbab47d275973c4a5856c1109f6bf4513def6bb54",
+        "bytes": 75488,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdftoppm"
+      },
+      "/opt/homebrew/bin/pdftotext": {
+        "sha256": "35b026441d599e8a002b557e3c0eb4aa0da56f96a217bb6a2d8ea1f8b138f7a3",
+        "bytes": 111000,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdftotext"
+      },
+      "/opt/homebrew/bin/pdfinfo": {
+        "sha256": "fafbf3c0999a707eb2792c8259f47585342c8d5e5c1b9a56ce494e41f5250753",
+        "bytes": 113048,
+        "realpath": "/opt/homebrew/Cellar/poppler/26.09.0/bin/pdfinfo"
+      }
+    },
+    "native_producer_receipt": {
+      "path": "/private/tmp/S94-F-X247-work/native/root-native-export-receipt.json",
+      "sha256": "ac089255bef916c0fb5a06aa3e4d0ce0e50072e330dd9b65822befd0e57971b2"
+    },
+    "independent_capture_audit": {
+      "path": "/private/tmp/S94-native-capture-audit.md",
+      "sha256": "65c81fa4d5ba6d0f62d651a22be143d2b5c1ad6032fc5b8eb7d79af6cef9d8b8"
+    },
+    "native_controls": {
+      "greek": {
+        "source_sha256": "94b3ebf14d27ad78c1dd6ba135511d565b7dbda236e47fa597b0c9ca159dece5",
+        "native_pdf_sha256": "89dda851ebcd2da4211e64de6b8874b171531ceabfa73bbf534d038d0e613a86",
+        "native_reopened_sha256": "024e172e03dd13329a7f07c0874529421a2338bd5e31f52f94db7792550e68be",
+        "latex": "\\alpha+\\beta+\\theta+\\lambda+\\mu+\\sigma+\\omega+\\varepsilon+\\phi+\\varphi",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>α+β+θ+λ+μ+σ+ω+ε+ϕ+φ</m:t></m:r></m:oMath>"
+      },
+      "symbols": {
+        "source_sha256": "792880d7cde2dc70a841f656bf26ab3d55ff1d191b984568b5d19b95a88360e1",
+        "native_pdf_sha256": "f8b4c38905274a72070a884d5b6e201b7b1ea4b79f4f3fa4a67a6d6a25275498",
+        "native_reopened_sha256": "4495e4ce94d485fbfc244429f48f8d165a5c60117dda17058c82f3127919b502",
+        "latex": "\\Delta x+\\Sigma+\\Omega+\\Gamma+a\\le b+a\\Rightarrow b+\\degree",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>Δ</m:t></m:r><m:r><m:t>x+</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>Σ</m:t></m:r><m:r><m:t>+</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>Ω</m:t></m:r><m:r><m:t>+</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>Γ</m:t></m:r><m:r><m:t>+a</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>≤</m:t></m:r><m:r><m:t>b+a</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>⇒</m:t></m:r><m:r><m:t>b+</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>°</m:t></m:r></m:oMath>"
+      },
+      "functions": {
+        "source_sha256": "cda67e16888ed674b5fe26c29e46eedbab3700e3911d4294d6b032a912ca2adc",
+        "native_pdf_sha256": "a6c2b821b812ad53cc1eda12930106f6a2ed5cd70c2ac85b25ebab3c7e0ce131",
+        "native_reopened_sha256": "9fdb4b46b05968e096193276bff06e7261018105ba4ac8cd8eb975359590c41d",
+        "latex": "\\sin x+\\log x+\\ln x+\\exp x+\\operatorname{tr}A",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:rPr><m:nor m:val=\"1\"/></m:rPr><m:t>sin</m:t></m:r><m:r><m:t>x+</m:t></m:r><m:r><m:rPr><m:nor m:val=\"1\"/></m:rPr><m:t>log</m:t></m:r><m:r><m:t>x+</m:t></m:r><m:r><m:rPr><m:nor m:val=\"1\"/></m:rPr><m:t>ln</m:t></m:r><m:r><m:t>x+</m:t></m:r><m:r><m:rPr><m:nor m:val=\"1\"/></m:rPr><m:t>exp</m:t></m:r><m:r><m:t>x+</m:t></m:r><m:r><m:rPr><m:nor m:val=\"1\"/></m:rPr><m:t>tr</m:t></m:r><m:r><m:t>A</m:t></m:r></m:oMath>"
+      },
+      "text": {
+        "source_sha256": "b2f726c959f14adacafe9683b45bafc3613130c268ce40dd518e1026663b4c36",
+        "native_pdf_sha256": "706f6bb660c1ac7fbef63d9caf1f52ad9b97010eff8edfd009df19bad95eef1d",
+        "native_reopened_sha256": "482dee5571e028fad10f6e579242c2d6eb69c689b327891349365181b93b326e",
+        "latex": "\\text{if }x+\\mathrm{d}x",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:rPr><m:nor m:val=\"1\"/><m:sty m:val=\"p\"/></m:rPr><m:t xml:space=\"preserve\">if </m:t></m:r><m:r><m:t>x+</m:t></m:r><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>d</m:t></m:r><m:r><m:t>x</m:t></m:r></m:oMath>"
+      },
+      "spacing": {
+        "source_sha256": "ac13f597a176323584f40e83a7334e570a708ca0c7f842a9713679bcb1ff0707",
+        "native_pdf_sha256": "2d69315f044a7dbf47319844a95be3643da16c435ec26cb623065d29958e48b7",
+        "native_reopened_sha256": "f5be10d12ed1cc06ee617bb0c04353e1d324d16bafc3d5e62bd53f5ac60fe8dc",
+        "latex": "a\\,b+a\\;b+a\\quad b",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:r><m:t>a b+a b+a b</m:t></m:r></m:oMath>"
+      },
+      "binomial": {
+        "source_sha256": "e0a15b6c44d193b1f6d2ac73db5db9fd6e4f6d79413b44839985c87891a1da42",
+        "native_pdf_sha256": "e20f32d4b592d62442705b4d1f9b74b3d0b4218ba1d06e22d7dd1c772422cf54",
+        "native_reopened_sha256": "c5c0ba462fbc75c542658d86da4beca4f7cd9a88fc681608557e64aec882f31d",
+        "latex": "\\binom{n}{k}",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:d><m:dPr><m:begChr m:val=\"(\"/><m:sepChr m:val=\"\"/><m:endChr m:val=\")\"/><m:grow m:val=\"1\"/></m:dPr><m:e><m:f><m:fPr><m:type m:val=\"noBar\"/></m:fPr><m:num><m:r><m:t>n</m:t></m:r></m:num><m:den><m:r><m:t>k</m:t></m:r></m:den></m:f></m:e></m:d></m:oMath>"
+      },
+      "canonical-fractions": {
+        "source_sha256": "e10e4eb12725cc84695e0520a77fd7429b9dbdbd91ef154b9b126580d3e7dee4",
+        "native_pdf_sha256": "c6e2fe940384fb2e3523b13777567104ac8b6210fab0a492837a956b6b50d295",
+        "native_reopened_sha256": "475cf13fa5dce77cdb3636192b29916ff05d6372d970ab4ebcfbd7eee105cb73",
+        "latex": "\\frac{1}{2}+\\dfrac{1}{2}+\\tfrac{1}{2}",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:f><m:fPr><m:type m:val=\"bar\"/></m:fPr><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f><m:r><m:t>+</m:t></m:r><m:f><m:fPr><m:type m:val=\"bar\"/></m:fPr><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f><m:r><m:t>+</m:t></m:r><m:f><m:fPr><m:type m:val=\"bar\"/></m:fPr><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath>"
+      }
+    },
+    "supplemental_native_producer_receipts": [
+      {
+        "path": "/private/tmp/S94-F-X247-work/script-boundary-native/root-native-export-receipt.json",
+        "sha256": "8d27965907608d2dcd47dbe59dd2ad430ff08135ca52df972d8870b5fb2e940f"
+      }
+    ],
+    "diagnostic_native_controls": {
+      "atom-boundaries": {
+        "source_sha256": "5af27d8575f9fabfa38fedce42f9047bc7da2a4a91a77e5b82d8bbc143314571",
+        "latex": "f^2+x^2+\\alpha^2+f_2+x_2+\\alpha_2",
+        "authored_omml": "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:sSup><m:e><m:r><m:t>f</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup><m:r><m:t>+</m:t></m:r><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup><m:r><m:t>+</m:t></m:r><m:sSup><m:e><m:r><m:t>α</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup><m:r><m:t>+</m:t></m:r><m:sSub><m:e><m:r><m:t>f</m:t></m:r></m:e><m:sub><m:r><m:t>2</m:t></m:r></m:sub></m:sSub><m:r><m:t>+</m:t></m:r><m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>2</m:t></m:r></m:sub></m:sSub><m:r><m:t>+</m:t></m:r><m:sSub><m:e><m:r><m:t>α</m:t></m:r></m:e><m:sub><m:r><m:t>2</m:t></m:r></m:sub></m:sSub></m:oMath>",
+        "native_pdf_sha256": "3ba4bb0d54b8058109ef3a88ce2137a27942cfd53032c7a9423cb0dd723c1f2f",
+        "native_reopened_sha256": "8346b7686c9ebe9f7aba13535e32f3b50ce89e09aabd0772f6734967a3ccf731"
+      }
+    },
+    "diagnostic_native_control_scope": "Supplementary script-boundary observation retains a failing width diagnostic from existing omitted MATH MathKern. It is not a finite paint-gate pass."
   }
 }

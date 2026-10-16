@@ -10,7 +10,7 @@ use quick_xml::reader::NsReader;
 use rdocx_oxml::math::{
     FractionType, MathAccent, MathArgument, MathDelimiter, MathExpression, MathFraction, MathLimit,
     MathMatrix, MathMatrixRow, MathNary, MathPreSubSuperscript, MathRadical, MathRun, MathScript,
-    MathSubSuperscript,
+    MathStyle, MathSubSuperscript,
 };
 
 use crate::{Error, Result};
@@ -127,6 +127,7 @@ pub fn equation_from_mathml(input: &str) -> Result<MathConversionResult<MathArgu
     diagnose_attributes(&root, "/math[1]", &[], &mut diagnostics)?;
     let mut value = mathml_children_to_argument(&root, "/math[1]", &mut diagnostics, &mut nodes)?;
     normalize_argument(&mut value);
+    validate_tree(&value).map_err(math_error)?;
     Ok(MathConversionResult {
         value,
         diagnostics: diagnostics.values,
@@ -433,34 +434,85 @@ fn mathml_children_to_argument(
 ) -> Result<MathArgument> {
     let mut expressions = Vec::new();
     let mut positions = std::collections::HashMap::<&str, usize>::new();
-    for child in &node.children {
+    let mut previous_element = None::<&XmlNode>;
+    let mut leading_text_space = false;
+    for (index, child) in node.children.iter().enumerate() {
         match child {
             XmlChild::Text(text) if !text.trim().is_empty() => {
                 diagnostics.push(path, "text outside a MathML token was discarded")?
             }
             XmlChild::Text(_) => {}
             XmlChild::Element(element) => {
+                let previous = previous_element.replace(element);
                 let position = positions.entry(element.local.as_str()).or_default();
                 *position += 1;
                 let child_path = format!("{path}/{}[{position}]", element.local);
-                // Pandoc marks an upright function name with an invisible application
-                // operator. Only this supported lim spelling has an implicit equivalent.
+                // A function marker qualifies the immediately preceding upright name.
+                // The historical lim carrier already has its implicit function role.
                 if element.namespace.as_deref() == Some(MATHML_NS)
                     && element.local == "mo"
                     && element.attributes.is_empty()
                     && element.elements().next().is_none()
                     && element.text() == "\u{2061}"
-                    && matches!(expressions.last(), Some(MathExpression::Run(run))
-                        if run.text == "lim" && run.properties.normal == Some(true))
+                    && let Some(MathExpression::Run(run)) = expressions.last_mut()
+                    && ((run.text == "lim" && run.properties.normal == Some(true))
+                        || (run.properties.style == Some(MathStyle::Plain)
+                            && run.properties.normal.is_none()
+                            && !run.text.is_empty()
+                            && run.text.chars().all(char::is_alphabetic)))
                 {
+                    run.properties.normal = Some(true);
+                    run.properties.style = None;
                     continue;
                 }
-                expressions.extend(mathml_element_to_expressions(
-                    element,
-                    &child_path,
-                    diagnostics,
-                    nodes,
-                )?);
+                // Pandoc writes a trailing text space both lexically and as mspace.
+                // Consume only this proved boundary pair, never arbitrary math spaces.
+                if element.namespace.as_deref() == Some(MATHML_NS)
+                    && element.local == "mspace"
+                    && element.attributes.len() == 1
+                    && element.attribute("width") == Some("0.333em")
+                    && element.children.is_empty()
+                    && previous.is_some_and(|node| {
+                        node.namespace.as_deref() == Some(MATHML_NS) && node.local == "mtext"
+                    })
+                    && let Some(MathExpression::Run(run)) = expressions.last_mut()
+                    && run.properties.normal == Some(true)
+                    && run.properties.style == Some(MathStyle::Plain)
+                {
+                    if !run.text.ends_with(' ') {
+                        run.text.push(' ');
+                    }
+                    continue;
+                }
+                if element.namespace.as_deref() == Some(MATHML_NS)
+                    && element.local == "mspace"
+                    && element.attributes.len() == 1
+                    && element.attribute("width") == Some("0.333em")
+                    && element.children.is_empty()
+                    && node.children[index + 1..]
+                        .iter()
+                        .find_map(|child| match child {
+                            XmlChild::Element(element) => Some(element),
+                            _ => None,
+                        })
+                        .is_some_and(|next| {
+                            next.namespace.as_deref() == Some(MATHML_NS) && next.local == "mtext"
+                        })
+                {
+                    leading_text_space = true;
+                    continue;
+                }
+                let mut converted =
+                    mathml_element_to_expressions(element, &child_path, diagnostics, nodes)?;
+                if leading_text_space {
+                    if let Some(MathExpression::Run(run)) = converted.first_mut()
+                        && !run.text.starts_with(' ')
+                    {
+                        run.text.insert(0, ' ');
+                    }
+                    leading_text_space = false;
+                }
+                expressions.extend(converted);
             }
         }
     }
@@ -503,6 +555,8 @@ fn mathml_element_to_expressions(
         "mfenced" => &["open", "close", "separators"][..],
         "mi" | "mn" | "mo" | "mtext" => &["mathvariant"][..],
         "mspace" => &["width"][..],
+        "mfrac" => &["linethickness"][..],
+        "mstyle" => &["displaystyle"][..],
         _ => &[][..],
     };
     diagnose_attributes(node, path, allowed_attributes, diagnostics)?;
@@ -513,6 +567,19 @@ fn mathml_element_to_expressions(
         diagnose_structural_text(node, path, diagnostics)?;
     }
     match node.local.as_str() {
+        "mstyle" => {
+            if !matches!(
+                node.attribute("displaystyle"),
+                None | Some("true" | "false")
+            ) {
+                diagnostics.push(
+                    format!("{path}/@displaystyle"),
+                    "unsupported MathML displaystyle was discarded",
+                )?;
+            }
+            // Forced display/text style has no distinct typed OfficeMath carrier.
+            Ok(mathml_children_to_argument(node, path, diagnostics, nodes)?.expressions)
+        }
         "math" | "mrow" => {
             if node.local == "mrow"
                 && let Some(delimiter) = parse_explicit_fenced_row(node, path, diagnostics, nodes)?
@@ -534,9 +601,22 @@ fn mathml_element_to_expressions(
                 )?;
             }
             let mut run = MathRun::new(node.text());
+            if node.local == "mtext" {
+                run.properties.normal = Some(true);
+                run.properties.style = Some(MathStyle::Plain);
+            }
+            if node.local == "mo" && run.text.contains('\u{2061}') {
+                diagnostics.push(path, "out-of-context MathML function marker was retained")?;
+            }
             if let Some(variant) = node.attribute("mathvariant") {
                 if variant == "normal" {
-                    run.properties.normal = Some(true);
+                    if node.local != "mtext" {
+                        if run.text == "lim" {
+                            run.properties.normal = Some(true);
+                        } else {
+                            run.properties.style = Some(MathStyle::Plain);
+                        }
+                    }
                 } else {
                     diagnostics.push(
                         format!("{path}/@mathvariant"),
@@ -553,8 +633,13 @@ fn mathml_element_to_expressions(
                     "nested MathML spacing content was discarded",
                 )?;
             }
-            if matches!(node.attribute("width"), Some("0.167em" | "thinmathspace")) {
-                Ok(vec![MathRun::new("\u{2009}").into()])
+            if let Some(space) = match node.attribute("width") {
+                Some("0.167em" | "thinmathspace") => Some("\u{2009}"),
+                Some("0.278em") => Some("\u{2004}"),
+                Some("1em" | "1.0em") => Some("\u{2001}"),
+                _ => None,
+            } {
+                Ok(vec![MathRun::new(space).into()])
             } else {
                 diagnostics.push(
                     format!("{path}/@width"),
@@ -566,10 +651,19 @@ fn mathml_element_to_expressions(
         "mfrac" => {
             let children = mathml_element_children(node);
             require_child_count(path, &children, 2)?;
-            Ok(vec![MathExpression::Fraction(MathFraction::new(
+            let mut fraction = MathFraction::new(
                 mathml_node_to_argument(children[0], &format!("{path}/*[1]"), diagnostics, nodes)?,
                 mathml_node_to_argument(children[1], &format!("{path}/*[2]"), diagnostics, nodes)?,
-            ))])
+            );
+            match node.attribute("linethickness") {
+                Some("0" | "0px") => fraction.fraction_type = FractionType::NoBar,
+                None => {}
+                Some(_) => diagnostics.push(
+                    format!("{path}/@linethickness"),
+                    "unsupported MathML fraction line thickness was discarded",
+                )?,
+            }
+            Ok(vec![MathExpression::Fraction(fraction)])
         }
         "msub" | "msup" => {
             let children = mathml_element_children(node);
@@ -853,6 +947,7 @@ fn is_supported_mathml_element(node: &XmlNode) -> bool {
             node.local.as_str(),
             "math"
                 | "mrow"
+                | "mstyle"
                 | "mi"
                 | "mn"
                 | "mo"
@@ -1237,6 +1332,15 @@ fn parse_explicit_fenced_row(
     if delimiter.arguments.len() > 1 {
         delimiter.separator_character = separator.unwrap_or_else(|| ",".to_owned());
     }
+    if delimiter.begin_character == "("
+        && delimiter.end_character == ")"
+        && matches!(delimiter.arguments.as_slice(), [argument] if matches!(argument.expressions.as_slice(), [MathExpression::Fraction(f)] if f.fraction_type == FractionType::NoBar))
+        && first.attribute("stretchy") == Some("true")
+        && last.attribute("stretchy") == Some("true")
+    {
+        delimiter.separator_character.clear();
+        delimiter.grow = Some(true);
+    }
     Ok(Some(delimiter))
 }
 
@@ -1549,7 +1653,9 @@ fn write_mathml_argument(
 
 fn run_has_unconverted_properties(run: &MathRun, normal_supported: bool) -> bool {
     let properties = &run.properties;
-    properties.style.is_some()
+    properties
+        .style
+        .is_some_and(|style| style != MathStyle::Plain)
         || (properties.normal.is_some() && !(normal_supported && properties.normal == Some(true)))
         || properties.literal.is_some()
         || properties.script.is_some()
@@ -1581,28 +1687,71 @@ fn write_mathml_expression(
                 )?;
                 return Ok(());
             }
-            if run.properties.normal == Some(true) {
+            if run.properties.normal == Some(true) && run.properties.style == Some(MathStyle::Plain)
+            {
+                let has_content = !run.text.trim_matches(' ').is_empty();
+                let leading =
+                    has_content && run.text.starts_with(' ') && !run.text.starts_with("  ");
+                let trailing = has_content && run.text.ends_with(' ') && !run.text.ends_with("  ");
+                if leading {
+                    output.push_str("<mspace width=\"0.333em\"/>");
+                }
+                output.push_str("<mtext>");
+                // One lexical boundary space is represented by one explicit marker.
+                let text = if leading {
+                    run.text.strip_prefix(' ').unwrap_or(&run.text)
+                } else {
+                    &run.text
+                };
+                let text = if trailing {
+                    text.strip_suffix(' ').unwrap_or(text)
+                } else {
+                    text
+                };
+                output.push_str(&xml_escape(text));
+                output.push_str("</mtext>");
+                if trailing && (!leading || run.text.len() > 1) {
+                    output.push_str("<mspace width=\"0.333em\"/>");
+                }
+            } else if run.properties.normal == Some(true)
+                || run.properties.style == Some(MathStyle::Plain)
+            {
                 output.push_str("<mi mathvariant=\"normal\">");
                 output.push_str(&xml_escape(&run.text));
                 output.push_str("</mi>");
+                if run.properties.normal == Some(true) && run.text != "lim" {
+                    output.push_str("<mo>⁡</mo>");
+                }
             } else {
-                for (index, part) in run.text.split('\u{2009}').enumerate() {
-                    if index > 0 {
-                        output.push_str("<mspace width=\"0.167em\"/>");
+                let mut part = String::new();
+                for character in run.text.chars() {
+                    if let Some(width) = math_space_width(character) {
+                        if !part.is_empty() {
+                            write!(output, "<mi>{}</mi>", xml_escape(&part))
+                                .expect("String writes succeed");
+                            part.clear();
+                        }
+                        write!(output, "<mspace width=\"{width}\"/>")
+                            .expect("String writes succeed");
+                    } else {
+                        part.push(character);
                     }
-                    if !part.is_empty() || run.text.is_empty() {
-                        output.push_str("<mi>");
-                        output.push_str(&xml_escape(part));
-                        output.push_str("</mi>");
-                    }
+                }
+                if !part.is_empty() || run.text.is_empty() {
+                    write!(output, "<mi>{}</mi>", xml_escape(&part))
+                        .expect("String writes succeed");
                 }
             }
         }
         MathExpression::Fraction(value) => {
-            if value.fraction_type != FractionType::Bar {
+            if !matches!(value.fraction_type, FractionType::Bar | FractionType::NoBar) {
                 diagnostics.push(path, "non-bar OfficeMath fraction type was discarded")?;
             }
-            output.push_str("<mfrac><mrow>");
+            output.push_str(if value.fraction_type == FractionType::NoBar {
+                "<mfrac linethickness=\"0\"><mrow>"
+            } else {
+                "<mfrac><mrow>"
+            });
             write_mathml_argument(&value.numerator, path, output, diagnostics)?;
             output.push_str("</mrow><mrow>");
             write_mathml_argument(&value.denominator, path, output, diagnostics)?;
@@ -1699,7 +1848,7 @@ fn write_mathml_expression(
         }
         MathExpression::Nary(value) => write_mathml_nary(value, path, output, diagnostics)?,
         MathExpression::Delimiter(value) => {
-            if value.grow.is_some() {
+            if value.grow.is_some() && canonical_binomial(value).is_none() {
                 diagnostics.push(path, "OfficeMath delimiter growth setting was discarded")?;
             }
             if value.begin_character.chars().count() > 1
@@ -2027,13 +2176,27 @@ impl<'a> LatexParser<'a> {
         self.bump();
         let command = self.read_command_name();
         match command.as_str() {
-            "frac" => {
+            "frac" | "dfrac" | "tfrac" | "binom" => {
                 let numerator = self.parse_required_group()?;
                 let denominator = self.parse_required_group()?;
                 self.add_node()?;
-                Ok(MathArgument::new(vec![MathExpression::Fraction(
-                    MathFraction::new(numerator, denominator),
-                )]))
+                let mut fraction = MathFraction::new(numerator, denominator);
+                let expression = if command == "binom" {
+                    fraction.fraction_type = FractionType::NoBar;
+                    let mut delimiter = MathDelimiter::new(
+                        "(",
+                        ")",
+                        vec![MathArgument::new(vec![MathExpression::Fraction(fraction)])],
+                    );
+                    delimiter.separator_character.clear();
+                    delimiter.grow = Some(true);
+                    self.add_node()?;
+                    MathExpression::Delimiter(delimiter)
+                } else {
+                    // OfficeMath canonicalizes forced TeX styles to a stacked bar.
+                    MathExpression::Fraction(fraction)
+                };
+                Ok(MathArgument::new(vec![expression]))
             }
             "sqrt" => {
                 self.skip_whitespace();
@@ -2078,12 +2241,46 @@ impl<'a> LatexParser<'a> {
                 }]))
             }
             "begin" => self.parse_matrix_environment(start),
-            "pi" | "to" | "rightarrow" | "infty" | "," | "lim" => {
+            "operatorname" | "mathrm" | "text" => {
+                let text = self.read_literal_group()?;
+                self.add_node()?;
+                let mut run = MathRun::new(text);
+                if command != "mathrm" {
+                    run.properties.normal = Some(true);
+                }
+                if command != "operatorname" {
+                    run.properties.style = Some(MathStyle::Plain);
+                }
+                Ok(MathArgument::new(vec![run.into()]))
+            }
+            "sin" | "log" | "ln" | "exp" => {
+                self.add_text(command.len())?;
+                self.add_node()?;
+                let mut run = MathRun::new(command);
+                run.properties.normal = Some(true);
+                Ok(MathArgument::new(vec![run.into()]))
+            }
+            name if latex_symbol(name).is_some() => {
+                let character = latex_symbol(name).expect("matched finite symbol");
+                self.add_text(character.len_utf8())?;
+                self.add_node()?;
+                let mut run = MathRun::new(character.to_string());
+                if !matches!(
+                    character,
+                    'α' | 'β' | 'θ' | 'λ' | 'μ' | 'σ' | 'ω' | 'ε' | 'ϕ' | 'φ' | '∂'
+                ) {
+                    run.properties.style = Some(MathStyle::Plain);
+                }
+                Ok(MathArgument::new(vec![run.into()]))
+            }
+            "pi" | "to" | "rightarrow" | "infty" | "," | ";" | "quad" | "lim" => {
                 let text = match command.as_str() {
                     "pi" => "π",
                     "to" | "rightarrow" => "→",
                     "infty" => "∞",
                     "," => "\u{2009}",
+                    ";" => "\u{2004}",
+                    "quad" => "\u{2001}",
                     _ => "lim",
                 };
                 self.add_text(text.len())?;
@@ -2094,7 +2291,7 @@ impl<'a> LatexParser<'a> {
                 }
                 Ok(MathArgument::new(vec![run.into()]))
             }
-            ";" | "!" | " " => {
+            "!" | " " => {
                 self.diagnostics.push(
                     format!("byte:{start}"),
                     format!("unsupported LaTeX spacing \\{command} was discarded"),
@@ -2285,6 +2482,43 @@ impl<'a> LatexParser<'a> {
     fn parse_required_argument(&mut self) -> Result<MathArgument> {
         self.skip_whitespace();
         self.parse_atom()
+    }
+
+    fn read_literal_group(&mut self) -> Result<String> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.error("LaTeX literal group exceeds the depth limit"));
+        }
+        self.skip_whitespace();
+        if self.bump() != Some('{') {
+            return Err(self.error("expected a braced literal"));
+        }
+        let mut value = String::new();
+        loop {
+            self.bump_token()?;
+            match self.bump() {
+                Some('}') => {
+                    if !is_xml_1_0_text(&value) {
+                        return Err(
+                            self.error("literal group contains a forbidden XML 1.0 character")
+                        );
+                    }
+                    return Ok(value);
+                }
+                Some('{') => return Err(self.error("nested literal groups are unsupported")),
+                Some('\\') => match self.bump() {
+                    Some(character @ ('{' | '}' | '\\' | '_' | '^' | '#' | '$' | '%' | '&')) => {
+                        self.add_text(character.len_utf8())?;
+                        value.push(character);
+                    }
+                    _ => return Err(self.error("unsupported command in literal group")),
+                },
+                Some(character) => {
+                    self.add_text(character.len_utf8())?;
+                    value.push(character);
+                }
+                None => return Err(self.error("unterminated literal group")),
+            }
+        }
     }
 
     fn read_raw_group(&mut self) -> Result<String> {
@@ -2876,20 +3110,43 @@ fn write_latex_expression(
     }
     match expression {
         MathExpression::Run(run) => {
-            let upright_lim = run.text == "lim" && run.properties.normal == Some(true);
-            if run_has_unconverted_properties(run, upright_lim) {
+            let upright = run.properties.normal == Some(true);
+            if run_has_unconverted_properties(run, upright) {
                 diagnostics.push(path, "OfficeMath run properties were discarded")?;
             }
-            if run
-                .text
-                .chars()
-                .any(|character| character.is_whitespace() && character != '\u{2009}')
+            let literal = run.properties.style == Some(MathStyle::Plain);
+            if upright && literal {
+                output.push_str("\\text{");
+                output.push_str(&latex_literal_escape(&run.text));
+                output.push('}');
+            } else if upright {
+                if matches!(run.text.as_str(), "lim" | "sin" | "log" | "ln" | "exp") {
+                    write!(output, "\\{} ", run.text).expect("String writes succeed");
+                } else {
+                    write!(
+                        output,
+                        "\\operatorname{{{}}}",
+                        latex_literal_escape(&run.text)
+                    )
+                    .expect("String writes succeed");
+                }
+            } else if literal
+                && !(run.text.chars().count() == 1
+                    && run
+                        .text
+                        .chars()
+                        .next()
+                        .and_then(latex_symbol_name)
+                        .is_some())
             {
-                diagnostics.push(path, "OfficeMath run whitespace was discarded by LaTeX")?;
-            }
-            if upright_lim {
-                output.push_str("\\lim ");
+                write!(output, "\\mathrm{{{}}}", latex_literal_escape(&run.text))
+                    .expect("String writes succeed");
             } else {
+                if run.text.chars().any(|character| {
+                    character.is_whitespace() && math_space_width(character).is_none()
+                }) {
+                    diagnostics.push(path, "OfficeMath run whitespace was discarded by LaTeX")?;
+                }
                 output.push_str(&latex_escape(&run.text));
             }
         }
@@ -3005,8 +3262,14 @@ fn write_latex_expression(
             }
             write_latex_group(&value.base, path, output, diagnostics)?;
         }
+        MathExpression::Delimiter(value) if canonical_binomial(value).is_some() => {
+            let fraction = canonical_binomial(value).expect("matched canonical binomial");
+            output.push_str("\\binom");
+            write_latex_group(&fraction.numerator, path, output, diagnostics)?;
+            write_latex_group(&fraction.denominator, path, output, diagnostics)?;
+        }
         MathExpression::Delimiter(value) => {
-            if value.grow.is_some() {
+            if value.grow.is_some() && canonical_binomial(value).is_none() {
                 diagnostics.push(path, "OfficeMath delimiter growth setting was discarded")?;
             }
             if value.begin_character.chars().count() > 1
@@ -3051,12 +3314,151 @@ fn write_latex_expression(
     Ok(())
 }
 
+fn canonical_binomial(value: &MathDelimiter) -> Option<&MathFraction> {
+    if value.begin_character != "("
+        || value.end_character != ")"
+        || !value.separator_character.is_empty()
+        || value.grow != Some(true)
+    {
+        return None;
+    }
+    let [argument] = value.arguments.as_slice() else {
+        return None;
+    };
+    let [expression @ MathExpression::Fraction(fraction)] = argument.expressions.as_slice() else {
+        return None;
+    };
+    (fraction.fraction_type == FractionType::NoBar
+        && !expression_has_direct_unsupported_content(expression))
+    .then_some(fraction)
+}
+
+fn math_space_width(character: char) -> Option<&'static str> {
+    match character {
+        '\u{2009}' => Some("0.167em"),
+        '\u{2004}' => Some("0.278em"),
+        '\u{2001}' => Some("1.0em"),
+        _ => None,
+    }
+}
+
+fn latex_literal_escape(value: &str) -> String {
+    let mut result = String::new();
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '{' | '}' | '_' | '^' | '#' | '$' | '%' | '&'
+        ) {
+            result.push('\\');
+        }
+        result.push(character);
+    }
+    result
+}
+
+fn latex_symbol(command: &str) -> Option<char> {
+    Some(match command {
+        "alpha" => 'α',
+        "beta" => 'β',
+        "theta" => 'θ',
+        "lambda" => 'λ',
+        "mu" => 'μ',
+        "sigma" => 'σ',
+        "omega" => 'ω',
+        "varepsilon" => 'ε',
+        "phi" => 'ϕ',
+        "varphi" => 'φ',
+        "Delta" => 'Δ',
+        "Sigma" => 'Σ',
+        "Omega" => 'Ω',
+        "Gamma" => 'Γ',
+        "le" | "leq" => '≤',
+        "ge" | "geq" => '≥',
+        "ne" | "neq" => '≠',
+        "approx" => '≈',
+        "equiv" => '≡',
+        "sim" => '∼',
+        "propto" => '∝',
+        "in" => '∈',
+        "subset" => '⊂',
+        "times" => '×',
+        "cdot" => '⋅',
+        "div" => '÷',
+        "pm" => '±',
+        "mp" => '∓',
+        "cup" => '∪',
+        "cap" => '∩',
+        "Rightarrow" => '⇒',
+        "leftarrow" => '←',
+        "partial" => '∂',
+        "nabla" => '∇',
+        "forall" => '∀',
+        "exists" => '∃',
+        "degree" => '°',
+        "ldots" => '…',
+        "cdots" => '⋯',
+        _ => return None,
+    })
+}
+
+fn latex_symbol_name(character: char) -> Option<&'static str> {
+    Some(match character {
+        'α' => "alpha",
+        'β' => "beta",
+        'θ' => "theta",
+        'λ' => "lambda",
+        'μ' => "mu",
+        'σ' => "sigma",
+        'ω' => "omega",
+        'ε' => "varepsilon",
+        'ϕ' => "phi",
+        'φ' => "varphi",
+        'Δ' => "Delta",
+        'Σ' => "Sigma",
+        'Ω' => "Omega",
+        'Γ' => "Gamma",
+        '≤' => "leq",
+        '≥' => "geq",
+        '≠' => "neq",
+        '≈' => "approx",
+        '≡' => "equiv",
+        '∼' => "sim",
+        '∝' => "propto",
+        '∈' => "in",
+        '⊂' => "subset",
+        '×' => "times",
+        '⋅' => "cdot",
+        '÷' => "div",
+        '±' => "pm",
+        '∓' => "mp",
+        '∪' => "cup",
+        '∩' => "cap",
+        '⇒' => "Rightarrow",
+        '←' => "leftarrow",
+        '∂' => "partial",
+        '∇' => "nabla",
+        '∀' => "forall",
+        '∃' => "exists",
+        '°' => "degree",
+        '…' => "ldots",
+        '⋯' => "cdots",
+        _ => return None,
+    })
+}
+
 fn latex_escape(value: &str) -> String {
     let mut escaped = String::new();
     for character in value.chars() {
         match character {
             '\\' => escaped.push_str("\\backslash{}"),
             '\u{2009}' => escaped.push_str("\\,"),
+            '\u{2004}' => escaped.push_str("\\;"),
+            '\u{2001}' => escaped.push_str("\\quad "),
+            character if latex_symbol_name(character).is_some() => {
+                escaped.push('\\');
+                escaped.push_str(latex_symbol_name(character).expect("matched finite symbol"));
+                escaped.push_str("{}");
+            }
             '[' => escaped.push_str("\\lbrack{}"),
             ']' => escaped.push_str("\\rbrack{}"),
             '{' | '}' | '_' | '^' | '#' | '$' | '%' | '&' => {
@@ -3097,6 +3499,394 @@ mod tests {
     use rdocx_oxml::math::{CT_OMath, LimitLocation, MathStyle};
 
     use super::*;
+
+    const FX247_CASES: [&str; 73] = [
+        r"\alpha + \beta",
+        r"\pi r^2",
+        r"\theta",
+        r"\lambda",
+        r"\mu",
+        r"\sigma",
+        r"\omega",
+        r"\varepsilon",
+        r"\phi",
+        r"\varphi",
+        r"\Delta x",
+        r"\Sigma",
+        r"\Omega",
+        r"\Gamma",
+        r"a \le b",
+        r"a \leq b",
+        r"a \ge b",
+        r"a \geq b",
+        r"a \ne b",
+        r"a \neq b",
+        r"a \approx b",
+        r"a \equiv b",
+        r"a \sim b",
+        r"a \propto b",
+        r"x \in A",
+        r"A \subset B",
+        r"a \times b",
+        r"a \cdot b",
+        r"a \div b",
+        r"a \pm b",
+        r"a \mp b",
+        r"A \cup B",
+        r"A \cap B",
+        r"a \to b",
+        r"a \rightarrow b",
+        r"a \Rightarrow b",
+        r"a \leftarrow b",
+        r"\infty",
+        r"\partial f",
+        r"\nabla f",
+        r"\forall x",
+        r"\exists x",
+        r"\degree",
+        r"\ldots",
+        r"\cdots",
+        r"\lim_{x \to 0} x",
+        r"\sin x",
+        r"\log x",
+        r"\ln x",
+        r"\exp x",
+        r"\operatorname{tr} A",
+        r"\mathrm{d}x",
+        r"\text{if } x",
+        r"\binom{n}{k}",
+        r"\dfrac{1}{2}",
+        r"\tfrac{1}{2}",
+        r"a\quad b",
+        r"\frac{1}{2}",
+        r"\sqrt{2}",
+        r"\sqrt[3]{x}",
+        r"\sum_{i=1}^{n} i",
+        r"\prod_{i=1}^{n} i",
+        r"\int_0^1 x\,dx",
+        r"\oint",
+        r"\left( x \right)",
+        r"\overline{x}",
+        r"\hat{x}",
+        r"\bar{x}",
+        r"\vec{v}",
+        r"\dot{x}",
+        r"a\;b",
+        r"M = \frac{4\pi^{2} a^{3}}{G T^{2}}",
+        r"M = \frac{4π^{2} a^{3}}{G T^{2}}",
+    ];
+
+    #[test]
+    fn fx247_synthesized_text_boundary_spaces_obey_the_final_text_cap() {
+        for (prefix, suffix, synthesized) in [
+            ("", "<mspace width=\"0.333em\"/>", 1),
+            ("<mspace width=\"0.333em\"/>", "", 1),
+            (
+                "<mspace width=\"0.333em\"/>",
+                "<mspace width=\"0.333em\"/>",
+                2,
+            ),
+        ] {
+            let source = |text: usize| {
+                format!(
+                    "<math xmlns=\"{MATHML_NS}\">{prefix}<mtext>{}</mtext>{suffix}</math>",
+                    "x".repeat(text)
+                )
+            };
+            let at_limit = equation_from_mathml(&source(MAX_TEXT_BYTES - synthesized)).unwrap();
+            assert!(at_limit.diagnostics.is_empty());
+            let [MathExpression::Run(run)] = at_limit.value.expressions.as_slice() else {
+                panic!("one normal-text run")
+            };
+            assert_eq!(run.text.len(), MAX_TEXT_BYTES);
+            assert!(equation_from_mathml(&source(MAX_TEXT_BYTES - synthesized + 1)).is_err());
+        }
+    }
+
+    #[test]
+    fn fx247_actual_pandoc_semantics_style_wrapper_retains_stacked_fraction() {
+        for style in ["true", "false"] {
+            let source = format!(
+                "<math xmlns=\"{MATHML_NS}\"><semantics><mstyle displaystyle=\"{style}\"><mfrac><mn>1</mn><mn>2</mn></mfrac></mstyle></semantics></math>"
+            );
+            let imported = equation_from_mathml(&source).unwrap();
+            assert_eq!(
+                imported.value,
+                MathArgument::new(vec![MathExpression::Fraction(MathFraction::new(
+                    MathArgument::text("1"),
+                    MathArgument::text("2")
+                ))])
+            );
+            assert_eq!(imported.diagnostics.len(), 1);
+            assert_eq!(
+                imported.diagnostics[0].message,
+                "MathML semantics metadata was discarded"
+            );
+            let annotated = source.replace("<semantics>", "<semantics><annotation encoding=\"application/x-tex\">not the expression</annotation><foreign xmlns=\"urn:unused\"/>");
+            assert_eq!(
+                equation_from_mathml(&annotated).unwrap().value,
+                imported.value
+            );
+            let unknown = source.replace(
+                &format!("displaystyle=\"{style}\""),
+                "displaystyle=\"unsupported\"",
+            );
+            let unknown = equation_from_mathml(&unknown).unwrap();
+            assert_eq!(unknown.value, imported.value);
+            assert_eq!(unknown.diagnostics.len(), 2);
+            assert!(unknown.diagnostics[1].path.ends_with("/@displaystyle"));
+        }
+    }
+
+    #[test]
+    fn fx247_finite_symbol_table_and_case_aliases() {
+        let expected = [
+            (r"\alpha", "α"),
+            (r"\beta", "β"),
+            (r"\theta", "θ"),
+            (r"\lambda", "λ"),
+            (r"\mu", "μ"),
+            (r"\sigma", "σ"),
+            (r"\omega", "ω"),
+            (r"\varepsilon", "ε"),
+            (r"\phi", "ϕ"),
+            (r"\varphi", "φ"),
+            (r"\Delta", "Δ"),
+            (r"\Sigma", "Σ"),
+            (r"\Omega", "Ω"),
+            (r"\Gamma", "Γ"),
+            (r"\le", "≤"),
+            (r"\leq", "≤"),
+            (r"\ge", "≥"),
+            (r"\geq", "≥"),
+            (r"\ne", "≠"),
+            (r"\neq", "≠"),
+            (r"\approx", "≈"),
+            (r"\equiv", "≡"),
+            (r"\sim", "∼"),
+            (r"\propto", "∝"),
+            (r"\in", "∈"),
+            (r"\subset", "⊂"),
+            (r"\times", "×"),
+            (r"\cdot", "⋅"),
+            (r"\div", "÷"),
+            (r"\pm", "±"),
+            (r"\mp", "∓"),
+            (r"\cup", "∪"),
+            (r"\cap", "∩"),
+            (r"\Rightarrow", "⇒"),
+            (r"\leftarrow", "←"),
+            (r"\partial", "∂"),
+            (r"\nabla", "∇"),
+            (r"\forall", "∀"),
+            (r"\exists", "∃"),
+            (r"\degree", "°"),
+            (r"\ldots", "…"),
+            (r"\cdots", "⋯"),
+        ];
+        for (source, text) in expected {
+            let parsed = equation_from_latex(source).unwrap();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{source}: {:?}",
+                parsed.diagnostics
+            );
+            let [MathExpression::Run(run)] = parsed.value.expressions.as_slice() else {
+                panic!("{source}")
+            };
+            assert_eq!(run.text, text, "{source}");
+            let reverse = equation_to_latex(&parsed.value);
+            assert!(
+                reverse.diagnostics.is_empty(),
+                "{source}: {:?}",
+                reverse.diagnostics
+            );
+            assert_eq!(
+                equation_from_latex(&reverse.value).unwrap().value,
+                parsed.value
+            );
+        }
+        assert!(
+            !equation_from_latex(r"\ALPHA")
+                .unwrap()
+                .diagnostics
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn fx247_upright_roles_and_text_boundary_spaces() {
+        for (source, text, normal, style) in [
+            (r"\sin", "sin", Some(true), None),
+            (r"\operatorname{tr}", "tr", Some(true), None),
+            (r"\mathrm{d}", "d", None, Some(MathStyle::Plain)),
+            (r"\text{if }", "if ", Some(true), Some(MathStyle::Plain)),
+            (
+                r"\text{ a  b }",
+                " a  b ",
+                Some(true),
+                Some(MathStyle::Plain),
+            ),
+        ] {
+            let parsed = equation_from_latex(source).unwrap();
+            assert!(parsed.diagnostics.is_empty(), "{source}");
+            let [MathExpression::Run(run)] = parsed.value.expressions.as_slice() else {
+                panic!("{source}")
+            };
+            assert_eq!(
+                (&*run.text, run.properties.normal, run.properties.style),
+                (text, normal, style)
+            );
+            let mathml = equation_to_mathml(&parsed.value);
+            assert!(
+                mathml.diagnostics.is_empty(),
+                "{source}: {:?}",
+                mathml.diagnostics
+            );
+            let reopened = equation_from_mathml(&mathml.value).unwrap();
+            assert!(
+                reopened.diagnostics.is_empty(),
+                "{source}: {:?}",
+                reopened.diagnostics
+            );
+            assert_eq!(reopened.value, parsed.value, "{source}: {}", mathml.value);
+            let latex = equation_to_latex(&parsed.value);
+            assert!(
+                latex.diagnostics.is_empty(),
+                "{source}: {:?}",
+                latex.diagnostics
+            );
+            assert_eq!(
+                equation_from_latex(&latex.value).unwrap().value,
+                parsed.value
+            );
+        }
+        assert!(
+            !equation_from_mathml(&format!(r#"<math xmlns="{MATHML_NS}"><mo>⁡</mo></math>"#))
+                .unwrap()
+                .diagnostics
+                .is_empty()
+        );
+        assert!(
+            equation_from_latex(&format!(
+                "{}\\text{{x}}{}",
+                "{".repeat(MAX_DEPTH),
+                "}".repeat(MAX_DEPTH)
+            ))
+            .is_err()
+        );
+        assert!(equation_from_latex("\\text{bad\0}").is_err());
+        for source in [r"\text{bad\unknown}", r"\text{bad{nest}}", r"\text{bad"] {
+            assert!(equation_from_latex(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn fx247_canonical_stacked_fractions_and_binomial() {
+        for source in [r"\frac{1}{2}", r"\dfrac{1}{2}", r"\tfrac{1}{2}"] {
+            let parsed = equation_from_latex(source).unwrap();
+            assert!(parsed.diagnostics.is_empty(), "{source}");
+            assert_eq!(
+                parsed.value,
+                MathArgument::new(vec![MathExpression::Fraction(MathFraction::new(
+                    MathArgument::text("1"),
+                    MathArgument::text("2")
+                ))])
+            );
+            assert_eq!(equation_to_latex(&parsed.value).value, r"\frac{1}{2}");
+        }
+        let parsed = equation_from_latex(r"\binom{n}{k}").unwrap();
+        assert!(parsed.diagnostics.is_empty());
+        let [MathExpression::Delimiter(d)] = parsed.value.expressions.as_slice() else {
+            panic!("binomial")
+        };
+        assert_eq!(
+            (
+                &*d.begin_character,
+                &*d.end_character,
+                &*d.separator_character,
+                d.grow
+            ),
+            ("(", ")", "", Some(true))
+        );
+        let [MathExpression::Fraction(f)] = d.arguments[0].expressions.as_slice() else {
+            panic!("no fraction")
+        };
+        assert_eq!(f.fraction_type, FractionType::NoBar);
+        assert_eq!(f.numerator, MathArgument::text("n"));
+        assert_eq!(f.denominator, MathArgument::text("k"));
+        assert_eq!(equation_to_latex(&parsed.value).value, r"\binom{n}{k}");
+        let ml = equation_to_mathml(&parsed.value);
+        assert!(ml.diagnostics.is_empty(), "{:?}", ml.diagnostics);
+        assert_eq!(equation_from_mathml(&ml.value).unwrap().value, parsed.value);
+    }
+
+    #[test]
+    fn fx247_spacing_is_distinct_and_round_trips() {
+        for (source, expected, width) in [
+            (r"a\,b", "a\u{2009}b", "0.167em"),
+            (r"a\;b", "a\u{2004}b", "0.278em"),
+            (r"a\quad b", "a\u{2001}b", "1.0em"),
+        ] {
+            let parsed = equation_from_latex(source).unwrap();
+            assert!(parsed.diagnostics.is_empty(), "{source}");
+            assert_eq!(parsed.value, MathArgument::text(expected));
+            let ml = equation_to_mathml(&parsed.value);
+            assert!(ml.diagnostics.is_empty());
+            assert!(ml.value.contains(width));
+            assert_eq!(equation_from_mathml(&ml.value).unwrap().value, parsed.value);
+            let latex = equation_to_latex(&parsed.value);
+            assert!(latex.diagnostics.is_empty());
+            assert_eq!(
+                equation_from_latex(&latex.value).unwrap().value,
+                parsed.value
+            );
+        }
+    }
+
+    #[test]
+    fn fx247_all73_conversion_round_trips_and_zero_diagnostics() {
+        for (index, source) in FX247_CASES.iter().enumerate() {
+            let parsed = equation_from_latex(source).unwrap();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "row{} {source}: {:?}",
+                index + 1,
+                parsed.diagnostics
+            );
+            for reverse in [
+                equation_to_latex(&parsed.value),
+                equation_to_mathml(&parsed.value),
+            ] {
+                assert!(
+                    reverse.diagnostics.is_empty(),
+                    "row{} {source}: {:?}",
+                    index + 1,
+                    reverse.diagnostics
+                );
+                let reopened = if reverse.value.starts_with('<') {
+                    equation_from_mathml(&reverse.value)
+                } else {
+                    equation_from_latex(&reverse.value)
+                }
+                .unwrap();
+                assert!(
+                    reopened.diagnostics.is_empty(),
+                    "row{} {}: {:?}",
+                    index + 1,
+                    reverse.value,
+                    reopened.diagnostics
+                );
+                assert_eq!(
+                    reopened.value,
+                    parsed.value,
+                    "row{} {}",
+                    index + 1,
+                    reverse.value
+                );
+            }
+        }
+    }
 
     const ISSUE365: &str =
         r"\int_{a}^{b} e^{i \pi K} \, dx = \lim_{x \to \infty} \frac{S}{\sqrt{T^2 + C^2}}";
@@ -3232,7 +4022,11 @@ mod tests {
                 .iter()
                 .map(|d| d.path.as_str())
                 .collect::<Vec<_>>(),
-            ["/math[1]/mi[1]/@mathvariant", "/math[1]/mspace[1]/@width"]
+            [
+                "/math[1]/mi[1]/@mathvariant",
+                "/math[1]/mspace[1]/@width",
+                "/math[1]/mo[1]"
+            ]
         );
         let mut lim = MathRun::new("lim");
         lim.properties.normal = Some(true);
@@ -3241,14 +4035,14 @@ mod tests {
             MathArgument::new(vec![MathRun::new("x\u{2061}").into(), lim.into()])
         );
         let losses = equation_from_latex(r"a\;b\!c\unknown{d}").unwrap();
-        assert_eq!(losses.value, MathArgument::text("abc"));
+        assert_eq!(losses.value, MathArgument::text("a\u{2004}bc"));
         assert_eq!(
             losses
                 .diagnostics
                 .iter()
                 .map(|d| d.path.as_str())
                 .collect::<Vec<_>>(),
-            ["byte:1", "byte:4", "byte:7"]
+            ["byte:4", "byte:7"]
         );
         assert!(
             equation_from_latex(&format!(
@@ -3488,41 +4282,44 @@ mod tests {
         ))
         .expect("complete supported MathML subset");
         assert!(coverage.diagnostics.is_empty());
-        assert_eq!(coverage.value.expressions.len(), 9);
+        assert_eq!(coverage.value.expressions.len(), 10);
         assert!(matches!(
             &coverage.value.expressions[0],
-            MathExpression::Run(run) if run.text == "x2+word"
+            MathExpression::Run(run) if run.text == "x2+"
         ));
+        assert!(
+            matches!(&coverage.value.expressions[1], MathExpression::Run(run) if run.text == "word" && run.properties.normal == Some(true) && run.properties.style == Some(MathStyle::Plain))
+        );
         assert!(matches!(
-            coverage.value.expressions[1],
+            coverage.value.expressions[2],
             MathExpression::Subscript(_)
         ));
         assert!(matches!(
-            coverage.value.expressions[2],
+            coverage.value.expressions[3],
             MathExpression::Superscript(_)
         ));
         assert!(matches!(
-            coverage.value.expressions[3],
+            coverage.value.expressions[4],
             MathExpression::PreSubSuperscript(_)
         ));
         assert!(matches!(
-            coverage.value.expressions[4],
+            coverage.value.expressions[5],
             MathExpression::Radical(_)
         ));
         assert!(matches!(
-            coverage.value.expressions[5],
+            coverage.value.expressions[6],
             MathExpression::LowerLimit(_)
         ));
         assert!(matches!(
-            coverage.value.expressions[6],
+            coverage.value.expressions[7],
             MathExpression::UpperLimit(_)
         ));
         assert!(matches!(
-            coverage.value.expressions[7],
+            coverage.value.expressions[8],
             MathExpression::Nary(_)
         ));
         assert!(matches!(
-            &coverage.value.expressions[8],
+            &coverage.value.expressions[9],
             MathExpression::Delimiter(value) if value.separator_character == ";"
         ));
 

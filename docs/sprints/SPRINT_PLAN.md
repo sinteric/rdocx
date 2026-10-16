@@ -775,7 +775,7 @@ worth filling in the Rust ecosystem.
 | S59 to S64 | M21, presentation depth | 15 | 60 |
 | S65 to S69 | M22, Word depth | 12 | 44 |
 | S70 to S73 | M23, from-scratch business documents | 24 | 112 |
-| S74 to S75, S86, S89 to S91, S95, S97 to S99 | M24, modern DOCX authoring completeness | 47 | 219 |
+| S74 to S75, S86, S89 to S91, S95.2 to S95.4, S97 to S99 | M24, modern DOCX authoring completeness | 47 | 219 |
 | S100 | M20, external Word benchmark fidelity | 6 | 21 |
 | S101 to S110 | M19, advanced spreadsheets | 21 | 85 |
 
@@ -2717,47 +2717,161 @@ in published artefacts is a packaging decision reviewed at design, not a
 default change for the Rust crates. F-X247 follows the completed S93 bounded
 conversion/layout repairs and shares Word facade, binding test and oracle
 carriers only through explicit leases. Its pending follow-up does not expand
-S93 acceptance or add work to the eleven-story S95 capacity split.
+S93 acceptance. The S95 through S95.4 programme separately includes new
+Issue384 and Issue385 repairs and the eleven existing carryovers.
 
-#### Sprint S95, Bibliography and navigation carryovers, templates and forms
+#### Sprint S95, New validation, form and rendering repairs
 
-**Goal**: resume the parked F-X192 bibliography and F-283 navigation contracts
-after S91. Preserve the existing template, control and form programme for
-capacity review when S95 opens. The eleven-story batch has a lower-bound
-estimate of 36 developer-days and must be split before opening. This scheduling decision opens no new sprint
-and changes no acceptance contract.
+**Goal**: prioritize the new Issue384 and Issue385 repairs after S94 closes.
+Five stories total 10 to 15 developer-days. S95 does not close the whole Issue385
+union, whose remaining authoring and PowerPoint admission work is in S95.1.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X248 | Validate identified paragraphs inside block content controls | M |
+| F-X249 | Set typed content control values as Word does | M |
+| F-X251 | Refuse invalid Word values before publication | M |
+| F-X252 | Refuse newly invalid Word raw XML atomically | M |
+| F-X253 | Honor imported chart types and hidden master shapes | M |
+
+#### Sprint S95.1, Remaining everyday APIs and native interoperability
+
+**Goal**: complete the remaining Issue385 repairs and the two bounded native
+interoperability carryovers. Four stories total 12 to 16 developer-days.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X250 | Complete everyday Word chart equation list and note APIs | L |
+| F-X254 | Refuse invalid PowerPoint values XML and empty edits | L |
+| F-X219 | Qualify full-range text watermark interoperability | M |
+| F-X223 | Qualify native Word embedded multi-face interoperability | M |
+
+#### Sprint S95.2, Bibliography, navigation and template carryovers
+
+**Goal**: resume F-X192 and F-283 and establish the stable template grammar.
+Three stories provisionally total 12 to 15 developer-days. F-X192 has a partial
+registered worker, not an absent disposable worktree. Preserve its surviving
+files, Git metadata/index/branch and native evidence before an authenticated
+resume. Missing original unstaged source and the exact unresolved whole-feature
+findings require a recovery/design checkpoint. This estimate is provisional
+until that uncertainty is resolved, not a claim of exact old source recovery.
 
 | F-ID | Title | Size |
 |------|-------|------|
 | F-X192 | Complete the remaining Word bibliography catalogue | L |
-| F-X219 | Qualify full-range text watermark interoperability | M |
-| F-X223 | Qualify native Word embedded multi-face interoperability | M |
 | F-283 | Complete numbering-aware navigation fields | L |
 | F-284 | Stable container-wide template grammar | L |
+
+F-283 consumes completed F-X200 numbering without duplicate work. F-284 retains
+the existing S89 fragment-transaction foundation. Issues264 and281 remain open
+under their current contracts, not new repair acceptance.
+
+#### Sprint S95.3, Content control foundations and typed values
+
+**Goal**: author the control lifecycle before typed values and XML bindings.
+Three stories total 12 to 15 developer-days.
+
+| F-ID | Title | Size |
+|------|-------|------|
 | F-285 | Content control creation and lifecycle | L |
 | F-286 | Rich, repeating, and typed content controls | L |
 | F-287 | Custom XML stores and data binding authoring | L |
+
+Complete and integrate F-285 through its scoped dependency-prefix checkpoint
+before starting F-286 or F-287. Their shared source/resource leases may require
+serial implementation even though neither formally depends on the other.
+F-X249's bounded existing-control fill repair does not replace these authoring
+contracts.
+
+#### Sprint S95.4, Complete form and mail-merge authoring
+
+**Goal**: compose legacy fields and modern forms, and author mail-merge data.
+Three stories total 8 to 11 developer-days.
+
+| F-ID | Title | Size |
+|------|-------|------|
 | F-288 | Legacy form field creation | M |
 | F-289 | Modern Word form authoring | L |
 | F-290 | Mail-merge package and data-source authoring | M |
+
+Complete and integrate F-288 through its scoped dependency-prefix checkpoint
+before F-289. Its F-285 through F-287 prerequisites complete in S95.3. F-290
+keeps its existing dependencies and may proceed only under distinct leases.
+Public-created forms/templates require save/reopen and explicit diagnostics for
+unavailable external mail-merge data. S96 follows the completed form programme.
+
+The five boundaries contain eighteen stories, seven new cross-cutting repairs
+and eleven existing stories, totalling54to72developer-days. These are effort
+ranges, not elapsed-time promises. Every boundary retains the normal complete
+integrated gate and sprint review. Only the selected S95 opens after S94 closes.
+Later fractional boundaries open sequentially, without renumbering S96 through
+S110 or claiming future completion. Update any carried plan's current schedule
+through ordinary design/revision before its claim, preserving prior reviews.
 
 Restore the missing historical native PowerPoint timeline movie/frame and
 SmartArt PNG oracle inputs as later fixture infrastructure. Their four existing
 missing-input checks remain explicitly uncredited in S91. Regeneration must
 use actual independent producer output, with a separate infrastructure design
-when resumed. It adds no repair scope to the frozen S91 issue/PR set and does
-not waive applicable current source, schema, save/reopen or rendering gates.
+when resumed. This is not extra unestimated acceptance inside these eighteen
+stories and does not waive current source, schema or rendering gates.
 
-F-X192 resumes its retained unfinished worker branch and native evidence.
-F-283 consumes completed S91 F-X200 numbering without duplicate work.
-These two stories are parked, not completed. Issues264 and281 remain open.
+##### New issue acceptance ownership
 
-F-284 builds on S89 fragment transactions. F-285 establishes the control
-lifecycle before F-286 and F-287 add typed values and bindings. F-288 uses the
-S90 field builder. F-289 composes controls, bindings, ranges, and protection
-into a complete form. F-290 may proceed alongside the form work after S90.
-The sprint gate checks public-created templates and forms through save-reopen,
-with explicit diagnostics for unavailable external mail-merge data.
+Issue384 and Issue385 were created on2026-10-16 against main3a3b0de8. Preserve
+original bodies and the linked reporter tests at immutable skills commit
+`91a57108f13877cfb6179a70077d425d6ebf098b`. The [Word tests](https://github.com/hadim/rdocx-skills/blob/91a57108f13877cfb6179a70077d425d6ebf098b/tests/test_docx_everyday.py)
+and [PowerPoint tests](https://github.com/hadim/rdocx-skills/blob/91a57108f13877cfb6179a70077d425d6ebf098b/tests/test_pptx.py)
+are source-generated strict expected-failure controls. Establish fresh RED on
+final integrated S94. Retain the unchanged original strict run and its raw
+`XFAIL` and `XPASS(strict)` outcomes, without changing or removing markers or
+labelling that original run green. Separately execute the unchanged test bodies
+and checks, for example with pytest `--runxfail`, and qualify their actual
+outcomes with independent semantic/atomicity observers. Label these executions
+separately. Do not treat old main observations as fresh current-source failures
+or hide the original strict-run outcomes when claiming repaired behavior.
+
+| Issue criterion | Owner | Required outcome |
+|---|---|---|
+| [384](https://github.com/tensorbee/rdocx/issues/384), block SDT paragraph identifiers | F-X248 | CLI and both Python validation routes succeed, paraId/textId survive save/reopen, real owner mismatches still refuse |
+| [385](https://github.com/tensorbee/rdocx/issues/385), Word chart read-back | F-X250 | Reopened document charts expose type, categories and series values |
+| 385, Word content control values | F-X249 | Remove placeholder flag, write fullDate, map declared list value/display text, refuse invalid choice and missing individual selector, CLI agrees |
+| 385, Word display equations | F-X250 | display=True stores m:oMathPara and inspection reports display |
+| 385, Word values accepted silently | F-X251 | Refuse wrong save format, duplicate tab, header page break, malformed language and nameless font before publication |
+| 385, Word list numbering | F-X250 | Restart flag, explicit restart at5 and bullet-level font survive reopen |
+| 385, Word notes | F-X250 | Styled foot/endnote references and remove-by-id after unrelated edits |
+| 385, Word raw XML | F-X252 | Reject newly invalid w: child and non-Ignorable foreign child atomically, preserve valid extensions |
+| 385, PowerPoint chart type | F-X253 | Four known imported subtypes map correctly, genuinely unknown type returns None |
+| 385, PowerPoint values accepted silently | F-X254 | Refuse wrong save format, out-of-range size, both flips on table/chart frames and unavailable style |
+| 385, PowerPoint raw XML | F-X254 | Four invalid owner mutations refuse atomically and validation diagnoses malformed imported inputs |
+| 385, master shapes in renders | F-X253 | PDF, PNG, convert and render omit hidden master shapes with native evidence and sensitive logo controls |
+| 385, replace --map | F-X254 | Each zero-match pair without expect refuses without output, preserve explicit expect0 |
+| 385, CLI font existing-output wording | F-X251 Word, F-X254 PowerPoint | Both stop recommending unavailable --force, preserve no-overwrite |
+| 385, CLI absent font removal | F-X254 | rpptx font remove exits nonzero and publishes no pretend removal |
+
+Issue385 remains open until the union passes, including its two CLI points.
+The linked tests also include Issue379 names and spacing controls already owned
+by F-X238/F-X239. Do not duplicate those or F-X240 signing/F-X241 five-kind
+inventory and existing-value fill wrappers. F-X249 deliberately adds typed
+native semantics that F-X241 deferred, including placeholder, date and list
+metadata, with exact compatibility decisions at design. F-X250 reuses existing
+native note removal and OfficeMath carriers. Issue365's finite conversion and
+historical fidelity limits remain unchanged.
+
+Formal dependencies in HLD14 identify existing real providers. Scheduling
+waves and leases are separate constraints, not invented dependency edges.
+F-X248 Word validation and F-X253 PowerPoint paint may support independent
+source/oracle preparation. Derive conflict-free implementation waves only after
+actual approved plans identify every shared file and resource. Both may write
+`scripts/readme_doctests.py` and the affected README catalogue, so different
+product families alone do not establish parallel implementation safety.
+Serialize all same-file, catalogue and baseline writes under explicit leases.
+PowerPoint chart/admission stories also share binding carriers. Keep one writer
+per source worktree/F-ID, one numeric archive/README catalogue writer and one
+deterministic baseline owner. Root coordinates native Word/PowerPoint captures.
+Preserve all checked owner, opaque XML, schema order and atomic publication
+contracts. Intentional paint/admission compatibility changes require explicit
+design and labelled expected-delta commits. Optional Issue377 badge, Issue281
+spreadsheet demand and broader Issue264 discussion are not added stories.
 
 #### Sprint S96, Fillable PDF forms
 
@@ -2797,7 +2911,7 @@ ambient state.
 | F-296 | Collaboration identity and deterministic time policy | M |
 
 F-291 establishes revision ownership. F-292 and F-293 then cover property,
-move, and comment records across stories. F-294 uses the S95 form and
+move, and comment records across stories. F-294 uses the S95.4 form and
 protection surface. F-295 composes complete comparison revisions, and F-296
 closes identity and clock inputs. The sprint gate covers Word differential
 results, accept and reject views, and byte-identical output in deterministic

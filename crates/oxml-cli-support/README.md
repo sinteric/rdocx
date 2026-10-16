@@ -14,6 +14,8 @@ publication, and JSON contracts.
   set keeps the files it has already swapped in when a later one fails, since
   the files they replaced cannot be restored.
 - Versioned JSON object envelopes shared by Word and Presentation CLIs.
+- Owned signature report JSON behind the default-off digital-signatures feature,
+  selected by the two real CLI consumers. Base builds keep OPC and crypto absent.
 - Bounded expansion and staged multi-output publication without replacement
   keep large or failed requests from leaving partial command results.
 
@@ -23,7 +25,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-cli-support | 9,712 compressed bytes, 34,641 member bytes, 6 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-cli-support` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-14 |
+| Crates.io archive: oxml-cli-support | 14,710 compressed bytes, 55,732 member bytes, 6 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-cli-support` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 
 ## Use it when
 

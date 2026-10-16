@@ -38,12 +38,12 @@ doc = false
 
 [dependencies]
 clap.workspace = true
-oxml-cli-support.workspace = true
+oxml-cli-support = { workspace = true, features = ["digital-signatures"] }
 oxml-layout.workspace = true
 oxml-pdf.workspace = true
-rpptx = { workspace = true, features = ["render"] }
+rpptx = { workspace = true, features = ["render", "digital-signatures"] }
 serde_json.workspace = true
 
 [dev-dependencies]
 oxml-opc.workspace = true
-rpptx = { workspace = true, features = ["default-template", "render"] }
+rpptx = { workspace = true, features = ["default-template", "render", "digital-signatures"] }

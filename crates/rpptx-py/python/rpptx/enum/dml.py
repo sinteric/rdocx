@@ -174,3 +174,20 @@ class MSO_PATTERN_TYPE(IntEnum):
 
 
 MSO_PATTERN = MSO_PATTERN_TYPE
+
+
+MSO_THEME_COLOR_INDEX = MSO_THEME_COLOR
+
+
+class MSO_COLOR_TYPE(IntEnum):
+    """Import-compatible color kind values, independent of ColorFormat.type."""
+
+    RGB = 1
+    SCHEME = 2
+    HSL = 101
+    PRESET = 102
+    SCRGB = 103
+    SYSTEM = 104
+
+
+__all__ += ["MSO_THEME_COLOR_INDEX", "MSO_COLOR_TYPE"]

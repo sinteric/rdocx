@@ -1,6 +1,6 @@
 """Python bindings for rpptx."""
 
-from .enum.dml import MSO_THEME_COLOR, MSO_PATTERN_TYPE, MSO_PATTERN
+from .enum.dml import MSO_COLOR_TYPE, MSO_THEME_COLOR_INDEX, MSO_THEME_COLOR, MSO_PATTERN_TYPE, MSO_PATTERN
 from .dml.color import RGBColor
 from .enum.shapes import MSO_SHAPE, PP_PLACEHOLDER, PP_PLACEHOLDER_TYPE
 from .enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, MSO_UNDERLINE, PP_ALIGN
@@ -39,7 +39,7 @@ class ReplacementCountError(RpptxError):
 
 from ._rpptx import FontEmbeddingLicense, EmbeddedFont, EmbeddedFontFace, EmbeddedTypeface
 from ._rpptx import Element, Comment, CommentAuthor, CommentReply, Presentation, PresentationTextExport, CoreProperties, AppProperties, CustomProperties, CustomProperty, CustomFileTime, Section, MediaInfo, GradientStops, GradientStop
-from ._rpptx import SlideTransition, HeaderFooter, PlaceholderFormat, SlideMaster, SlideMasterCollection, Theme, ThemeFonts, ThemeFontSet, ThemeColors, MasterTextStyles, TextStyleList
+from ._rpptx import NotesSlide, NotesTextFrame, SlideTransition, HeaderFooter, PlaceholderFormat, SlideMaster, SlideMasterCollection, Theme, ThemeFonts, ThemeFontSet, ThemeColors, MasterTextStyles, TextStyleList
 from ._rpptx import FitReport, FitFrameReport, FitTrial, AutofitRefreshResult, AutofitUpdate, BoundingBox, TextFrameLayout, TextLineLayout, ValidationIssue
 
 __all__ = [
@@ -50,7 +50,8 @@ __all__ = [
     "EmbeddedTypeface",
 
     "MSO_PATTERN_TYPE", "MSO_PATTERN", "CoreProperties", "AppProperties", "CustomProperties", "CustomProperty", "CustomFileTime", "Section", "MediaInfo", "GradientStops", "GradientStop",
-    "MSO_THEME_COLOR",
+    "MSO_THEME_COLOR", "MSO_THEME_COLOR_INDEX", "MSO_COLOR_TYPE",
+    "NotesSlide", "NotesTextFrame",
     "BoundingBox",
     "FitReport",
     "FitFrameReport",

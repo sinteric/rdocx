@@ -86,7 +86,7 @@ rdocx-py = { path = "crates/rdocx-py", version = "0.16.1" }
 # default-off RustCrypto and CFB dependencies below. Likewise fontdb's `memmap`
 # feature is off because fonts are read into memory anyway, and it avoids
 # memmap2 entirely.
-zip = { version = "8.1", default-features = false, features = [
+zip = { version = "9.0.3", default-features = false, features = [
     "deflate-flate2-zlib-rs",
 ] }
 quick-xml = "0.41"

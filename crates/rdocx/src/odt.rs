@@ -2670,7 +2670,10 @@ impl<'a> OdtArchive<'a> {
             let entry = archive.by_index(index).map_err(|error| {
                 odt_error(None, 0, format!("cannot index ODT archive: {error}"))
             })?;
-            let name = entry.name();
+            let decoded_name = entry.name().map_err(|error| {
+                odt_error(None, 0, format!("cannot decode ODT entry name: {error}"))
+            })?;
+            let name = decoded_name.as_ref();
             validate_entry_name(name)?;
             if !entry.is_file() {
                 return Err(odt_error(Some(name), 0, "ODT entry is not a regular file"));
@@ -4884,6 +4887,65 @@ mod tests {
     }
 
     #[test]
+    fn zip9_odt_flag_clear_utf8_resource_and_raw_utf8_refusal() {
+        let xml = content(
+            r#"<text:p><draw:frame svg:width="1in" svg:height="1in"><draw:image xlink:href="Pictures/é.png"/></draw:frame></text:p>"#,
+            "",
+        );
+        let mut source = package(&xml, None, &[("Pictures/é.png", PNG)]);
+        for offset in 0..source.len().saturating_sub(46) {
+            let flags = match &source[offset..offset + 4] {
+                b"PK\x03\x04" => offset + 6,
+                b"PK\x01\x02" => offset + 8,
+                _ => continue,
+            };
+            source[flags + 1] &= !8;
+        }
+        let before = source.clone();
+        let document = Document::from_odt_bytes(&source).unwrap().document;
+        let images = document.images();
+        assert_eq!(images.len(), 1);
+        assert_eq!(document.image_data(&images[0].embed_id).unwrap(), PNG);
+        assert_eq!(source, before);
+
+        // Keep the existing raw central-name UTF8 admission independently of zip9 decoding.
+        for flagged in [false, true] {
+            let mut malformed = package(
+                &content("<text:p>x</text:p>", ""),
+                None,
+                &[("x0.bin", b"opaque")],
+            );
+            let mut changed = 0;
+            for offset in 0..malformed.len().saturating_sub(46) {
+                let (header, flags) = match &malformed[offset..offset + 4] {
+                    b"PK\x03\x04" => (30, 6),
+                    b"PK\x01\x02" => (46, 8),
+                    _ => continue,
+                };
+                let start = offset + header;
+                if malformed.get(start..start + 6) != Some(b"x0.bin") {
+                    continue;
+                }
+                malformed[start..start + 6].copy_from_slice(b"x\x82.bin");
+                malformed[offset + flags + 1] =
+                    (malformed[offset + flags + 1] & !8) | if flagged { 8 } else { 0 };
+                changed += 1;
+            }
+            assert_eq!(changed, 2);
+            let before = malformed.clone();
+            let error = match Document::from_odt_bytes(&malformed) {
+                Ok(_) => panic!("ODT accepted a raw non-UTF8 name"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("ODT entry name is not UTF-8"),
+                "{error}"
+            );
+            assert_eq!(malformed, before);
+        }
+    }
+
+    #[test]
     fn odt_archive_rejects_unsafe_duplicate_encrypted_and_oversized_entries() {
         let safe = package(&content("<text:p>x</text:p>", ""), None, &[]);
         assert!(Document::from_odt_bytes(&safe).is_ok());
@@ -5239,7 +5301,7 @@ mod tests {
         .enumerate()
         {
             let entry = archive.by_index(index).unwrap();
-            assert_eq!(entry.name(), name);
+            assert_eq!(entry.name().unwrap(), name);
             assert_eq!(entry.name_raw(), name.as_bytes());
             assert_eq!(entry.compression(), compression);
             assert_eq!(entry.last_modified(), Some(zip::DateTime::DEFAULT));
@@ -5247,7 +5309,7 @@ mod tests {
             assert!(entry.is_file());
             assert!(!entry.encrypted());
             assert!(entry.comment().is_empty());
-            assert!(entry.extra_data().is_none_or(<[u8]>::is_empty));
+            assert!(entry.extra_data().is_none_or(|extra| extra.is_empty()));
             assert_eq!(
                 entry.data_start().unwrap() - entry.header_start(),
                 30 + entry.name_raw().len() as u64,

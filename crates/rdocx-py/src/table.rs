@@ -23,6 +23,38 @@ fn path_index(
         .ok_or_else(|| PyIndexError::new_err(format!("{kind} index is missing")))
 }
 
+pub(crate) fn checked_table_style(
+    py: Python<'_>,
+    candidate: &mut rdocx::Document,
+    value: &str,
+) -> PyResult<String> {
+    candidate
+        .ensure_builtin_table_style(value)
+        .map_err(|e| rdocx_to_pyerr(py, e))?;
+    let style_id = {
+        let styles = candidate.styles();
+        let exact_id = styles.iter().any(|style| {
+            style.style_id() == value && style.style_type() == rdocx::StyleType::Table
+        });
+        if !exact_id {
+            let matching = styles
+                .iter()
+                .filter(|style| {
+                    style.style_type() == rdocx::StyleType::Table
+                        && style
+                            .name()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(value))
+                })
+                .count();
+            if matching > 1 {
+                return Err(PyValueError::new_err("table style name is ambiguous"));
+            }
+        }
+        crate::paragraph::style_id_of_type(candidate, value, rdocx::StyleType::Table)?
+    };
+    Ok(style_id)
+}
+
 #[derive(Clone)]
 pub(crate) enum TableLocation {
     Body(usize),
@@ -670,6 +702,23 @@ impl PyTable {
         )
     }
 
+    #[pyo3(signature = (width))]
+    fn add_column(&self, py: Python<'_>, width: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.validate(py)?;
+        let _ = width;
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "use table.insert_column(index, before=...) and table.set_column_width(column, width); construct an empty grid with Document.add_table(rows, cols)",
+        ))
+    }
+
+    #[getter]
+    fn columns(&self, py: Python<'_>) -> PyResult<()> {
+        self.validate(py)?;
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "use table.grid_widths and table.set_column_width(column, width), or cell.width",
+        ))
+    }
+
     #[getter]
     fn style(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.read(py, |table| table.style_id().map(str::to_owned))
@@ -681,30 +730,7 @@ impl PyTable {
         let related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
         let mut candidate = document.inner.clone_for_staging();
-        candidate
-            .ensure_builtin_table_style(value)
-            .map_err(|e| rdocx_to_pyerr(py, e))?;
-        let style_id = {
-            let styles = candidate.styles();
-            let exact_id = styles.iter().any(|style| {
-                style.style_id() == value && style.style_type() == rdocx::StyleType::Table
-            });
-            if !exact_id {
-                let matching = styles
-                    .iter()
-                    .filter(|style| {
-                        style.style_type() == rdocx::StyleType::Table
-                            && style
-                                .name()
-                                .is_some_and(|name| name.eq_ignore_ascii_case(value))
-                    })
-                    .count();
-                if matching > 1 {
-                    return Err(PyValueError::new_err("table style name is ambiguous"));
-                }
-            }
-            crate::paragraph::style_id_of_type(&candidate, value, rdocx::StyleType::Table)?
-        };
+        let style_id = checked_table_style(py, &mut candidate, value)?;
         TableLocation::new(index, &related)
             .edit(&mut candidate, |table| {
                 table.set_style(&style_id);

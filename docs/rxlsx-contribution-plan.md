@@ -110,7 +110,8 @@ contracts. Their large-workbook gates require measured memory evidence.
 ## 3. Parallel streams and responsibilities
 
 The canonical roadmap retains S91.1 publication, S92 and S93 repairs,
-S94 Python/CLI parity, S95 Word features, S96 fillable PDF forms,
+S94 Python/CLI parity, S95 and S95.1 new repairs and native interoperability,
+S95.2 through S95.4 Word features, S96 fillable PDF forms,
 S97 throughS99 Word features and the S100 external Word benchmark. The
 conditional Excel programme starts at S101. An independent contributor stream
 remains a workflow proposal until the extensions below are implemented.

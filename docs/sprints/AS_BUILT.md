@@ -19916,3 +19916,128 @@ Metadata no-verify packaging is not publication verification.
 **Hash harness.** The seven shared samples contain bitmap charts, not ChartML. All49worker entries and shared pixel baselines remain unchanged by this story. Separate component oracle evidence does not create a shared baseline move.
 
 **Notes for future sessions.** Original native empty-legend Word overlay disagrees with the approved product default false and remains diagnostic. Original Aptos/Calibri mismatches remain recorded. Matching-font controls qualify keys, labels and the adjacent right plot edge only. Integrated S93 Rust, installed Python, native and retained-failure evidence is recorded under F-X232 in this completion batch. Final successor gate and clean sprint review remain closure requirements.
+
+### F-X238, Restore python-docx Word names from the first-draft corpus
+
+**Sprint.** S94
+**Completed.** 2026-10-16
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Adds approved Python names for stream save, section enums, highlighting and first-page headers through existing native providers. Styles return a tuple-compatible collection. Unsupported operations name the supported alternative. The approved concrete section module supports direct typed imports, including the minimum Python 3.9 import path. Forms and signing retain their distinct owner-publication rules.
+
+**Non-obvious choices.** The original 122 corpus inputs and runners are unchanged. Raw exits remain Word 1 and PowerPoint 0. Independent body and saved-file checks succeed for 55 of 76 Word cases and 43 of 44 PowerPoint cases. The 32 requested Word names comprise 16 saved-file successes and 16 explicit supported alternatives. The exact divergence pointers remain `remove_content`, `set_style` and `slides.remove`. Successful `Cell.merge` behavior and its stale original `set_cell_grid_span` marker remain separately reported. These results do not establish complete drop-in compatibility or a green original Word runner.
+
+**Deviations from the design plan.** The approved section module and corpus qualifications govern the result. Two test expectations were corrected to the established stale-owner and no-op binding contracts, without broadening production behavior.
+
+**Spec sections touched.** HLD10 binding names and ownership, HLD12 compatibility qualification, HLD15 installed package identities.
+
+**Tests.** Regression gate: `test_fx238_word_names_create_on_one_prepared_candidate`, `test_fx238_stream_input_and_output_are_both_qualified`, `test_fx238_section_module_matches_pinned_enum_values`, `test_fx238_immutable_first_draft_contract_classification`, `test_fx238_created_owners_follow_current_form_and_signing_publication` and `test_fx238_stream_save_preserves_signed_forms_and_refusal_authority`. Differential rider: `test_fx238_word_names_match_pinned_python_docx`. Installed strict typing, stubtest and minimum Python 3.9 import controls remain separately qualified.
+
+Feature pass 5 has zero defects and smells. Earlier real test-observer failures remain retained. Python 3.9 import RED and repaired GREEN are separate observations. Pinned comparisons use python-docx 1.2.0 and python-pptx 1.0.2.
+
+**Hash harness.** All 49 shared hashes and seven deterministic pixel buffers match at `da4a75ac8d387e87ad4f00746e93207dc07e6c22`. No shared baseline changed. Consolidated verification is recorded under F-X238.
+
+**Notes for future sessions.** **Shared integrated evidence for all five entries.** Actual producer `9cdbea00f18ca3ec84853a6bf86b2f8c1f6ce9cd` has:
+
+- Fresh ordinary installed wheels: 877 Word and 905 PowerPoint tests, 1,782 total, plus strict mypy and stubtest for both families. Closed qualification: `/private/tmp/S94-final-installed-9cdbea-1/closed-qualification.json`. Main receipt: `/private/tmp/S94-final-installed-9cdbea-1/receipt.json`.
+- Fresh public-consumer supplement: 13 Word and 10 PowerPoint packages and reports, not predecessor artifacts. Receipt: `/private/tmp/S94-final-retained-public-9cdbea-1/receipt.json`.
+- Actual hosted run [38867583009](https://github.com/tensorbee/rdocx/actions/runs/38867583009): 27 acceptance jobs succeeded and four publication/release jobs correctly skipped. Receipt: `/private/tmp/S94-hosted-acceptance-1/receipt.json`. This is hosted acceptance, not publication or full sprint verification.
+- Exact applicability to clean amendment commit `da4a75ac8d387e87ad4f00746e93207dc07e6c22`: `/private/tmp/S94-test-only-applicability-2/clean-da4a75ac-applicability.json`. It reauthenticates 1,052 artifacts and explicitly excludes one test literal and two archive-metadata carriers from whole-file equality. Relevant production source is unchanged. It does not claim new hosted or installed execution at that successor, and does not carry the changed renderer archive forward.
+
+**Integrated native gate.** The complete gate at `da4a75ac8d387e87ad4f00746e93207dc07e6c22` passes 5,493 changed-default tests with 68 ignored and 6,579 workspace all-features tests with 73 ignored. These configurations overlap and are not a unique combined count. Formatting, both Clippy scopes, 49 hashes, seven pixel buffers, prose, adapters, policy 183 tests with two expected skips, the fresh no-default-font path with 149 passed and one ignored, both WASM targets, ZIP MSRV 1.93, denied-warning docs, README examples, genuinely verified publication of 22 crates, exact archive measurements below 10 MiB and cargo deny pass. Receipt `/private/tmp/S94-full-native-da4a75ac-4/receipt.json`, SHA-256 `594b2f351f2effb28bae678136732ab4dfadb117b95d7f29231f7c62d3a10992`, authenticates all 18 command results and 22 archives. Same-source continuations authenticate earlier passing steps without claiming they ran again. The original stale-assertion failure, cached binary pointing to a removed worker and measurement helper selecting unpublished crates remain retained. A fresh font cache and exact publishable-package selection resolve those verification issues without further product edits. Final documentation/review successor verification and a clean sprint review remain closure requirements.
+
+### F-X239, python-pptx notes names and refusal of silent zero values
+
+**Sprint.** S94
+**Completed.** 2026-10-16
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Adds owner-bound notes presence, lazy notes creation, text-frame access, scalar text mutation and enum aliases/imports. Five nonzero-to-zero assignments now refuse before mutation. Valid explicit-unit inputs retain existing native truncation. Notes owners follow physical slide identity.
+
+**Non-obvious choices.** Notes use existing scalar serialization, not a new rich-text API. `MSO_COLOR_TYPE` is import-only. `MSO_THEME_COLOR_INDEX` aliases the existing enum by identity. `ColorFormat.type` retains its documented string or `None` result.
+
+**Deviations from the design plan.** The approved import-only color enum scope retains the existing string-valued ColorFormat.type contract. No deviation from that final contract.
+
+**Spec sections touched.** HLD06 notes, HLD10 binding and unit contracts, HLD12 controls, HLD15 package identities.
+
+**Tests.** Regression gate: `test_fx239_notes_names_distinguish_absent_empty_and_missing_body`, `test_fx239_notes_frame_owner_is_exact_or_refused`, `test_fx239_quantization_refusals_are_source_and_revision_atomic`, `test_fx239_word_font_storage_boundaries_and_clear` and `test_fx239_theme_alias_and_color_import_scope_are_explicit`. Differential rider: `test_fx239_notes_names_match_pinned_python_pptx`.
+
+Independent feature and integration reviews are clean. Pinned python-pptx 1.0.2 comparisons, all five storage-boundary controls and atomic refusals passed. Final installed and hosted results, applicability and consolidated full verification are recorded under F-X238.
+
+**Hash harness.** All 49 shared hashes and seven deterministic pixel buffers match at `da4a75ac8d387e87ad4f00746e93207dc07e6c22`. No shared baseline changed. Consolidated verification is recorded under F-X238.
+
+**Notes for future sessions.** **Proof preservation.** A helper overwrote one of 267 retained S93 proof files, the original Word identity JSON. That JSON is lost and was not reconstructed. The other 266 original files are unchanged. Original wheels, installed RECORD/native bytes and historical claims were independently authenticated without rerunning S93 acceptance. The correction is `/private/tmp/F-X239-proof-provenance-audit-1/S93-provenance-correction.json`, SHA-256 `532254abb17044bdb7579c299eb6ece46945004f7aea370a0a8007d5aff97ea2`. Ten extra unmanifested PowerPoint files remain separately retained.
+
+Shared actual hosted, installed, current 23-package and closed receipts, successor applicability and consolidated native gate are recorded under F-X238 above. Final sprint review and successor verification remain closure requirements.
+
+### F-X240, Python and CLI signing and signature verification
+
+**Sprint.** S94
+**Completed.** 2026-10-16
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Both Python families and ordinary CLIs sign current packages using DER or strict single-block unencrypted PKCS8 private-key and X.509 certificate PEM. Reports expose signer identity, cryptographic validity, coverage and exact issues. Word verification serializes staged current state without publishing it. Successful signing preserves certified owners. Wrapper dependencies enable signing while native and WASM defaults retain their boundaries.
+
+**Non-obvious choices.** Reports do not establish certificate-chain trust. The approved pre-1.0 ZIP 9 migration changes the exposed upstream error type and UTF-8/CP437 filename decoding after unchanged cargo-deny rejected yanked ZIP 8 versions. Paired old and new ordinary archives both used made-by version 20, refuting the predicted 45-to-20 change. No PDF signing or package publication is claimed.
+
+**Deviations from the design plan.** The user-approved bounded ZIP 9 revision superseded the original ZIP 8 dependency choice. The integration amendment changes only a test expectation and genuine archive measurements.
+
+**Spec sections touched.** HLD03 dependency boundaries, HLD04 signatures and ZIP admission, HLD10 reports and ownership, HLD12 acceptance, HLD15 graph and artifact measurements.
+
+**Tests.** Regression gate in both installed families: `test_fx240_sign_verify_owned_reports_pem_and_multisignatures`, `test_fx240_current_tamper_partial_unsigned_and_malformed` and `test_fx240_refusal_preserves_current_bytes_and_held_authority`. Word interaction gate: `test_fx240_fill_then_sign_sign_then_fill_and_unchanged_story_owners`. The approved release-CLI exit, ordinary-distribution and shared-report controls retain their recorded evidence. Amendment test: `rpptx_render_dependency_direction_is_one_way`.
+
+Scoped controls cover unsigned, valid, partial, tampered and malformed signatures, repeated signing, PEM admission, material bounds and no-overwrite atomicity. Native/MSRV/WASM/no-default, downstream error-consumer and matched release-CLI evidence retain their recorded producer identities. Actual integrated hosted, installed and 23-package results are shared under F-X238.
+
+**Hash harness.** All 49 shared hashes and seven deterministic pixel buffers match at `da4a75ac8d387e87ad4f00746e93207dc07e6c22`. No shared baseline changed. Consolidated verification is recorded under F-X238.
+
+**Notes for future sessions.** **Integration amendment.** The first final native attempt genuinely failed because a renderer test still expected the binding dependency without approved `digital-signatures`. A separate test-only literal repair passed the focused test and formatting check. Independent amendment review found zero defects, smells or nitpicks. Actual no-verify archive measurements refreshed only the renderer carriers to 84,664 compressed bytes, 461,174 normalized member bytes and eight members. Receipts are under `/private/tmp/S94-native-test-remediation-1/`. Old renderer archive evidence is not carried forward. Fresh verified publication of all 22 packages and the completed same-source native gate are recorded under F-X238.
+
+Shared actual hosted, installed, current 23-package and closed receipts, successor applicability and consolidated native gate are recorded under F-X238 above. Final sprint review and successor verification remain closure requirements.
+
+### F-X241, Python and CLI form reading and filling
+
+**Sprint.** S94
+**Completed.** 2026-10-16
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Adds callable snapshots and staged filling for plain-text, checkbox, drop-down and date SDTs plus legacy text fields. Finite values, duplicate/unknown/mixed selectors and identity drift are validated atomically. Existing tag selection remains supported. Unchanged certified owners survive, while retired runs retain their established causal stale-element error.
+
+**Non-obvious choices.** Fill then sign and sign then fill use current package state. Native Word normalization of signed intermediates is separately qualified and is not substituted for installed public API or CLI acceptance.
+
+**Deviations from the design plan.** None from the final approved five-kind filling and staged-publication contract.
+
+**Spec sections touched.** HLD10 form providers and bindings, HLD12 saved-package and native qualification, HLD15 package identities.
+
+**Tests.** Regression gate: `test_fx241_python_fill_all_five_reported_form_kinds`, `test_fx241_bind_contract_priority_nested_noop_owners_and_late_failure`, `test_fx241_legacy_identity_and_value_refusals_are_atomic`, `test_fx241_bound_xml_values_source_preservation_and_late_refusal` and `test_fx241_changed_table_retires_cell_and_paragraph_descendants`. Approved CLI JSON duplicate/unknown/cross-kind, mixed legacy ordinal-shift and late-failure controls remain part of the recorded feature evidence.
+
+Independent feature and integration reviews are clean. Saved/reopened five-kind controls, expanded XML, namespaces, opaque content, bounds and atomic failures passed. Native fill/sign artifacts retain their specific source and serialization qualifications. Final installed, hosted and public-consumer results and consolidated full verification are shared under F-X238.
+
+**Hash harness.** All 49 shared hashes and seven deterministic pixel buffers match at `da4a75ac8d387e87ad4f00746e93207dc07e6c22`. No shared baseline changed. Consolidated verification is recorded under F-X238.
+
+**Notes for future sessions.** Shared actual hosted, installed, current 23-package and closed receipts, successor applicability and consolidated native gate are recorded under F-X238 above. Final sprint review and successor verification remain closure requirements.
+
+### F-X247, Preserve the common LaTeX inputs reported in Issue365
+
+**Sprint.** S94
+**Completed.** 2026-10-16
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Extends finite symbol, script-base, upright/text and spacing normalization through existing OfficeMath types. All 73 specified inputs use public `add_equation`, save/reopen and independent semantic inspection. Actual Pandoc 3.11 emits 72 cases. Its degree row retains the warning/raw-TeX fallback and uses independent Unicode/native authority, without replacing the original input. Canonical fraction normalization does not promise exact forced TeX styles or unrestricted TeX support.
+
+**Non-obvious choices.** The reporter's original unconditional FAIL summary remains retained and separate from the summary-only observer correction. Current native Word 16.114 captures remain distinct from historical Word 16.113.2 captures, with their actual producer identities. Poppler 26.09 is pinned. No fresh historical GUI or Pandoc run is inferred from retained artifacts.
+
+The supplementary atom-boundary width case remains failed because MathKern is absent. It is diagnostic, not relabeled as accepted. The original 13-formula product and mutation PDFs are byte equal to retained predecessors, providing bounded nonregression. The original Caladea-request aggregate qualification and the preexisting matched-Cambria bottom mismatch remain distinct. This does not establish full native matched-font fidelity for all 13 formulas. Earlier failed logs and measurements are retained, but some iterative predecessor raw PDFs were overwritten. Final replay artifacts are separately authenticated.
+
+**Deviations from the design plan.** The approved finite grammar, canonical Bar fractions and native evidence refinements retain the documented forced-style, MathKern and historical-producer limits. No unrestricted TeX or complete historical native-paint claim.
+
+**Spec sections touched.** HLD08 OfficeMath, HLD10 finite conversion, HLD12 native and semantic evidence, HLD14 acceptance, HLD15 producer identities.
+
+**Tests.** Differential gate: actual Pandoc 3.11 finite matrix and native matched-font paint controls, with the limits below. Existing regression tests include `fx247_finite_symbol_table_and_case_aliases`, `fx247_upright_roles_and_text_boundary_spaces`, `fx247_canonical_stacked_fractions_and_binomial`, `fx247_spacing_is_distinct_and_round_trips`, `fx247_all73_conversion_round_trips_and_zero_diagnostics`, `fx247_physical_math_atom_correction_is_not_reapplied_at_scripts`, `test_fx247_all73_saved_semantics_and_public_reopen` and `test_fx247_saved_semantic_observer_rejects_real_mutations`.
+
+Independent feature and integration review is clean. Fresh final ZIP 9 replay at `9cdbea` authenticates 673 artifacts and 63 commands: `/private/tmp/S94-F-X247-final-native-2/receipt.json`, with completed authentication in `/private/tmp/S94-F-X247-final-native-2-completed-authentication.json`. All seven finite positive cases pass and all seven real 1.01-point mutations are rejected. The captured historical six cases and clusters pass. Their exact negative result remains five rejected mutations and one radical escape, not six rejections.
+
+**Hash harness.** All 49 shared hashes and seven deterministic pixel buffers match at `da4a75ac8d387e87ad4f00746e93207dc07e6c22`. No shared baseline changed. Consolidated verification is recorded under F-X238.
+
+**Notes for future sessions.** Final installed and hosted outcomes, exact successor applicability and consolidated full verification are recorded under F-X238.
+
+Shared actual hosted, installed, current 23-package and closed receipts, successor applicability and consolidated native gate are recorded under F-X238 above. Final sprint review and successor verification remain closure requirements.

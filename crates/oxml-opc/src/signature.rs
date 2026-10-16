@@ -150,13 +150,54 @@ struct ReferenceSpec {
     transforms: Vec<ReferenceTransform>,
 }
 
+// Bound both the original envelope and decoded allocation before parsing ASN.1.
+const SIGNING_MATERIAL_LIMIT: usize = 1024 * 1024;
+
+fn signing_material_der(
+    input: &[u8],
+    expected_label: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    if input.is_empty() || input.len() > SIGNING_MATERIAL_LIMIT {
+        return Err("signing material must contain between 1 byte and 1 MiB".into());
+    }
+    // DER is binary. Its bytes, including trailing bytes, reach the strict DER parser unchanged.
+    let trimmed = input.trim_ascii();
+    if !trimmed.starts_with(b"-----") {
+        return Ok(input.to_vec());
+    }
+    if !input.is_ascii() {
+        return Err("PEM framing must be ASCII".into());
+    }
+    let begin = format!("-----BEGIN {expected_label}-----");
+    let end = format!("-----END {expected_label}-----");
+    let body = trimmed
+        .strip_prefix(begin.as_bytes())
+        .and_then(|rest| rest.strip_suffix(end.as_bytes()))
+        .ok_or_else(|| "expected exactly one matching unencrypted PEM block".to_owned())?;
+    let encoded: Vec<u8> = body
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if encoded.is_empty() {
+        return Err("empty PEM body".into());
+    }
+    BASE64
+        .decode(encoded)
+        .map_err(|_| "invalid padded PEM base64".into())
+}
+
 pub(crate) fn create_signature(
     package: &mut OpcPackage,
     private_key_pkcs8_der: &[u8],
     certificate_der: &[u8],
 ) -> Result<SignatureReport> {
     package.validate_graph()?;
-    let certificate = Certificate::from_der(certificate_der)
+    let certificate_der = signing_material_der(certificate_der, "CERTIFICATE")
+        .map_err(OpcError::InvalidSigningCertificate)?;
+    let private_key_pkcs8_der = signing_material_der(private_key_pkcs8_der, "PRIVATE KEY")
+        .map_err(OpcError::InvalidSigningKey)?;
+    let certificate = Certificate::from_der(&certificate_der)
         .map_err(|error| OpcError::InvalidSigningCertificate(error.to_string()))?;
     let subject_public_key_info = certificate.tbs_certificate().subject_public_key_info();
     let key_algorithm = subject_public_key_info.algorithm.oid.to_string();
@@ -169,7 +210,7 @@ pub(crate) fn create_signature(
         .ok_or_else(|| {
             OpcError::InvalidSigningCertificate("non-octet-aligned public key".into())
         })?;
-    let private_key = RsaKeyPair::from_pkcs8(private_key_pkcs8_der)
+    let private_key = RsaKeyPair::from_pkcs8(&private_key_pkcs8_der)
         .map_err(|error| OpcError::InvalidSigningKey(error.to_string()))?;
     if private_key.public_key().as_ref() != certificate_public_key {
         return Err(OpcError::InvalidSigningKey(
@@ -1641,6 +1682,92 @@ mod tests {
     const SIGNATURE_SIG_BASE64: &str = "PoIHdPAtYTKOlVcxhWvUEHrlYf58I53jEJFbeiVb1BrQq3MLln4Bq8uHjY6gPs043hDausEDwuf44Olw/l2twOPmyiDPotpCNZe+yg6QeWPYMcWMM2PedUsMflLaYxOOFCFSAolH6MWR6N7w8iIgUSohay5B7KyRiuOOTu2nvlcxZJhei0EEiQFnPlfLhijZDZ97V0I+JAAPy8DDvFF7NOAUOz15yIN1AVgKtzUdgdsCvqR6wKV1+2XEfDftBt462QHOhkW5lrHcMg/THY0yEHjw1VXN6hwBPshzTORXeJexr0lmcJJt1p1vyyjPuDEiM8/JYpDDF8xP0B44/uE4Cg==";
     const CERTIFICATE_DER_BASE64: &str = "MIIDZzCCAk+gAwIBAgIUHP/5/GIqsdVlsrP3bYWND71j/aswDQYJKoZIhvcNAQELBQAwQzEaMBgGA1UEAwwRRi0xNzEgVGVzdCBTaWduZXIxGDAWBgNVBAoMD1RlbnNvcmJlZSBUZXN0czELMAkGA1UEBhMCR0IwHhcNMjYwODIyMDE1NTAxWhcNMzYwODE5MDE1NTAxWjBDMRowGAYDVQQDDBFGLTE3MSBUZXN0IFNpZ25lcjEYMBYGA1UECgwPVGVuc29yYmVlIFRlc3RzMQswCQYDVQQGEwJHQjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALRYSR2vue+MSg8VlQKoYDwwZk+b3rs7F2j6u3e5Wbanf/ABy4378xFq1xB6M5B3T+kabTVeENWx+IE3d2r8Z7KxOxsHhZyhrcS4QMa2alL9ErE2JrrTNFsM+ciI02xgLIr+baSig2iV5uzAgcqe9jMMurpeyCmaZxIAhpy3bjKUgyWVBgmZsznfDLMbJfC4u4fifY5Lpsghb9ewaV4euP/8/TE5orJOC80kWyqgbkws+RzoA1KyyBf6EzNtUzBBhEH+iBkhZtYVXuZcaq5WlkcKvQLzhsxPWSjD5CPU0tohtJkGP3ugDczifJRXH5i55GZjUPB9SGKdV6Gsi3Ow3x0CAwEAAaNTMFEwHQYDVR0OBBYEFG8Kul280npBFhtYiONVazzJqGNTMB8GA1UdIwQYMBaAFG8Kul280npBFhtYiONVazzJqGNTMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAFd9eu72wlh9rtleRKvPGOjZN55GtQistxUqBWdNNSBEDIQDIvZ9gM3ix+IkM45zS5rX6ME8eqeAUIiP40izNnrOIk4PT6f68hL/dCrDmcxouU0RHI2OgHHz9Ir2n94Lz+dBWx+8Syafa48GfvfpKKXo4/qQQNk0idZ524ftYT7RpCL11z2QuzcBHnD7ZoubdRYo6i12WPGHo2mZu0BS1odKZajMvBPhdF4rH2TqGUgYyjeeHUb+8cnYz9OPgGB/6hvv+sBCqEHWDnsVYIJzhjDQS6l0v0YVeE7RIwHrxPvEF+dGAqLfDYoZ6mWe50jBtrOq9otI13ncnccEHm8Aovo=";
     const EC_CERTIFICATE_DER_BASE64: &str = "MIIB4DCCAYegAwIBAgIUf1e7Wg30URPA6mcy7mqRrxSGfkUwCgYIKoZIzj0EAwIwRjEdMBsGA1UEAwwURi0xNzEgRUMgVGVzdCBTaWduZXIxGDAWBgNVBAoMD1RlbnNvcmJlZSBUZXN0czELMAkGA1UEBhMCR0IwHhcNMjYwODIyMDIwMTE4WhcNMzYwODE5MDIwMTE4WjBGMR0wGwYDVQQDDBRGLTE3MSBFQyBUZXN0IFNpZ25lcjEYMBYGA1UECgwPVGVuc29yYmVlIFRlc3RzMQswCQYDVQQGEwJHQjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDzWARcxjZ++hPgwD2LB/Hz+cJ2fm0Fjb3uE3NNhH0gItnMAQJvS3KQBRUU28gVYra2iDQabYYcCGC5LNX2yXCmjUzBRMB0GA1UdDgQWBBTiKMGSnjWxKe/LNO0uLALvpD8QrTAfBgNVHSMEGDAWgBTiKMGSnjWxKe/LNO0uLALvpD8QrTAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIBd6DFidlSSE5BApuxqqpsXpx5bHWZJrpn89432E5LJoAiB0akoHnuZREqsmnrJ9GXehgUMXYqf7hiVdcB4JMXeE4w==";
+
+    #[test]
+    fn signing_material_strictness_and_failures_are_atomic() {
+        let bytes = |package: &OpcPackage| {
+            let mut output = Cursor::new(Vec::new());
+            package.write_to(&mut output).unwrap();
+            output.into_inner()
+        };
+        let der = test_private_key();
+        assert_eq!(signing_material_der(&der, "PRIVATE KEY").unwrap(), der);
+        let mut trailing = der.clone();
+        trailing.push(b' ');
+        assert_eq!(
+            signing_material_der(&trailing, "PRIVATE KEY").unwrap(),
+            trailing
+        );
+        let valid = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+            BASE64.encode(&der)
+        );
+        let invalid = [
+            Vec::new(),
+            vec![b'x'; SIGNING_MATERIAL_LIMIT + 1],
+            valid.replace("PRIVATE KEY", "RSA PRIVATE KEY").into_bytes(),
+            valid
+                .replace("PRIVATE KEY", "ENCRYPTED PRIVATE KEY")
+                .into_bytes(),
+            valid
+                .replace("END PRIVATE KEY", "END CERTIFICATE")
+                .into_bytes(),
+            format!("{valid}\n{valid}").into_bytes(),
+            format!("{valid}trailer").into_bytes(),
+            format!("é{valid}").into_bytes(),
+            b"-----BEGIN PRIVATE KEY-----\nZh==\n-----END PRIVATE KEY-----".to_vec(),
+            b"-----BEGIN PRIVATE KEY-----\nZg\n-----END PRIVATE KEY-----".to_vec(),
+            b"-----BEGIN PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nZg==\n-----END PRIVATE KEY-----"
+                .to_vec(),
+            b"-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----".to_vec(),
+        ];
+        for key in invalid.iter().chain(std::iter::once(&trailing)) {
+            let mut package = unsigned_package();
+            let before = bytes(&package);
+            assert!(package.sign(key, &test_certificate()).is_err());
+            assert_eq!(before, bytes(&package));
+            assert!(package.verify_signatures().unwrap().is_empty());
+        }
+        for cert in [
+            &b"-----BEGIN PRIVATE KEY-----Zg==-----END PRIVATE KEY-----"[..],
+            &vec![0; SIGNING_MATERIAL_LIMIT + 1],
+        ] {
+            let mut package = unsigned_package();
+            let before = bytes(&package);
+            assert!(matches!(
+                package.sign(&der, cert),
+                Err(OpcError::InvalidSigningCertificate(_))
+            ));
+            assert_eq!(before, bytes(&package));
+        }
+    }
+
+    #[test]
+    fn signing_accepts_single_strict_pem_blocks() {
+        for newline in ["\n", "\r\n"] {
+            let pem = |label: &str, bytes: &[u8]| {
+                let encoded = BASE64.encode(bytes);
+                let lines = encoded
+                    .as_bytes()
+                    .chunks(64)
+                    .map(|line| std::str::from_utf8(line).unwrap())
+                    .collect::<Vec<_>>()
+                    .join(newline);
+                format!(
+                    " \t{newline}-----BEGIN {label}-----{newline}{lines}{newline}-----END {label}-----{newline} "
+                )
+            };
+            let mut package = unsigned_package();
+            let report = package
+                .sign(
+                    pem("PRIVATE KEY", &test_private_key()).as_bytes(),
+                    pem("CERTIFICATE", &test_certificate()).as_bytes(),
+                )
+                .unwrap();
+            assert!(report.cryptographically_valid && report.coverage_complete);
+            assert_eq!(package.verify_signatures().unwrap(), vec![report]);
+        }
+    }
 
     #[test]
     fn signature_creation_uses_schema_order_and_complete_canonical_references() {

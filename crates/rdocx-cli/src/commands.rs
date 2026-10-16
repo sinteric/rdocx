@@ -2699,6 +2699,322 @@ pub fn fields_update(
     )
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct FillControl {
+    tag: Option<String>,
+    alias: Option<String>,
+    id: Option<i32>,
+    kind: Option<rdocx_oxml::content_control::SdtType>,
+}
+
+fn fill_control_inventory(document: &Document) -> Vec<FillControl> {
+    document
+        .content_controls()
+        .into_iter()
+        .map(|control| FillControl {
+            tag: control.tag().map(str::to_owned),
+            alias: control.alias().map(str::to_owned),
+            id: control.id(),
+            kind: control.control_type(),
+        })
+        .collect()
+}
+
+enum FillTarget {
+    Control {
+        index: usize,
+        by_tag: bool,
+        value: String,
+    },
+    Legacy {
+        index: usize,
+        value: rdocx::LegacyFormFieldValue,
+    },
+}
+
+fn parse_form_values(path: &Path) -> Result<Vec<(String, Value)>> {
+    use std::io::Read;
+    const MAX_BYTES: u64 = 1024 * 1024;
+    const MAX_ASSIGNMENTS: usize = 4096;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("--values exceeds 1 MiB".into());
+    }
+    let text = std::str::from_utf8(&bytes)?;
+    let mut rest = text
+        .trim_start_matches([' ', '\t', '\r', '\n'])
+        .strip_prefix('{')
+        .ok_or("--values requires a flat JSON object")?;
+    let mut values = Vec::new();
+    let mut keys = std::collections::HashSet::new();
+    loop {
+        rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+        if let Some(tail) = rest.strip_prefix('}') {
+            if !tail.trim_matches([' ', '\t', '\r', '\n']).is_empty() || values.is_empty() {
+                return Err(
+                    "--values requires a nonempty JSON object without trailing data".into(),
+                );
+            }
+            return Ok(values);
+        }
+        if values.len() == MAX_ASSIGNMENTS {
+            return Err("--values exceeds 4096 assignments".into());
+        }
+        let mut key_stream = serde_json::Deserializer::from_str(rest).into_iter::<String>();
+        let key = key_stream.next().ok_or("missing form key")??;
+        rest = rest[key_stream.byte_offset()..].trim_start_matches([' ', '\t', '\r', '\n']);
+        rest = rest
+            .strip_prefix(':')
+            .ok_or("expected ':' after form key")?
+            .trim_start_matches([' ', '\t', '\r', '\n']);
+        if key.is_empty() || !keys.insert(key.clone()) {
+            return Err(format!("empty or duplicate form key {key:?}").into());
+        }
+        if !matches!(
+            rest.as_bytes().first(),
+            Some(b'"' | b't' | b'f' | b'0'..=b'9')
+        ) {
+            return Err(format!(
+                "form value for {key:?} must be a string, bool or nonnegative integer"
+            )
+            .into());
+        }
+        // Decode one scalar, never an object map that could discard duplicate keys.
+        let mut scalar_stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+        let value = scalar_stream.next().ok_or("missing form value")??;
+        match &value {
+            Value::String(_) | Value::Bool(_) => {}
+            Value::Number(number)
+                if number
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .is_some() => {}
+            _ => return Err(format!("invalid scalar form value for {key:?}").into()),
+        }
+        rest = rest[scalar_stream.byte_offset()..].trim_start_matches([' ', '\t', '\r', '\n']);
+        values.push((key, value));
+        if let Some(tail) = rest.strip_prefix(',') {
+            rest = tail.trim_start_matches([' ', '\t', '\r', '\n']);
+            if rest.starts_with('}') {
+                return Err("trailing comma in form values".into());
+            }
+        } else if !rest.starts_with('}') {
+            return Err("expected ',' or '}' after form value".into());
+        }
+    }
+}
+
+fn select_form_targets(
+    values: &[(String, Value)],
+    controls: &[FillControl],
+    fields: &[rdocx::LegacyFormFieldInfo],
+) -> Result<Vec<FillTarget>> {
+    let mut targets = Vec::with_capacity(values.len());
+    let mut selected = std::collections::HashSet::new();
+    for (key, value) in values {
+        let control_matches = controls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, control)| {
+                (control.tag.as_deref() == Some(key) || control.alias.as_deref() == Some(key))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let legacy_matches = fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| (field.name.as_deref() == Some(key)).then_some(index))
+            .collect::<Vec<_>>();
+        if control_matches.len() + legacy_matches.len() != 1 {
+            let locations = legacy_matches
+                .iter()
+                .map(|index| format!("{}#{}", fields[*index].source_part, fields[*index].ordinal))
+                .collect::<Vec<_>>();
+            return Err(format!("form key {key:?} requires exactly one target, found SDT indices {control_matches:?} and legacy locations {locations:?}").into());
+        }
+        let target = if let Some(&index) = control_matches.first() {
+            if !selected.insert((true, index)) {
+                return Err(
+                    format!("form key {key:?} assigns an already selected SDT target").into(),
+                );
+            }
+            let control = &controls[index];
+            let value = match value {
+                Value::String(value) => value.clone(),
+                Value::Bool(value)
+                    if control.kind == Some(rdocx_oxml::content_control::SdtType::CheckBox) =>
+                {
+                    value.to_string()
+                }
+                _ => {
+                    return Err(format!(
+                        "SDT form key {key:?} requires string, or bool for checkbox"
+                    )
+                    .into());
+                }
+            };
+            FillTarget::Control {
+                index,
+                by_tag: control.tag.as_deref() == Some(key),
+                value,
+            }
+        } else {
+            let index = legacy_matches[0];
+            if !selected.insert((false, index)) {
+                return Err(
+                    format!("form key {key:?} assigns an already selected legacy target").into(),
+                );
+            }
+            let value = match (fields[index].kind, value) {
+                (rdocx::LegacyFormFieldKind::TextInput, Value::String(value)) => {
+                    rdocx::LegacyFormFieldValue::Text(value.clone())
+                }
+                (rdocx::LegacyFormFieldKind::CheckBox, Value::Bool(value)) => {
+                    rdocx::LegacyFormFieldValue::Checked(*value)
+                }
+                (rdocx::LegacyFormFieldKind::DropDownList, Value::Number(value)) => {
+                    rdocx::LegacyFormFieldValue::SelectedIndex(usize::try_from(
+                        value.as_u64().ok_or("invalid dropdown integer")?,
+                    )?)
+                }
+                _ => return Err(format!("legacy form key {key:?} has the wrong value kind").into()),
+            };
+            FillTarget::Legacy { index, value }
+        };
+        targets.push(target);
+    }
+    Ok(targets)
+}
+
+// Existing setters can remove typed legacy fields, but do not author new SDTs.
+// Re-resolve only explicit selectors against their frozen unique metadata. A
+// removed unrelated control must not turn a later vector index into authority.
+fn selected_control_is_current(
+    document: &Document,
+    key: &str,
+    by_tag: bool,
+    expected: &FillControl,
+) -> bool {
+    let inventory = fill_control_inventory(document);
+    let mut matches = inventory.iter().filter(|control| {
+        if by_tag {
+            control.tag.as_deref() == Some(key)
+        } else {
+            control.alias.as_deref() == Some(key)
+        }
+    });
+    matches.next() == Some(expected) && matches.next().is_none()
+}
+
+pub fn fill_values(
+    file: &Path,
+    values_path: &Path,
+    output: &Path,
+    json_output: bool,
+) -> Result<()> {
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_available(&[output.to_path_buf()])?;
+    let values = parse_form_values(values_path)?;
+    let document = Document::open(file)?;
+    let controls = fill_control_inventory(&document);
+    let fields = document.legacy_form_fields()?;
+    let targets = select_form_targets(&values, &controls, &fields)?;
+    let mut candidate = document.clone_for_staging();
+    let mut rows = vec![Value::Null; targets.len()];
+    let has_legacy = targets
+        .iter()
+        .any(|target| matches!(target, FillTarget::Legacy { .. }));
+    for (slot, target) in targets.iter().enumerate() {
+        if let FillTarget::Control {
+            index,
+            by_tag,
+            value,
+        } = target
+        {
+            if !selected_control_is_current(&candidate, &values[slot].0, *by_tag, &controls[*index])
+            {
+                return Err(
+                    format!("SDT identity drift before form key {:?}", values[slot].0).into(),
+                );
+            }
+            let key = &values[slot].0;
+            let count = if *by_tag {
+                candidate.set_content_control_value_by_tag(key, value)?
+            } else {
+                candidate.set_content_control_value_by_alias(key, value)?
+            };
+            if count != 1
+                || !selected_control_is_current(&candidate, key, *by_tag, &controls[*index])
+            {
+                return Err(format!(
+                    "SDT overlap or identity drift for form key {key:?} at index {index}"
+                )
+                .into());
+            }
+            rows[slot] = json!({"key":key,"target_kind":"content_control","selector_route":if *by_tag {"tag"} else {"alias"},"count":1});
+        }
+    }
+    for (slot, target) in targets.iter().enumerate() {
+        if let FillTarget::Control { index, by_tag, .. } = target
+            && !selected_control_is_current(&candidate, &values[slot].0, *by_tag, &controls[*index])
+        {
+            return Err("selected SDT target disappeared or changed during form fill".into());
+        }
+    }
+    let mut expected_fields = fields;
+    if has_legacy && candidate.legacy_form_fields()? != expected_fields {
+        return Err(
+            "mixed form fill refused: SDT edits changed the pre-edit legacy inventory".into(),
+        );
+    }
+    for (slot, target) in targets.iter().enumerate() {
+        if let FillTarget::Legacy { index, value } = target {
+            if candidate.legacy_form_fields()? != expected_fields {
+                return Err("legacy form identity or metadata drift before assignment".into());
+            }
+            let selected = &expected_fields[*index];
+            let updated = candidate.set_legacy_form_field_value(
+                &selected.source_part,
+                selected.ordinal,
+                value.clone(),
+            )?;
+            let mut expected = selected.clone();
+            expected.value = value.clone();
+            if updated != expected {
+                return Err("legacy form identity or value did not survive assignment".into());
+            }
+            expected_fields[*index] = expected;
+            if candidate.legacy_form_fields()? != expected_fields {
+                return Err("legacy form inventory drift after assignment".into());
+            }
+            rows[slot] = json!({"key":values[slot].0,"target_kind":"legacy_form_field","selector_route":"name","source_part":updated.source_part,"ordinal":updated.ordinal,"count":1});
+        }
+    }
+    let bytes = candidate.to_bytes()?;
+    let mut reopened = Document::from_bytes(&bytes)?;
+    if has_legacy && reopened.legacy_form_fields()? != expected_fields {
+        return Err("form inventory did not survive final reopen".into());
+    }
+    for (slot, target) in targets.iter().enumerate() {
+        if let FillTarget::Control { index, by_tag, .. } = target
+            && !selected_control_is_current(&reopened, &values[slot].0, *by_tag, &controls[*index])
+        {
+            return Err("selected SDT target did not survive final reopen".into());
+        }
+    }
+    publish_document(&mut reopened, output)?;
+    mutation_record(
+        json_output,
+        "accepted-main-body-and-supported-legacy-stories",
+        "fill",
+        json!({"assignments":rows,"count":values.len()}),
+        output,
+    )
+}
+
 pub fn fill(
     file: &Path,
     pairs: &[(String, String)],
@@ -3297,6 +3613,94 @@ pub fn font_list(file: &Path, as_json: bool) -> Result<()> {
         }
         Ok(())
     }
+}
+
+// Bound file reads before allocation, independently of the native material parser.
+fn signing_material_file(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    const LIMIT: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > LIMIT {
+        return Err("signing material must contain between 1 byte and 1 MiB".into());
+    }
+    Ok(bytes)
+}
+
+/// Sign a private candidate, then publish one complete new output with no replacement.
+pub fn sign(file: &Path, key: &Path, cert: &Path, output: &Path, as_json: bool) -> Result<()> {
+    oxml_cli_support::ensure_output_paths_allowed(&[output.to_owned()], file, false)?;
+    let key = signing_material_file(key)?;
+    let cert = signing_material_file(cert)?;
+    let mut candidate = rdocx::Document::open(file)?;
+    let report = candidate.sign(&key, &cert)?;
+    if !report.cryptographically_valid || !report.coverage_complete {
+        return Err("new signature did not authenticate complete current content".into());
+    }
+    let record = oxml_cli_support::signature_report_json(&report);
+    let bytes = candidate.to_bytes()?;
+    let mut staged = oxml_cli_support::StagedOutputSet::new();
+    staged.stage_bytes(output, &bytes)?;
+    staged.publish()?;
+    if as_json {
+        print_json(serde_json::json!({"signature": record}))?;
+    } else {
+        writeln!(
+            io::stdout(),
+            "Signed {} with complete package coverage (certificate trust not evaluated)",
+            output.display()
+        )?;
+    }
+    Ok(())
+}
+
+/// Return true only for at least one signature, all valid with complete coverage.
+pub fn verify_signatures(file: &Path, as_json: bool) -> Result<bool> {
+    let mut current = rdocx::Document::open(file)?;
+    let bytes = current.to_bytes()?;
+    let reports = rdocx::Document::from_bytes(&bytes)?.verify_signatures()?;
+    let valid = !reports.is_empty()
+        && reports
+            .iter()
+            .all(|report| report.cryptographically_valid && report.coverage_complete);
+    let status = if reports.is_empty() {
+        "unsigned"
+    } else if reports.iter().any(|report| !report.cryptographically_valid) {
+        "invalid"
+    } else if reports.iter().any(|report| !report.coverage_complete) {
+        "partial"
+    } else {
+        "valid"
+    };
+    if as_json {
+        let records = reports
+            .iter()
+            .map(oxml_cli_support::signature_report_json)
+            .collect::<Vec<_>>();
+        print_json(serde_json::json!({"status": status, "signatures": records}))?;
+    } else {
+        writeln!(
+            io::stdout(),
+            "Signatures: {status} (certificate trust not evaluated)"
+        )?;
+        for report in &reports {
+            writeln!(
+                io::stdout(),
+                "{}: valid={}, complete={}",
+                report.signature_part,
+                report.cryptographically_valid,
+                report.coverage_complete
+            )?;
+            writeln!(
+                io::stdout(),
+                "{}",
+                oxml_cli_support::signature_report_json(report)
+            )?;
+        }
+    }
+    Ok(valid)
 }
 
 #[cfg(test)]

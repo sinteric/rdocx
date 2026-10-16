@@ -1556,8 +1556,14 @@ Verification is read-only. A loaded package retains the original content-types
 bytes while its typed content types remain unchanged, so saving does not
 invalidate a signature by reserializing equivalent XML.
 
-Signature creation accepts only a PKCS#8 DER RSA private key and an X.509 DER
-certificate with the matching public key. It builds the signature origin,
+Signature creation accepts a PKCS#8 DER RSA private key and an X.509 DER
+certificate with the matching public key, or their single unencrypted PRIVATE
+KEY and CERTIFICATE PEM envelopes. Each input is bounded at1MiB before copying
+or decoding. DER bytes pass unchanged to strict ASN.1 parsing. PEM permits
+ASCII whitespace outside the block and in wrapped standard padded base64.
+Wrong labels, multiple blocks, encrypted or PKCS#1 formats, malformed padding,
+non-ASCII framing and trailers refuse without publishing state. The one
+private normalization path feeds all native, Python and CLI consumers. It builds the signature origin,
 signature part, content-type overrides, and internal relationships on a cloned
 package. Collision-free names never replace occupied parts. The manifest uses
 content-type-qualified references in deterministic part and relationship
@@ -2031,3 +2037,9 @@ publication. An existing destination, repeated destination or publication
 failure leaves the source and existing outputs unchanged and removes newly
 published outputs. CLI staging applies its explicit overwrite policy to the
 whole output set while protecting the input, including aliases and hard links.
+
+## ZIP identity and container metadata
+
+The workspace uses zip9.0.3. Decoded names try UTF8 regardless of the ZIP flag and otherwise CP437. OPC normalization and duplicate detection operate on those decoded names. ODT retains its separate raw central-name UTF8 check. ODP keeps contextual decoder errors and existing traversal, duplicate, compression and expansion limits. No new strict raw-name policy is implied.
+
+Ordinary Deflate entries use central-directory made-by version20. Retained ZIP8 native packages also use version20, so the source-only prediction of a45-to20 output change is refuted. Entry order, selected compression backend, fixed timestamps and permissions remain deterministic. Container bytes can differ while exact inflated XML and opaque member bytes remain equal. ZIP64 and malformed header behavior require dedicated controls, not a general byte-neutrality claim.

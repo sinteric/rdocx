@@ -1,50 +1,47 @@
-# Current Sprint, S93
+# Current Sprint, S94
 
-**Milestone**: M24, X, rendering and remaining issue repairs.
+**Milestone**: M24, X, Python and CLI parity and bounded conversion.
 
-**Goal**: Finish the remaining issue acceptance with independent rendering and conversion evidence. Qualify legal revision rendering, diagnose paragraph borders, preserve supported LaTeX structure, qualify equation layout, and measure public setter inlining before changing policy. Also preserve chart-data revisions and render chart legends outside the plot when requested. Seven stories total 21 to 27 developer-days of estimated effort.
+**Goal**: Let first-draft python-docx and python-pptx scripts and the existing native signing and form surfaces work from Python and the CLI. Complete the finite 73 input LaTeX conversion follow-up to Issue365. The four parity stories reuse existing native semantics, while F-X247 explicitly defines bounded conversion normalization. Five stories total 14 to 19 developer-days of estimated effort.
 
 ## Spec references
 
-- `docs/hld/14-development-backlog.md`, F-X232 through F-X236, F-X245 and F-X246 define the issue contracts, dependencies and story gates. The M24 stability boundary remains S99.
-- `docs/hld/03-architecture.md`, OfficeMath conversion belongs to the Word facade, layout consumes the typed tree, and checked XML owners preserve unmodelled content.
-- `docs/hld/08-rendering-spec.md`, Word revision views, paragraph paint and OfficeMath layout define formatting, projection, baselines and deterministic rendering.
-- `docs/hld/10-bindings-spec.md`, revision rendering options and native equation conversion define public surface and compatibility boundaries.
-- `docs/hld/12-testing-strategy.md`, revision-view regressions, OfficeMath structure and native geometry/raster oracles define independent acceptance and mutation-sensitive controls.
-- `docs/hld/15-build-and-toolchain.md`, pinned tools, deterministic bundled-font mode and build profiles constrain valid rendering and performance comparisons.
+- `docs/hld/14-development-backlog.md`, F-X238 through F-X241 and F-X247 define the five story contracts. M24's final stability boundary remains S99.
+- `docs/hld/03-architecture.md`, the document-family boundaries, staged mutation and shared binding/tool support constrain adapters and dependency edges.
+- `docs/hld/04-opc-and-packaging.md`, package signatures, coverage, XML preservation, schema order and atomic publication constrain signing, forms and equation round trips.
+- `docs/hld/06-presentationml-model.md`, retained notes and opaque source preserve PowerPoint ownership while exposing compatibility names.
+- `docs/hld/08-rendering-spec.md`, existing deterministic OfficeMath layout and unit semantics constrain the bounded conversion and silent-zero refusals.
+- `docs/hld/10-bindings-spec.md`, Python/CLI parity, immutable snapshots, causal owner publication, native signing and form providers define the public surface.
+- `docs/hld/12-testing-strategy.md`, regression, external structural/native differential, installed binding and mutation-sensitive checks define acceptance.
+- `docs/hld/15-build-and-toolchain.md`, pinned producers, packaging, feature reachability, archive inventories and actual artifact measurements constrain shipped signing and render evidence.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-X232 | Render legal revisions and qualify checked XML repros | L | done | - |
-| F-X233 | Repair paragraph border geometry | M | done | - |
-| F-X234 | Preserve supported LaTeX conversion structure | M | done | - |
-| F-X235 | Qualify equation layout against native Word | L | done | - |
-| F-X236 | Measure public setter inlining before changing policy | S | done | - |
-| F-X245 | Preserve chart data changes in Word comparison | L | done | - |
-| F-X246 | Honor chart legend position and overlay during rendering | L | done | - |
+| F-X238 | Restore python-docx Word names from the first-draft corpus | L | done | - |
+| F-X239 | python-pptx notes names and refusal of silent zero values | M | done | - |
+| F-X240 | Python and CLI signing and signature verification | M | done | - |
+| F-X241 | Python and CLI form reading and filling | M | done | - |
+| F-X247 | Preserve the common LaTeX inputs reported in Issue365 | L | done | - |
 
 ## Sequencing note
 
-Rows are listed in dependency order, not F-ID order.
+Rows list the accepted scope. Implementation waves follow dependencies and explicit file leases in the approved plans. Design all five stories before implementation. F-X247 consumes completed S93 F-X234 and F-X235. F-X238 and F-X239 overlap Word formatting and PowerPoint slide bindings and integrate serially. F-X240 and F-X241 share Word binding/CLI entrypoints and also serialize their changes there. Independent math and parity work may share a wave only when their actual source, test and HLD section leases do not overlap.
 
-F-X232 assesses PR375 for Issue373 after completed F-X201, F-X211a and F-X211d. Reuse checked-XML and namespace providers and qualify the exact header/footer repros. Decide compatibility for proposed public rendering types during design. Legal revision and border painting share paginator resources and integrate serially.
+A blocked worker does not block independent stories without formal dependencies. After F-X238 fully checkpoints and explicitly releases its overlapping source, test, HLD and cache leases, F-X239 may start from clean canonical source while F-X238 stays blocked and unintegrated. It may share disjoint implementation time with F-X247, but the math worker retains the archive/catalog lane until explicit release. Later claims and integration preserve all scoped, microscope and final union gates. F-X238 resumes only after lease return and reconciliation against the current consumers.
 
-F-X233 uses the user-approved inferred15point and raw15 controls because Issue366's original input is unavailable. It independently distinguishes width, clearance, clipping and joins while retaining that reproduction limit. F-X234 resolves Issue365's conversion half before F-X235 qualifies equation layout against an independently pinned native Word producer. F-X236 measures a real cross-crate, non-LTO setter consumer before selecting annotations or documenting no change.
-
-F-X245 resolves Issue382 after completed F-X229 and F-X230, preserving chart parts and embedded workbooks in accept-all and reject-all reconstruction. F-X246 resolves Issue383 across Word and PowerPoint, including default legend placement, explicit positions and overlay. Coordinate shared chart resources and attribute chart raster changes separately.
-
-Design every story before implementation. Lease shared sources and test entrypoints explicitly. Only one story may own a deterministic baseline change per wave. Expected product and external raster changes require separate attribution and review. Developer-day estimates are effort estimates, not elapsed-time promises. Expanded scope needs a split rather than weakened gates.
+Keep installed environments and build caches isolated or exclusively leased. One story per wave may change deterministic baselines. Shared archive observations and delivery totals belong to the integrator. Developer-day estimates describe effort, not elapsed delivery time. S95 prioritizes the new repair intake. SPRINT_PLAN.md assigns the remaining repairs and carryovers to the explicit S95.1 through S95.4 boundaries.
 
 ## Definition of done for this sprint
 
-- Complete all seven story contracts through design, implementation, independent zero-defect and zero-smell microscope, scoped verification and integrated full verification.
-- Prove Issue373 legal revision colours and double underline without changing stored formatting, with cache identity, native/CLI/Python parity, checked-owner repros and independent native paint evidence.
-- Prove Issue366's diagnosed border repair with save/reopen, independently measured geometry and native paint on the approved inferred inputs. Preserve raster thresholds and the missing-original limitation.
-- Prove Issue365's exact supplied formula conversion with normalized OfficeMath structure, meaningful symbols/spacing, explicit loss diagnostics and bounded parsing, then qualify layout under the existing one-point geometry and declared 150DPI SSIM contract.
-- Resolve Issue367 with cross-crate non-LTO measurements and compiler evidence. Preserve semantics and avoid an unmeasured blanket inline policy.
-- Use deterministic font mode for baselines. Attribute every intentional product or independent raster delta to its approved story and retain preservation, schema ordering and resource bounds.
-- Reconcile all hash-harness outputs, pass the union of risk riders and obtain a clean integrated sprint review. M24's final stability gate remains a later boundary.
-- Prove Issue382 chart-only changes at word and run granularity, chart-plus-text changes and the unchanged-chart control after save/reopen. Accept-all reproduces the edited chart and workbook, reject-all the original.
-- Prove Issue383 default, bottom and left legends render differently in both formats without plot overlap when overlay is false or absent. Qualify all supported positions, overlay and hidden-legend controls.
+- Complete all five approved contracts through implementation, independent zero-defect and zero-smell microscope, scoped verification, integrated full verification and clean sprint review.
+- Execute the authenticated PR333 first-draft inputs unchanged, keeping their original reports separate from F-X211. Independently qualify every requested Word name, including add_section, stream save, highlight and first-page headers, as compatible behavior or an error naming the supported alternative. The three specified divergence messages retain their exact required pointer tokens.
+- Preserve successful Cell.merge behavior. Retain the original runner's stale divergence-marker result separately from saved-file and semantic qualification. A raw runner result alone cannot qualify needs-labelled scripts or erase a diagnosed observer contradiction.
+- Qualify notes presence versus empty content and notes text mutation, the requested enum aliases and constants, and all five exact silent-zero assignments. Refusals name the correct units and leave complete document bytes and owner authority unchanged. Positive explicit-unit controls still serialize correctly. Native unit constructors keep their existing truncation behavior.
+- Sign and verify both DOCX and PPTX through actual installed Python and CLI entrypoints using admitted DER and PEM. Reports preserve signer identity, precise issues, cryptographic validity and coverage. Typed edits, saved tampering, partial and unsigned controls have the approved distinct outcomes and CLI exits. Verification does not assert certificate-chain trust.
+- Ordinary shipped wheel and CLI configurations enable signing, including the existing no-default-features CLI path, with actual dependency, licence, artifact and package measurements. Native family and shared support default features keep their approved boundaries. Unexecuted target builds remain unclaimed.
+- Read and fill plain text, checkbox, drop-down and date controls plus a legacy text field through Python and CLI --values. Independently inspect saved XML and reopen values. Preserve existing callable snapshots, --tag behavior, custom XML, held owners, strict new mixed-selector refusal and whole-operation atomicity. Fill/sign interactions operate on current package state.
+- Execute the exact 73 LaTeX inputs through public add_equation and save/reopen. Retain the original unconditional FAIL label and use a separately identified summary-only correction with independent semantic assertions. Preserve symbols, script bases, upright/text roles and meaningful spacing under the explicitly designed OfficeMath normalization. Qualify actual pinned Pandoc outputs and native paint where required, retaining oracle limitations and fraction-style boundaries.
+- Keep deterministic fonts, XML/schema preservation, parser/resource caps and historical oracle identities. Do not weaken geometry, raster or mutation gates. Reconcile all 49 hashes and the pixel manifest, with any intentional delta separately declared and reviewed.
+- Pass the integrated union of binding, typing, stub, target, publication, supply-chain and differential riders. No release or publication is part of this sprint. M24's final gate remains a later boundary.

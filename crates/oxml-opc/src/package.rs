@@ -156,7 +156,7 @@ impl OpcPackage {
                     limit: limits.max_total_uncompressed_bytes,
                 });
             }
-            let name = normalize_part_name(entry.name());
+            let name = normalize_part_name(entry.name()?.as_ref());
             let name = name.strip_prefix('/').unwrap_or(&name).to_string();
             if !raw_part_identities.insert(name.to_ascii_lowercase()) {
                 return Err(OpcError::DuplicatePartName(name));
@@ -382,8 +382,8 @@ impl OpcPackage {
 
     /// Sign a cloned candidate package with the strict RSA-SHA256 profile.
     ///
-    /// The private key must be PKCS#8 DER and the certificate must be X.509
-    /// DER. The live package changes only after the candidate verifies with
+    /// The private key must be PKCS#8 DER or one unencrypted PRIVATE KEY PEM
+    /// block. The certificate must be X.509 DER or one CERTIFICATE PEM block. The live package changes only after the candidate verifies with
     /// complete declared coverage. Certificate-chain trust remains caller
     /// policy.
     #[cfg(feature = "digital-signatures")]
@@ -1177,6 +1177,122 @@ mod tests {
         buffer
     }
 
+    fn replace_zip_name(bytes: &mut [u8], old: &[u8], raw: &[u8], utf8: bool) {
+        assert_eq!(old.len(), raw.len());
+        let mut changed = 0;
+        for offset in 0..bytes.len().saturating_sub(46) {
+            let (header, flags, length) = match &bytes[offset..offset + 4] {
+                b"PK\x03\x04" => (30, 6, 26),
+                b"PK\x01\x02" => (46, 8, 28),
+                _ => continue,
+            };
+            let name_len = u16::from_le_bytes(
+                bytes[offset + length..offset + length + 2]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let start = offset + header;
+            if name_len != old.len() || bytes.get(start..start + name_len) != Some(old) {
+                continue;
+            }
+            bytes[start..start + name_len].copy_from_slice(raw);
+            let mut value = u16::from_le_bytes(
+                bytes[offset + flags..offset + flags + 2]
+                    .try_into()
+                    .unwrap(),
+            );
+            value = (value & !(1 << 11)) | if utf8 { 1 << 11 } else { 0 };
+            bytes[offset + flags..offset + flags + 2].copy_from_slice(&value.to_le_bytes());
+            changed += 1;
+        }
+        assert_eq!(changed, 2, "both local and central names must be patched");
+    }
+
+    #[test]
+    fn zip9_utf8_and_cp437_names_preserve_opaque_payloads() {
+        for (raw, utf8) in [
+            (b"x\xc3\xa9.bin".as_slice(), false),
+            (b"x\xc3\xa9.bin".as_slice(), true),
+            (b"x\x82.bin".as_slice(), false),
+            (b"x\x82.bin".as_slice(), true),
+        ] {
+            let name = format!("{}.bin", "a".repeat(raw.len() - 4));
+            let mut bytes = package_zip(&[
+                ("[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="bin" ContentType="application/octet-stream"/></Types>"#),
+                (&name, b"opaque\0\xff"),
+            ]).into_inner();
+            replace_zip_name(&mut bytes, name.as_bytes(), raw, utf8);
+            let before = bytes.clone();
+            let package = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+            assert_eq!(
+                package.get_part("/xé.bin"),
+                Some(b"opaque\0\xff".as_slice())
+            );
+            let mut saved = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut saved).unwrap();
+            let reopened =
+                OpcPackage::from_reader(std::io::Cursor::new(saved.into_inner())).unwrap();
+            assert_eq!(
+                reopened.get_part("/xé.bin"),
+                Some(b"opaque\0\xff".as_slice())
+            );
+            assert_eq!(bytes, before);
+        }
+    }
+
+    #[test]
+    fn zip9_decoded_aliases_reach_existing_duplicate_rejection() {
+        let mut bytes = package_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+            ),
+            ("aa.bin", b"first"),
+            ("aaa.bin", b"second"),
+        ])
+        .into_inner();
+        replace_zip_name(&mut bytes, b"aa.bin", b"x\x82.bin", false);
+        replace_zip_name(&mut bytes, b"aaa.bin", b"x\xc3\xa9.bin", false);
+        let before = bytes.clone();
+        assert!(
+            matches!(OpcPackage::from_reader(std::io::Cursor::new(&bytes)),
+            Err(OpcError::DuplicatePartName(name)) if name == "xé.bin")
+        );
+        assert_eq!(bytes, before);
+    }
+
+    #[test]
+    fn zip9_ordinary_writer_header_is_deterministic_version_twenty() {
+        let mut package = OpcPackage::new();
+        package.set_part("opaque.bin", b"opaque\0\xff".to_vec());
+        let mut first = std::io::Cursor::new(Vec::new());
+        let mut second = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut first).unwrap();
+        package.write_to(&mut second).unwrap();
+        assert_eq!(first.get_ref(), second.get_ref());
+        let bytes = first.get_ref();
+        let mut central = 0;
+        for offset in 0..bytes.len().saturating_sub(46) {
+            if &bytes[offset..offset + 4] != b"PK\x01\x02" {
+                continue;
+            }
+            let read =
+                |at| u16::from_le_bytes(bytes[offset + at..offset + at + 2].try_into().unwrap());
+            assert_eq!(read(4) & 0xff, 20);
+            assert_eq!(read(6), 20);
+            assert_eq!(read(12), 0);
+            assert_eq!(read(14), 33);
+            assert_eq!(read(10), 8);
+            central += 1;
+        }
+        assert_eq!(central, 3);
+        let reopened = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            reopened.get_part("opaque.bin"),
+            Some(b"opaque\0\xff".as_slice())
+        );
+    }
+
     fn fake_eocd(total_entries: u16) -> [u8; EOCD_LEN as usize] {
         let mut eocd = [0; EOCD_LEN as usize];
         eocd[..4].copy_from_slice(&EOCD_SIGNATURE);
@@ -1905,7 +2021,7 @@ mod tests {
         let mut rebuilt = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for index in 0..source.len() {
             let mut entry = source.by_index(index).unwrap();
-            let name = entry.name().to_owned();
+            let name = entry.name().unwrap().into_owned();
             let mut data = Vec::new();
             std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
             if name == "ppt/presentation.xml" {

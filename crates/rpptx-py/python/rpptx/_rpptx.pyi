@@ -1,3 +1,4 @@
+from typing import TypedDict as _TypedDict
 from typing import BinaryIO as _BinaryIO
 import os as _os
 from collections.abc import Iterable as _Iterable, Iterator as _Iterator, Sequence as _Sequence
@@ -34,6 +35,28 @@ from .enum.text import (
 )
 from .util import Length as _Length
 
+class _SignerCertificateIdentity(_TypedDict):
+    subject: str
+    issuer: str
+    serial_number: str
+
+class _CoveredRelationship(_TypedDict):
+    source_part: str
+    relationship_id: str
+
+class _SignatureIssue(_TypedDict):
+    kind: _Literal["missing_part", "changed_reference", "duplicate_reference", "missing_relationship", "duplicate_relationship", "external_relationship", "missing_relationship_target", "uncovered_part", "uncovered_relationship", "signature_value_mismatch", "orphan_signature_part"]
+    details: dict[str, str]
+
+class _SignatureReport(_TypedDict):
+    signature_part: str
+    signer: _SignerCertificateIdentity | None
+    cryptographically_valid: bool
+    coverage_complete: bool
+    covered_parts: list[str]
+    covered_relationships: list[_CoveredRelationship]
+    issues: list[_SignatureIssue]
+
 _Path = str | _os.PathLike[str]
 _ImageFile = _Path | bytes | _IO[bytes]
 _AutoNumberScheme = _Literal[
@@ -54,7 +77,7 @@ __all__ = [
     "EmbeddedFontFace",
     "EmbeddedTypeface",
 
-    "SlideTransition", "HeaderFooter", "PlaceholderFormat", "SlideMaster", "SlideMasterCollection",
+    "NotesSlide", "NotesTextFrame", "SlideTransition", "HeaderFooter", "PlaceholderFormat", "SlideMaster", "SlideMasterCollection",
     "Theme", "ThemeFonts", "ThemeFontSet", "ThemeColors", "MasterTextStyles", "TextStyleList",
     "AppProperties", "CoreProperties", "CustomFileTime", "CustomProperties",
     "CustomProperty", "GradientStop", "GradientStops", "MediaInfo", "Section",
@@ -337,6 +360,8 @@ class PresentationTextExport:
 
 @_final
 class Presentation:
+    def sign(self, private_key: bytes, certificate: bytes) -> _SignatureReport: ...
+    def verify_signatures(self) -> tuple[_SignatureReport, ...]: ...
     @property
     def embedded_fonts(self) -> tuple[EmbeddedTypeface, ...]: ...
     def embed_font(self, name: str, font: _FontInput | EmbeddedFont, kind: _FontKind = "regular", *, license: FontEmbeddingLicense) -> None: ...
@@ -510,6 +535,10 @@ class Slide:
     @property
     def placeholders(self) -> PlaceholderCollection: ...
     @property
+    def has_notes_slide(self) -> bool: ...
+    @property
+    def notes_slide(self) -> NotesSlide: ...
+    @property
     def notes_text(self) -> str | None: ...
     @notes_text.setter
     def notes_text(self, value: str) -> None: ...
@@ -556,6 +585,20 @@ class Slide:
     def move_comment(self, from_: int, to: int) -> None: ...
     def move_reply(self, comment_id: str, from_: int, to: int) -> None: ...
 
+
+@_final
+class NotesSlide:
+    def __new__(cls, *, _private: _Never) -> NotesSlide: ...
+    @property
+    def notes_text_frame(self) -> NotesTextFrame | None: ...
+
+@_final
+class NotesTextFrame:
+    def __new__(cls, *, _private: _Never) -> NotesTextFrame: ...
+    @property
+    def text(self) -> str: ...
+    @text.setter
+    def text(self, value: str) -> None: ...
 
 @_final
 class SlideCollection:

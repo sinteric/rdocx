@@ -1,5 +1,9 @@
 """Python bindings for rdocx."""
 
+from __future__ import annotations
+
+from typing import NoReturn as _Never, SupportsIndex as _SupportsIndex, overload as _overload
+
 from .enum import MSO_THEME_COLOR
 from .enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from .enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT, WD_TAB_LEADER, WD_UNDERLINE
@@ -71,6 +75,7 @@ from ._rdocx import (
     Picture,
     PictureOptions,
     ContentControl,
+    LegacyFormField,
     CustomFileTime,
     CustomProperty,
     CustomProperties,
@@ -151,6 +156,7 @@ __all__ = [
     "Picture",
     "PictureOptions",
     "ContentControl",
+    "LegacyFormField",
     "CustomFileTime",
     "CustomProperty",
     "CustomProperties",
@@ -391,3 +397,25 @@ class XL_CHART_TYPE(IntEnum):
     PIE = 5
     RADAR = 81
     XY_SCATTER = 74
+
+
+class _StyleSnapshots(tuple[Style, ...]):
+    """Immutable snapshots, with an explicit alternative to mutable lookup."""
+
+    @_overload
+    def __getitem__(self, index: _SupportsIndex) -> Style: ...
+
+    @_overload
+    def __getitem__(self, index: slice) -> tuple[Style, ...]: ...
+
+    @_overload
+    def __getitem__(self, index: str) -> _Never: ...
+
+    def __getitem__(
+        self, index: _SupportsIndex | slice | str
+    ) -> Style | tuple[Style, ...]:
+        if isinstance(index, str):
+            raise NotImplementedError(
+                "styles are snapshots: use document.set_style(name, font_name=..., font_size=...)"
+            )
+        return tuple.__getitem__(self, index)

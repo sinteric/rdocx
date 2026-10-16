@@ -924,6 +924,16 @@ output extension selects the class the same way.
 
 ## Notes parts
 
+`SlideRef::notes_text_frame_text() -> Result<Option<String>>` projects one
+writable notes body without mutation. No notes or no effective body yields
+None. One direct Body shape yields its exact text, including an empty body
+without txBody. Multiple effective bodies, grouped-only or alternate-fallback
+bodies refuse with the aggregate `Slide.notes_text` alternative. The read
+selects the same direct body that the existing first-writable-body setter
+would update. The scalar notes reader retains its aggregate semantics and its
+setter retains its first-writable-body policy.
+
+
 A notes slide has this root sequence:
 
 ```

@@ -3642,3 +3642,146 @@ fn fx216_cli_ranges_insertion_and_atomic_errors_preserve_inputs() {
         );
     }
 }
+
+#[test]
+fn fx240_unsigned_status_material_bound_and_output_refusal() {
+    let workspace = TempWorkspace::new("fx240-signing");
+    let input = workspace.path.join("unsigned.pptx");
+    Presentation::new().unwrap().save(&input).unwrap();
+    let result = cli(&["verify-signatures", input.to_str().unwrap(), "--json"]);
+    assert_eq!(result.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["status"], "unsigned");
+    assert_eq!(json["signatures"], serde_json::json!([]));
+    let before = fs::read(&input).unwrap();
+    let key = workspace.path.join("oversized.key");
+    let cert = workspace.path.join("invalid.cert");
+    fs::write(&key, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    fs::write(&cert, b"invalid").unwrap();
+    let output = workspace.path.join("refused.pptx");
+    let result = cli(&[
+        "sign",
+        input.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--cert",
+        cert.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+    fs::write(&output, b"keep").unwrap();
+    let result = cli(&[
+        "sign",
+        input.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--cert",
+        cert.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(fs::read(&output).unwrap(), b"keep");
+    assert_eq!(
+        cli(&["sign", input.to_str().unwrap()]).status.code(),
+        Some(2)
+    );
+    assert!(!workspace.path.read_dir().unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp")
+    }));
+}
+
+#[test]
+fn fx240_text_and_json_io_failures_exit_one_without_panicking() {
+    let workspace = TempWorkspace::new("fx240-stdout");
+    let input = workspace.path.join("unsigned.pptx");
+    Presentation::new().unwrap().save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let material = |name: &str, label: &str| {
+        let source = include_str!("../../oxml-opc/src/signature.rs");
+        let prefix = format!("const {name}: &str = \"");
+        let encoded = source
+            .split_once(prefix.as_str())
+            .unwrap()
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        format!("-----BEGIN {label}-----\n{encoded}\n-----END {label}-----\n")
+    };
+    let key = workspace.path.join("key.pem");
+    let cert = workspace.path.join("cert.pem");
+    fs::write(
+        &key,
+        material("TEST_PRIVATE_KEY_PKCS8_BASE64", "PRIVATE KEY"),
+    )
+    .unwrap();
+    fs::write(
+        &cert,
+        material("TEST_CERTIFICATE_DER_BASE64", "CERTIFICATE"),
+    )
+    .unwrap();
+    for signing in [false, true] {
+        for as_json in [false, true] {
+            let output = workspace.path.join(format!("signed-{as_json}.pptx"));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rpptx"));
+            if signing {
+                command
+                    .arg("sign")
+                    .arg(&input)
+                    .arg("--key")
+                    .arg(&key)
+                    .arg("--cert")
+                    .arg(&cert)
+                    .arg("-o")
+                    .arg(&output);
+            } else {
+                command.arg("verify-signatures").arg(&input);
+            }
+            if as_json {
+                command.arg("--json");
+            }
+            let mut child = command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            drop(child.stdout.take());
+            let result = child.wait_with_output().unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "signing={signing}, json={as_json}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stderr).starts_with("Error:"));
+            assert!(!String::from_utf8_lossy(&result.stderr).contains("panicked"));
+            assert_eq!(fs::read(&input).unwrap(), before);
+            if signing {
+                // Publication precedes reporting. A report I/O error keeps the valid new package.
+                let reports = Presentation::open(&output)
+                    .unwrap()
+                    .verify_signatures()
+                    .unwrap();
+                assert!(!reports.is_empty());
+                assert!(
+                    reports
+                        .iter()
+                        .all(|report| report.cryptographically_valid && report.coverage_complete)
+                );
+            } else {
+                assert!(!output.exists());
+            }
+        }
+    }
+}

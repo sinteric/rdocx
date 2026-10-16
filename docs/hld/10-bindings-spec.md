@@ -216,7 +216,7 @@ p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 r = p.add_run(" world")
 r.font.bold = True
 r.font.size = Pt(18)
-doc.add_picture("img.png", width=Inches(2))   # height inferred by oxml-media
+doc.add_picture("img.png", width=Inches(2), height=Inches(1))
 doc.save("out.docx")
 doc.save_pdf("out.pdf")                        # documented as an rdocx extension
 ```
@@ -251,6 +251,47 @@ doc.save_pdf("out.pdf")                        # documented as an rdocx extensio
   to `XmlError`, layout failures map to `LayoutError`, and the shared stale
   domain error maps to `StaleElementError`. `oxml-py-support` therefore remains
   independent of any Python base class.
+
+Word paragraph creation accepts empty text and an optional resolved paragraph
+style. `add_heading` resolves Title or Heading1 through Heading9, and
+`add_page_break` stages its paragraph and page-break run together. Table style
+creation follows the existing checked table-style resolver. Validation and
+returned-owner allocation finish on a candidate before publication. Missing
+list styles name explicit numbering and style providers without changing the
+default template. Run bold, italic and underline aliases share `run.font`'s
+owner validation and tri-state behavior.
+
+Document construction/open accept binary seekable streams as well as paths.
+Save serializes fully before writing to a binary stream, detects short writes
+and preserves caller stream ownership. I/O errors propagate. Picture streams
+reuse native byte admission. Supplying only one picture dimension refuses with
+the explicit width-and-height alternative. Direct-body paragraph insertion
+resolves the physical body index. Hyperlink anchor=Paragraph refuses with
+explicit add_bookmark/add_internal_hyperlink guidance. Cell and related-story insertion refuse with
+the supported story or document authoring path.
+
+`styles` is an immutable tuple subtype containing frozen Style snapshots.
+Integer indexing, slicing, iteration and equality retain tuple behavior, with
+slices returning ordinary tuples. String indexing raises a first-line
+`set_style` pointer. Exact builtin tuple type identity is outside this contract.
+Frozen Section header/footer/first-page properties name the live
+`document.section(snapshot.ordinal)` alternative. `add_section` names native
+insert/update operations without promising python-docx section cloning.
+Table column compatibility names refuse with `insert_column`,
+`set_column_width`, `grid_widths` and `cell.width` alternatives. Paragraph
+`_element` and Presentation `_sldIdLst` name `remove_content` and
+`slides.remove` respectively, without exposing lxml mutation.
+
+The `rdocx.enum.text` module defines bounded `WD_BREAK_TYPE`/`WD_BREAK` and
+`WD_COLOR_INDEX`. The concrete `rdocx.enum.section` module defines
+`WD_SECTION_START`/`WD_SECTION` and `WD_ORIENTATION`/`WD_ORIENT` with pinned
+python-docx numeric values and identity-preserving aliases. Its inline annotations
+provide the same direct import path at runtime and under strict typing. These
+constants do not add XML conversion methods or section-cloning semantics. The
+table module's `WD_ALIGN_VERTICAL` aliases `WD_CELL_VERTICAL_ALIGNMENT` by identity.
+`Font.highlight_color` maps the supported color-index values to native Word
+highlight names and clears with None. Other break forms retain named
+line/page/column alternatives.
 
 ## Python Word formatting and checked list publication
 
@@ -316,6 +357,22 @@ the existing left/right rendering mapping. List retains its established
 fallback and has no additional paint-parity claim.
 
 ## Python colour inputs and live font formats
+
+Python numeric setters reject bool before conversion. Word font.size accepts
+its existing EMU/Length representation and refuses nonzero values whose
+unchanged native conversion stores zero half-points. The error names EMU,
+0.5 point storage and rdocx.shared.Pt. Explicit zero and None retain their
+existing behavior. Native constructors and imported zero source are unchanged.
+
+Presentation before/after spacing rejects nonzero EMU values that truncate to
+zero centipoints, while explicit zero, None and existing float-line roles
+remain valid. Character spacing applies the same refusal symmetrically to
+small signed values, preserving meaningful negative spacing. Line spacing
+must produce positive stored points or percentage units, with positive line
+multiples and rpptx.util.Pt named by its refusal. Role-specific positivity does
+not change valid zero before/after spacing. Every refusal precedes owner or
+source publication, including warmed wrappers and pre-existing nonzero values.
+
 
 Both families accept `RGBColor`, legacy integer channel triples and exactly
 six ASCII hexadecimal digits with an optional single leading hash at every
@@ -1704,7 +1761,22 @@ carry ordered `MathConversionDiagnostic` records. The boundary accepts a bare
 argument, so document-wide and display-paragraph properties stay with their
 owners rather than being silently projected. Format attributes and expression
 properties that cannot survive the conversion are diagnosed. The surface is
-native Rust only and remains additive before 1.0.
+native Rust, with Python's existing `Paragraph.add_equation(source, format=...)`
+route reusing it. The finite Issue365 matrix admits named Greek variants,
+relations, operators, arrows and degree, upright sin/log/ln/exp/operatorname,
+plain mathrm and literal text. Function runs use normal=true, plain mathematics
+uses style=Plain and normal text uses both. Literal text retains boundary and
+interior whitespace. Supported MathML function application and text-boundary
+spacing normalize into these existing carriers. Unknown marker contexts and
+unsupported properties retain explicit diagnostics.
+
+frac, dfrac and tfrac normalize to stacked Bar fractions and canonical frac
+output. Forced TeX display/text style is not preserved. binom uses existing
+parentheses around a NoBar fraction. Thin, semicolon and quad spaces retain
+U+2009, U+2004 and U+2001 respectively, with canonical MathML widths .167em,
+.278em and1em. Native semicolon paint uses an explicit Unicode approximation.
+These bounded pre-1.0 behavior expansions add no public signature, model field,
+variant or binding method and do not claim unrestricted TeX support.
 
 Native Rust callers can import RTF through `Document::from_rtf_bytes` and
 `Document::open_rtf`. These additive pre-1.0 APIs return an `RtfReadResult`
@@ -2003,12 +2075,11 @@ their API and dependency graphs remain unchanged.
 When native callers enable the default-off `digital-signatures` feature,
 `Document::verify_signatures` directly returns the shared package verification
 reports. `Document::sign` accepts PKCS#8 private-key DER and X.509 certificate
-DER on native targets. It flushes typed state into a staged document, asks the
+DER or the admitted single unencrypted PEM envelopes on native targets. It flushes typed state into a staged document, asks the
 shared package layer to sign and verify the complete graph, and commits only
 the verified candidate. The additive APIs distinguish cryptographic validity
-and complete declared coverage from certificate-chain trust. They do not
-expand Python, WASM, or CLI surfaces and those dependency graphs remain
-unchanged.
+and complete declared coverage from certificate-chain trust. Python and CLI adapters explicitly enable signing and owned reports. WASM
+does not select the feature.
 
 The native `Presentation` facade exposes the parallel default-off security
 surface. `open_encrypted`, `from_encrypted_bytes`, and the bounded bytes
@@ -2016,12 +2087,13 @@ variant use the shared package reader. `save_encrypted` and
 `to_encrypted_bytes` use the shared fixed Agile profile, with sibling-file
 atomic publication for the path method. `verify_signatures` stages current
 typed presentation state before returning shared reports. Native `sign`
-accepts PKCS#8 private-key DER and X.509 certificate DER, then commits only a
+accepts PKCS#8 private-key DER and X.509 certificate DER or the admitted PEM
+envelopes, then commits only a
 candidate whose signature is cryptographically valid and has complete declared
 coverage. Relevant mutation retains signature infrastructure for inspection
-but makes verification report it as invalid. These additive pre-1.0 APIs do
-not expand Python, WASM, or CLI surfaces, and their manifests select neither
-security feature.
+but makes verification report it as invalid. Python and CLI adapters explicitly select digital signatures. WASM and
+native defaults remain unchanged, and the tool adapters do not select Agile
+encryption.
 
 Native callers rebuilding one Word document from another can call
 `Document::transfer_reusable_layout_from`. The method moves the source's normal
@@ -2344,9 +2416,10 @@ Native Word callers can also inspect content controls through
 update every matching tag or alias, while `bind_content_controls` applies a
 string map with tag precedence and alias fallback. Bound values update their
 custom XML datastore and displayed text atomically through the
-package-preserving facade. These methods are additive native APIs. They do not
-implicitly add Python, WASM, or CLI methods, and the existing binding surfaces
-remain unchanged.
+package-preserving facade. Python retains callable frozen snapshots and the
+existing all-match tag/alias setters. Its bind_content_controls(dict[str,str])
+wrapper uses the same tag precedence, alias fallback and ignored unmatched keys.
+WASM has no corresponding new form surface.
 
 Native Word callers inspect direct body order through
 `Document::body_items`. Each `BodyItemRef` borrows one paragraph, table,
@@ -2938,6 +3011,29 @@ public surface.
 
 ## Native PowerPoint notes and handout export
 
+Python Slide.has_notes_slide is a pure presence predicate, including existing
+empty notes. Slide.notes_slide lazily creates native notes/master relationships
+only when absent and prepares its returned NotesSlide owner before publication.
+NotesSlide.notes_text_frame returns None for a missing body, or an owner-aware
+NotesTextFrame exposing scalar text. One exact direct effective Body shape is
+required. Ambiguous, grouped or alternate bodies refuse with the existing
+aggregate Slide.notes_text read alternative. Every operation validates the
+physical slide owner, follows surviving moves and rejects retired slides.
+Existing notes are not rewritten by wrapper access.
+
+Notes text writes stage the existing native provider and publish checked owner
+survival. Outside-body placeholders, relationships and opaque source remain
+owned by their original parts. Within the selected body the existing scalar
+setter retains body-level state and first-paragraph/template formatting rather
+than arbitrary rich-run distributions. Actual serialized source equality is a
+no-op, while equal aggregate text alone does not bypass source comparison.
+
+The enum module provides identity alias MSO_THEME_COLOR_INDEX and import-only
+MSO_COLOR_TYPE with pinned RGB1, SCHEME2, HSL101, PRESET102, SCRGB103 and SYSTEM104
+values. ColorFormat.type retains its existing string/None contract. These
+imports do not add color authoring forms or switch getter return types.
+
+
 The published pre-1.0 `rpptx` facade exposes `HandoutLayout::{One, Two, Three,
 Four, Six, Nine}` and four render-feature methods:
 
@@ -3491,6 +3587,27 @@ subtype/order and opaque values survive updates. Remove-custom is explicit,
 and missing removal is unchanged. Tag fill splits NAME=VALUE once, uses tags
 only and refuses duplicates, missing tags or unsupported bound owners as one
 transaction. Native/Python fill_content_control_tags returns per-tag counts.
+The mutually exclusive `fill --values VALUES.json` route accepts a nonempty
+flat UTF-8 JSON object, at most1MiB and4096 assignments. Duplicate decoded keys,
+empty keys, unsupported values, unknown selectors and ambiguous cross-kind
+matches refuse. Keys select exactly one physical SDT through its tag or alias,
+or one uniquely named legacy field. A second key selecting the same target
+refuses. Strings fill SDTs and legacy text, actual bool fills checkbox controls,
+and nonnegative usize integers select legacy drop-down indices. No implicit
+stringification is performed. JSON assignment rows retain input order and name
+the route, target kind and legacy physical part/ordinal where applicable.
+
+One private candidate applies SDTs first, then legacy fields. Exact selected
+SDT routes and metadata are revalidated before edits, after the phase and after
+final reopen. Existing nested SDT retention is admitted when selected targets
+remain valid. When any legacy assignment exists, the complete original legacy
+identity, metadata and typed-value inventory must survive the SDT phase.
+Removing an earlier legacy field inside an edited SDT therefore refuses instead
+of selecting another field at a shifted ordinal. Each subsequent legacy edit
+permits only planned earlier value substitutions. Final reopen precedes one
+atomic output publication. Existing input/output collision protection and
+existing --tag all-match semantics remain unchanged.
+
 Core set in either family changes only supplied fields, treating empty text
 as removal and preserving imported metadata.
 
@@ -3784,6 +3901,38 @@ Template input accepts a string-keyed dict of bounded JSON values. Bool precedes
 
 CustomFileTime validates explicit RFC3339 text. CustomProperties returns immutable typed snapshots and stages checked set/delete operations. AppProperties and presence-sensitive track_revisions are live document-owned handles. Equations return immutable source snapshots, ordered per-child conversion results and native loss diagnostics. Tag and alias control updates stage all selected qualified values once. Runtime constructors, explicit exports and strict stubs describe the same public classes and defaults.
 
+Python `Document.legacy_form_fields()` returns a tuple of frozen owned
+LegacyFormField snapshots. Each exposes source_part, ordinal, optional name,
+enabled, calculate_on_exit, exact text/checkbox/dropdown type, typed str/bool/int
+value and immutable choices. Snapshots grant no mutation authority and retain
+historical values. The setter resolves current unique names or a complete
+source_part/ordinal pair, with optional matching name. Partial, stale, ambiguous,
+negative or bool identities refuse. Text requires str, checkbox actual bool,
+and drop-down a nonnegative int excluding bool. Native bounds and malformed
+source checks remain authoritative across supported related legacy stories.
+
+Bind dictionaries validate all keys and values before staging. Both new Python
+mutations allocate returned Python values before prepared owner publication.
+Exact source no-ops preserve bytes and authority. Failed staging preserves live
+source and held owners. SDT scope remains main body with nested controls, while
+legacy inventory follows native supported related stories. Date/drop-down SDTs
+retain existing display and bound-string semantics with producer metadata,
+without new date parsing or item validation. These scalar form operations do
+not add form creation, live snapshot proxies or a second XML provider.
+
+Form publication preserves an owner only when independent exact physical-route
+maps identify one old and one candidate owner, the existing matcher agrees,
+and native owning XML is byte-identical. Paragraph/table sources share the
+same batched native inventory as their addresses. Section source uses the
+existing checked section XML provider. Every ancestor must also be certified.
+Cells bind their exact table, row, cell and physical story, so a changed table
+retires all its cells and descendants. Changed or ambiguous paragraphs retire.
+Equal text or equal inventory counts alone grant no authority. Run/Hyperlink
+and existing global run/snapshot epochs retire on actual mutation. Exact
+no-ops and refused operations keep all current tokens. Other conservative
+publishers retain their existing behavior, and retired pre-existing tokens
+cannot be revived by a same-route or equal-text form result.
+
 ## Live PowerPoint masters and layouts
 
 Presentation.slide_masters and slide_master expose live physical part owners.
@@ -3966,3 +4115,45 @@ border children refuses atomically rather than losing those bytes.
 The style ID `LightShading-Accent1` and name `Light Shading Accent 1` resolve
 to the same actual canonical style definition. Lazy admission preserves
 custom definitions and leaves the default document factory unchanged.
+
+## Signing publication
+
+Python signing uses a private signing publication policy. Exact unchanged physical
+source and ancestor certificates preserve supported paragraph, table, cell and
+section owners. Runs require their certified parent and identical accepted path.
+Hyperlinks require the same unique physical paragraph source and local index.
+Unproved owners retire. Local revision preparation preserves document authority.
+Story snapshot authority survives only when the ordered story identities and
+complete item snapshots are equal across staging. Report and registry allocation
+finish before token commit and infallible native replacement. Read-only signature
+verification serializes current Word content on a private clone and publishes no
+state. Certificate identity does not establish certificate-chain trust.
+
+Both Python owners expose sign(private_key: bytes, certificate: bytes) and
+verify_signatures(). Signing returns an owned report dictionary. Verification
+returns a tuple of those dictionaries, empty for unsigned packages. Fields are
+signature_part, signer, cryptographically_valid, coverage_complete,
+covered_parts, covered_relationships and issues. The optional signer contains
+subject, issuer and serial_number. Relationship objects contain source_part
+and relationship_id. Issues contain the exact snake_case native kind and a
+details dictionary with every named string payload. Only the fieldless
+signature_value_mismatch has empty details. Private TypedDict descriptors in
+the existing stubs describe these values without adding runtime exports.
+Malformed and unsupported signatures retain package exceptions. Native
+re-signing and external-relationship refusals remain in force.
+
+Both CLIs expose sign INPUT --key KEY --cert CERT -o OUTPUT and
+verify-signatures INPUT, each with optional --json. Key and certificate reads
+are bounded at1MiB before allocation. Signing stages a verified complete
+candidate and refuses existing or aliased destinations. JSON retains schema1
+and carries signature for signing, or status and signatures for verification.
+Verification reports valid, invalid, partial or unsigned. Invalid outranks
+partial. Exit0 requires at least one report and all reports valid and complete.
+Unsigned, invalid, incomplete and runtime errors exit1. Usage errors exit2.
+Both signing and verification propagate report output errors, including broken
+pipes, as exit1. Signing publishes before reporting, so an output error can leave
+a valid new signed package. Input and existing destinations remain unchanged.
+
+## Native ZIP error compatibility
+
+OpcError::Zip exposes zip::result::ZipError from the version9 dependency, replacing its zip8 type identity. Native Word and PowerPoint error families continue to carry that OPC error. This is an accepted pre-1.0 source-compatibility boundary for downstream construction, matching and From conversions. No new wrapper error or method is introduced. Python retains the existing package/error mappings.

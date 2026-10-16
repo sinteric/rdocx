@@ -76,6 +76,19 @@ with open("report.pdf", "wb") as output:
 - Python collections with negative indexes, slices, iteration, and explicit
   stale-handle errors after structural changes.
 
+
+## Package signatures
+
+`Document.sign(private_key, certificate)` accepts bytes containing a PKCS#8
+RSA private key and X.509 certificate as DER or single unencrypted PEM blocks.
+Each input is limited to1MiB. The returned ordinary dictionary reports signer
+identity, cryptographic validity, complete package coverage, covered parts,
+relationships and precise issue payloads. `verify_signatures()` returns a tuple
+of these dictionaries for current content, or an empty tuple when unsigned.
+Later edits can invalidate a signature. Verification preserves live handles.
+The certificate identity does not establish certificate-chain trust. Existing
+native refusals of signed input and external relationships remain in force.
+
 ## Measured footprint and speed
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |

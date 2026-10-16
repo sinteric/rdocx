@@ -2381,9 +2381,28 @@ Fonts with an OpenType MATH table supply the actual math axis, fraction rule
 and independent numerator/denominator clearances, script shifts and sizes,
 italic corrections, radical gaps and prepared vertical glyph variants. Private
 font reads honor the selected face index. Display frames measure actual glyph
-ink with MathLeading and retain RadicalExtraAscender above radical ink.
-Integral side limits attach independently rather than accumulating widths.
-First and second script sizes are relative to the root style size, with size
+ink with MathLeading and retain RadicalExtraAscender above radical ink. Their
+leading adjustment never moves a run-only display above its ordinary font frame.
+Mixed and structural equations retain their actual-ink adjustment and existing
+upper bound.
+Integral side limits attach independently rather than accumulating widths. Covered finite Greek mathematical italics retain logical codepoints while
+using the selected MATH face's glyphs. Covered mapped Latin and Greek ordinary
+math atoms use actual italic advance corrections before operators, explicit math
+spaces and run ends. Multi-character identifiers gain no inter-letter spacing,
+upright and normal text gain no math corrections, and pi retains its historical
+handling. Script attachment consumes an already-applied terminal advance
+before its own superscript or subscript rule, so a physical correction is counted
+once. Transparent measured sequences retain this private accounting. Physical MATH MathKern is not applied at script attachment. A supplementary f/x/alpha script capture therefore remains a failing accumulated-width diagnostic, separate from the seven finite paint controls. No full script-kerning fidelity is claimed. The admitted
+binary symbols use medium4mu atom glue and relations use thick5mu glue, alongside
+the existing plus, minus and equals rules. This spacing changes paint, not stored
+logical strings. Existing pi and ASCII glyph behavior remains pinned.
+Physical MATH Bar fractions derive horizontal widths from operand advances and
+actual italic corrections. Synthetic .06em-per-side fraction padding is confined
+to NoBar stack clearance and the non-MATH fallback. A physical MATH Bar with
+a direct Bar fraction in either operand sequence uses2mu clearance on each
+side. Argument sequences are transparent, while script, radical and delimiter
+children do not trigger this rule. This is the bounded native-qualified nested
+bar normalization, not a new OpenType constant or a universal Office claim. First and second script sizes are relative to the root style size, with size
 and optical alternate depth saturated at the second level. A radical degree
 uses the second level. Covered mathematical italic glyphs and ssty alternates
 change paint while the stored logical text remains intact. Missing MATH data

@@ -2080,3 +2080,90 @@ pub fn font_list(file: &Path, as_json: bool) -> Result<()> {
         Ok(())
     }
 }
+
+// Bound file reads before allocation, independently of the native material parser.
+fn signing_material_file(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    const LIMIT: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > LIMIT {
+        return Err("signing material must contain between 1 byte and 1 MiB".into());
+    }
+    Ok(bytes)
+}
+
+/// Sign a private candidate, then publish one complete new output with no replacement.
+pub fn sign(file: &Path, key: &Path, cert: &Path, output: &Path, as_json: bool) -> Result<()> {
+    oxml_cli_support::ensure_output_paths_allowed(&[output.to_owned()], file, false)?;
+    let key = signing_material_file(key)?;
+    let cert = signing_material_file(cert)?;
+    let mut candidate = rpptx::Presentation::open(file)?;
+    let report = candidate.sign(&key, &cert)?;
+    if !report.cryptographically_valid || !report.coverage_complete {
+        return Err("new signature did not authenticate complete current content".into());
+    }
+    let record = oxml_cli_support::signature_report_json(&report);
+    let bytes = candidate.to_bytes()?;
+    let mut staged = oxml_cli_support::StagedOutputSet::new();
+    staged.stage_bytes(output, &bytes)?;
+    staged.publish()?;
+    if as_json {
+        print_json(serde_json::json!({"signature": record}))?;
+    } else {
+        writeln!(
+            io::stdout(),
+            "Signed {} with complete package coverage (certificate trust not evaluated)",
+            output.display()
+        )?;
+    }
+    Ok(())
+}
+
+/// Return true only for at least one signature, all valid with complete coverage.
+pub fn verify_signatures(file: &Path, as_json: bool) -> Result<bool> {
+    let current = rpptx::Presentation::open(file)?;
+    let reports = current.verify_signatures()?;
+    let valid = !reports.is_empty()
+        && reports
+            .iter()
+            .all(|report| report.cryptographically_valid && report.coverage_complete);
+    let status = if reports.is_empty() {
+        "unsigned"
+    } else if reports.iter().any(|report| !report.cryptographically_valid) {
+        "invalid"
+    } else if reports.iter().any(|report| !report.coverage_complete) {
+        "partial"
+    } else {
+        "valid"
+    };
+    if as_json {
+        let records = reports
+            .iter()
+            .map(oxml_cli_support::signature_report_json)
+            .collect::<Vec<_>>();
+        print_json(serde_json::json!({"status": status, "signatures": records}))?;
+    } else {
+        writeln!(
+            io::stdout(),
+            "Signatures: {status} (certificate trust not evaluated)"
+        )?;
+        for report in &reports {
+            writeln!(
+                io::stdout(),
+                "{}: valid={}, complete={}",
+                report.signature_part,
+                report.cryptographically_valid,
+                report.coverage_complete
+            )?;
+            writeln!(
+                io::stdout(),
+                "{}",
+                oxml_cli_support::signature_report_json(report)
+            )?;
+        }
+    }
+    Ok(valid)
+}

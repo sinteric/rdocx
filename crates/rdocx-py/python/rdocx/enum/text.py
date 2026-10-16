@@ -50,3 +50,35 @@ class WD_TAB_LEADER(IntEnum):
 
 
 __all__ = ["WD_ALIGN_PARAGRAPH", "WD_UNDERLINE", "WD_TAB_ALIGNMENT", "WD_TAB_LEADER"]
+
+
+class WD_BREAK_TYPE(IntEnum):
+    LINE = 6
+    PAGE = 7
+    COLUMN = 8
+
+
+WD_BREAK = WD_BREAK_TYPE
+
+
+class WD_COLOR_INDEX(IntEnum):
+    AUTO = 0
+    BLACK = 1
+    BLUE = 2
+    TURQUOISE = 3
+    BRIGHT_GREEN = 4
+    PINK = 5
+    RED = 6
+    YELLOW = 7
+    WHITE = 8
+    DARK_BLUE = 9
+    TEAL = 10
+    GREEN = 11
+    VIOLET = 12
+    DARK_RED = 13
+    DARK_YELLOW = 14
+    GRAY_50 = 15
+    GRAY_25 = 16
+
+
+__all__ += ["WD_BREAK_TYPE", "WD_BREAK", "WD_COLOR_INDEX"]

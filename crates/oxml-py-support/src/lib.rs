@@ -658,6 +658,120 @@ pub fn twips_from_emu(value: i64) -> i32 {
     Length::emu(value).to_twips()
 }
 
+/// Convert a native signature report to independent Python dictionaries and lists.
+pub fn signature_report_to_py(
+    py: Python<'_>,
+    report: &oxml_opc::SignatureReport,
+) -> PyResult<Py<pyo3::types::PyDict>> {
+    use oxml_opc::SignatureIssue;
+    use pyo3::types::{PyDict, PyList};
+    let result = PyDict::new(py);
+    result.set_item("signature_part", &report.signature_part)?;
+    if let Some(signer) = &report.signer {
+        let identity = PyDict::new(py);
+        identity.set_item("subject", &signer.subject)?;
+        identity.set_item("issuer", &signer.issuer)?;
+        identity.set_item("serial_number", &signer.serial_number)?;
+        result.set_item("signer", identity)?;
+    } else {
+        result.set_item("signer", py.None())?;
+    }
+    result.set_item("cryptographically_valid", report.cryptographically_valid)?;
+    result.set_item("coverage_complete", report.coverage_complete)?;
+    result.set_item("covered_parts", &report.covered_parts)?;
+    let relationships = PyList::empty(py);
+    for relationship in &report.covered_relationships {
+        let item = PyDict::new(py);
+        item.set_item("source_part", &relationship.source_part)?;
+        item.set_item("relationship_id", &relationship.relationship_id)?;
+        relationships.append(item)?;
+    }
+    result.set_item("covered_relationships", relationships)?;
+    let issues = PyList::empty(py);
+    for issue in &report.issues {
+        let item = PyDict::new(py);
+        let details = PyDict::new(py);
+        let kind = match issue {
+            SignatureIssue::MissingPart { uri } => {
+                details.set_item("uri", uri)?;
+                "missing_part"
+            }
+            SignatureIssue::ChangedReference {
+                uri,
+                expected_digest,
+                actual_digest,
+            } => {
+                details.set_item("uri", uri)?;
+                details.set_item("expected_digest", expected_digest)?;
+                details.set_item("actual_digest", actual_digest)?;
+                "changed_reference"
+            }
+            SignatureIssue::DuplicateReference { uri } => {
+                details.set_item("uri", uri)?;
+                "duplicate_reference"
+            }
+            SignatureIssue::MissingRelationship {
+                source_part,
+                relationship_id,
+            } => {
+                details.set_item("source_part", source_part)?;
+                details.set_item("relationship_id", relationship_id)?;
+                "missing_relationship"
+            }
+            SignatureIssue::DuplicateRelationship {
+                source_part,
+                relationship_id,
+            } => {
+                details.set_item("source_part", source_part)?;
+                details.set_item("relationship_id", relationship_id)?;
+                "duplicate_relationship"
+            }
+            SignatureIssue::ExternalRelationship {
+                source_part,
+                relationship_id,
+                target,
+            } => {
+                details.set_item("source_part", source_part)?;
+                details.set_item("relationship_id", relationship_id)?;
+                details.set_item("target", target)?;
+                "external_relationship"
+            }
+            SignatureIssue::MissingRelationshipTarget {
+                source_part,
+                relationship_id,
+                target,
+            } => {
+                details.set_item("source_part", source_part)?;
+                details.set_item("relationship_id", relationship_id)?;
+                details.set_item("target", target)?;
+                "missing_relationship_target"
+            }
+            SignatureIssue::UncoveredPart { part_name } => {
+                details.set_item("part_name", part_name)?;
+                "uncovered_part"
+            }
+            SignatureIssue::UncoveredRelationship {
+                source_part,
+                relationship_id,
+            } => {
+                details.set_item("source_part", source_part)?;
+                details.set_item("relationship_id", relationship_id)?;
+                "uncovered_relationship"
+            }
+            SignatureIssue::SignatureValueMismatch => "signature_value_mismatch",
+            SignatureIssue::OrphanSignaturePart { part_name } => {
+                details.set_item("part_name", part_name)?;
+                "orphan_signature_part"
+            }
+        };
+        item.set_item("kind", kind)?;
+        item.set_item("details", details)?;
+        issues.append(item)?;
+    }
+    result.set_item("issues", issues)?;
+    Ok(result.unbind())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,4 +1504,217 @@ mod tests {
         assert_eq!(points_from_emu(914_400), 72.0);
         assert_eq!(twips_from_emu(914_400), 1_440);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn signature_reports_keep_all_issue_fields_and_owned_values() {
+    use oxml_opc::{
+        CoveredRelationship, SignatureIssue, SignatureReport, SignerCertificateIdentity,
+    };
+    let cases = vec![
+        (
+            SignatureIssue::MissingPart {
+                uri: "uri-value".into(),
+            },
+            "missing_part",
+            vec![("uri", "uri-value")],
+        ),
+        (
+            SignatureIssue::ChangedReference {
+                uri: "uri-value".into(),
+                expected_digest: "expected_digest-value".into(),
+                actual_digest: "actual_digest-value".into(),
+            },
+            "changed_reference",
+            vec![
+                ("uri", "uri-value"),
+                ("expected_digest", "expected_digest-value"),
+                ("actual_digest", "actual_digest-value"),
+            ],
+        ),
+        (
+            SignatureIssue::DuplicateReference {
+                uri: "uri-value".into(),
+            },
+            "duplicate_reference",
+            vec![("uri", "uri-value")],
+        ),
+        (
+            SignatureIssue::MissingRelationship {
+                source_part: "source_part-value".into(),
+                relationship_id: "relationship_id-value".into(),
+            },
+            "missing_relationship",
+            vec![
+                ("source_part", "source_part-value"),
+                ("relationship_id", "relationship_id-value"),
+            ],
+        ),
+        (
+            SignatureIssue::DuplicateRelationship {
+                source_part: "source_part-value".into(),
+                relationship_id: "relationship_id-value".into(),
+            },
+            "duplicate_relationship",
+            vec![
+                ("source_part", "source_part-value"),
+                ("relationship_id", "relationship_id-value"),
+            ],
+        ),
+        (
+            SignatureIssue::ExternalRelationship {
+                source_part: "source_part-value".into(),
+                relationship_id: "relationship_id-value".into(),
+                target: "target-value".into(),
+            },
+            "external_relationship",
+            vec![
+                ("source_part", "source_part-value"),
+                ("relationship_id", "relationship_id-value"),
+                ("target", "target-value"),
+            ],
+        ),
+        (
+            SignatureIssue::MissingRelationshipTarget {
+                source_part: "source_part-value".into(),
+                relationship_id: "relationship_id-value".into(),
+                target: "target-value".into(),
+            },
+            "missing_relationship_target",
+            vec![
+                ("source_part", "source_part-value"),
+                ("relationship_id", "relationship_id-value"),
+                ("target", "target-value"),
+            ],
+        ),
+        (
+            SignatureIssue::UncoveredPart {
+                part_name: "part_name-value".into(),
+            },
+            "uncovered_part",
+            vec![("part_name", "part_name-value")],
+        ),
+        (
+            SignatureIssue::UncoveredRelationship {
+                source_part: "source_part-value".into(),
+                relationship_id: "relationship_id-value".into(),
+            },
+            "uncovered_relationship",
+            vec![
+                ("source_part", "source_part-value"),
+                ("relationship_id", "relationship_id-value"),
+            ],
+        ),
+        (
+            SignatureIssue::SignatureValueMismatch,
+            "signature_value_mismatch",
+            vec![],
+        ),
+        (
+            SignatureIssue::OrphanSignaturePart {
+                part_name: "part_name-value".into(),
+            },
+            "orphan_signature_part",
+            vec![("part_name", "part_name-value")],
+        ),
+    ];
+    let mut report = SignatureReport {
+        signature_part: "/_xmlsignatures/sig1.xml".into(),
+        signer: None,
+        cryptographically_valid: true,
+        coverage_complete: false,
+        covered_parts: vec!["/word/document.xml".into()],
+        covered_relationships: vec![CoveredRelationship {
+            source_part: "/".into(),
+            relationship_id: "rId1".into(),
+        }],
+        issues: vec![],
+    };
+    use pyo3::types::{PyDict, PyList};
+    Python::initialize();
+    Python::attach(|py| {
+        for (issue, kind, fields) in cases {
+            report.issues = vec![issue];
+            let result = signature_report_to_py(py, &report).unwrap();
+            let result = result.bind(py);
+            assert!(result.get_item("signer").unwrap().unwrap().is_none());
+            assert_eq!(
+                result
+                    .get_item("signature_part")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                report.signature_part
+            );
+            assert!(
+                result
+                    .get_item("cryptographically_valid")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            assert!(
+                !result
+                    .get_item("coverage_complete")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            let issues = result.get_item("issues").unwrap().unwrap();
+            let issue = issues.cast::<PyList>().unwrap().get_item(0).unwrap();
+            let issue = issue.cast::<PyDict>().unwrap();
+            assert_eq!(
+                issue
+                    .get_item("kind")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                kind
+            );
+            let details = issue.get_item("details").unwrap().unwrap();
+            let details = details.cast::<PyDict>().unwrap();
+            assert_eq!(details.len(), fields.len());
+            for (key, value) in fields {
+                assert_eq!(
+                    details
+                        .get_item(key)
+                        .unwrap()
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    value
+                );
+            }
+            result.set_item("covered_parts", vec!["mutated"]).unwrap();
+            assert_eq!(report.covered_parts[0], "/word/document.xml");
+        }
+        report.signer = Some(SignerCertificateIdentity {
+            subject: "subject".into(),
+            issuer: "issuer".into(),
+            serial_number: "serial".into(),
+        });
+        let result = signature_report_to_py(py, &report).unwrap();
+        let signer = result.bind(py).get_item("signer").unwrap().unwrap();
+        let signer = signer.cast::<PyDict>().unwrap();
+        for (key, expected) in [
+            ("subject", "subject"),
+            ("issuer", "issuer"),
+            ("serial_number", "serial"),
+        ] {
+            assert_eq!(
+                signer
+                    .get_item(key)
+                    .unwrap()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                expected
+            );
+        }
+    });
 }

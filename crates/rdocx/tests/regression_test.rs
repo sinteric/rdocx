@@ -41125,7 +41125,7 @@ fn zip_entries(package: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let mut entries = BTreeMap::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).unwrap();
-        let name = entry.name().to_owned();
+        let name = entry.name().unwrap().into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
         entries.insert(name, bytes);
@@ -61723,7 +61723,11 @@ fn comment_moves_to_literal_text_keep_zero_width_and_namespace_semantics() {
             let mut member = archive.by_index(index).unwrap();
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut member, &mut bytes).unwrap();
-            assert!(output.insert(member.name().to_owned(), bytes).is_none());
+            assert!(
+                output
+                    .insert(member.name().unwrap().into_owned(), bytes)
+                    .is_none()
+            );
         }
         output
     };

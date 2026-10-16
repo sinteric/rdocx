@@ -4735,7 +4735,7 @@ mod tests {
         ));
         assert!(
             binding_manifest.contains(
-                "rpptx = { workspace = true, features = [\"default-template\", \"render\", \"system-fonts\"] }"
+                "rpptx = { workspace = true, features = [\"default-template\", \"render\", \"system-fonts\", \"digital-signatures\"] }"
             )
         );
         for dependency in [

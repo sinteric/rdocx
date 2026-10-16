@@ -83,6 +83,24 @@ enum FontCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Sign current package content with a local PKCS#8 key and X.509 certificate
+    Sign {
+        file: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        cert: PathBuf,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify signatures and complete coverage, without asserting chain trust
+    VerifySignatures {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// List, embed, remove and configure explicitly licensed fonts
     Font {
         #[command(subcommand)]
@@ -340,8 +358,11 @@ enum Command {
         /// Path to the DOCX file
         file: PathBuf,
         /// Set every control whose tag is NAME, repeatable
-        #[arg(long = "tag", value_name = "NAME=VALUE", value_parser = commands::parse_assignment)]
+        #[arg(long = "tag", value_name = "NAME=VALUE", conflicts_with = "values", value_parser = commands::parse_assignment)]
         tags: Vec<(String, String)>,
+        /// Fill exact content-control tags, aliases and legacy names from flat JSON
+        #[arg(long, value_name = "VALUES.json", conflicts_with = "tags")]
+        values: Option<PathBuf>,
         /// Output DOCX file
         #[arg(long, short = 'o')]
         output: PathBuf,
@@ -674,6 +695,23 @@ fn main() {
 
 fn run_cli() {
     let cli = Cli::parse();
+    let signing_command = matches!(&cli.command, Command::Sign { .. });
+    if let Command::VerifySignatures { file, json } = &cli.command {
+        let result = commands::verify_signatures(file, *json);
+        let flushed = io::stdout().flush();
+        match (result, flushed) {
+            (Ok(true), Ok(())) => return,
+            (Ok(false), Ok(())) => process::exit(1),
+            (Err(error), _) => {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            }
+            (_, Err(error)) => {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            }
+        }
+    }
 
     // `validate` always carries a verdict in its exit status, so it is
     // dispatched separately from the commands that only report errors.
@@ -700,6 +738,14 @@ fn run_cli() {
     let mut diff_status = 0;
 
     let result = match cli.command {
+        Command::VerifySignatures { .. } => unreachable!("verification is dispatched above"),
+        Command::Sign {
+            file,
+            key,
+            cert,
+            output,
+            json,
+        } => commands::sign(&file, &key, &cert, &output, json),
         Command::Font { command } => match command {
             FontCommand::List { file, json } => commands::font_list(&file, json),
             FontCommand::Embed {
@@ -1039,9 +1085,13 @@ fn run_cli() {
         Command::Fill {
             file,
             tags,
+            values,
             output,
             json,
-        } => commands::fill(&file, &tags, &output, json),
+        } => match values {
+            Some(values) => commands::fill_values(&file, &values, &output, json),
+            None => commands::fill(&file, &tags, &output, json),
+        },
         Command::Toc { command } => match command {
             TocCommand::Rebuild { file, output, json } => {
                 commands::toc_rebuild(&file, &output, json)
@@ -1058,7 +1108,7 @@ fn run_cli() {
         let closed_stdout = e
             .downcast_ref::<io::Error>()
             .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe);
-        if !closed_stdout {
+        if !closed_stdout || signing_command {
             eprintln!("Error: {e}");
             process::exit(if diff_exit_code { 2 } else { 1 });
         }

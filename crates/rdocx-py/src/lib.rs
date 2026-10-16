@@ -160,6 +160,7 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<document::PyContentLocation>()?;
     module.add_class::<document::PyDocumentFragment>()?;
     module.add_class::<document::PyContentControl>()?;
+    module.add_class::<document::PyLegacyFormField>()?;
     module.add_class::<document::PyCustomFileTime>()?;
     module.add_class::<document::PyCustomProperty>()?;
     module.add_class::<document::PyCustomProperties>()?;

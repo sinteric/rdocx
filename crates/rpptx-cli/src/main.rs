@@ -72,6 +72,24 @@ enum FontCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Sign current package content with a local PKCS#8 key and X.509 certificate
+    Sign {
+        file: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        cert: PathBuf,
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify signatures and complete coverage, without asserting chain trust
+    VerifySignatures {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// List, embed, remove and configure explicitly licensed fonts
     Font {
         #[command(subcommand)]
@@ -507,6 +525,24 @@ fn main() {
 
 fn run_cli() {
     let cli = Cli::parse();
+    let signing_command = matches!(&cli.command, Command::Sign { .. });
+    if let Command::VerifySignatures { file, json } = &cli.command {
+        let result = commands::verify_signatures(file, *json);
+        let flushed = io::stdout().flush();
+        match (result, flushed) {
+            (Ok(true), Ok(())) => return,
+            (Ok(false), Ok(())) => process::exit(1),
+            (Err(error), _) => {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            }
+            (_, Err(error)) => {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            }
+        }
+    }
+
     if let Command::Validate { file } = &cli.command {
         match commands::validate(file) {
             Ok(true) => return,
@@ -534,6 +570,14 @@ fn run_cli() {
         }
     }
     let result = match cli.command {
+        Command::VerifySignatures { .. } => unreachable!("verification is dispatched above"),
+        Command::Sign {
+            file,
+            key,
+            cert,
+            output,
+            json,
+        } => commands::sign(&file, &key, &cert, &output, json),
         Command::Font { command } => match command {
             FontCommand::List { file, json } => commands::font_list(&file, json),
             FontCommand::Embed {
@@ -880,7 +924,7 @@ fn run_cli() {
         let closed_stdout = error
             .downcast_ref::<io::Error>()
             .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe);
-        if !closed_stdout {
+        if !closed_stdout || signing_command {
             eprintln!("Error: {error}");
             process::exit(1);
         }

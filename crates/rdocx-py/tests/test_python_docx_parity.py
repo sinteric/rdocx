@@ -1294,3 +1294,390 @@ def test_fx245_exact_issue382_script_and_independent_package_graph(capsys):
         assert "[FAIL]" not in output, output
         assert graph(os.path.join(scope["TMP"], "accepted.docx")) == graph(edited)
         assert graph(os.path.join(scope["TMP"], "rejected.docx")) == graph(scope["a"])
+
+
+@pytest.mark.parametrize("initial", [None, 127000])
+@pytest.mark.parametrize("refused", [12, 6349, -1, -6350, True, False])
+def test_fx239_word_font_quantization_refuses_before_publication(initial, refused):
+    import rdocx
+    document = rdocx.Document()
+    held = document.add_paragraph("kept")
+    run = held.add_run("size")
+    font = run.font
+    font.size = initial
+    before = document.to_bytes()
+    with pytest.raises((TypeError, ValueError), match="EMU|Pt|bool"):
+        font.size = refused
+    assert document.to_bytes() == before and held.text == "keptsize"
+    assert font.size == initial
+    font.size = rdocx.Pt(12)
+    assert font.size == rdocx.Pt(12)
+
+
+def test_fx239_word_font_storage_boundaries_and_clear():
+    import rdocx
+    from xml.etree import ElementTree as ET
+    import io
+    document = rdocx.Document()
+    font = document.add_paragraph("").add_run("size").font
+    font.size = 6350
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as package:
+        root = ET.fromstring(package.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    assert next(root.iter(w + "sz")).get(w + "val") == "1"
+    font.size = 0
+    assert font.size == 0
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.paragraphs[0].runs[0].font.size == 0
+    font.size = None
+    assert font.size is None
+
+
+def test_fx239_valid_font_boundary_matches_pinned_python_docx():
+    import docx
+    import rdocx
+    import io
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version("python-docx") == "1.2.0"
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    values = []
+    for module in [rdocx, docx]:
+        document = module.Document()
+        paragraph = document.add_paragraph("")
+        shared = __import__(module.__name__ + ".shared", fromlist=["Pt"])
+        paragraph.add_run("boundary").font.size = shared.Pt(0.5)
+        raw = document.to_bytes() if module is rdocx else None
+        if raw is None:
+            stream = io.BytesIO()
+            document.save(stream)
+            raw = stream.getvalue()
+        with zipfile.ZipFile(io.BytesIO(raw)) as package:
+            root = ET.fromstring(package.read("word/document.xml"))
+        values.append([node.get(w + "val") for node in root.iter(w + "sz")])
+    assert values == [["1"], ["1"]]
+
+
+def test_fx238_word_names_create_on_one_prepared_candidate():
+    import rdocx
+    document = rdocx.Document()
+    assert document.add_paragraph().text == ""
+    heading = document.add_heading("Heading", 1)
+    assert heading.style == "Heading1"
+    paragraph = document.add_paragraph("Styled", style="Normal")
+    run = paragraph.add_run(" emphasized")
+    run.bold, run.italic, run.underline = True, False, True
+    assert (run.font.bold, run.font.italic, run.font.underline) == (True, False, True)
+    run.bold, run.italic, run.underline = None, None, None
+    assert (run.bold, run.italic, run.underline) == (None, None, None)
+    table = document.add_table(1, 1, style="Table Grid")
+    assert table.style == "TableGrid"
+    document.add_page_break()
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    with zipfile.ZipFile(__import__("io").BytesIO(reopened.to_bytes())) as package:
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(package.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    assert any(node.get(w + "type") == "page" for node in root.iter(w + "br"))
+
+
+def test_fx238_stream_input_and_output_are_both_qualified(tmp_path):
+    import io
+    import rdocx
+    original = rdocx.Document()
+    original.add_paragraph("original")
+    path = tmp_path / "input.docx"
+    path.write_bytes(original.to_bytes())
+    with path.open("rb") as stream:
+        document = rdocx.Document(stream)
+        assert not stream.closed
+    document.add_paragraph("stream roundtrip")
+    stream = io.BytesIO()
+    document.save(stream)
+    assert not stream.closed
+    assert "stream roundtrip" in rdocx.Document.open(io.BytesIO(stream.getvalue())).text()
+    before = document.to_bytes()
+    held = document.paragraphs[0]
+
+    class ShortWriter:
+        def write(self, value):
+            return len(value) - 1
+
+    with pytest.raises((ValueError, OSError), match="write|short|bytes"):
+        document.save(ShortWriter())
+    with pytest.raises((TypeError, ValueError), match="binary|bytes|from_bytes"):
+        rdocx.Document(io.StringIO("not binary"))
+    class ReadFailure:
+        def seek(self, offset):
+            raise OSError("seek-failed-control")
+
+        def read(self):
+            raise OSError("read-failed-control")
+
+    with pytest.raises(OSError, match="seek-failed-control"):
+        rdocx.Document(ReadFailure())
+    assert document.to_bytes() == before and held.text == "original"
+
+
+def test_fx238_styles_are_an_immutable_tuple_with_an_actionable_pointer():
+    import rdocx
+    document = rdocx.Document()
+    styles = document.styles
+    assert isinstance(styles, tuple) and type(styles) is not tuple
+    assert styles[0] == tuple(styles)[0]
+    assert styles[-1] == tuple(styles)[-1]
+    assert type(styles[:1]) is tuple
+    assert styles == tuple(styles) and len(styles) == len(tuple(styles))
+    with pytest.raises(NotImplementedError, match="set_style"):
+        styles["Normal"]
+    old_names = tuple(style.name for style in styles)
+    document.add_style("Later snapshot control", font_name="Arial")
+    assert tuple(style.name for style in styles) == old_names
+    assert len(document.styles) == len(styles) + 1
+    assert "Later snapshot control" not in old_names
+    with pytest.raises((AttributeError, TypeError)):
+        styles[0].name = "changed"
+
+
+def test_fx238_section_module_matches_pinned_enum_values():
+    from enum import IntEnum
+    import rdocx.enum.section as section
+    import rdocx.enum.text as text
+    from docx.enum.section import WD_SECTION as oracle_section, WD_ORIENT as oracle_orientation
+
+    assert importlib.metadata.version(ORACLE_DISTRIBUTION) == ORACLE_VERSION
+    assert section is not text
+    assert section.WD_SECTION is section.WD_SECTION_START
+    assert section.WD_ORIENT is section.WD_ORIENTATION
+    assert issubclass(section.WD_SECTION, IntEnum)
+    assert issubclass(section.WD_ORIENT, IntEnum)
+    assert {item.name: int(item) for item in section.WD_SECTION} == {
+        item.name: int(item) for item in oracle_section
+    } == {"CONTINUOUS": 0, "NEW_COLUMN": 1, "NEW_PAGE": 2, "EVEN_PAGE": 3, "ODD_PAGE": 4}
+    assert {item.name: int(item) for item in section.WD_ORIENT} == {
+        item.name: int(item) for item in oracle_orientation
+    } == {"PORTRAIT": 0, "LANDSCAPE": 1}
+    assert set(section.__all__) == {"WD_SECTION", "WD_SECTION_START", "WD_ORIENT", "WD_ORIENTATION"}
+    assert not hasattr(text, "WD_SECTION") and not hasattr(text, "WD_ORIENT")
+
+
+def test_fx238_highlight_and_first_page_names_are_not_import_only():
+    import io
+    import rdocx
+    from rdocx.enum.text import WD_BREAK, WD_COLOR_INDEX
+    from rdocx.enum.table import WD_ALIGN_VERTICAL, WD_CELL_VERTICAL_ALIGNMENT
+    from rdocx.enum.section import WD_SECTION, WD_SECTION_START, WD_ORIENT, WD_ORIENTATION
+    assert WD_SECTION is WD_SECTION_START and WD_ORIENT is WD_ORIENTATION
+    assert WD_ALIGN_VERTICAL is WD_CELL_VERTICAL_ALIGNMENT
+    assert int(WD_SECTION.NEW_PAGE) == 2 and int(WD_ORIENT.LANDSCAPE) == 1
+    document = rdocx.Document()
+    run = document.add_paragraph().add_run("highlight")
+    run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    run.add_break(WD_BREAK.PAGE)
+    assert run.font.highlight_color == WD_COLOR_INDEX.YELLOW
+    from xml.etree import ElementTree as ET
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as package:
+        root = ET.fromstring(package.read("word/document.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    assert next(root.iter(w + "highlight")).get(w + "val") == "yellow"
+    for name in ("header", "footer", "first_page_header", "different_first_page_header_footer"):
+        with pytest.raises(NotImplementedError, match="document.section"):
+            getattr(document.sections[0], name)
+    with pytest.raises(NotImplementedError, match="document.section"):
+        document.sections[0].different_first_page_header_footer = True
+    live = document.section(0)
+    live.different_first_page_header_footer = True
+    live.first_page_header.add_paragraph("cover")
+    assert rdocx.Document.from_bytes(document.to_bytes()).section(0).different_first_page_header_footer
+
+
+def test_fx238_no_new_native_semantics_refusals_name_alternatives():
+    import rdocx
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("keep")
+    table = document.add_table(1, 1)
+    for operation, pointer in ((lambda: document.add_section(), "insert_section"),
+                               (lambda: table.add_column(rdocx.Inches(1)), "insert_column"),
+                               (lambda: table.columns, "set_column_width"),
+                               (lambda: setattr(paragraph, "style", "List Number"), "numbering")):
+        before = document.to_bytes()
+        with pytest.raises(Exception, match=pointer):
+            operation()
+        assert document.to_bytes() == before
+    before = document.to_bytes()
+    # Retain the established package exception while naming the supported call.
+    with pytest.raises(rdocx.RdocxError, match="width=..., height=..."):
+        document.add_picture(_matrix_png(), width=rdocx.Inches(1))
+    assert document.to_bytes() == before and paragraph.text == "keep"
+    with pytest.raises(NotImplementedError, match="add_internal_hyperlink"):
+        paragraph.add_hyperlink("anchor", anchor=paragraph)
+    assert document.to_bytes() == before and paragraph.text == "keep"
+    with pytest.raises(NotImplementedError, match="remove_content"):
+        paragraph._element
+    with pytest.raises(NotImplementedError, match="set_style"):
+        document.styles["Normal"]
+
+
+def test_fx238_insertion_uses_physical_body_index_and_refuses_related_owners():
+    import rdocx
+    document = rdocx.Document()
+    document.add_table(1, 1)
+    paragraph = document.add_paragraph("last")
+    inserted = paragraph.insert_paragraph_before("first", style="Normal")
+    assert inserted.text == "first"
+    assert [p.text for p in document.paragraphs] == ["first", "last"]
+    cell = document.tables[0].cell(0, 0).paragraphs[0]
+    before = document.to_bytes()
+    with pytest.raises(NotImplementedError, match="direct body|insert_paragraph"):
+        cell.insert_paragraph_before("unsupported")
+    assert document.to_bytes() == before
+
+
+def test_fx238_invalid_creation_operands_leave_source_and_owners_unchanged():
+    import rdocx
+    document = rdocx.Document()
+    held = document.add_paragraph("kept")
+    for operation in (lambda: document.add_paragraph("bad", style="unknown-fx238-style"),
+                      lambda: document.add_heading("bad", True),
+                      lambda: document.add_heading("bad", 10),
+                      lambda: document.add_table(1, 1, style="unknown-fx238-style")):
+        before = document.to_bytes()
+        with pytest.raises((ValueError, TypeError, KeyError)):
+            operation()
+        assert document.to_bytes() == before and held.text == "kept"
+
+
+def test_fx238_word_names_match_pinned_python_docx():
+    import io
+    import docx
+    import rdocx
+    from xml.etree import ElementTree as ET
+    assert importlib.metadata.version("python-docx") == "1.2.0"
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    projections = []
+    for module in (rdocx, docx):
+        document = module.Document()
+        document.add_heading("Heading", 1)
+        paragraph = document.add_paragraph("Body", style="Normal")
+        paragraph.add_run("strong").bold = True
+        document.add_page_break()
+        stream = io.BytesIO()
+        document.save(stream)
+        with zipfile.ZipFile(io.BytesIO(stream.getvalue())) as package:
+            root = ET.fromstring(package.read("word/document.xml"))
+        projections.append(([(p.find(w + "pPr/" + w + "pStyle").get(w + "val") if p.find(w + "pPr/" + w + "pStyle") is not None else "Normal") for p in root.iter(w + "p")],
+                            [t.text for t in root.iter(w + "t") if t.text],
+                            [n.get(w + "type") for n in root.iter(w + "br")]))
+    assert projections[0] == projections[1]
+
+
+# The issue's 32 specimens stay distinct from the immutable runner's needs marks.
+FX238_WORD_REQUIREMENTS = {
+    **dict.fromkeys(("exp_pdf", "fmt_headings", "tpl_append_to_template"), ("add_style", "set_style")),
+    **dict.fromkeys(("list_heading_and_bullets", "fmt_paragraph_style_kwarg",
+                     "list_bullet_style", "list_nested_bullets", "list_number_style",
+                     "list_style_assignment"), ("add_numbering_definition",)),
+    **dict.fromkeys(("fmt_font_color_rgb", "fmt_font_size_and_name",
+                     "fmt_run_formatting_loop", "fmt_bold_italic_runs",
+                     "tbl_cell_bold_centered", "doc_insert_paragraph_before",
+                     "sec_page_break", "sec_run_add_break", "fmt_highlight_color",
+                     "tbl_row_height_and_valign", "doc_open_and_save_stream",
+                     "tbl_style_and_alignment"), ()),
+    **dict.fromkeys(("hf_header_text", "hf_footer_text", "hf_footer_page_number",
+                     "hf_different_first_page"), ("document.section",)),
+    "link_internal_anchor": ("add_internal_hyperlink",),
+    "sec_add_section": ("insert_section",),
+    **dict.fromkeys(("pic_add_picture_width", "pic_centered_picture",
+                     "pic_from_stream"), ("width=..., height=...",)),
+    "tbl_add_column": ("insert_column",),
+    "tbl_column_widths": ("set_column_width",),
+}
+
+
+def _fx238_contract_disposition(failure, alternatives):
+    """A saved-file check failure never receives explicit-refusal credit."""
+    if failure is None:
+        return "correct-saved-file"
+    first_line = failure.splitlines()[0]
+    if first_line.startswith("script: ") and any(
+        alternative in first_line for alternative in alternatives
+    ):
+        return "explicit-alternative"
+    return "unresolved"
+
+
+def test_fx238_immutable_first_draft_contract_classification():
+    assert len(FX238_WORD_REQUIREMENTS) == 32
+    classify = _fx238_contract_disposition
+    assert classify(None, ("set_style",)) == "correct-saved-file"
+    assert classify("script: NotImplementedError: use document.set_style(name)",
+                    ("set_style",)) == "explicit-alternative"
+    assert classify("script: AttributeError: missing style", ("set_style",)) == "unresolved"
+    assert classify("script: ValueError: bad value\nuse set_style", ("set_style",)) == "unresolved"
+    assert classify("check: AssertionError: wrong saved set_style value",
+                    ("set_style",)) == "unresolved"
+
+
+def test_fx238_created_owners_follow_current_form_and_signing_publication():
+    import rdocx
+    from test_core import _fx240_material, _fx241_five_kind_document
+
+    document = _fx241_five_kind_document()
+    paragraph = document.add_paragraph("held alias paragraph", style="Normal")
+    run = paragraph.add_run(" held run")
+    table = document.add_table(1, 1, style="Table Grid")
+    cell = table.cell(0, 0)
+    cell.text = "held cell"
+    section = document.section(0)
+    section_width = section.page_width
+    run = paragraph.runs[-1]
+    assert run.text == " held run"
+    assert document.bind_content_controls({"plain": "Ada"}) == 1
+    assert paragraph.text == "held alias paragraph held run"
+    assert cell.text == "held cell" and len(table.rows) == 1
+    assert section.page_width == section_width
+    with pytest.raises(rdocx.StaleElementError, match=r"Document\.bind_content_controls"):
+        _ = run.text
+    document.set_legacy_form_field_value("legacy", "filled")
+    assert paragraph.text == "held alias paragraph held run" and cell.text == "held cell"
+    fresh_run = paragraph.runs[0]
+    key, certificate = _fx240_material()
+    document.sign(key, certificate)
+    assert fresh_run.text == "held alias paragraph"
+    assert cell.text == "held cell" and section.page_width == section_width
+    before = document.to_bytes()
+    assert document.bind_content_controls({"plain": "Ada"}) == 1
+    assert document.to_bytes() == before and fresh_run.text == "held alias paragraph"
+
+
+def test_fx238_stream_save_preserves_signed_forms_and_refusal_authority():
+    import io
+    import rdocx
+    from test_core import _fx240_material, _fx241_five_kind_document
+
+    document = _fx241_five_kind_document()
+    document.bind_content_controls({"plain": "Ada", "check": "true", "choice": "two", "date": "2026-10-16"})
+    document.set_legacy_form_field_value("legacy", "filled")
+    paragraph = document.add_paragraph("held stream owner", style="Normal")
+    key, certificate = _fx240_material()
+    document.sign(key, certificate)
+    before = document.to_bytes()
+    buffer = io.BytesIO()
+    document.save(buffer)
+    assert not buffer.closed and buffer.getvalue() == before
+    reopened = rdocx.Document.open(io.BytesIO(buffer.getvalue()))
+    report, = reopened.verify_signatures()
+    assert report["cryptographically_valid"] and report["coverage_complete"]
+    assert {control.tag: control.text for control in reopened.content_controls()}["plain"] == "Ada"
+    assert reopened.legacy_form_fields()[0].value == "filled"
+
+    class ShortWriter(io.BytesIO):
+        def write(self, data):
+            super().write(data)
+            return len(data) - 1
+
+    refused = ShortWriter()
+    with pytest.raises(OSError, match="short or invalid"):
+        document.save(refused)
+    assert not refused.closed and document.to_bytes() == before
+    assert paragraph.text == "held stream owner"
+    assert document.verify_signatures()[0]["cryptographically_valid"]

@@ -3176,13 +3176,13 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertEqual(environment.count(marker), 1)
         inventory = json.loads(textwrap.dedent(environment.split(marker, 1)[1]))
         self.assertEqual(set(inventory), {"rdocx", "rpptx"})
-        for family, count in (("rdocx", 37), ("rpptx", 41)):
+        for family, count in (("rdocx", 42), ("rpptx", 44)):
             nodes = inventory[family]
             self.assertEqual(len(nodes), count)
             self.assertEqual(len(set(nodes)), count)
             self.assertTrue(all(node.startswith(f"crates/{family}-py/tests/") for node in nodes))
         identity = hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        self.assertEqual(identity, "28abec50e648f84c3072d224c947d81bc1cb2d9cc1766cccd61022046a3fa2b8")
+        self.assertEqual(identity, "eee4eae3127ea9ca7ce74156c77bf837acd53a5cf915272fe77f8080a5908b05")
         expected = ('import json\nimport os\nimport subprocess\nimport sys\n\n'
                     'nodes = json.loads(os.environ["WHEEL_TEST_NODES"])[os.environ["PACKAGE_DISTRIBUTION"]]\n'
                     'subprocess.run([sys.executable, "-m", "pytest", *nodes], check=True)')
@@ -3389,6 +3389,17 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn("Install and test musllinux wheel", wheel_build)
         self.assertIn("Validate installed typing surface", wheel_build)
         self.assert_wheel_priority_routes(wheel_build)
+        signing = self.yaml_step(cli_build, "Qualify selected CLI signing")
+        self.assertIn('SIGNING_FAMILY: ${{ steps.selected.outputs.binary }}', signing)
+        self.assertIn('export SIGNING_BINARY="target/${{ matrix.platform.target }}/release/${{ steps.selected.outputs.binary }}"', signing)
+        self.assertIn("          python - <<'PY'\n          import ast", signing)
+        start = signing.index("          import ast\n")
+        end = signing.index("\n          PY", start)
+        program = textwrap.dedent(signing[start:end]) + "\n"
+        compile(program, "wheels selected CLI signing acceptance", "exec")
+        self.assertEqual(hashlib.sha256(program.encode()).hexdigest(), "e76a27d86837251ecb01de6b93e5a1c9433791f2de2e2ebe0635e19d01e0e53a")
+        python = cli_build[cli_build.index("      - uses: actions/setup-python@"):cli_build.index("      - name: Select Rust release family")]
+        self.assertNotIn("if:", python)
         self.assertIn("needs: build-cli-assets", cli_review)
         self.assertIn("expected_members = {executable, \"README.md\", \"LICENSE\"}", cli_review)
         self.assertIn("needs: [cli-assets, build-wheels, build-sdists]", aggregate)
@@ -3444,6 +3455,20 @@ class SprintWorkflowTests(unittest.TestCase):
             [line.strip() for line in pypi.splitlines() if line.startswith("    if:")],
             ["if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/rpptx-v'))"],
         )
+
+    def test_fx240_cli_signing_route_rejects_skipped_or_weakened_acceptance(self) -> None:
+        source = (workflow.REPO / ".github/workflows/wheels.yml").read_text()
+        self.assert_wheels_workflow_contract(source.encode())
+        changes = {
+            "missing-execution": source.replace("          python - <<'PY'\n          import ast", "          true # skipped\n          import ast", 1),
+            "wrong-family": source.replace('SIGNING_FAMILY: ${{ steps.selected.outputs.binary }}', 'SIGNING_FAMILY: rdocx', 1),
+            "partial-success": source.replace('assert checked["status"] == "partial"', 'assert checked["status"] == "valid"', 1),
+            "unsigned-success": source.replace('assert run(["verify-signatures", original, "--json"], 1)', 'assert run(["verify-signatures", original, "--json"], 0)', 1),
+        }
+        for label, changed in changes.items():
+            self.assertNotEqual(source, changed, label)
+            with self.subTest(case=label), self.assertRaises((AssertionError, ValueError)):
+                self.assert_wheels_workflow_contract(changed.encode())
 
     def test_wheels_workflow_covers_every_package_target_and_clean_install(
         self,
@@ -4956,62 +4981,104 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn("rdocx-layout v0.13.0", resolved.stdout + resolved.stderr)
         self.assertIn("oxml-layout v0.10.0", resolved.stdout + resolved.stderr)
 
-    def test_immutable_rdocx_layout_0_10_1_registry_graph_remains_at_oxml_layout_0_6_0(
+    def test_immutable_rdocx_layout_0_10_1_published_locked_graph_remains_at_oxml_layout_0_6_0(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory(prefix="rdocx-layout-registry-") as temp:
-            consumer = Path(temp) / "published-graph"
-            (consumer / "src").mkdir(parents=True)
-            (consumer / "Cargo.toml").write_text(
-                """[package]
-name = "published-rdocx-layout-graph"
-version = "0.0.0"
-edition = "2024"
+        import urllib.request
 
-[dependencies]
-rdocx-layout = "=0.10.1"
-""",
-                encoding="utf-8",
+        # Fresh unlocked resolution is unavailable after the zip8 releases were yanked.
+        # Authenticate the actual published lock instead of inventing a consumer lock.
+        with tempfile.TemporaryDirectory(prefix="rdocx-layout-registry-") as temp:
+            root = Path(temp)
+            url = "https://static.crates.io/crates/rdocx-layout/rdocx-layout-0.10.1.crate"
+            with urllib.request.urlopen(url, timeout=60) as response:
+                archive = response.read(10 * 1024 * 1024 + 1)
+            self.assertLessEqual(len(archive), 10 * 1024 * 1024)
+            self.assertEqual(
+                hashlib.sha256(archive).hexdigest(),
+                "aa4ce415bd91317fd1475f6cb197486b6f637e7b86a5cae542dfdff54ad122df",
             )
-            (consumer / "src/lib.rs").write_text("", encoding="utf-8")
-            env = os.environ.copy()
-            env["CARGO_HOME"] = str(Path(temp) / "cargo-home")
-            completed = subprocess.run(
-                (
-                    "cargo",
-                    "tree",
-                    "--manifest-path",
-                    str(consumer / "Cargo.toml"),
-                    "--edges",
-                    "normal",
-                    "--prefix",
-                    "none",
-                    "--package",
-                    "rdocx-layout@0.10.1",
-                ),
-                cwd=consumer,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as package:
+                members = package.getmembers()
+                names = [member.name for member in members]
+                self.assertEqual(len(names), len(set(names)))
+                for member in members:
+                    self.assertTrue(member.isfile(), member.name)
+                    self.assertTrue(member.name.startswith("rdocx-layout-0.10.1/"))
+                    self.assertNotIn("\\", member.name)
+                    self.assertFalse({"", ".", ".."} & set(member.name.split("/")))
+                package.extractall(root, filter="data")
+            published = root / "rdocx-layout-0.10.1"
+            expected = {
+                "Cargo.toml": "46bfee891aa2cb53a94a9a0427d2beab39110e46f6beb7162d1d6f238f6f0184",
+                "Cargo.toml.orig": "4d94ac7caae034064096c0b4150bb4e087cd135bd0fe45659a4c4e759a7857d5",
+                "Cargo.lock": "e14d94bfbc7be2deafe14396119860c6990a93b9e9961b326a24ed54a8f846ae",
+            }
+            original = {name: (published / name).read_bytes() for name in expected}
+            self.assertEqual(
+                {name: hashlib.sha256(data).hexdigest() for name, data in original.items()},
+                expected,
             )
-        self.assertEqual(
-            completed.returncode,
-            0,
-            completed.stdout + completed.stderr,
-        )
-        self.assertIn(
-            "rdocx-layout v0.10.1",
-            completed.stdout + completed.stderr,
-        )
-        self.assertIn(
-            "oxml-layout v0.6.0",
-            completed.stdout + completed.stderr,
-        )
-        self.assertNotIn(
-            "oxml-layout v0.7.0",
-            completed.stdout + completed.stderr,
-        )
+            manifest = tomllib.loads(original["Cargo.toml"].decode("utf-8"))
+            self.assertEqual(manifest["dependencies"]["oxml-layout"]["version"], "0.6.0")
+            self.assertNotIn("path", manifest["dependencies"]["oxml-layout"])
+            env = {name: os.environ[name] for name in (
+                "HOME", "USER", "LOGNAME", "PATH", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN",
+                "SYSTEMROOT", "SystemRoot", "WINDIR", "USERPROFILE", "HOMEDRIVE",
+                "HOMEPATH", "APPDATA", "LOCALAPPDATA", "COMSPEC", "PATHEXT",
+            ) if name in os.environ}
+            env.update(CARGO_HOME=str(root / "cargo-home"),
+                       CARGO_TARGET_DIR=str(root / "unused-target"),
+                       CARGO_NET_OFFLINE="false")
+            common = ("--locked", "--manifest-path", str(published / "Cargo.toml"))
+            tree = subprocess.run(
+                ("cargo", "tree", *common, "--edges", "normal", "--prefix", "none",
+                 "--package", "rdocx-layout@0.10.1"),
+                cwd=published, env=env, check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(tree.returncode, 0, tree.stdout + tree.stderr)
+            self.assertIn("rdocx-layout v0.10.1", tree.stdout)
+            self.assertIn("oxml-layout v0.6.0", tree.stdout)
+            self.assertNotIn("oxml-layout v0.7.0", tree.stdout)
+            metadata = subprocess.run(
+                ("cargo", "metadata", *common, "--format-version", "1"),
+                cwd=published, env=env, check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(metadata.returncode, 0, metadata.stdout + metadata.stderr)
+            graph = json.loads(metadata.stdout)
+            packages = {package["id"]: package for package in graph["packages"]}
+            nodes = {node["id"]: node for node in graph["resolve"]["nodes"]}
+            root_id = graph["resolve"]["root"]
+            self.assertIsNotNone(root_id)
+            self.assertEqual(packages[root_id]["name"], "rdocx-layout")
+            self.assertEqual(packages[root_id]["version"], "0.10.1")
+            self.assertIsNone(packages[root_id]["source"])
+            self.assertEqual(Path(packages[root_id]["manifest_path"]), published / "Cargo.toml")
+            layout_edges = [packages[dependency["pkg"]]
+                            for dependency in nodes[root_id]["deps"]
+                            if packages[dependency["pkg"]]["name"] == "oxml-layout"
+                            and any(kind["kind"] is None for kind in dependency["dep_kinds"])]
+            self.assertEqual([(package["name"], package["version"]) for package in layout_edges],
+                             [("oxml-layout", "0.6.0")])
+            reachable = set()
+            pending = [root_id]
+            while pending:
+                package_id = pending.pop()
+                if package_id in reachable:
+                    continue
+                reachable.add(package_id)
+                pending.extend(dependency["pkg"] for dependency in nodes[package_id]["deps"]
+                               if any(kind["kind"] is None for kind in dependency["dep_kinds"]))
+            normal = [packages[package_id] for package_id in reachable]
+            self.assertTrue(any(package["name"] == "oxml-layout" and package["version"] == "0.6.0"
+                                for package in normal))
+            self.assertFalse(any(package["name"] == "oxml-layout" and package["version"] == "0.7.0"
+                                 for package in normal))
+            for package_id in reachable - {root_id}:
+                self.assertEqual(packages[package_id]["source"],
+                                 "registry+https://github.com/rust-lang/crates.io-index")
+            self.assertEqual({name: (published / name).read_bytes() for name in expected}, original)
+            self.assertFalse((root / "unused-target").exists())
 
     def test_release_notes_v0_10_1_reconcile_release_inventory(self) -> None:
         changelog = (workflow.REPO / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -8553,7 +8620,7 @@ Pedro Assumpcao and the rdocx maintainers.
         audited = {f"F-{number:03d}" for number in range(240, 311)}
         self.assertLessEqual(audited, all_stories)
 
-        placements: dict[str, list[tuple[int, str, str]]] = {
+        placements: dict[str, list[tuple[tuple[int, ...], str, str]]] = {
             fid: [] for fid in audited
         }
         sprint_markers = list(
@@ -8572,28 +8639,31 @@ Pedro Assumpcao and the rdocx maintainers.
                 row_pattern = row_pattern.removesuffix("$") + r" [^|\n]+ \|$"
             for fid, title, size in re.findall(row_pattern, section, re.MULTILINE):
                 if fid in placements:
-                    placements[fid].append((int(marker.group(1)), title.strip(), size))
+                    sprint = tuple(int(part) for part in marker.group(1).split("."))
+                    placements[fid].append((sprint, title.strip(), size))
         self.assertTrue(all(value for value in placements.values()))
         self.assertTrue(all(len(value) == 1 for value in placements.values()))
         self.assertEqual(
             {sprint for value in placements.values() for sprint, _, _ in value},
-            set(range(70, 75)) | {86, 89, 90, 95} | set(range(97, 100)),
+            {(number,) for number in set(range(70, 75)) | {86, 89, 90} | set(range(97, 100))}
+            | {(95, 2), (95, 3), (95, 4)},
         )
 
-        backlog_rows: dict[str, list[tuple[int, str, str, str]]] = {
+        backlog_rows: dict[str, list[tuple[tuple[int, ...], str, str, str]]] = {
             fid: [] for fid in audited
         }
         sprint_backlog = (workflow.REPO / "docs/sprints/BACKLOG.md").read_text(
             encoding="utf-8"
         )
         for fid, title, sprint, size, status in re.findall(
-            r"^\| (F-\d{3}) \| ([^|]+?) \| S(\d+) \| ([SML]) \| "
+            r"^\| (F-\d{3}) \| ([^|]+?) \| S(\d+(?:\.\d+)?) \| ([SML]) \| "
             r"(pending|in-progress|reviewed|done|archived) \|$",
             sprint_backlog,
             re.MULTILINE,
         ):
             if fid in backlog_rows:
-                backlog_rows[fid].append((int(sprint), title.strip(), size, status))
+                sprint_number = tuple(int(part) for part in sprint.split("."))
+                backlog_rows[fid].append((sprint_number, title.strip(), size, status))
         self.assertTrue(all(len(value) == 1 for value in backlog_rows.values()))
         hld_rows = {
             fid: (title.strip(), size)

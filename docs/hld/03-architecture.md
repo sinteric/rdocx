@@ -131,8 +131,12 @@ creation and verification, and X.509 parsing in `oxml-opc`. `rdocx` and
 `rpptx` forward the native package reports and stage typed facade state before
 requesting package verification or signing. Both facades also forward the
 default-off `agile-encryption` feature for native encrypted opens and writes.
-Ordinary, Python, WASM, and CLI graphs do not include either security feature
-or its cryptographic dependencies.
+Native defaults and WASM do not select either security feature. Both Python
+bindings and both CLIs explicitly select digital signatures. The two Python
+consumers share concrete owned report conversion in oxml-py-support. The two
+CLIs select the default-off oxml-cli-support report feature even when their
+wrapper default features are disabled. Agile encryption remains unselected
+by Python, WASM and CLI consumers.
 
 **`oxml-media` has no dependencies at all.** It owns byte sniffing, image header
 probing, intrinsic EMU sizing through its local `NativeSize` value, safe MIME
@@ -2175,3 +2179,11 @@ pixel extents are validated. The existing crate root owns the crate-private boun
 Semantic export attaches its source-path error context at the call site. The
 validator remains a concrete facade helper, with no dependency from a shared
 OXML crate into a facade.
+
+## ZIP package dependency
+
+The three direct ZIP consumers are oxml-opc, rdocx and rpptx. They use zip9.0.3 with disabled defaults and the existing Rust Deflate backend. No extra codec or dependency alias is selected. Native OPC errors expose the upstream zip9 error identity. Existing package and ODF validation owns admission after fallible decoded-name access.
+
+ZIP9 also selects its upstream macOS/BSD-only nix0.31.3 dependency with fs and
+disabled defaults, plus cfg_aliases0.2.2 for that dependency build. They do not
+add a ZIP codec and remain subject to actual target, license and MSRV checks.

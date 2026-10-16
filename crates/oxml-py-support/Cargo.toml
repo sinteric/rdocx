@@ -17,6 +17,7 @@ tag-name = "v{{version}}"
 
 [dependencies]
 oxml-core = { workspace = true }
+oxml-opc = { workspace = true, features = ["digital-signatures"] }
 pyo3 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }

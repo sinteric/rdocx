@@ -17254,8 +17254,8 @@ impl Document {
 
     /// Sign the current typed document with the strict RSA-SHA256 profile.
     ///
-    /// The private key must be PKCS#8 DER and the certificate must be X.509
-    /// DER. Typed state is flushed and signed on a staged clone, so any
+    /// The private key must be PKCS#8 DER or one unencrypted PRIVATE KEY PEM
+    /// block. The certificate must be X.509 DER or one CERTIFICATE PEM block. Typed state is flushed and signed on a staged clone, so any
     /// serialization, key, certificate, or signature failure leaves this
     /// document unchanged. Certificate-chain trust remains caller policy.
     #[cfg(all(feature = "digital-signatures", not(target_arch = "wasm32")))]
@@ -54137,10 +54137,11 @@ mod odttf_tests {
             let mut file = archive.by_index(index).unwrap();
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).unwrap();
-            if file.name() == "word/_rels/document.xml.rels" {
+            let name = file.name().unwrap().into_owned();
+            if name == "word/_rels/document.xml.rels" {
                 bytes = b"<Relationships".to_vec();
             }
-            entries.push((file.name().to_owned(), file.compression(), bytes));
+            entries.push((name, file.compression(), bytes));
         }
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         for (name, compression, bytes) in entries {

@@ -83,11 +83,20 @@ pub(crate) struct MeasuredMath {
     pub(crate) group: GroupElement,
     // Font-requested white space above ink, retained when a box owns the row top.
     top_padding: f64,
+    // The completed terminal atom has this correction in width already. Script
+    // attachment consumes that advance before applying its own positioning rule.
+    terminal_italic_advance: f64,
 }
 
 impl MeasuredMath {
     pub(crate) fn height(&self) -> f64 {
         self.ascent + self.descent
+    }
+
+    fn for_script_attachment(mut self) -> Self {
+        self.width -= self.terminal_italic_advance;
+        self.terminal_italic_advance = 0.0;
+        self
     }
 
     fn empty() -> Self {
@@ -96,6 +105,7 @@ impl MeasuredMath {
             ascent: 0.0,
             descent: 0.0,
             group: group(Vec::new()),
+            terminal_italic_advance: 0.0,
             top_padding: 0.0,
         }
     }
@@ -182,7 +192,14 @@ pub(crate) fn layout_officemath(
                 // A display frame starts above its ink by MathLeading. Face
                 // ascenders include blank space and differ across constructs.
                 let shift = leading.max(0.0) + measured.top_padding - ink_bounds(&measured, fm).y;
-                let shift = shift.clamp(-measured.ascent, size * MAX_DELIMITER_SCALE);
+                let run_only = value.equations.iter().all(|equation| {
+                    equation
+                        .expressions
+                        .iter()
+                        .all(|expression| matches!(expression, MathExpression::Run(_)))
+                });
+                let lower = if run_only { 0.0 } else { -measured.ascent };
+                let shift = shift.clamp(lower, size * MAX_DELIMITER_SCALE);
                 measured.group.transform.f += shift;
                 measured.ascent += shift;
             }
@@ -219,6 +236,7 @@ pub(crate) fn layout_officemath(
             let width = available_width.max(measured.width);
             Ok((
                 MeasuredMath {
+                    terminal_italic_advance: 0.0,
                     top_padding: 0.0,
                     width,
                     ascent: measured.ascent + pre_spacing,
@@ -921,10 +939,14 @@ fn layout_run(
     // them only when the requested physical face covers the complete run.
     if italic
         && !bold
-        && run
-            .text
-            .chars()
-            .all(|c| !c.is_alphabetic() || c.is_ascii_alphabetic() || c == 'π')
+        && run.text.chars().all(|c| {
+            !c.is_alphabetic()
+                || c.is_ascii_alphabetic()
+                || matches!(
+                    c,
+                    'π' | 'α' | 'β' | 'θ' | 'λ' | 'μ' | 'σ' | 'ω' | 'ε' | 'ϕ' | 'φ' | '∂'
+                )
+        })
     {
         let mapped: String = run
             .text
@@ -938,6 +960,17 @@ fn layout_run(
                     char::from_u32(0x1d44e + character as u32 - 'a' as u32).unwrap_or(character)
                 }
                 'π' => '𝜋',
+                'α' => '𝛼',
+                'β' => '𝛽',
+                'θ' => '𝜃',
+                'λ' => '𝜆',
+                'μ' => '𝜇',
+                'σ' => '𝜎',
+                'ω' => '𝜔',
+                'ε' => '𝜀',
+                'ϕ' => '𝜙',
+                'φ' => '𝜑',
+                '∂' => '𝜕',
                 _ => character,
             })
             .collect();
@@ -961,6 +994,65 @@ fn layout_run(
                     diagnostics,
                 )?;
                 if let Some(PositionedElement::Text(glyphs)) = measured.group.children.first_mut() {
+                    let data = fm.font_data(glyphs.font_id)?;
+                    if let Ok(face) = ttf_parser::Face::parse(&data.data, data.face_index)
+                        && let Some(corrections) = face
+                            .tables()
+                            .math
+                            .and_then(|math| math.glyph_info)
+                            .and_then(|info| info.italic_corrections)
+                        && mapped.chars().count() == glyphs.glyph_ids.len()
+                    {
+                        let logical: Vec<_> = run.text.chars().collect();
+                        for (index, character) in logical.iter().copied().enumerate() {
+                            let ordinary = character.is_ascii_alphabetic()
+                                || matches!(
+                                    character,
+                                    'α' | 'β' | 'θ' | 'λ' | 'μ' | 'σ' | 'ω' | 'ε' | 'ϕ' | 'φ' | '∂'
+                                );
+                            let boundary = logical.get(index + 1).is_none_or(|next| {
+                                matches!(
+                                    next,
+                                    '+' | '−'
+                                        | '='
+                                        | '×'
+                                        | '⋅'
+                                        | '÷'
+                                        | '±'
+                                        | '∓'
+                                        | '∪'
+                                        | '∩'
+                                        | '≤'
+                                        | '≥'
+                                        | '≠'
+                                        | '≈'
+                                        | '≡'
+                                        | '∼'
+                                        | '∝'
+                                        | '∈'
+                                        | '⊂'
+                                        | '⇒'
+                                        | '←'
+                                        | '\u{2009}'
+                                        | '\u{2004}'
+                                        | '\u{2001}'
+                                )
+                            });
+                            if ordinary
+                                && boundary
+                                && let Some(value) =
+                                    corrections.get(ttf_parser::GlyphId(glyphs.glyph_ids[index]))
+                            {
+                                let correction = f64::from(value.value) * font_size
+                                    / f64::from(face.units_per_em());
+                                glyphs.advances[index] += correction;
+                                measured.width += correction;
+                                if index + 1 == logical.len() {
+                                    measured.terminal_italic_advance = correction;
+                                }
+                            }
+                        }
+                    }
                     glyphs.text.clone_from(&run.text);
                 }
                 return Ok(measured);
@@ -1029,8 +1121,12 @@ fn layout_text(
         // It belongs to operator layout, not to the stored logical string.
         for (index, character) in text.chars().enumerate() {
             let gap = match character {
-                '+' | '−' => font_size * 4.0 / 18.0,
-                '=' => font_size * 5.0 / 18.0,
+                '+' | '−' | '×' | '⋅' | '÷' | '±' | '∓' | '∪' | '∩' => {
+                    font_size * 4.0 / 18.0
+                }
+                '=' | '≤' | '≥' | '≠' | '≈' | '≡' | '∼' | '∝' | '∈' | '⊂' | '⇒' | '←' => {
+                    font_size * 5.0 / 18.0
+                }
                 _ => 0.0,
             };
             if index == 0 {
@@ -1049,6 +1145,7 @@ fn layout_text(
     }
     Ok(horizontally_scaled(
         MeasuredMath {
+            terminal_italic_advance: 0.0,
             top_padding: 0.0,
             width: shaped.width.max(0.0),
             ascent: metrics.ascent.max(0.0),
@@ -1139,7 +1236,18 @@ fn layout_fraction(
         )?;
         return Ok(layout_sequence(vec![numerator, slash, denominator]));
     }
-    let padding = font_size * 0.06;
+    let direct_bar = value.numerator.expressions.iter().chain(&value.denominator.expressions)
+        .any(|expression| matches!(expression, MathExpression::Fraction(fraction) if fraction.fraction_type == FractionType::Bar));
+    let padding = if constants.is_some() && value.fraction_type == FractionType::Bar {
+        // Observed nested-bar clearance is atom glue, not a MATH table constant.
+        if direct_bar {
+            font_size * 2.0 / 18.0
+        } else {
+            0.0
+        }
+    } else {
+        font_size * 0.06
+    };
     let width = numerator.width.max(denominator.width) + padding * 2.0;
     let numerator_x = (width - numerator.width) / 2.0;
     let denominator_x = (width - denominator.width) / 2.0;
@@ -1229,6 +1337,7 @@ fn layout_fraction(
         });
     }
     Ok(MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: numerator.top_padding,
         width,
         ascent,
@@ -1282,6 +1391,7 @@ fn layout_script_pair(
     fm: &mut FontManager,
     font_family: Option<&str>,
 ) -> Result<MeasuredMath> {
+    let base = base.for_script_attachment();
     let font_size = context.font_size;
     let empty = MeasuredMath::empty();
     let (down, up) = if superscript {
@@ -1313,6 +1423,7 @@ fn layout_script_pair(
     };
     let after = space_after_script(fm, font_family, font_size)?;
     Ok(MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: if script_y < base_y {
             script.top_padding
         } else {
@@ -1443,6 +1554,11 @@ fn layout_measured_scripts(
     shifts: (f64, f64),
     correction: Option<f64>,
 ) -> MeasuredMath {
+    let base = if pre {
+        base
+    } else {
+        base.for_script_attachment()
+    };
     let font_size = context.font_size;
     let (subscript_shift, superscript_shift) = shifts;
     let ascent = base.ascent.max(superscript_shift + superscript.ascent);
@@ -1458,6 +1574,7 @@ fn layout_measured_scripts(
         (base.width + gap, 0.0)
     };
     MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: if superscript_shift + superscript.ascent > base.ascent {
             superscript.top_padding
         } else {
@@ -1586,6 +1703,7 @@ fn layout_radical(
                 children.push(translated(degree.group, before.max(0.0), degree_y));
             }
             return Ok(MeasuredMath {
+                terminal_italic_advance: 0.0,
                 top_padding: extra,
                 width: base_x + base.width,
                 ascent,
@@ -1651,6 +1769,7 @@ fn layout_radical(
     }
     Ok(horizontally_scaled(
         MeasuredMath {
+            terminal_italic_advance: 0.0,
             top_padding: 0.0,
             width: base_x + base.width,
             ascent,
@@ -1746,6 +1865,7 @@ fn layout_matrix(
         y += row_ascent + row_descent + row_gap;
     }
     Ok(MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: 0.0,
         width,
         ascent,
@@ -1791,6 +1911,7 @@ fn layout_limit(
         let limit_height = limit.height();
         let ascent = limit.height() + gap + base.ascent;
         Ok(MeasuredMath {
+            terminal_italic_advance: 0.0,
             top_padding: 0.0,
             width,
             ascent,
@@ -1804,6 +1925,7 @@ fn layout_limit(
         let ascent = base.ascent;
         let base_height = base.height();
         Ok(MeasuredMath {
+            terminal_italic_advance: 0.0,
             top_padding: 0.0,
             width,
             ascent,
@@ -1947,6 +2069,7 @@ fn stack_above(base: MeasuredMath, limit: MeasuredMath, font_size: f64) -> Measu
     let limit_height = limit.height();
     let ascent = limit_height + gap + base.ascent;
     MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: 0.0,
         width,
         ascent,
@@ -1963,6 +2086,7 @@ fn stack_below(base: MeasuredMath, limit: MeasuredMath, font_size: f64) -> Measu
     let width = base.width.max(limit.width);
     let base_height = base.height();
     MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: 0.0,
         width,
         ascent: base.ascent,
@@ -2083,6 +2207,7 @@ fn layout_accent(
     if matches!(accent_text, "¯" | "̅" | "̲") {
         let rule = font_size * RULE_EM;
         return Ok(MeasuredMath {
+            terminal_italic_advance: 0.0,
             top_padding: 0.0,
             width: base.width,
             ascent: base.ascent + gap + rule,
@@ -2120,6 +2245,7 @@ fn layout_accent(
     let accent_raise = font_size * 0.262;
     let ascent = base.ascent + accent_raise;
     Ok(MeasuredMath {
+        terminal_italic_advance: 0.0,
         top_padding: 0.0,
         width,
         ascent,
@@ -2138,6 +2264,7 @@ fn vertically_scaled(value: MeasuredMath, target_height: f64) -> MeasuredMath {
     }
     let scale = (target_height / height).min(MAX_DELIMITER_SCALE);
     MeasuredMath {
+        terminal_italic_advance: value.terminal_italic_advance,
         top_padding: value.top_padding * scale,
         width: value.width,
         ascent: value.ascent * scale,
@@ -2160,6 +2287,7 @@ fn horizontally_scaled(value: MeasuredMath, scale: f64) -> MeasuredMath {
         return value;
     }
     MeasuredMath {
+        terminal_italic_advance: value.terminal_italic_advance * scale,
         top_padding: value.top_padding,
         width: value.width * scale,
         ascent: value.ascent,
@@ -2193,6 +2321,9 @@ fn layout_spaced_sequence(values: Vec<MeasuredMath>, spacing: f64) -> MeasuredMa
         .iter()
         .max_by(|left, right| left.ascent.total_cmp(&right.ascent))
         .map_or(0.0, |value| value.top_padding);
+    let terminal_italic_advance = values
+        .last()
+        .map_or(0.0, |value| value.terminal_italic_advance);
     let mut x = 0.0;
     let mut children = Vec::with_capacity(values.len());
     for value in values {
@@ -2200,6 +2331,7 @@ fn layout_spaced_sequence(values: Vec<MeasuredMath>, spacing: f64) -> MeasuredMa
         x += value.width + spacing.max(0.0);
     }
     MeasuredMath {
+        terminal_italic_advance,
         top_padding,
         width,
         ascent,
@@ -2423,6 +2555,73 @@ mod tests {
                 &mut Vec::new(),
             )
             .unwrap();
+            let numerator_width = layout_argument(
+                &text("S"),
+                &mut fm,
+                Some("F-X235 math"),
+                MathLayoutStyle::new(size, true),
+                Color::BLACK,
+                "fx247-numerator-width",
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .width;
+            let denominator_width = layout_argument(
+                &text("T"),
+                &mut fm,
+                Some("F-X235 math"),
+                MathLayoutStyle::new(size, true).cramped(),
+                Color::BLACK,
+                "fx247-denominator-width",
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .width;
+            assert!((fraction.width - numerator_width.max(denominator_width)).abs() < 1e-8);
+            let mut no_bar = MathFraction::new(text("S"), text("T"));
+            no_bar.fraction_type = FractionType::NoBar;
+            let no_bar = layout_fraction(
+                &no_bar,
+                &mut fm,
+                Some("F-X235 math"),
+                MathLayoutStyle::new(size, true),
+                Color::BLACK,
+                "fx247-no-bar-clearance",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!((no_bar.width - fraction.width - 2.0 * size * 0.06).abs() < 1e-8);
+            let nested_operand = MathArgument::new(vec![MathExpression::Fraction(
+                MathFraction::new(text("S"), text("T")),
+            )]);
+            let nested_operand_width = layout_argument(
+                &nested_operand,
+                &mut fm,
+                Some("F-X235 math"),
+                MathLayoutStyle::new(size, true),
+                Color::BLACK,
+                "fx247-nested-operand",
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .width;
+            let nested_fraction = layout_fraction(
+                &MathFraction::new(text("S"), nested_operand),
+                &mut fm,
+                Some("F-X235 math"),
+                MathLayoutStyle::new(size, true),
+                Color::BLACK,
+                "fx247-nested-clearance",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!(
+                (nested_fraction.width
+                    - numerator_width.max(nested_operand_width)
+                    - 2.0 * size * 2.0 / 18.0)
+                    .abs()
+                    < 1e-8
+            );
             let PositionedElement::Line { start, width, .. } = &fraction.group.children[2] else {
                 panic!("rule");
             };
@@ -2446,6 +2645,63 @@ mod tests {
             .unwrap();
             let actual = ink_bounds(&display, &fm);
             assert!((actual.y - (100.0 + 75.0) * size / units).abs() < 1e-8);
+            // A run-only display retains the ordinary frame, even when its
+            // glyph ink would otherwise produce a negative leading shift.
+            for expressions in [
+                vec![],
+                vec![MathRun::new("x").into()],
+                vec![MathRun::new("x").into(), MathRun::new("\u{2004}").into(), {
+                    let mut run = MathRun::new("text ");
+                    run.properties.normal = Some(true);
+                    run.into()
+                }],
+            ] {
+                let argument = layout_expressions(
+                    &expressions,
+                    &mut fm,
+                    Some("F-X235 math"),
+                    MathLayoutStyle::new(size, true),
+                    Color::BLACK,
+                    0.0,
+                    "fx247-short-base",
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let short = OfficeMath::display(vec![CT_OMath::new(expressions)]);
+                let (display, _) = layout_officemath(
+                    &short,
+                    &mut fm,
+                    size,
+                    Color::BLACK,
+                    200.0,
+                    Some(&properties),
+                    "fx247-short-display",
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                if argument.width > 0.0 {
+                    assert!(ink_bounds(&display, &fm).y >= ink_bounds(&argument, &fm).y - 1e-8);
+                }
+            }
+            // Mixed/tall content keeps the actual-ink rule instead of inheriting
+            // the short-frame lower bound.
+            let mixed_expressions = vec![
+                MathRun::new("x").into(),
+                MathExpression::Fraction(MathFraction::new(text("S"), text("T"))),
+            ];
+            let mixed = OfficeMath::display(vec![CT_OMath::new(mixed_expressions)]);
+            let (mixed, _) = layout_officemath(
+                &mixed,
+                &mut fm,
+                size,
+                Color::BLACK,
+                200.0,
+                Some(&properties),
+                "fx247-mixed-display",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!((ink_bounds(&mixed, &fm).y - 100.0 * size / units).abs() < 1e-8);
             let root_context = MathLayoutStyle::new(size, true);
             let first = math_script_context(&mut fm, Some("F-X235 math"), root_context, 1).unwrap();
             let second = math_script_context(&mut fm, Some("F-X235 math"), first, 1).unwrap();
@@ -2921,6 +3177,175 @@ mod tests {
         };
         assert_eq!(delimiter_scale(&fixed), 1.0);
         assert!(delimiter_scale(&growing) > 1.0);
+    }
+
+    #[test]
+    #[ignore = "requires the authenticated caller Cambria collection"]
+    fn fx247_physical_math_atom_correction_is_not_reapplied_at_scripts() {
+        let path =
+            std::env::var("RDOCX_FX247_NATIVE_FONT").expect("authenticated caller font path");
+        let mut fm =
+            FontManager::new_with_fonts(vec![("Cambria".to_owned(), std::fs::read(path).unwrap())]);
+        let context = MathLayoutStyle::new(12.0, false);
+        let family = Some("Cambria Math");
+        for (logical, mapped) in [("x", '𝑥'), ("f", '𝑓'), ("α", '𝛼')] {
+            let id = fm
+                .resolve_font_for_text(family, false, false, &mapped.to_string())
+                .unwrap();
+            let data = fm.font_data(id).unwrap();
+            let face = ttf_parser::Face::parse(&data.data, data.face_index).unwrap();
+            let glyph = face.glyph_index(mapped).unwrap();
+            let units = f64::from(face.units_per_em());
+            let raw = f64::from(face.glyph_hor_advance(glyph).unwrap()) * context.font_size / units;
+            let correction = f64::from(
+                face.tables()
+                    .math
+                    .unwrap()
+                    .glyph_info
+                    .unwrap()
+                    .italic_corrections
+                    .unwrap()
+                    .get(glyph)
+                    .unwrap()
+                    .value,
+            ) * context.font_size
+                / units;
+            assert!(correction > 0.0, "meaningful positive correction {logical}");
+            let base = layout_argument(
+                &text(logical),
+                &mut fm,
+                family,
+                context,
+                Color::BLACK,
+                "fx247-base",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!((base.width - raw - correction).abs() < 1e-8);
+            let position = |value: &MeasuredMath, index: usize| {
+                let PositionedElement::Group(group) = &value.group.children[index] else {
+                    panic!("script group")
+                };
+                group.transform.e
+            };
+            for superscript in [false, true] {
+                let expression = if superscript {
+                    MathExpression::Superscript(MathScript::new(text(logical), text("2")))
+                } else {
+                    MathExpression::Subscript(MathScript::new(text(logical), text("2")))
+                };
+                let measured = layout_expression(
+                    &expression,
+                    &mut fm,
+                    family,
+                    context,
+                    Color::BLACK,
+                    "fx247-script",
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let expected = raw + if superscript { correction } else { 0.0 };
+                assert!(
+                    (position(&measured, 1) - expected).abs() < 1e-8,
+                    "{logical} superscript={superscript}"
+                );
+            }
+            let combined = layout_three_part_script(
+                &text(logical),
+                &text("2"),
+                &text("3"),
+                false,
+                &mut fm,
+                family,
+                context,
+                Color::BLACK,
+                "fx247-combined",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert!((position(&combined, 1) - raw - correction).abs() < 1e-8);
+            assert!((position(&combined, 2) - raw).abs() < 1e-8);
+        }
+        // A multi-letter identifier pays only its final correction. Normal
+        // text and the historical pi spelling do not enter this added advance.
+        let mut normal = MathRun::new("f");
+        normal.properties.normal = Some(true);
+        let normal = layout_run(
+            &normal,
+            &mut fm,
+            family,
+            context,
+            Color::BLACK,
+            "normal",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(normal.terminal_italic_advance, 0.0);
+        let pi = layout_run(
+            &MathRun::new("π"),
+            &mut fm,
+            family,
+            context,
+            Color::BLACK,
+            "pi",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(pi.terminal_italic_advance, 0.0);
+        let mixed = layout_run(
+            &MathRun::new("xf"),
+            &mut fm,
+            family,
+            context,
+            Color::BLACK,
+            "identifier",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let id = fm
+            .resolve_font_for_text(family, false, false, "𝑥𝑓")
+            .unwrap();
+        let data = fm.font_data(id).unwrap();
+        let face = ttf_parser::Face::parse(&data.data, data.face_index).unwrap();
+        let raw = ['𝑥', '𝑓']
+            .iter()
+            .map(|c| {
+                f64::from(
+                    face.glyph_hor_advance(face.glyph_index(*c).unwrap())
+                        .unwrap(),
+                ) * context.font_size
+                    / f64::from(face.units_per_em())
+            })
+            .sum::<f64>();
+        assert!((mixed.width - raw - mixed.terminal_italic_advance).abs() < 1e-8);
+    }
+
+    #[test]
+    fn fx247_non_math_fraction_retains_fallback_padding() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let size = 11.0;
+        let context = MathLayoutStyle::new(size, true);
+        let operand = layout_argument(
+            &text("1"),
+            &mut fm,
+            None,
+            context,
+            Color::BLACK,
+            "fallback-operand",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let fraction = layout_fraction(
+            &MathFraction::new(text("1"), text("1")),
+            &mut fm,
+            None,
+            context,
+            Color::BLACK,
+            "fallback-fraction",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!((fraction.width - operand.width - 2.0 * size * 0.06).abs() < 1e-8);
     }
 
     #[test]

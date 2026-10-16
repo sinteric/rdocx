@@ -6615,3 +6615,453 @@ fn fx231_cli_word_html_whitespace_roundtrip() {
     assert_eq!(links[0].text, "x ");
     assert_eq!(links[0].url.as_deref(), Some("https://example.test/"));
 }
+
+fn fx241_legacy(name: &str, maximum: usize) -> String {
+    format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="{name}"/><w:enabled/><w:calcOnExit w:val="0"/><w:textInput><w:default w:val="old"/><w:maxLength w:val="{maximum}"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>old</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+    )
+}
+
+fn fx241_control(tag: &str, properties: &str, contents: &str) -> String {
+    format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="{tag}"/>{properties}</w:sdtPr><w:sdtContent>{contents}</w:sdtContent></w:sdt>"#
+    )
+}
+
+fn fx241_template(path: &Path, body: &str) {
+    write_document(path, &["seed"]);
+    let mut package = OpcPackage::open(path).unwrap();
+    package.set_part("/word/document.xml", format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:p="urn:producer"><w:body>{body}<w:sectPr/></w:body></w:document>"#).into_bytes());
+    package.set_part("/customXml/opaque.xml", b"<opaque exact='yes'/>".to_vec());
+    package.save(path).unwrap();
+}
+
+fn fx241_fill(input: &Path, values: &Path, output: &Path) -> Output {
+    cli(&[
+        "fill",
+        path_text(input),
+        "--values",
+        path_text(values),
+        "-o",
+        path_text(output),
+        "--json",
+    ])
+}
+
+#[test]
+fn fx241_cli_fill_five_kinds_preserves_order_source_and_old_tag_contract() {
+    let temp = TempWorkspace::new("fx241-five");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let values = temp.path.join("values.json");
+    let text = "<w:p><w:r><w:t>old</w:t></w:r></w:p>";
+    let body = [fx241_control("plain", r#"<w:alias w:val="Plain alias"/><w:text/>"#, text),
+        fx241_control("check", r#"<w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox>"#, text),
+        fx241_control("choice", r#"<w:dropDownList w:lastValue="one"><w:listItem w:displayText="One" w:value="one"/><w:listItem w:displayText="Two" w:value="two"/></w:dropDownList>"#, text),
+        fx241_control("date", r#"<w:date w:fullDate="2026-09-15T00:00:00Z"><w:dateFormat w:val="yyyy-MM-dd"/></w:date>"#, text), fx241_legacy("legacy", 40)].concat();
+    fx241_template(&input, &body);
+    let before = fs::read(&input).unwrap();
+    fs::write(&values, r#"{"legacy":"filled","Plain alias":"Ada","check":true,"choice":"two","date":"2026-10-16"}"#).unwrap();
+    let result = fx241_fill(&input, &values, &output);
+    assert_success(&result, "five-kind values");
+    let report = json_stdout(&result);
+    let rows = report["assignments"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|x| x["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["legacy", "Plain alias", "check", "choice", "date"]
+    );
+    assert_eq!(rows[0]["source_part"], "/word/document.xml");
+    assert_eq!(rows[0]["ordinal"], 0);
+    assert_eq!(rows[1]["selector_route"], "alias");
+    let reopened = Document::open(&output).unwrap();
+    assert_eq!(
+        reopened.legacy_form_fields().unwrap()[0].value,
+        rdocx::LegacyFormFieldValue::Text("filled".into())
+    );
+    let texts = reopened
+        .content_controls()
+        .iter()
+        .map(|x| x.text())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["Ada", "☒", "two", "2026-10-16"]);
+    let xml = package_part_text(&output, "/word/document.xml");
+    assert!(xml.contains("w14:checked w14:val=\"1\""));
+    assert!(xml.contains("MS Gothic"));
+    assert!(xml.contains("2026-09-15T00:00:00Z"));
+    assert!(xml.contains("yyyy-MM-dd"));
+    assert!(xml.contains("w:default w:val=\"filled\""));
+    assert_eq!(
+        package_part_text(&output, "/customXml/opaque.xml"),
+        "<opaque exact='yes'/>"
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+    fs::remove_file(&output).unwrap();
+    let conflict = cli(&[
+        "fill",
+        path_text(&input),
+        "--values",
+        path_text(&values),
+        "--tag",
+        "plain=x",
+        "-o",
+        path_text(&output),
+    ]);
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(!output.exists());
+}
+
+#[test]
+fn fx241_json_and_target_refusals_leave_input_and_output_untouched() {
+    let temp = TempWorkspace::new("fx241-refuse");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let values = temp.path.join("values.json");
+    let body = fx241_control(
+        "plain",
+        r#"<w:alias w:val="alias"/><w:text/>"#,
+        "<w:p><w:r><w:t>old</w:t></w:r></w:p>",
+    ) + &fx241_legacy("legacy", 4);
+    fx241_template(&input, &body);
+    let before = fs::read(&input).unwrap();
+    let mut invalid = vec![
+        "{}".to_string(),
+        r#"{"plain":"a","plain":"b"}"#.into(),
+        r#"{"plain":"a","pl\u0061in":"b"}"#.into(),
+        r#"{"plain":"a","alias":"b"}"#.into(),
+        r#"{"missing":"x"}"#.into(),
+        r#"{"plain":null}"#.into(),
+        r#"{"plain":1}"#.into(),
+        r#"{"plain":true}"#.into(),
+        r#"{"plain":1.5}"#.into(),
+        r#"{"legacy":-1}"#.into(),
+        r#"{"plain":[]}"#.into(),
+        r#"{"plain":{}}"#.into(),
+        r#"{"plain":"x",}"#.into(),
+        "{\u{a0}\"plain\":\"x\"}".into(),
+        r#"{"plain":"early","legacy":"too-long"}"#.into(),
+        r#"{"plain":"x"} garbage"#.into(),
+        r#"{"":"x"}"#.into(),
+    ];
+    invalid.push(format!(
+        "{{{}}}",
+        (0..4097)
+            .map(|i| format!("\"key{i}\":\"x\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    invalid.push(format!("{{\"plain\":\"{}\"}}", "x".repeat(1024 * 1024)));
+    for raw in invalid {
+        fs::write(&values, raw.as_bytes()).unwrap();
+        let result = fx241_fill(&input, &values, &output);
+        assert_eq!(
+            result.status.code(),
+            Some(1),
+            "{raw:.100}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+    fs::write(&values, [b'{', 0xff, b'}']).unwrap();
+    assert_eq!(fx241_fill(&input, &values, &output).status.code(), Some(1));
+    assert!(!output.exists());
+    fs::write(&output, b"existing output").unwrap();
+    fs::write(&values, r#"{"plain":"changed"}"#).unwrap();
+    assert_eq!(fx241_fill(&input, &values, &output).status.code(), Some(1));
+    assert_eq!(fs::read(&output).unwrap(), b"existing output");
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn fx241_duplicate_and_cross_kind_selectors_refuse_instead_of_first_match() {
+    let temp = TempWorkspace::new("fx241-collision");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let values = temp.path.join("values.json");
+    let control = fx241_control("same", "<w:text/>", "<w:p><w:r><w:t>old</w:t></w:r></w:p>");
+    for body in [
+        control.clone() + &control,
+        control.clone() + &fx241_legacy("same", 40),
+        fx241_legacy("same", 40) + &fx241_legacy("same", 40),
+    ] {
+        fx241_template(&input, &body);
+        let before = fs::read(&input).unwrap();
+        fs::write(&values, r#"{"same":"new"}"#).unwrap();
+        let result = fx241_fill(&input, &values, &output);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("exactly one target"));
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+    fx241_template(&input, &(control.clone() + &control));
+    let result = cli(&[
+        "fill",
+        path_text(&input),
+        "--tag",
+        "same=all",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "existing all-match tags");
+    assert_eq!(json_stdout(&result)["tags"][0]["count"], 2);
+}
+
+#[test]
+fn fx241_mixed_ordinal_shift_refuses_and_nested_sdt_native_semantics_survive() {
+    let temp = TempWorkspace::new("fx241-overlap");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let values = temp.path.join("values.json");
+    let outer = fx241_control("outer", "<w:text/>", &fx241_legacy("removed", 40));
+    fx241_template(
+        &input,
+        &(outer + &fx241_legacy("target", 40) + &fx241_legacy("wrong", 40)),
+    );
+    let before = fs::read(&input).unwrap();
+    fs::write(&values, r#"{"target":"chosen","outer":"replace"}"#).unwrap();
+    let result = fx241_fill(&input, &values, &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("legacy inventory"));
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+    let inner = fx241_control(
+        "inner",
+        "<w:text/>",
+        "<w:p><w:r><w:t>inside</w:t></w:r></w:p>",
+    );
+    let outer = fx241_control(
+        "outer",
+        "<w:text/>",
+        &("<w:p><w:r><w:t>own</w:t></w:r></w:p>".to_string() + &inner),
+    );
+    fx241_template(&input, &outer);
+    let before = fs::read(&input).unwrap();
+    for raw in [
+        r#"{"outer":"replaced","inner":"selected"}"#,
+        r#"{"inner":"selected","outer":"replaced"}"#,
+    ] {
+        fs::write(&values, raw).unwrap();
+        let result = fx241_fill(&input, &values, &output);
+        assert_success(&result, "selected nested SDTs retain native semantics");
+        let reopened = Document::open(&output).unwrap();
+        assert_eq!(
+            reopened
+                .content_controls()
+                .iter()
+                .map(|x| x.text())
+                .collect::<Vec<_>>(),
+            ["replaced", "selected"]
+        );
+        assert_eq!(fs::read(&input).unwrap(), before);
+        fs::remove_file(&output).unwrap();
+    }
+    fs::write(&values, r#"{"outer":"replaced"}"#).unwrap();
+    let result = fx241_fill(&input, &values, &output);
+    assert_success(&result, "outer-only replacement");
+    let reopened = Document::open(&output).unwrap();
+    assert_eq!(reopened.content_controls().len(), 2);
+    assert_eq!(reopened.content_controls()[0].text(), "replaced");
+}
+
+#[test]
+fn fx241_typed_legacy_cli_and_late_bound_failure_are_atomic() {
+    let temp = TempWorkspace::new("fx241-typed");
+    let input = temp.path.join("input.docx");
+    let output = temp.path.join("output.docx");
+    let values = temp.path.join("values.json");
+    let control = fx241_control("early", "<w:text/>", "<w:p><w:r><w:t>old</w:t></w:r></w:p>");
+    let checkbox = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="flag"/><w:checkBox><w:sizeAuto/><w:default w:val="0"/><w:checked w:val="0"/></w:checkBox></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let dropdown = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="pick"/><w:ddList><w:result w:val="0"/><w:listEntry w:val="one"/><w:listEntry w:val="two"/></w:ddList></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMDROPDOWN </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>one</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    fx241_template(&input, &(control.clone() + checkbox + dropdown));
+    let before = fs::read(&input).unwrap();
+    for raw in [
+        r#"{"early":"candidate","flag":1}"#,
+        r#"{"flag":"true"}"#,
+        r#"{"pick":true}"#,
+        r#"{"early":"candidate","pick":2}"#,
+        r#"{"pick":18446744073709551616}"#,
+    ] {
+        fs::write(&values, raw).unwrap();
+        assert_eq!(fx241_fill(&input, &values, &output).status.code(), Some(1));
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+    fs::write(&values, r#"{"pick":1,"early":"candidate","flag":true}"#).unwrap();
+    assert_success(&fx241_fill(&input, &values, &output), "typed legacy values");
+    let fields = Document::open(&output)
+        .unwrap()
+        .legacy_form_fields()
+        .unwrap();
+    assert_eq!(fields[0].value, rdocx::LegacyFormFieldValue::Checked(true));
+    assert_eq!(
+        fields[1].value,
+        rdocx::LegacyFormFieldValue::SelectedIndex(1)
+    );
+    fs::remove_file(&output).unwrap();
+    let binding = r#"<w:dataBinding w:storeItemID="{11111111-1111-1111-1111-111111111111}" w:xpath="/root/value"/><w:text/>"#;
+    fx241_template(
+        &input,
+        &(control
+            + &fx241_control(
+                "late",
+                binding,
+                "<w:p><w:r><w:t>bound old</w:t></w:r></w:p>",
+            )),
+    );
+    let before = fs::read(&input).unwrap();
+    fs::write(
+        &values,
+        r#"{"early":"candidate","late":"missing datastore"}"#,
+    )
+    .unwrap();
+    let result = fx241_fill(&input, &values, &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn fx240_unsigned_status_material_bound_and_output_refusal() {
+    let workspace = TempWorkspace::new("fx240-signing");
+    let input = workspace.path.join("unsigned.docx");
+    Document::new().save(&input).unwrap();
+    let result = cli(&["verify-signatures", input.to_str().unwrap(), "--json"]);
+    assert_eq!(result.status.code(), Some(1));
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["status"], "unsigned");
+    assert_eq!(json["signatures"], serde_json::json!([]));
+    let before = fs::read(&input).unwrap();
+    let key = workspace.path.join("oversized.key");
+    let cert = workspace.path.join("invalid.cert");
+    fs::write(&key, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    fs::write(&cert, b"invalid").unwrap();
+    let output = workspace.path.join("refused.docx");
+    let result = cli(&[
+        "sign",
+        input.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--cert",
+        cert.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+    fs::write(&output, b"keep").unwrap();
+    let result = cli(&[
+        "sign",
+        input.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+        "--cert",
+        cert.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(fs::read(&output).unwrap(), b"keep");
+    assert_eq!(
+        cli(&["sign", input.to_str().unwrap()]).status.code(),
+        Some(2)
+    );
+    assert!(!workspace.path.read_dir().unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp")
+    }));
+}
+
+#[test]
+fn fx240_text_and_json_io_failures_exit_one_without_panicking() {
+    let workspace = TempWorkspace::new("fx240-stdout");
+    let input = workspace.path.join("unsigned.docx");
+    Document::new().save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let material = |name: &str, label: &str| {
+        let source = include_str!("../../oxml-opc/src/signature.rs");
+        let prefix = format!("const {name}: &str = \"");
+        let encoded = source
+            .split_once(prefix.as_str())
+            .unwrap()
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        format!("-----BEGIN {label}-----\n{encoded}\n-----END {label}-----\n")
+    };
+    let key = workspace.path.join("key.pem");
+    let cert = workspace.path.join("cert.pem");
+    fs::write(
+        &key,
+        material("TEST_PRIVATE_KEY_PKCS8_BASE64", "PRIVATE KEY"),
+    )
+    .unwrap();
+    fs::write(
+        &cert,
+        material("TEST_CERTIFICATE_DER_BASE64", "CERTIFICATE"),
+    )
+    .unwrap();
+    for signing in [false, true] {
+        for as_json in [false, true] {
+            let output = workspace.path.join(format!("signed-{as_json}.docx"));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rdocx"));
+            if signing {
+                command
+                    .arg("sign")
+                    .arg(&input)
+                    .arg("--key")
+                    .arg(&key)
+                    .arg("--cert")
+                    .arg(&cert)
+                    .arg("-o")
+                    .arg(&output);
+            } else {
+                command.arg("verify-signatures").arg(&input);
+            }
+            if as_json {
+                command.arg("--json");
+            }
+            let mut child = command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            drop(child.stdout.take());
+            let result = child.wait_with_output().unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "signing={signing}, json={as_json}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stderr).starts_with("Error:"));
+            assert!(!String::from_utf8_lossy(&result.stderr).contains("panicked"));
+            assert_eq!(fs::read(&input).unwrap(), before);
+            if signing {
+                // Publication precedes reporting. A report I/O error keeps the valid new package.
+                let reports = Document::open(&output)
+                    .unwrap()
+                    .verify_signatures()
+                    .unwrap();
+                assert!(!reports.is_empty());
+                assert!(
+                    reports
+                        .iter()
+                        .all(|report| report.cryptographically_valid && report.coverage_complete)
+                );
+            } else {
+                assert!(!output.exists());
+            }
+        }
+    }
+}

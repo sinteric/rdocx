@@ -65,7 +65,12 @@ jobs:
             "crates/rdocx-py/tests/test_core.py::test_fx211d_merge_opaque_refusal_preserves_package_and_owners[properties]",
             "crates/rdocx-py/tests/test_core.py::test_fx211d_merge_opaque_refusal_preserves_package_and_owners[borders]",
             "crates/rdocx-py/tests/test_rendering_threads.py::test_fx211c_word_unknown_symbol_source_and_same_pass_diagnostics[symbol]",
-            "crates/rdocx-py/tests/test_rendering_threads.py::test_fx211c_word_unknown_symbol_source_and_same_pass_diagnostics[numbering]"
+            "crates/rdocx-py/tests/test_rendering_threads.py::test_fx211c_word_unknown_symbol_source_and_same_pass_diagnostics[numbering]",
+            "crates/rdocx-py/tests/test_core.py::test_fx240_sign_verify_owned_reports_pem_and_multisignatures",
+            "crates/rdocx-py/tests/test_core.py::test_fx240_current_tamper_partial_unsigned_and_malformed",
+            "crates/rdocx-py/tests/test_core.py::test_fx240_refusal_preserves_current_bytes_and_held_authority",
+            "crates/rdocx-py/tests/test_core.py::test_fx240_fill_then_sign_sign_then_fill_and_unchanged_story_owners",
+            "crates/rdocx-py/tests/test_core.py::test_fx240_late_graph_refusal_preserves_link_run_story_and_raw_parts"
           ],
           "rpptx": [
             "crates/rpptx-py/tests/test_documented_examples.py::test_python_round_three_authoring_and_inspection_is_typed_and_lossless",
@@ -108,7 +113,10 @@ jobs:
             "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[add_at]",
             "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[single]",
             "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[diagnostics]",
-            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[batch]"
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx216_foreign_layout_precedes_stale_collection_without_publication[batch]",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx240_sign_verify_owned_reports_pem_and_multisignatures",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx240_current_tamper_partial_unsigned_and_malformed",
+            "crates/rpptx-py/tests/test_documented_examples.py::test_fx240_refusal_preserves_current_bytes_and_held_authority"
           ]
         }
     permissions:
@@ -336,7 +344,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        if: github.event_name == 'workflow_dispatch'
         with:
           python-version: "3.12"
       - name: Select Rust release family
@@ -415,6 +422,130 @@ jobs:
           [[ "$version_output" == "${{ steps.selected.outputs.binary }} ${{ steps.selected.outputs.version }}" ]]
           "$binary_path" --help
           "$binary_path" inspect --help
+      - name: Qualify selected CLI signing
+        shell: bash
+        env:
+          SIGNING_FAMILY: ${{ steps.selected.outputs.binary }}
+        run: |
+          export SIGNING_BINARY="target/${{ matrix.platform.target }}/release/${{ steps.selected.outputs.binary }}"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            export SIGNING_BINARY="${SIGNING_BINARY}.exe"
+          fi
+          python - <<'PY'
+          import ast
+          import base64
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import tempfile
+          import zipfile
+
+          family = os.environ["SIGNING_FAMILY"]
+          assert family in ("rdocx", "rpptx")
+          binary = Path(os.environ["SIGNING_BINARY"]).resolve()
+          source = Path("crates/oxml-opc/src/signature.rs").read_text(encoding="utf-8")
+          def material(name):
+              return base64.b64decode(re.search(r'const ' + name + r': &str = "([^"]+)";', source)[1], validate=True)
+          def rewritten(data, mutate=None, extra=False):
+              output = io.BytesIO()
+              with zipfile.ZipFile(io.BytesIO(data)) as original, zipfile.ZipFile(output, "w") as result:
+                  entries = [(item.filename, original.read(item.filename)) for item in original.infolist()]
+                  for name, value in entries:
+                      result.writestr(name, mutate(name, value) if mutate else value)
+                  if extra:
+                      result.writestr("word/uncovered.xml" if family == "rdocx" else "ppt/uncovered.xml", b"<uncovered/>")
+              return output.getvalue()
+          with tempfile.TemporaryDirectory(prefix="signature-acceptance-", dir=os.environ.get("RUNNER_TEMP")) as temporary:
+              work = Path(temporary)
+              def run(args, status=0, structured=True):
+                  result = subprocess.run([str(binary), *map(str, args)], capture_output=True, text=True)
+                  assert result.returncode == status, (args[0], result.returncode, result.stderr)
+                  if structured:
+                      payload = json.loads(result.stdout)
+                      assert payload["schema"] == 1
+                      return payload
+                  return result
+              key = work / "key.der"; cert = work / "cert.der"
+              key.write_bytes(material("TEST_PRIVATE_KEY_PKCS8_BASE64"))
+              cert.write_bytes(material("TEST_CERTIFICATE_DER_BASE64"))
+              original = work / ("source.docx" if family == "rdocx" else "source.pptx")
+              if family == "rdocx":
+                  # Reuse the exact integrated five-kind source recipes without importing a wheel.
+                  tree = ast.parse(Path("crates/rdocx-py/tests/test_core.py").read_text(encoding="utf-8"))
+                  names = {"_fx241_control", "_fx241_legacy_text"}
+                  functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+                  assert {node.name for node in functions} == names
+                  scope = {}
+                  exec(compile(ast.Module(body=functions, type_ignores=[]), "five-kind-source", "exec"), scope)
+                  control = scope["_fx241_control"]
+                  body = control("plain", "<w:text/>")
+                  body += control("check", '<w14:checkbox xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w14:checked w14:val="0"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox>', "☐")
+                  body += control("choice", '<w:dropDownList><w:listItem w:displayText="One" w:value="one"/><w:listItem w:displayText="Two" w:value="two"/></w:dropDownList>', "one")
+                  body += control("date", '<w:date><w:dateFormat w:val="yyyy-MM-dd"/></w:date>', "2026-09-15")
+                  body += scope["_fx241_legacy_text"]() + '<w:sectPr/>'
+                  with zipfile.ZipFile(original, "w") as result:
+                      result.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+                      result.writestr("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+                      result.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + body + '</w:body></w:document>')
+              else:
+                  original.write_bytes(Path("crates/rpptx/assets/default.pptx").read_bytes())
+              original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
+              assert run(["verify-signatures", original, "--json"], 1)["status"] == "unsigned"
+              signing_input = original
+              if family == "rdocx":
+                  values = work / "values.json"; values.write_text(json.dumps({"plain":"Ada", "check": True, "choice":"two", "date":"2026-10-16", "legacy":"filled"}))
+                  signing_input = work / "filled.docx"
+                  run(["fill", original, "--values", values, "-o", signing_input, "--json"])
+                  with zipfile.ZipFile(signing_input) as archive:
+                      xml = archive.read("word/document.xml")
+                      assert all(value in xml for value in (b"Ada", b"two", b"2026-10-16", b"filled", "☒".encode()))
+              signed = work / ("signed.docx" if family == "rdocx" else "signed.pptx")
+              signature = run(["sign", signing_input, "--key", key, "--cert", cert, "-o", signed, "--json"])["signature"]
+              assert signature["cryptographically_valid"] and signature["coverage_complete"]
+              assert "F-172 Test Signer" in signature["signer"]["subject"] and not signature["issues"]
+              checked = run(["verify-signatures", signed, "--json"])
+              assert checked["status"] == "valid" and len(checked["signatures"]) == 1
+              partial = work / "partial.zip"; partial.write_bytes(rewritten(signed.read_bytes(), extra=True))
+              checked = run(["verify-signatures", partial, "--json"], 1)
+              assert checked["status"] == "partial" and checked["signatures"][0]["cryptographically_valid"]
+              assert not checked["signatures"][0]["coverage_complete"]
+              def tamper(name, value):
+                  if family == "rdocx" and name == "word/document.xml":
+                      assert b"Ada" in value; return value.replace(b"Ada", b"Changed", 1)
+                  if family == "rpptx" and name == "docProps/core.xml":
+                      assert b"</cp:coreProperties>" in value
+                      return value.replace(b"</cp:coreProperties>", b"<dc:description>Changed</dc:description></cp:coreProperties>")
+                  return value
+              changed = work / "changed.zip"; changed.write_bytes(rewritten(signed.read_bytes(), tamper))
+              checked = run(["verify-signatures", changed, "--json"], 1)
+              assert checked["status"] == "invalid"
+              assert any(issue["kind"] == "changed_reference" for item in checked["signatures"] for issue in item["issues"])
+              if family == "rdocx":
+                  values.write_text(json.dumps({"plain":"After signing"}))
+                  after = work / "after.docx"
+                  run(["fill", signed, "--values", values, "-o", after, "--json"])
+                  checked = run(["verify-signatures", after, "--json"], 1)
+                  assert checked["status"] == "invalid"
+                  assert any(issue["kind"] == "changed_reference" and issue["details"]["uri"].startswith("/word/document.xml?") for item in checked["signatures"] for issue in item["issues"])
+              for label, path in ((b"PRIVATE KEY", key), (b"CERTIFICATE", cert)):
+                  encoded = base64.b64encode(path.read_bytes())
+                  path.write_bytes(b" \r\n-----BEGIN " + label + b"-----\r\n" + b"\r\n".join(encoded[i:i+64] for i in range(0, len(encoded), 64)) + b"\r\n-----END " + label + b"-----\r\n")
+              pem_signed = work / "pem.zip"
+              assert run(["sign", original, "--key", key, "--cert", cert, "-o", pem_signed, "--json"])["signature"]["coverage_complete"]
+              before = signed.read_bytes()
+              run(["sign", original, "--key", key, "--cert", cert, "-o", signed], 1, False)
+              assert signed.read_bytes() == before
+              key.write_bytes(b"x" * (1024 * 1024 + 1))
+              refused = work / "refused.zip"
+              run(["sign", original, "--key", key, "--cert", cert, "-o", refused], 1, False)
+              assert not refused.exists()
+              assert hashlib.sha256(original.read_bytes()).hexdigest() == original_hash
+              print(json.dumps({"family":family, "source_sha256":original_hash, "signed_sha256":hashlib.sha256(before).hexdigest(), "valid":True, "partial_refused":True, "tamper_refused":True, "pem":True, "material_bound_atomic":True}))
+          PY
       - name: Package selected CLI
         shell: bash
         run: |

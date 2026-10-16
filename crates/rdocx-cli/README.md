@@ -18,14 +18,35 @@ and produces fixed or flow output without an Office host.
 - Tracked revision inspection, filtered resolution, table-of-contents rebuilds,
   and document comparison at run, word, or character granularity with ignore
   options.
+- Atomic form filling accepts repeatable `--tag` assignments or strict flat
+  `--values` JSON over unique SDT tags/aliases and legacy names.
 - Package-preserving edits cover the final S74 paragraph, run, typography,
   table, section, settings, field, form, equation, and drawing surface.
+
+
+## Package signatures
+
+```sh
+rdocx sign input.docx --key private-key.pem --cert certificate.pem -o signed.docx --json
+rdocx verify-signatures signed.docx --json
+```
+
+The key must be PKCS#8 RSA and the certificate X.509, as DER or one unencrypted
+PEM block each, at most1MiB per input. Signing refuses existing destinations,
+including aliases, and publishes only a valid complete candidate. Verification
+returns schema1 JSON with status and signatures. Status is valid, invalid,
+partial or unsigned. Exit0 requires at least one valid complete signature and
+no invalid or incomplete report. Runtime and integrity failures exit1, and
+usage errors exit2. Certificate-chain trust is not evaluated. The native signer
+refuses already signed inputs and packages with external relationships.
+Both commands return exit1 on report output errors, including a closed stdout.
+Signing publishes before reporting, so this error can leave a valid new output.
 
 ## Measured footprint and speed
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 98,929 compressed bytes, 457,596 member bytes, 8 members | 0.16.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-15 |
+| Crates.io archive: rdocx-cli | 108,558 compressed bytes, 501,418 member bytes, 8 members | 0.16.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 
 ## Use it when
 

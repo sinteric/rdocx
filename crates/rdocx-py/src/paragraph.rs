@@ -343,7 +343,9 @@ fn find_style<'s, 'a>(
 }
 
 fn no_style_error(value: &str) -> PyErr {
-    PyKeyError::new_err(format!("no style with ID or name '{value}'"))
+    PyKeyError::new_err(format!(
+        "no style with ID or name '{value}'; use document.add_style/set_style; lists use document.add_numbering_definition and add_numbering_instance",
+    ))
 }
 
 /// Resolve a style of `style_type`, given by ID or name, to the ID the
@@ -691,6 +693,39 @@ impl PyParagraph {
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
+    #[getter]
+    fn _element(&self, py: Python<'_>) -> PyResult<()> {
+        self.validate(py)?;
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "use document.remove_content(document.find_content_index(paragraph)); read paragraph.xml and write paragraph.replace_xml(xml) instead of lxml",
+        ))
+    }
+
+    #[pyo3(signature = (text = "", style = None))]
+    fn insert_paragraph_before(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        style: Option<&str>,
+    ) -> PyResult<Py<PyParagraph>> {
+        let ParagraphLocation::Body(index) = self.validate(py)? else {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "insert_paragraph_before supports direct body owners; use document.insert_paragraph(index, text) for body content or the related story authoring API",
+            ));
+        };
+        let content = self
+            .document
+            .borrow(py)
+            .inner
+            .content_index_of_paragraph(index)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyNotImplementedError::new_err(
+                    "use document.insert_paragraph with a direct body content index",
+                )
+            })?;
+        PyDocument::insert_paragraph(self.document.clone_ref(py), py, content, text, style)
+    }
+
     fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
         self.validate(py)?;
         let mut document = self.document.borrow_mut(py);
@@ -933,14 +968,26 @@ impl PyParagraph {
         self.append_run(py, text, None, None)
     }
 
-    #[pyo3(signature = (text, url, *, tooltip=None))]
+    #[pyo3(signature = (text, url=None, *, tooltip=None, anchor=None))]
     fn add_hyperlink(
         &self,
         py: Python<'_>,
         text: &str,
-        url: &str,
+        url: Option<&str>,
         tooltip: Option<&str>,
+        anchor: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyRun>> {
+        self.validate(py)?;
+        if anchor.is_some() {
+            return Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                "use document.add_bookmark(...) then paragraph.add_internal_hyperlink(text, bookmark); anchor=Paragraph does not infer bookmarks",
+            ));
+        }
+        let url = url.ok_or_else(|| {
+            PyTypeError::new_err(
+                "use add_hyperlink(text, url) or add_internal_hyperlink(text, bookmark)",
+            )
+        })?;
         if let Some(bookmark) = url.strip_prefix('#') {
             self.append_internal_run(py, text, bookmark, tooltip)
         } else {

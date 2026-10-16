@@ -16,11 +16,30 @@ replaces text, and produces deterministic fixed output.
 - Scriptable output covers slide order, notes, comments, recursive group
   content, relationship-backed media, and deterministic rendering diagnostics.
 
+
+## Package signatures
+
+```sh
+rpptx sign input.pptx --key private-key.pem --cert certificate.pem -o signed.pptx --json
+rpptx verify-signatures signed.pptx --json
+```
+
+The key must be PKCS#8 RSA and the certificate X.509, as DER or one unencrypted
+PEM block each, at most1MiB per input. Signing refuses existing destinations,
+including aliases, and publishes only a valid complete candidate. Verification
+returns schema1 JSON with status and signatures. Status is valid, invalid,
+partial or unsigned. Exit0 requires at least one valid complete signature and
+no invalid or incomplete report. Runtime and integrity failures exit1, and
+usage errors exit2. Certificate-chain trust is not evaluated. The native signer
+refuses already signed inputs and packages with external relationships.
+Both commands return exit1 on report output errors, including a closed stdout.
+Signing publishes before reporting, so this error can leave a valid new output.
+
 ## Measured footprint and speed
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 62,359 compressed bytes, 287,346 member bytes, 8 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-14 |
+| Crates.io archive: rpptx-cli | 66,411 compressed bytes, 305,091 member bytes, 8 members | 0.14.1 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
 
 ## Use it when
 

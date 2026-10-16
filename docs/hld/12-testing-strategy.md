@@ -195,7 +195,39 @@ inserts their content and reopens the package. Lifecycle checks cover raw
 body wrapper attributes, adversarial producer prefix scopes, related-story
 control variants, retained self-closing empty containers, duplicate names,
 stale snapshots and atomic rejection of unsafe or incomplete graphs.
-The Python, WASM, and CLI surfaces and the 49-entry hash set remain unchanged.
+Installed Python and the actual release CLI qualify the same source-built
+five-kind form template. Expanded-name observers inspect checkbox state,
+glyph/font, SDT display and bound custom XML, retained producer date/drop-down
+metadata, legacy typed default and cached text. Semantic negatives retain a
+matching display while losing checkbox state or disagreeing with the legacy
+cached result, and must fail the same observer. Frozen snapshots, exact no-op
+bytes, held Section/Paragraph/Table/Cell/Story owners, current related-part
+identity, typed values, ambiguity and late failure are independent controls.
+
+Strict CLI values controls cover decoded duplicate keys, exact whitespace,
+UTF-8/file/entry bounds, scalar kinds, repeated physical targets, cross-kind
+collisions and unchanged old all-match tags. An SDT replacement removing an
+earlier legacy field must refuse the mixed operation before ordinal-based
+legacy mutation. Nested SDTs retain actual native semantics when every selected
+target remains valid. Source and pre-existing output remain unchanged on
+refusal. Ordinary release wheel/CLI hashes and sizes are compared with genuine
+matched prefeature artifacts. Strict installed typing/stubtest and genuine
+verified affected archives are required. WASM form surfaces and the49-entry
+hash set remain unchanged. Public fill/sign interaction is qualified separately
+on the integrated signing surface.
+
+Form publication preserves an owner only when independent exact physical-route
+maps identify one old and one candidate owner, the existing matcher agrees,
+and native owning XML is byte-identical. Paragraph/table sources share the
+same batched native inventory as their addresses. Section source uses the
+existing checked section XML provider. Every ancestor must also be certified.
+Cells bind their exact table, row, cell and physical story, so a changed table
+retires all its cells and descendants. Changed or ambiguous paragraphs retire.
+Equal text or equal inventory counts alone grant no authority. Run/Hyperlink
+and existing global run/snapshot epochs retire on actual mutation. Exact
+no-ops and refused operations keep all current tokens. Other conservative
+publishers retain their existing behavior, and retired pre-existing tokens
+cannot be revived by a same-route or equal-text form result.
 
 The glossary, embedded-content, and package-story malformed XML matrices run
 through the single strict XML 1.0 lexical validator in `oxml-core`. A shared
@@ -962,6 +994,27 @@ editing. Word for Mac does not expose a Windows certificate-trust verdict. The
 oracle does not establish certificate trust or replace the Rust cryptographic
 and coverage assertions.
 
+The signing tool regression gate covers both ordinary installed Python families
+and both release CLI artifacts. Source-built inputs exercise DER, LF/CRLF PEM,
+strict envelope and size refusals, unsaved Word edits, precise changed-part
+issues, valid but incomplete coverage, unsigned input and multiple reports.
+Both shared report converters test every issue variant and its exact payload.
+Held Word paragraph, run, internal hyperlink and story authority and held
+presentation slide, shape and text authority survive supported package-only
+signing. Genuine late graph refusal retains bytes and authority. Integrated
+five-kind form fill then sign is fully covered, while later fill reports the
+changed Word part. Reports are owned values and cannot mutate package state.
+
+The wheel workflow retains exact installed test membership in native and Alpine
+musl consumers. CLI acceptance runs the actual selected executable on every
+release target, including its no-default-features musl build. It creates fixtures
+from the existing source recipes without importing either Python product wheel.
+These target results must bind the reviewed source before feature acceptance.
+Standalone default and no-default CLI-support graphs are checked independently
+from workspace feature unification. Explicit support signing and both CLI
+consumers activate the optional report helper. Native defaults and WASM stay
+unchanged. No certificate-chain trust or GUI signature-trust result is inferred.
+
 The scalar template unit gate splits one tag across five differently formatted
 runs and proves that the first matched run supplies replacement formatting
 while unmatched prefix and suffix formatting remain intact. The structural
@@ -1586,6 +1639,49 @@ alone. Constructed font tables distinguish root-relative first/second script
 sizes, deep saturation, degree depth and optical alternates. The original
 Caladea-request fallback mismatch and implicit-spacing sources remain separate
 diagnostics, preserving all historical sources, identities and outcomes.
+
+The finite73 follow-up uses independent saved-OMML expectations for every source
+row and public native plus freshly installed Python save/reopen. Physical-font script regressions independently read positive MATH corrections
+for x, f and alpha and test superscript, subscript and combined attachment.
+Completed MathML trees enforce text limits after synthesized boundary spaces,
+with exact at-limit and one-byte-over-limit atomic-publication controls.
+semantics/style-wrapper probes retain actual fraction operands despite preceding
+annotations, while unknown styles remain diagnosed. Actual package
+mutations swap fraction operands, change phi variants and binomial type, attach
+scripts to a wrong base, italicize a function, strip text space and collapse
+explicit mathematical spaces. The unchanged reporter script retains its literal
+unconditional FAIL label. A separately identified one-line summary correction
+reports the actual loss count, while structural observers decide acceptance.
+
+Fresh Pandoc3.11 forward DOCX/MathML and annotation-free reverse retain all73
+inputs in inline and display contexts. Only72 emit math because degree produces
+an actual unsupported-command warning. Independent Unicode and native controls
+qualify degree. Explicit assertions classify the writer's tfrac Linear fraction,
+forced-style normalization, native text/function roles, no-bar binomial,
+spacing approximations and structural reverse losses.
+
+Seven separately named source-built controls pin actual Word16.114
+build16.114.26101123, normal save/reopen, authentic caller fonts and Poppler26.09.
+Absolute PDF bounds, derived width and150DPI actual ink keep1.0point limits with
+0.99 block-luminance SSIM. Actual rendered1.01point group translations remain
+negative controls. The older13-family and six-case producer pins stay unchanged.
+Captured six-case verification authenticates the original producer receipt,
+PDFs, source/font/tool hashes and current-source product output. It explicitly
+reports that installed Word differs from the historical producer. The strict
+installed-old-application check still refuses that mismatch, and historical
+artifact replay is never reported as a fresh old-Word export.
+
+The supplementary script-boundary diagnostic preserves actual predecessor and
+corrected PDFs, positive-font single-IC RED/GREEN and the still-failing1.142188pt
+derived-width difference. Physical MATH MathKern is outside this increment.
+The original13-family raw native PDF and producer receipt are unavailable.
+Its recorded-vector runtime checks are separate from raw-PDF/raster replay.
+Fresh current Word captures retain the exact Caladea-request source and a
+separate explicit Cambria variant. Word substitutes Cambria for Caladea. The
+original-source product is byte-identical between baseline and current wheels
+on the same caller-font route. Matched-Cambria retains the baseline's8.833383pt
+lower-bound difference. No full13-family matched-font fidelity is inferred.
+
 
 The general native field construction gate reopens explicit simple and complex
 fields with identical instruction semantics and ordered cached content. Tests
@@ -4419,6 +4515,67 @@ the measurements. A separate fresh debug-guarded opt-level2 wheel executes the
 complete Word Python suite with its existing runtime and font prerequisites.
 Release timing does not replace guarded correctness acceptance.
 
+## Notes owners and unit refusal qualification
+
+Notes controls distinguish absent parts, empty bodies, missing placeholders
+and missing txBody. Direct, duplicate, grouped and alternate-body variants
+qualify exact frame admission, namespace aliases, opaque retention, physical
+slide moves and retirement. Pinned python-pptx1.0.2 comparisons inspect
+expanded body names, scalar text and actual notes/master relationships.
+Existing aggregate notes and first-paragraph formatting limits remain explicit.
+
+The original five-assignment script runs unchanged with authenticated input
+identity. Its self-catching exit is insufficient. Each label must report a
+unit-qualified refusal. Old installed artifacts supply actual accepted-zero
+RED output and independent reopened Word sz and DrawingML spacing values.
+Boundary controls include6350/6349 Word EMU,126/127 PPT EMU, signed character
+spacing, zero and tiny-positive line spacing, bool confusion, None clearing,
+valid zero before/after and subsequent valid assignments through warmed owners.
+Complete package equality and held unrelated owners qualify atomic refusal.
+Valid Word/PPT length controls compare expanded storage against pinned oracles.
+
+The independent PR333 input retains 122 files: 76 Word scripts, 44 Presentation
+scripts and both original runners. Original reports, exits and historical stale merge
+markers remain separate from requirement classification and the100-case metric
+below. Notes/import/refusal qualification does not claim full Issue379 raw
+runner success while other feature surfaces remain unresolved. Fresh actual
+paired wheels, installed RECORD/native/stub identities, strict typing, complete
+Presentation acceptance and focused Word controls qualify changed consumers.
+
+
+## First-draft Python name qualification
+
+The separate PR333 corpus pins commit193819ca0a1dcf3415017c0be1186fe8df6bcb86:
+76 Word scripts,44 Presentation scripts and both original runners. Execution
+authenticates all122 bodies, checks, membership and source identities. Original
+runner reports and exits remain immutable. Their needs marks do not qualify
+an interface, and the passing Cell.merge specimen retains its stale divergence
+marker and raw diagnostic. This corpus is separate from the100-case metric
+below.
+
+An independent complete attempt classifies each of the32 issue-listed Word
+specimens as correct saved-file success, explicit supported-alternative
+refusal, or unresolved. The three original divergence messages require exact
+first-line `remove_content`, `set_style` and `slides.remove` tokens. Check
+failures never receive refusal credit, generic errors remain unresolved, and
+results from separate candidates are not stitched together. Original expected
+passes that receive an approved alternative remain visible raw failures.
+
+Installed regressions compare expanded Word names and normalized structural
+values against python-docx1.2.0, including heading styles, run formatting,
+highlight and page breaks. Empty lexical text nodes do not change logical
+text. Stream save/reopen, malformed binary results, short writes and I/O
+failures retain source and held-owner checks. Signed five-kind forms retain filled
+values and valid complete reports through stream save/reopen. F238-created
+paragraph, table, cell and section owners follow current form and Signing
+publication, including form-retired runs and Signing/no-op survivors. Tuple snapshot protocols and
+both first-page compatibility names have explicit controls. Direct imports from
+`rdocx.enum.section` require all pinned enum values and alias identities, strict
+positive consumers and rejecting wrong-value or missing-member consumers. Fresh paired
+wheel identities, strict typing and stubtest qualify actual installed members.
+The complete Word suite and focused Presentation pointer test form the feature
+gate, with both full family suites repeated over the integrated sprint union.
+
 ## Integrated Python compatibility qualification
 
 The immutable corpus contains100 scripts,49 Word and51 PowerPoint, with
@@ -4469,3 +4626,9 @@ measurement, empty or hidden content and first-use dedup exclude historical
 facts. Unknown semantic meaning and actual glyph absence remain separate
 claims. Test-only family-name rewriting authenticates complete font checksums
 and unchanged glyph tables without adding a font asset.
+
+## ZIP dependency compatibility controls
+
+ZIP migration controls retain actual old8 and new9 artifacts, with matched raw local/central name bytes and flags, CRC-valid payloads and independent header inspection. They cover UTF8 and CP437 identity, normalized alias rejection, traversal, limits, malformed names, ODT raw UTF8 refusal, ODP first stored mimetype, Unicode-path extras and opaque/resource retention. Existing signature/encryption and ODT/ODP/EPUB controls remain mandatory.
+
+Raw container header changes are attributed separately from ordered member names, inflated XML/media, compressed payloads, timestamps and permissions. The49 semantic/render hashes and deterministic pixels remain unchanged gates. The native upstream error identity gets an actual downstream consumer. Fresh affected ZIP9 native, installed-wheel and CLI qualifications supersede predecessor runtime claims, while original artifacts remain intact.

@@ -39,12 +39,12 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-rdocx.workspace = true
+rdocx = { workspace = true, features = ["digital-signatures"] }
 rdocx-oxml = { workspace = true }
 oxml-layout = { workspace = true }
 oxml-pdf = { workspace = true }
 oxml-opc = { workspace = true }
-oxml-cli-support = { workspace = true }
+oxml-cli-support = { workspace = true, features = ["digital-signatures"] }
 quick-xml = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

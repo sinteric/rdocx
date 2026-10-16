@@ -902,6 +902,43 @@ impl PyPresentation {
             .and_then(Self::from_presentation_owned)
     }
 
+    /// Sign current content with DER or one unencrypted PKCS#8/X.509 PEM block.
+    fn sign(
+        &mut self,
+        private_key: &[u8],
+        certificate: &[u8],
+        py: Python<'_>,
+    ) -> PyResult<Py<pyo3::types::PyDict>> {
+        let mut candidate = self.inner.clone();
+        let report = py
+            .detach(|| candidate.sign(private_key, certificate))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let result = oxml_py_support::signature_report_to_py(py, &report)?;
+        let survivors = self.unchanged_owners()?;
+        let prepared = self.prepare_owners(
+            &candidate,
+            "Presentation.sign",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        self.publish_owners(candidate, prepared)?;
+        Ok(result)
+    }
+
+    /// Verify current content. Identity does not assert certificate-chain trust.
+    fn verify_signatures(&self, py: Python<'_>) -> PyResult<Py<PyTuple>> {
+        let reports = py
+            .detach(|| self.inner.verify_signatures())
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let reports = reports
+            .iter()
+            .map(|report| oxml_py_support::signature_report_to_py(py, report))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyTuple::new(py, reports)?.unbind())
+    }
+
     fn save(&self, path: PathBuf, py: Python<'_>) -> PyResult<()> {
         self.inner
             .save(path)
