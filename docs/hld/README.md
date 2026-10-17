@@ -34,6 +34,14 @@ set describes the product, not the way it is built.
 | 14 | [Development backlog](14-development-backlog.md) | Every story, sized, with a test gate |
 | 15 | [Build and toolchain](15-build-and-toolchain.md) | Toolchain pinning, deterministic rendering, CI, packaging |
 
+## Proposals for discussion
+
+[Shared Word formatting for styles and content](issue-264-shared-word-formatting.md)
+is a draft for issue #264 and the StrictMark integration. It proposes reusable
+formatting for direct content and named Word styles. Its examples include
+unimplemented APIs and open questions for the reporter. It does not change the
+numbered specifications or commit a release scope.
+
 ## Living status
 
 This set is written once and changed rarely. It describes intent. The

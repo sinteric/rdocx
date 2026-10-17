@@ -17,7 +17,10 @@ Keeping the three from diverging is the whole reason the design plan has an
 `/design` writes `## HLD impact` as a list of `docs/hld/` files. That list is
 consumed twice:
 
-1. `/complete-feature` step 3 updates **exactly those files**, no others.
+1. `/implement-feature` updates **exactly those files** before source freeze,
+   microscope and the final full gate. `/complete-feature` step3 confirms them.
+   HLD intent may describe the implemented mechanism while its native/oracle
+   qualification remains explicitly pending in the delivery record.
 2. `/microscope` and `/sprint-review` look for the inverse failure, a spec
    section the implementation contradicted that the plan never listed.
 
@@ -89,6 +92,7 @@ as though it shipped.
 
 - `docs/hld/README.md`, the precedence rule and the set index.
 - `.claude/commands/design.md`, which writes the impact list.
-- `.claude/commands/complete-feature.md`, step 3, which executes it.
+- `.claude/commands/complete-feature.md`, step3, which confirms the reviewed
+  update without changing source intent after final verification.
 - `.claude/commands/realign-docs.md`, the bulk repair when drift has already
   accumulated.

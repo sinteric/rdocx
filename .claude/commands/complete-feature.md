@@ -15,25 +15,28 @@ mode" below.
 
 1. **Check the preconditions.**
    - The F-ID is `in-progress`.
-   - `.claude/plans/F-XXX-design.md` exists and every checklist item is ticked.
+   - `.claude/plans/F-XXX-design.md` exists and every local implementation item
+     is ticked. Final sprint items may remain explicitly pending as below.
    - The latest `.claude/reviews/F-XXX-*` pass reports **zero defects and zero
      smells**.
-   - `/verify --scoped F-XXX` passes, including every risk rider declared by
-     the approved design plan.
+   - Actual `/verify --scoped F-XXX` local evidence and clean microscope apply
+     to the final feature source. Consume these observations, do not rerun them.
+     Named final sprint checks remain due at the integrated gate.
 
-   If any fails, say which and stop.
+   If any fails, say which and stop. Before normal completion steps4 onward,
+   require actual final checks to have passed, except the narrow approved local
+   provider-prefix checkpoint below. Otherwise prepare only the explicit final
+   sprint acceptance checkpoint, without delivery completion.
 
-2. **Confirm the test gate exists and is real.** Find the test named in the
-   design plan. Run it. Then confirm it would fail if the implementation were
-   reverted. A gate that passes against unmodified code is not a gate.
 
-3. **Update the HLD.** Read the plan's `## HLD impact` and update **exactly
-   those files**, no others. Replace stale prose with current reality. These
-   documents describe what is true now, not a history of changes.
+2. **Confirm the test gate evidence is real.** Read the retained named local
+   old-source RED and fixed-source GREEN observations. Run only a missing or
+   invalidated check. Do not repeat a passing test just because this command
+   was invoked. A gate that passes against unmodified code is not a gate.
 
-   If the implementation contradicted a spec section that the plan did not
-   list, stop. Either the spec is wrong and the plan should have said so, or the
-   implementation drifted.
+3. **Confirm the HLD is current.** Its exact approved impact files must already
+   be included in implementation and review. Do not edit source intent after
+   final verification. An unlisted contradiction requires a plan revision.
 
 4. **Append to `docs/sprints/AS_BUILT.md`** using the template in that file.
    The `**Hash harness**` field is mandatory for M1 through M6, recording either
@@ -72,7 +75,9 @@ owns its feature. It does not own the sprint's totals, and two workers appending
 to `AS_BUILT.md` in parallel is a conflict in the one file that must not have
 one.
 
-Do steps 1 through 3 and step 7 normally. Then instead of steps 4 to 6 and 9:
+Do steps 1 through 3. Set the plan completed only after actual final acceptance.
+When final checks remain, use the checkpoint below and keep the plan approved.
+Instead of steps 4 to 6 and 9:
 
 1. **Write `.claude/handoffs/F-XXX-ready.md`**, exactly these fields:
 
@@ -118,13 +123,47 @@ Report the branch, the head sha, and the exact integration command:
 /integrate-feature F-XXX work/<fid-lower>-<agent>
 ```
 
+### Final sprint acceptance preparation
+
+When implementation, scoped local regressions and independent microscope pass,
+prepare integration without pretending final oracles ran. Keep the plan
+approved, final checklist items unticked and the feature in-progress. Use:
+
+```
+**Checkpoint**: sprint-final-acceptance
+**Verify**: /verify --scoped F-XXX, local checks pass, final sprint checks pending
+**Test gate**: <named actual local regression checks>, pass
+**Final checks**: <named cases/commands from the approved plan>, pending
+**Hash harness**: deferred to final sprint gate, expected unchanged | <declared delta>
+```
+
+Preserve this debt in the existing plan, progress and run state before consuming
+its handoff. Integrate as reviewed, not completed. Final integrated acceptance
+must actually pass before delivery ledgers, completed status or successful
+oracle claims. Do not combine this marker with the external CI checkpoint.
+
+### Approved local provider-prefix completion
+
+Only an explicitly approved dependency-prefix checkpoint may record provider
+implementation completion before final qualification. Require its named genuine
+LOCAL provider gate to have actually passed, applicable scoped evidence and a
+clean independent microscope, and the integrated source commit to be an ancestor
+of the consumer's Base. Mark the provider completed in the existing sprint run
+state and done in BACKLOG/CURRENT_SPRINT to satisfy the formal dependency edge.
+Keep its plan approved and preserve every named final rider in the existing
+plan/progress record. Do not append AS_BUILT or SPRINT_TRACKER, complete its
+plan or claim final oracle acceptance here. The actual final union supplies
+those records exactly once for every integrated provider, including prefixes.
+A provider whose required dependency gate is itself an unperformed oracle
+cannot use this exception. Reviewed status alone never supplies completion.
+
 ### Release preparation
 
 A release F-ID whose gate requires real publication has one narrow exception.
 Its worker may prepare the reviewed release machinery before the irreversible
 approval and publication checklist items are complete. All implementation
-items, workflow tests, `/verify`, the hash harness and `/microscope` must still
-pass. Leave the plan `approved`, record the handoff test gate as
+items, focused workflow regressions, scoped local evidence and `/microscope`
+must pass. Hash and oracle obligations remain in the final sprint gate. Leave the plan `approved`, record the handoff test gate as
 `deferred to /release vX.Y.Z`, and integrate it in batch as `reviewed` rather
 than `completed`.
 
@@ -139,8 +178,8 @@ test gate or to any non-release F-ID.
 An approved feature whose new workflow must be available remotely to execute
 its actual external CI gate may prepare a source availability handoff. This
 is preparation for acceptance, not feature completion. All implementation,
-local checks, applicable local risk riders, hash checks and a zero-finding
-independent microscope must pass. Leave the plan approved, its external CI
+focused local checks and a zero-finding independent microscope must pass.
+Preserve final sprint riders separately without combining checkpoint markers. Leave the plan approved, its external CI
 checklist items unticked and the feature in-progress. Do not write delivery
 ledgers or unblock dependent work.
 

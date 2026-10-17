@@ -96,3 +96,12 @@ oracle, which is still a delta and still needs declaring.
 - `docs/hld/12-testing-strategy.md`, which defines the six categories.
 - `.claude/commands/differential.md`, which runs the corpus.
 - `.claude/skills/risk-routing.md`, the oracle-pinning row.
+
+## Execution timing
+
+Pin and prepare applicable oracle inputs during design. Run external oracle
+comparisons once in the final integrated sprint union, not per story or again
+through completion subcommands. Local implementation uses named in-repo
+RED/GREEN regression controls. Pending oracle qualification is recorded in the
+existing plan and handoff, never called passed before actual execution. Reuse
+only actual observations with unchanged source, tools, inputs and configuration.

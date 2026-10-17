@@ -20413,3 +20413,210 @@ partial until F-X250/F-X254 in S95.11. S95 does not establish M24's S99 stabilit
 boundary. Publication requires clean reviewed main and separate approval for
 each family under /release, shared/PowerPoint first. No release tag, registry
 publication, issue closure or main merge is authorized by this completion.
+
+### F-X250, Complete everyday Word chart equation list and note APIs
+
+**Sprint.** S95.11
+**Completed.** 2026-10-17
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Read-only Word chart snapshots expose chart_type, categories
+and ordered series data for qualified physical occurrences in direct main-body
+paragraphs. Shared targets remain separate occurrences. Related stories, tables,
+text boxes and opaque descendants are outside this collection. Seven existing
+data families retain their finite projection and refusal rules. Optional display
+equations use the existing math conversion providers. Numbered items support
+persisted restart/start overrides and existing-level marker font selection.
+Footnote and endnote references receive matching authored character styles, and
+current-id document removal remains valid after a snapshot retires. This does
+not complete F-283 navigation composition or widen field evaluation.
+
+**Non-obvious choices.** Effective concrete replacement levels govern list
+admission without changing public numbering_level semantics. Chart collection
+uses one direct-body inventory and does not acquire unrelated header/note graph
+failures. No new recursive story provider, mutable chart owner, font asset or
+renderer redesign was introduced. The new Chart stub export correction is
+included in the actual final ordinary Word wheel.
+
+**Deviations from the design plan.** None. Legacy assertion and stub-export repairs preserve the approved contract.
+
+**Spec sections touched.** HLD04 checked Word ownership and publication,
+HLD08 authored reference/display appearance, HLD09 chart snapshots, HLD10 Word
+bindings and HLD12 local and final integrated qualification.
+
+**Tests.** Unique local old-source RED/fixed-source GREEN regressions, independent
+microscope and integrated saved-package observers qualify chart occurrence/data,
+display boundaries, effective numbering and note authority. Five unchanged
+Word reporter bodies pass separately from their strict marker outcomes. Actual
+Word save/reopen XML and note measurements accompany pinned Word/LibreOffice
+open/save/reopen custody and independent bounded visible chart, inline/display,
+list1/2/1/2/5 and superscript observations. Unsupported LO numbering/metric helpers
+remain unsupported, not passed. The actual own-renderer once-only and cold/warm
+note tests pass with unchanged provider bytes. No exact cross-font lineage or
+whole-page pixel parity is claimed.
+
+The integrated evidence join retains actual producers H3
+2636dca5a7f9791c39b7a70c3bb8e68e151a99ac, H5
+d65f2c068695ae53de0af9b1ca9fd4e88c1d1403, continuation
+836f00916da82389d60fbbf98f1581c86eda8f83 and H7
+2992fdc91ab289d680f201105732084500937317. Native runtime observations join32
+binaries with6616 unique passes and73 ignored, with one repeated case removed,
+and11 complete workspace doctests. Actual ordinary installed Word955 and
+PowerPoint1007 pass with strict typing and stubtest. The Issue385 union is27
+distinct bodies, twelve accepted in S95 and fifteen in S95.11. Each epoch retains
+strict XPASS/raw exit1 separately from unchanged-body PASS/raw exit0. Hash49 and
+seven deterministic pixel buffers match. No-default fonts, both WASM graphs,
+documentation, README cases and deny have actual applicable passes. Policy qualification joins183 old passes and three affected GREEN checks,
+186 passes and two retained skips across188 tests, without inventing a new
+full-command exit0. Genuine package verification joins21 applicable H5 crates and current
+H7 rpptx-cli with all22 local patches and unchanged archive limits.
+
+Installed receipt SHA256
+cff97a3605b2b32601881e5727cbc926b392294f66c79e02062fa0b6747d7805,
+reporter15 SHA256
+6109789870f72fa7b7a4892b27ce8f7adf583fa3b8c97b717201f54f06306070,
+runtime/doc partial receipt SHA256
+99787cf314315b25f5e66d89812c15cc37423f133fd68b52b314b0a9b1e2dcda,
+build-tail partial receipt SHA256
+921e51101707792aba8d34bbc8792af35e36906986ad988319dcfc47c12cdca2,
+and current CLI recovered receipt SHA256
+b656c2c672dc5ee6f3d18d6a82d457373d86715b8c6421d69c0d467f58789ea9
+retain their actual scopes and earlier failures. The latter authenticates the
+actual verified archive and compiled source after the wrapper found a stale
+archive path, without another Cargo run. Final accepted full source is 05ba6cc8461a896fa751ca7dc1fe209a8fa70045,
+with recorded unchanged-component applicability. No command is claimed to have
+rerun merely because completion metadata moved HEAD.
+Final integrated qualification receipt SHA256
+6bd76990051cb4e095fdbd673692aca7dfbc1398c3b7b2905f1dda29571b09d1
+records passed:true at the accepted source by explicit applicability, user
+limitation disposition and clean independent review, without replaying commands.
+
+**Hash harness.** All49 hashes and seven deterministic pixel buffers unchanged.
+No baseline write or intentional paint delta.
+
+**Notes for future sessions.** User-directed lean workflow decision: canonical
+process commits6d86c477,88d26c70,81a9b4ab and caf7fd0a align commands and generated
+Claude/Codex adapters around named local RED/GREEN checks and one integrated
+final union. Consume real unaffected scoped observations with source, inputs,
+tools and configuration correspondence. A later failure stays failed until its
+affected check is actually repaired. Metadata-only adoption does not pretend to
+rerun a producer or permit duplicate complete suites through completion and
+release subcommands. The user guide is
+`/Users/atulsharma/Desktop/comms/lean-sprint-verification.md`, SHA256
+c4c01c656c22fd4131e4920f73b203908687569a9c7f95ccfa4fdb142dde8194.
+Canonical workflow/commands remain authoritative. Fresh registry, publisher and
+separate exact-SHA final release approval remain required. No publication or
+new version is claimed here. F-X219 remains unfinished in S96, which has not
+started. Sprint review, close and later boundary work retain their own authority.
+
+### F-X254, Refuse invalid PowerPoint values XML and empty edits
+
+**Sprint.** S95.11
+**Completed.** 2026-10-17
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Checked PowerPoint mutation refuses unsupported table and chart-frame flips,
+wrong output formats, out-of-range slide geometry and unknown table styles
+before publication. Finite imported XML child order/multiplicity and selected
+compatibility branches produce owner/part diagnostics. The CLI map route refuses
+a no-match edit when no explicit expectation supplies an alternative contract.
+Missing-family font removals refuse without pretend output, and existing-output diagnostics no longer recommend unavailable force options. Valid source remains readable and preserved. The legacy duplicate paragraph
+properties test now distinguishes validation refusal from nonmutating text reads.
+
+**Non-obvious choices.** Existing physical owners, opaque source and resource
+limits remain authoritative. Particle matching and nested Fallback handling have
+actual separate regressions, rather than a general schema engine. The explicit
+user-approved public Rust ValidationIssue::InvalidXmlChild enum arm is a source
+compatibility boundary for downstream exhaustive matches. No blanket Rust source
+compatibility claim is made.
+
+**Deviations from the design plan.** None. The explicit diagnostic enum addition was approved before implementation.
+
+**Spec sections touched.** HLD04 source ownership and package publication,
+HLD06 finite PresentationML/schema and compatibility rules, HLD10 native/Python/CLI
+refusals and diagnostics, and HLD12 regression/native qualification.
+
+**Tests.** Ten unchanged original PowerPoint reporter cases pass under runxfail
+with ten expected strict XPASS failures recorded separately. Complete installed
+PowerPoint1007, strict typing/stubtest and actual affected native/CLI tests pass
+within the common evidence join recorded under F-X250. Actual PowerPoint16.113.4
+build16.113.26100421 opened, saved, known closed and normally reopened the valid
+control without repair. Independent native-saved XML and actual visible table
+and chart observations remain separate from refusal/atomicity tests. The one
+renamed CLI regression has its genuine unique GREEN, and current CLI dry-run
+verification authenticates H7 source/archive bytes. The accepted source is
+05ba6cc8461a896fa751ca7dc1fe209a8fa70045, with earlier H3/H5/836/H7 producers and failed attempts retained.
+No additional suite or native run is claimed by this completion metadata.
+
+**Hash harness.** Shared final49 hashes and seven deterministic pixel buffers
+unchanged. No baseline change.
+
+**Notes for future sessions.** Preserve the finite validation frontier and
+source-owned diagnostics. The approved enum addition affects exhaustive native
+matches. Do not widen this story into recursive schema validation or reinterpret
+opaque XML based on a local-name match. No release, new version or S96 start is
+recorded by this completion.
+
+### F-X223, Qualify native Word embedded multi-face interoperability
+
+**Sprint.** S95.11
+**Completed.** 2026-10-17
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Bounded licensed-source native interoperability investigation
+and current contract documentation. Source-controlled preparation authenticates
+fresh uninstalled logical families, genuine four-face bodies, exact roles/keys,
+ODTTF/package ownership and independent actual PDF glyph/metric/paint evidence.
+The proper embedBold-only discriminator contains no embedRegular and is distinct
+from the historical bold-body-in-Regular control. Existing APIs, renderer,
+licensed source bodies, bundled fonts and source graph contracts remain intact.
+No demonstrated writer defect earned a speculative product fix.
+
+**Non-obvious choices.** All27 actual Word phases were captured from nine cases,
+before save, after save and after known close/normal disk reopen, without repair.
+Thirteen phases produced finite observer records and fourteen retained
+unsupported CS representation refusals. An observer record is not automatically
+a genuine-face pass. Proper Bold uniquely uses genuine prepared Bold in all
+three phases. Paired Italic uses Regular outlines with actual affine shear,
+not genuine Italic, in all three phases. Word normalization leaves that saved
+Italic font part empty. Missing-font and raw-storage controls demonstrate no
+prepared-face selection in their observed outputs. Disabled embedding and
+changed-face controls retain their actual outcomes and unsupported observations,
+without a predetermined failure prediction. Broader genuine paired/four-face
+Word interoperability remains unqualified.
+
+**Deviations from the design plan.** The final native matrix establishes the
+bounded documented consumer limitation rather than universal genuine multi-face
+consumption. The user explicitly accepted this disposition by replying
+"document word limitation". Completion closes this bounded investigation and
+documentation contract. It does not convert fourteen unsupported observations
+into passes, claim broad interoperability, change source families as a workaround
+or carry the completed F-X223 story to S96.
+
+**Spec sections touched.** HLD04 embedded package/normalization distinction,
+HLD08 genuine selection versus synthesis, HLD10 unchanged licensed API contract,
+HLD12 finite evidence and HLD14 bounded native outcome. The separate disposition
+microscope pass2 is clean, SHA256
+66c1d6db2a7154486ab1bd714776cd941f0f9a8d763f41f67a9fdfd19a1e6843.
+
+**Tests.** Actual capture custody, host absence/source-face availability,
+application/build, package graph and PDF observations bind H5 source and actual
+ordinary installed artifacts. Proper-Bold observer summary SHA256
+78fb0fa53a2b6b2bde991f2819fd509daeb200689b572afc488e9c39cf784b44
+and matrix triage SHA256
+2778c91d6a885f52613ec99522ecad4fdf5202513d06874b7d87eec7005a017c
+retain exact candidate, synthesis, normalization and unsupported outcomes.
+Existing local source-graph/refusal and deterministic selection observations
+remain applicable to unchanged providers. The common final runtime/installed/
+WASM/package/hash evidence is recorded under F-X250. Source correspondence to
+05ba6cc8461a896fa751ca7dc1fe209a8fa70045 retains actual producer epochs and does not claim fresh full native
+interoperability or a rerun caused by metadata.
+
+**Hash harness.** Shared final49 hashes and seven deterministic pixel buffers
+unchanged. No baseline or font-asset change.
+
+**Notes for future sessions.** Preserve the actual Word limitation and all
+negative/unsupported evidence. A future genuine multi-face solution needs new
+bounded evidence and its own approved scope, not a rewrite of these results.
+F-X219 alone remains unfinished and carried to S96. No S96 work, publication or
+version change is included in this completion.

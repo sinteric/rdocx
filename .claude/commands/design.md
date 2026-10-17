@@ -77,11 +77,15 @@ say so and justify it.
 
 ## Test plan
 
-| Category | Test | Asserts |
-|---|---|---|
-| unit | `name_of_test` | ... |
+| Timing | Category | Test | Asserts |
+|---|---|---|---|
+| local scoped | regression | `name_of_test` | Actual old-source RED and fixed-source GREEN |
+| final sprint | oracle or risk rider | `<exact command/cases>` | ... |
 
-The **test gate** from the backlog, named explicitly. Plus anything else.
+The **test gate** from the backlog, named explicitly. Distinguish local
+regressions from final sprint oracle/risk qualification. An oracle-only test
+gate stays pending until final acceptance, with a real local regression named
+for implementation readiness. No whole-suite or oracle execution per worker.
 
 ## HLD impact
 

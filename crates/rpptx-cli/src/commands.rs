@@ -605,7 +605,6 @@ pub fn replace(
 ) -> Result<()> {
     ensure_output_paths_available(&[output.to_path_buf()])?;
     ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
-    let single = pair.is_some();
     let pairs = match (pair, map) {
         (Some((placeholder, value)), None) => vec![ReplacementPair {
             placeholder,
@@ -628,12 +627,14 @@ pub fn replace(
             m.index, m.expected, m.placeholder, m.found
         )
     })?;
-    if single && counts[0] == 0 && pairs[0].expect.is_none() {
-        return Err(format!(
-            "no replacements found for \"{}\", nothing written",
-            pairs[0].placeholder
-        )
-        .into());
+    for (index, (pair, count)) in pairs.iter().zip(&counts).enumerate() {
+        if *count == 0 && pair.expect.is_none() {
+            return Err(format!(
+                "pair {index}: no replacements found for \"{}\", nothing written",
+                pair.placeholder
+            )
+            .into());
+        }
     }
     let total = counts
         .iter()
@@ -1947,8 +1948,8 @@ fn read_font_file(path: &Path) -> Result<Vec<u8>> {
     }
 }
 pub fn font_embed(file: &Path, options: &FontEmbedOptions<'_>) -> Result<()> {
-    ensure_output_paths_allowed(&[options.output.to_path_buf()], file, false)?;
-    ensure_output_paths_allowed(&[options.output.to_path_buf()], options.font, false)?;
+    ensure_output_paths_allowed(&[options.output.to_path_buf()], file, true)?;
+    ensure_output_paths_allowed(&[options.output.to_path_buf()], options.font, true)?;
     ensure_output_paths_available(&[options.output.to_path_buf()])?;
     if !options.license_authorized || options.license_identity.trim().is_empty() {
         return Err(
@@ -1977,7 +1978,7 @@ pub fn font_remove(
     output: &Path,
     as_json: bool,
 ) -> Result<()> {
-    ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+    ensure_output_paths_allowed(&[output.to_path_buf()], file, true)?;
     ensure_output_paths_available(&[output.to_path_buf()])?;
     let mut document = Presentation::open(file)?;
     let removed = if let Some(kind) = kind {
@@ -1987,6 +1988,11 @@ pub fn font_remove(
     } else {
         document.remove_font(name)?.is_some()
     };
+    if !removed {
+        return Err(
+            format!("font {name:?} with the selected kind was not found, nothing written").into(),
+        );
+    }
     let bytes = document.to_bytes_for_path(output)?;
     stage_and_publish(&[(output.to_path_buf(), bytes)], false)?;
     if as_json {
@@ -2026,7 +2032,7 @@ pub fn font_settings(
         );
     }
     if let Some(output) = output {
-        ensure_output_paths_allowed(&[output.to_path_buf()], file, false)?;
+        ensure_output_paths_allowed(&[output.to_path_buf()], file, true)?;
         ensure_output_paths_available(&[output.to_path_buf()])?;
     }
     let mut document = Presentation::open(file)?;

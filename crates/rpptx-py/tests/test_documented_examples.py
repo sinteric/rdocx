@@ -2008,7 +2008,7 @@ def test_slide_size_reads_and_writes_keep_the_other_dimension(tmp_path):
     assert (prs.slide_width, prs.slide_height) == (rpptx.Inches(10), 6_858_000)
     assert len(held) == 0
     before = prs.to_bytes()
-    with pytest.raises(rpptx.RpptxError):
+    with pytest.raises(ValueError, match=r"^slide_height must be between 1 and 56 inches$"):
         prs.slide_height = 0
     assert prs.to_bytes() == before
     path = tmp_path / "sized.pptx"
@@ -9558,6 +9558,8 @@ def test_fx211b_element_qualified_alias_and_default_roots_preserve_actual_source
     fully_modeled = kind in ("body", "paragraph", "run", "cell")
     xml = element.xml
     opaque = '<corpus:keep xmlns:corpus="urn:fx211b:opaque" value="corpus:QName">&#65;</corpus:keep>'
+    if kind in ("shape", "slide"):
+        opaque = f'<p:extLst><p:ext uri="urn:fx211b:opaque">{opaque}</p:ext></p:extLst>'
     if not fully_modeled:
         head, closing = xml.rsplit("</", 1)
         element.replace_xml(head + opaque + "</" + closing)
@@ -11402,3 +11404,334 @@ def test_fx258_color_saved_packages_agree_with_pinned_python_pptx():
     color = oracle.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font.color
     assert int(color.type) == int(font.color.type)
     assert int(color.theme_color) == int(font.color.theme_color) == 0
+
+# F-X254 local regressions. Complete installed/oracle suites belong to sprint final.
+@pytest.mark.parametrize("suffix", [".pdf", ".PDF"])
+def test_fx254_python_save_refusal_is_atomic(tmp_path, suffix):
+    from rpptx import Presentation
+
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    before = prs.to_bytes()
+    output = tmp_path / ("wrong" + suffix)
+    with pytest.raises(ValueError, match="to_pdf"):
+        prs.save(output)
+    assert not output.exists()
+    assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("axis", ["slide_width", "slide_height"])
+@pytest.mark.parametrize("value", [914399, 51206401])
+def test_fx254_python_dimension_refusal_is_atomic(axis, value):
+    from rpptx import Presentation
+
+    prs = Presentation()
+    before = prs.to_bytes()
+    with pytest.raises(ValueError, match="1.*56"):
+        setattr(prs, axis, value)
+    assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("axis", ["slide_width", "slide_height"])
+@pytest.mark.parametrize("value", [914400, 51206400])
+def test_fx254_python_dimension_endpoints_remain_valid(axis, value):
+    from rpptx import Presentation
+
+    prs = Presentation()
+    setattr(prs, axis, value)
+    assert getattr(prs, axis) == value
+
+
+@pytest.mark.parametrize("axis", ["flip_h", "flip_v"])
+@pytest.mark.parametrize("kind", ["table", "chart"])
+def test_fx254_frame_flip_axes_and_payloads(axis, kind):
+    from rpptx import CategoryChartData, Presentation, XL_CHART_TYPE
+    from rpptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    if kind == "table":
+        shape = slide.shapes.add_table(1, 1, 0, 0, Inches(2), Inches(1))
+    else:
+        data = CategoryChartData()
+        data.categories = ["A", "B"]
+        data.add_series("Values", [1, 2])
+        shape = slide.shapes.add_chart(
+            XL_CHART_TYPE.COLUMN_CLUSTERED, 0, 0, Inches(2), Inches(1), data
+        )
+    before = prs.to_bytes()
+    setattr(shape, axis, False)
+    assert prs.to_bytes() == before
+    with pytest.raises(ValueError, match="flip"):
+        setattr(shape, axis, True)
+    assert prs.to_bytes() == before
+    assert getattr(shape, axis) is False
+
+
+def test_fx254_style_availability_refuses_unknown_atomically():
+    from rpptx import Presentation, RpptxError
+    from rpptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_table(1, 1, 0, 0, Inches(2), Inches(1))
+    before = prs.to_bytes()
+    with pytest.raises((ValueError, RpptxError), match="style"):
+        shape.table.style_id = "{00000000-0000-0000-0000-000000000000}"
+    assert prs.to_bytes() == before
+    assert len(shape.table.rows) == 1
+
+@pytest.mark.parametrize("case", ["shape", "geometry", "paragraph", "slide"])
+def test_fx254_four_xml_frontiers_refuse_before_publish(case):
+    from rpptx import MSO_SHAPE, Presentation, RpptxError
+    from rpptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(2), Inches(1))
+    shape.text = "source"
+    owner = shape.text_frame.element if case == "paragraph" else slide.element if case == "slide" else shape.element
+    old, new = {
+        "shape": ("</p:sp>", "<a:p/></p:sp>"),
+        "geometry": ("<a:avLst/>", "<a:avLst/><a:bogus/>"),
+        "paragraph": ("<a:r>", "<a:bogus/><a:r>"),
+        "slide": ("<p:clrMapOvr>", "<p:bogus/><p:clrMapOvr>"),
+    }[case]
+    xml = owner.xml
+    assert old in xml
+    before = prs.to_bytes()
+    with pytest.raises((ValueError, RpptxError)):
+        owner.replace_xml(xml.replace(old, new, 1))
+    assert prs.to_bytes() == before
+    assert shape.text == "source"
+    assert owner.xml == xml
+
+
+@pytest.mark.parametrize("case", ["shape", "geometry", "paragraph", "slide"])
+def test_fx254_import_validation_diagnoses_four_frontiers(case):
+    from rpptx import MSO_SHAPE, Presentation
+    from rpptx.util import Inches
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(2), Inches(1))
+    shape.text = "source"
+    old, new = {
+        "shape": (b"</p:sp>", b"<a:p/></p:sp>"),
+        "geometry": (b"<a:avLst/>", b"<a:avLst/><a:bogus/>"),
+        "paragraph": (b"<a:r>", b"<a:bogus/><a:r>"),
+        "slide": (b"<p:clrMapOvr>", b"<p:bogus/><p:clrMapOvr>"),
+    }[case]
+    target = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(prs.to_bytes())) as source, zipfile.ZipFile(target, "w") as dest:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "ppt/slides/slide1.xml":
+                assert old in data
+                data = data.replace(old, new, 1)
+            dest.writestr(info, data)
+    imported = Presentation.from_bytes(target.getvalue())
+    before = imported.to_bytes()
+    issues = [issue for issue in imported.validate() if issue.kind == "invalid_xml_child"]
+    assert issues and all("/ppt/slides/slide1.xml" in issue.message for issue in issues)
+    assert imported.to_bytes() == before
+    imported.slides[0].shapes.add_textbox(0, 0, 1000000, 500000).text = "unrelated"
+    assert new in _package_parts(imported.to_bytes())["ppt/slides/slide1.xml"]
+    assert any(issue.kind == "invalid_xml_child" for issue in imported.validate())
+    owner = imported.slides[0].shapes[0].element
+    existing = owner.xml
+    current = imported.to_bytes()
+    with pytest.raises((ValueError, __import__("rpptx").RpptxError)):
+        owner.replace_xml(existing.replace("</p:sp>", "<a:bogus/></p:sp>", 1))
+    assert imported.to_bytes() == current
+    assert owner.xml == existing
+
+
+def test_fx254_imported_size_noop_and_other_axis_correction():
+    import rpptx
+
+    parts = _package_parts(rpptx.Presentation().to_bytes())
+    xml = parts["ppt/presentation.xml"]
+    xml, count = re.subn(rb'(<p:sldSz\b[^>]*\bcx=")[0-9]+', rb'\g<1>60000000', xml, count=1)
+    assert count == 1
+    parts["ppt/presentation.xml"] = xml
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    before = prs.to_bytes()
+    prs.slide_width = 60000000
+    assert prs.to_bytes() == before
+    prs.slide_height = 914400
+    assert prs.slide_width == 60000000 and prs.slide_height == 914400
+
+
+@pytest.mark.parametrize("style", ["{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}", "{073A0DAA-6AF3-43AB-8588-CEC1D06C72B9}", "{D7AC3CCA-C797-4891-BE02-D94E43425B78}"])
+def test_fx254_builtin_styles_and_clear(style):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    shape = prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_table(1, 1, 0, 0, 1000000, 500000)
+    shape.table.style_id = style.lower()
+    assert shape.table.style_id == style.lower()
+    before = prs.to_bytes()
+    shape.table.style_id = style.lower()
+    assert prs.to_bytes() == before
+    shape.table.style_id = None
+    assert shape.table.style_id is None
+
+
+@pytest.mark.parametrize("mode", ["valid", "duplicate", "foreign", "wrong-content-type"])
+def test_fx254_custom_style_uses_actual_unique_deck_definition(mode):
+    import xml.etree.ElementTree as ET
+    import rpptx
+
+    a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    rel = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ct = "http://schemas.openxmlformats.org/package/2006/content-types"
+    kind = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles"
+    style = "{12345678-1234-1234-1234-123456789ABC}"
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_table(1, 1, 0, 0, 1000000, 500000)
+    parts = _package_parts(prs.to_bytes())
+    relationships = ET.fromstring(parts["ppt/_rels/presentation.xml.rels"])
+    for row in list(relationships):
+        if row.get("Type") == kind:
+            relationships.remove(row)
+    ET.SubElement(relationships, "{" + rel + "}Relationship", {"Id": "rIdFx254Style", "Type": kind, "Target": "tableStyles.xml"})
+    parts["ppt/_rels/presentation.xml.rels"] = ET.tostring(relationships)
+    types = ET.fromstring(parts["[Content_Types].xml"])
+    for row in list(types):
+        if row.get("PartName") == "/ppt/tableStyles.xml":
+            types.remove(row)
+    ET.SubElement(types, "{" + ct + "}Override", {"PartName": "/ppt/tableStyles.xml", "ContentType": "application/xml" if mode == "wrong-content-type" else "application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"})
+    parts["[Content_Types].xml"] = ET.tostring(types)
+    row = f'<a:tblStyle styleId="{style}" styleName="Custom"><a:wholeTbl/></a:tblStyle>'
+    if mode == "duplicate":
+        row += row.replace(style, style.lower())
+    if mode == "foreign":
+        row = row.replace("<a:tblStyle ", '<x:tblStyle xmlns:x="urn:foreign" ').replace("</a:tblStyle>", "</x:tblStyle>")
+    parts["ppt/tableStyles.xml"] = f'<a:tblStyleLst xmlns:a="{a}" def="{style}">{row}</a:tblStyleLst>'.encode()
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    table = prs.slides[0].shapes[0].table
+    before = prs.to_bytes()
+    if mode == "valid":
+        table.style_id = style.lower()
+        assert table.style_id == style.lower()
+        assert rpptx.Presentation.from_bytes(prs.to_bytes()).slides[0].shapes[0].table.style_id == style.lower()
+    else:
+        with pytest.raises((ValueError, rpptx.RpptxError), match="style"):
+            table.style_id = style
+        assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("payload", ['<z:opaque xmlns:z="urn:foreign"/>', '<z:avLst xmlns:z="urn:foreign"/>'])
+def test_fx254_raw_foreign_geometry_cannot_disappear_in_projection(payload):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    shape = prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_shape(rpptx.MSO_SHAPE.RECTANGLE, 0, 0, 1000000, 500000)
+    owner = shape.element
+    before = prs.to_bytes()
+    xml = owner.xml
+    assert "<a:avLst/>" in xml
+    with pytest.raises((ValueError, rpptx.RpptxError)):
+        owner.replace_xml(xml.replace("<a:avLst/>", payload, 1))
+    assert prs.to_bytes() == before
+
+
+@pytest.mark.parametrize("scope", ["root", "group"])
+def test_fx254_valid_ignored_extension_uses_physical_ancestor(scope):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shapes = slide.shapes if scope == "root" else slide.shapes.add_group_shape().shapes
+    shapes.add_shape(rpptx.MSO_SHAPE.RECTANGLE, 0, 0, 1000000, 500000).text = "before"
+    parts = _package_parts(prs.to_bytes())
+    source = parts["ppt/slides/slide1.xml"]
+    insertion = b'<p:sld ' if scope == "root" else b'<p:grpSp>'
+    replacement = b'<p:sld xmlns:z="urn:fx254" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="z" ' if scope == "root" else b'<p:grpSp xmlns:z="urn:fx254" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="z">'
+    assert insertion in source
+    parts["ppt/slides/slide1.xml"] = source.replace(insertion, replacement, 1)
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    shape = prs.slides[0].shapes[0] if scope == "root" else prs.slides[0].shapes[0].shapes[0]
+    xml = shape.element.xml
+    shape.element.replace_xml(xml.replace("</p:sp>", '<z:opaque xmlns:z="urn:fx254"/></p:sp>', 1))
+    assert b'<z:opaque xmlns:z="urn:fx254"/>' in _package_parts(prs.to_bytes())["ppt/slides/slide1.xml"]
+    shape = prs.slides[0].shapes[0] if scope == "root" else prs.slides[0].shapes[0].shapes[0]
+    shape.text = "after"
+    assert b'<z:opaque xmlns:z="urn:fx254"/>' in _package_parts(prs.to_bytes())["ppt/slides/slide1.xml"]
+
+
+@pytest.mark.parametrize("case", ["blank", "additive", "rebound", "understood", "wrong-attribute", "once", "literal"])
+def test_fx254_mc_authority_is_uri_based_and_qualified(case):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6]).shapes.add_shape(rpptx.MSO_SHAPE.RECTANGLE, 0, 0, 1000000, 500000)
+    parts = _package_parts(prs.to_bytes())
+    uri = "urn:fx&#50;54" if case == "once" else "urn:fx&amp;#50;54" if case == "literal" else "urn:fx254"
+    grant = 'Ignorable="z"' if case == "wrong-attribute" else 'mc:Ignorable="a"' if case == "understood" else 'mc:Ignorable="z"'
+    authority = f'<p:sld xmlns:z="{uri}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" {grant} '
+    parts["ppt/slides/slide1.xml"] = parts["ppt/slides/slide1.xml"].replace(b"<p:sld ", authority.encode(), 1)
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    element = prs.slides[0].shapes[0].element
+    xml = element.xml
+    child = '<z:opaque xmlns:z="urn:other"/>' if case == "rebound" else '<a:bogus/>' if case == "understood" else '<z:opaque xmlns:z="urn:fx254"/>'
+    changed = xml.replace("</p:sp>", child + "</p:sp>", 1)
+    if case == "blank":
+        changed = changed.replace("<p:sp ", '<p:sp mc:Ignorable="" ', 1)
+    elif case == "additive":
+        changed = changed.replace("<p:sp ", '<p:sp xmlns:q="urn:additional" mc:Ignorable="q" ', 1)
+        changed = changed.replace("</p:sp>", '<q:opaque/></p:sp>', 1)
+    before = prs.to_bytes()
+    if case in ("blank", "additive", "once"):
+        element.replace_xml(changed)
+        saved = prs.to_bytes()
+        assert child.encode() in _package_parts(saved)["ppt/slides/slide1.xml"]
+        assert rpptx.Presentation.from_bytes(saved).to_bytes() == saved
+    else:
+        with pytest.raises((ValueError, rpptx.RpptxError)):
+            element.replace_xml(changed)
+        assert prs.to_bytes() == before
+        assert element.xml == xml
+
+
+@pytest.mark.parametrize("change", ["fresh-id", "swap-ids", "group-id", "same-owner-text"])
+def test_fx254_whole_part_exception_keeps_physical_shape_identity(change):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shapes = slide.shapes.add_group_shape().shapes if change == "group-id" else slide.shapes
+    first = shapes.add_shape(rpptx.MSO_SHAPE.RECTANGLE, 0, 0, 1000000, 500000)
+    first.text = "before"
+    second = shapes.add_shape(rpptx.MSO_SHAPE.RECTANGLE, 0, 0, 1000000, 500000)
+    first_id, second_id = first.shape_id, second.shape_id
+    group_id = slide.shapes[0].shape_id
+    parts = _package_parts(prs.to_bytes())
+    parts["ppt/slides/slide1.xml"] = parts["ppt/slides/slide1.xml"].replace(b"</p:sp>", b'<z:opaque xmlns:z="urn:old-exception"/></p:sp>', 1)
+    prs = rpptx.Presentation.from_bytes(_package_bytes(parts))
+    slide = prs.slides[0]
+    shapes = slide.shapes[0].shapes if change == "group-id" else slide.shapes
+    held = shapes[0]
+    element = slide.element
+    xml = element.xml
+    if change == "same-owner-text":
+        changed = xml.replace("before", "after", 1).replace("<p:cNvPr ", '<p:cNvPr xmlns:q="urn:unrelated" ', 1)
+    elif change == "group-id":
+        changed = xml.replace(f'id="{group_id}"', 'id="99"', 1)
+    elif change == "fresh-id":
+        changed = xml.replace(f'id="{first_id}"', 'id="99"', 1)
+    else:
+        changed = xml.replace(f'id="{first_id}"', 'id="99"', 1).replace(f'id="{second_id}"', f'id="{first_id}"', 1).replace('id="99"', f'id="{second_id}"', 1)
+    assert changed != xml
+    before = prs.to_bytes()
+    if change == "same-owner-text":
+        element.replace_xml(changed)
+        assert prs.slides[0].shapes[0].text == "after"
+        assert b'<z:opaque xmlns:z="urn:old-exception"/>' in _package_parts(prs.to_bytes())["ppt/slides/slide1.xml"]
+    else:
+        with pytest.raises((ValueError, rpptx.RpptxError)):
+            element.replace_xml(changed)
+        assert prs.to_bytes() == before
+        assert element.xml == xml
+        assert held.shape_id == first_id and held.text == "before"

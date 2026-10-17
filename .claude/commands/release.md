@@ -45,19 +45,29 @@ Refuse before any tag or push if one check fails:
    may differ. Refuse a material source, release-workflow, command, changelog,
    manifest, lockfile, or HLD difference. Do not run `/sprint-review` on
    `main`, because that command writes tracked review files.
-4. Run `/verify --full` read-only at this clean `main` SHA. Its hash harness
-   result must match the reviewed sprint result. Stop if verification changes
-   the tree or fails. The clean sprint review and exact tree comparison are the
-   review evidence for the main merge commit.
+4. Consume the closed sprint's authenticated full verification at producer H
+   and its validated completion/review metadata at R when this clean main
+   merge M has exactly R's Git tree and all relevant tools, oracle inputs,
+   configuration and retained artifacts remain unchanged. Use the existing
+   `closure_evidence_problems(load(sprint), reviewed_R)` check and step3's
+   actual main/review tree comparison. Current clean main, origin/main and
+   sprint tag identities remain required. Record H, R and M truthfully. Do
+   not claim the commands ran at M or repeat them merely because merging
+   changed the commit SHA. No new cache service or command bridge is needed.
+   A latest failed full attempt blocks reuse of an older green one. Missing
+   evidence, a material tree delta or changed inputs requires the missing or
+   invalidated gates. Both requested families reuse this common applicable
+   full evidence. Fresh registry, publisher and approval checks remain due.
 5. Run `python3 scripts/sprint_workflow.py release-notes <requested-tag>
    --check`, render the exact `CHANGELOG.md` body, and inspect the family-only
    claims, compatibility guidance, included issue and pull-request links, and
    authenticated contributor credit. Rebuild the selected contribution
    inventory from reviewed evidence.
-6. Run the locally patched `cargo publish --workspace --dry-run` command from
-   `/verify` step 10. Check its exact 22-package union and archives below
-   10 MiB. Confirm the selected family's crates.io versions and PyPI version
-   are absent. A duplicate or partial prior publication is a failed release.
+6. Consume the actual locally patched publication dry run included in step4's
+   applicable full evidence, with its retained verified archives and exact
+   22-package union below10MiB. Do not execute it a second time. Confirm the
+   selected family's crates.io versions and PyPI version are freshly absent.
+   A duplicate or partial prior publication is a failed release.
 7. Inspect `.github/workflows/wheels.yml`. Its tag path must select exactly
    one Rust allowlist, one CLI binary, and one Python distribution, validate
    six CLI archives and seven Python artifacts, verify their provenance,

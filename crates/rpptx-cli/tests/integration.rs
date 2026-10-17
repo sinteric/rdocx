@@ -401,7 +401,7 @@ fn outline_emits_a_field_only_title_once() {
 }
 
 #[test]
-fn validate_and_text_read_a_paragraph_with_a_second_paragraph_properties_element() {
+fn validate_reports_duplicate_paragraph_properties_while_text_remains_readable() {
     let temp = TempWorkspace::new("second-ppr");
     let deck = temp.path.join("second-ppr.pptx");
     write_deck(&deck, &["One. Two."]);
@@ -426,10 +426,13 @@ fn validate_and_text_read_a_paragraph_with_a_second_paragraph_properties_element
     package.save(&deck).expect("write second pPr fixture");
 
     let validated = cli(&["validate", deck.to_str().unwrap()]);
+    assert!(!validated.status.success());
+    let diagnostic = String::from_utf8(validated.stderr).unwrap();
+    assert!(diagnostic.contains("InvalidXmlChild"), "{diagnostic}");
+    assert!(diagnostic.contains(&slide_part), "{diagnostic}");
     assert!(
-        validated.status.success(),
-        "{}",
-        String::from_utf8_lossy(&validated.stderr)
+        diagnostic.contains("finite XML child order or multiplicity is invalid"),
+        "{diagnostic}"
     );
     let text = cli(&["text", deck.to_str().unwrap()]);
     assert!(
@@ -3844,4 +3847,93 @@ fn fx253_pdf_png_convert_render_hide_native_master_logo() {
         results[0], results[2],
         "hidden master output must equal the original direct-slide scene"
     );
+}
+
+#[test]
+fn fx254_map_implicit_zero_is_pairwise_atomic() {
+    let workspace = TempWorkspace::new("fx254-map");
+    let input = workspace.path.join("input.pptx");
+    let output = workspace.path.join("output.pptx");
+    let map = workspace.path.join("map.json");
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(1000000), Emu(500000))
+        .unwrap()
+        .set_text("{{first}}")
+        .unwrap();
+    deck.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    fs::write(
+        &map,
+        r#"[{"placeholder":"{{first}}","value":"one"},{"placeholder":"absent","value":"two"}]"#,
+    )
+    .unwrap();
+    let result = cli(&[
+        "replace",
+        input.to_str().unwrap(),
+        "--map",
+        map.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!output.exists());
+    assert_eq!(fs::read(&input).unwrap(), before);
+    fs::write(&map, r#"[{"placeholder":"{{first}}","value":"one"},{"placeholder":"absent","value":"two","expect":0}]"#).unwrap();
+    let result = cli(&[
+        "replace",
+        input.to_str().unwrap(),
+        "--map",
+        map.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output.exists());
+}
+
+#[test]
+fn fx254_missing_font_and_output_messages() {
+    let workspace = TempWorkspace::new("fx254-font");
+    let input = workspace.path.join("input.pptx");
+    let output = workspace.path.join("output.pptx");
+    Presentation::new().unwrap().save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    for kind in [None, Some("regular")] {
+        let mut args = vec![
+            "font",
+            "remove",
+            input.to_str().unwrap(),
+            "--name",
+            "Missing font",
+            "-o",
+            output.to_str().unwrap(),
+        ];
+        if let Some(kind) = kind {
+            args.extend(["--kind", kind]);
+        }
+        let result = cli(&args);
+        assert!(!result.status.success());
+        assert!(!output.exists());
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+    fs::write(&output, b"sentinel").unwrap();
+    let result = cli(&[
+        "font",
+        "remove",
+        input.to_str().unwrap(),
+        "--name",
+        "Missing font",
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("--force"));
+    assert_eq!(fs::read(&output).unwrap(), b"sentinel");
 }

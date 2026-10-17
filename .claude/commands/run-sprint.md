@@ -12,10 +12,12 @@ it comes back clean.
 Defaults are three review passes and as many workers as the wave allows.
 
 Each worker keeps its implementation scoped to its approved F-ID, with focused
-tests, the applicable oracle cases, `/verify --scoped` and a zero-finding
+RED/GREEN regressions, F-ID-bound fast `/verify --scoped` and a zero-finding
 `/microscope`. Reserve `/verify --full`, the union of sprint risk riders and
 `/sprint-review` for the integrated final result. A dependency-prefix
-checkpoint uses its scoped evidence and focused reconciliation checks.
+checkpoint uses actual scoped local evidence and focused reconciliation checks.
+External oracles, complete suites and risk riders run only in the final union.
+Subcommands consume the same evidence instead of repeating its execution.
 
 **`scripts/sprint_workflow.py` is the state authority.** Everything below is
 resumable through `.claude/scratch/SNN-run.json`. Reuse it rather than starting
@@ -67,8 +69,10 @@ For a valid zero-feature sprint:
 3. Set the phase directly to `verification` and run step 6, including every
    boundary-specific gate in the sprint definition of done.
 4. Set the phase to `review` and run step 8. Commit review records before
-   recording the clean review and repeat the full verification if that commit
-   changed HEAD. Review and full verification must both cover the final HEAD.
+   recording the clean review. Adopt only permitted delivery/review metadata via
+   `record-verification SNN --scope metadata --reuse-from <full-head>`.
+   Source changes invalidate affected checks. Never rerun all categories solely
+   because the review file changed HEAD.
 5. Continue at step 9. Report zero integrated F-IDs and no retained workers.
 
 Do not manufacture an F-ID, design plan, handoff, tracker row or `AS_BUILT.md`
@@ -151,8 +155,8 @@ Per ordinary F-ID in the wave:
    without asking separately.
 2. In the worker worktree, run `/implement-feature F-XXX`. The approved plan is
    reused. Do not design again.
-3. Run the focused checks for the changed crates, plus every rider the plan's
-   `## Risk routing` declared.
+3. Consume applicable focused local checks, running only missing or invalidated
+   cases. Preserve every named final risk rider and oracle as pending.
 4. Run `/microscope F-XXX --working` against the worker diff. Iterate in
    numbered passes until zero defects and zero smells. **Not skippable.**
 5. Run `/complete-feature F-XXX --prepare`, which writes and validates
@@ -175,14 +179,20 @@ sprint closure. Keep the same sprint run state.
    --batch`. Review its incremental integration diff against its approved
    plan. A semantic conflict receives another `/microscope` pass after
    reconciliation.
-2. Confirm the worker's `/verify --scoped`, focused oracle cases, hash result,
-   test gate and zero-finding microscope remain valid for the integrated
-   prefix. Run focused checks for any integration-only reconciliation. Do not
-   run `/verify --full` or `/sprint-review` at this checkpoint.
-3. Apply the non-release documentation and delivery-record steps in section 7
-   for that prerequisite. Mark it `completed`, clear its owner, and commit
-   those records. Keep the worker branch for final sprint review. Remove its
-   clean worktree after recording the integration commit to save disk space.
+2. Confirm the worker's scoped local RED/GREEN regressions and zero-finding
+   microscope remain valid for the integrated prefix. Only an explicitly
+   approved genuine LOCAL provider gate that actually passed can unblock its
+   consumer. Confirm the integrated source commit is an ancestor of the
+   consumer Base. A pending oracle-only dependency gate cannot qualify, and
+   reviewed status alone never means completed. Run only affected focused
+   reconciliation checks, never full suites or final oracles at this checkpoint.
+3. Record provider implementation completion in the existing completed run
+   state and done BACKLOG/CURRENT_SPRINT cells, clearing its owner. Keep its
+   plan approved and named final rider debt in existing plan/progress. Commit
+   these bounded records without AS_BUILT or SPRINT_TRACKER entries or final
+   oracle claims. Section7 writes the actual final delivery entries once.
+   Keep the worker branch for final review. Remove its clean integrated worktree
+   after preserving all evidence outside it and recording the integration commit.
 4. Return the phase to `implementation` and start the dependent wave. Record
    that full verification and sprint review are still due at final closure.
 
@@ -226,8 +236,9 @@ human.
 Use this checkpoint only when an approved feature's new workflow must be on
 GitHub before its named actual external CI gate can run. A validated
 `external-ci-source-availability` handoff must already be consumed by batch
-integration. Every implementation item, local check, applicable local risk
-rider, hash check and independent microscope must pass. The plan remains
+integration. Every implementation item, named focused local check and independent
+microscope must pass. Hash, oracle and final risk riders remain explicitly
+pending for the integrated union. The plan remains
 approved and the feature in-progress with its named external gates pending.
 Do not write completion ledgers or unblock dependencies.
 
@@ -249,7 +260,9 @@ claim that the final sprint gate passed.
 For the ordinary final gate, only after every branch is integrated or consumed
 by a dependency-prefix checkpoint:
 
-1. Run `/verify --full`. Not per worker, not `--fast`, and not `--scoped`.
+1. Finish all source and HLD intent edits, then run `/verify --full` once at
+   clean source H. Not per worker, not `--fast`, and not `--scoped`. Reuse
+   categories already covered by the same actual suite/configuration.
 2. Add the union of every `## Risk routing` rider the sprint's plans declared.
    A rider one story earned runs once here for the whole sprint.
 3. **The hash harness is the step that matters most.** Every delta must trace to
@@ -270,11 +283,14 @@ by a dependency-prefix checkpoint:
 
 After verification passes:
 
-For every integrated F-ID, including a release preparation story:
+For every integrated F-ID, including release preparation and locally completed
+provider-prefix stories, write actual final delivery records exactly once:
 
-1. Apply the `/complete-feature` documentation steps:
-   update exactly the HLD files its plan listed, append its `AS_BUILT.md` entry
-   with the consolidated evidence, and append its `SPRINT_TRACKER.md` row.
+1. Confirm HLD intent was updated before the full gate. Append the actual
+   `AS_BUILT.md` evidence at producer H and the `SPRINT_TRACKER.md` row. Prepare
+   the close-sprint summary and velocity rows here so final review covers them
+   and close can consume them without changing the reviewed tree. Do not insert
+   source or HLD edits in this completion-only phase.
 2. Set `done` in `BACKLOG.md` and `CURRENT_SPRINT.md`, clear its `Owner` cell,
    and regenerate the AUTOGEN counts.
 3. Set its design plan to `**Status**: completed`.
@@ -310,6 +326,22 @@ to a distinct remediation phase does not require another user invocation.
 
 At the bound, if actionable findings remain, `set-phase SNN blocked`, do not
 push, and report what is outstanding. Closure stays forbidden.
+
+After the clean review and completion records are committed at R, run the
+cheap metadata applicability check, including affected delivery/review Markdown
+and commit-message prose validation:
+
+```
+python3 scripts/sprint_workflow.py record-verification SNN \
+  --scope metadata --reuse-from <actual-full-head-H> --passed
+```
+
+The helper retains the actual full producer H and validates only the bounded
+completion/review/plan-status/checkmark delta. Source, HLD, README, command,
+script, workflow, manifest or test changes block metadata adoption. The latest
+full attempt must pass. A later failure cannot reuse an older green attempt.
+This check never reruns product suites or oracles. Remediation reruns affected
+checks and records the actual successor evidence before any adoption.
 
 ## 9. Finish
 

@@ -1064,6 +1064,12 @@ pub enum ValidationIssue {
     MissingThemeRel {
         master: usize,
     },
+    /// One violation at an explicitly supported checked XML grammar frontier.
+    InvalidXmlChild {
+        part: String,
+        path: String,
+        message: String,
+    },
 }
 
 /// One slide master's theme, as [`Presentation::theme`] reads it.
@@ -1517,6 +1523,722 @@ fn ppt_xml_child_order(namespace: &str, parent: &[u8], child: &[u8]) -> Option<(
     })
 }
 
+const PPT_MC_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+
+#[derive(Default)]
+struct PptXmlNames {
+    values: Vec<String>,
+    ids: HashMap<String, usize>,
+    routes: HashMap<(usize, usize, usize, usize), usize>,
+    physical_owners: HashMap<(usize, usize, usize), usize>,
+    route_edges: Vec<(usize, usize, usize, usize)>,
+}
+impl PptXmlNames {
+    fn id(&mut self, value: &str) -> usize {
+        if let Some(id) = self.ids.get(value) {
+            return *id;
+        }
+        let id = self.values.len();
+        self.values.push(value.to_owned());
+        self.ids.insert(value.to_owned(), id);
+        id
+    }
+    fn path(&self, mut route: usize) -> String {
+        let mut segments = Vec::new();
+        while route != 0 {
+            let (parent, ordinal, uri, local) = self.route_edges[route - 1];
+            segments.push(format!(
+                "{{{}}}{}[{}]",
+                self.values[uri],
+                self.values[local],
+                ordinal + 1
+            ));
+            route = parent;
+        }
+        segments.reverse();
+        format!("/{}", segments.join("/"))
+    }
+    fn route(&mut self, parent: usize, ordinal: usize, uri: usize, local: usize) -> usize {
+        let key = (parent, ordinal, uri, local);
+        if let Some(route) = self.routes.get(&key) {
+            return *route;
+        }
+        let next = self.route_edges.len() + 1;
+        self.route_edges.push(key);
+        self.routes.insert(key, next);
+        next
+    }
+}
+#[derive(Default)]
+struct PptXmlScope {
+    bindings: HashMap<String, usize>,
+    ignorable: HashSet<usize>,
+}
+#[derive(Default)]
+struct PptXmlScopeDelta {
+    bindings: Vec<(String, Option<usize>)>,
+    ignorable: Vec<usize>,
+}
+impl PptXmlScope {
+    fn name(&self, raw: &[u8], attribute: bool, names: &mut PptXmlNames) -> Result<(usize, usize)> {
+        let text = std::str::from_utf8(raw)
+            .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+        let (prefix, local) = text.split_once(':').unwrap_or(("", text));
+        let uri = if prefix == "xml" {
+            names.id("http://www.w3.org/XML/1998/namespace")
+        } else if prefix.is_empty() && attribute {
+            names.id("")
+        } else if let Some(uri) = self.bindings.get(prefix) {
+            *uri
+        } else if prefix.is_empty() {
+            names.id("")
+        } else {
+            return Err(invalid_shape_mutation("replace XML", "unbound XML prefix"));
+        };
+        Ok((uri, names.id(local)))
+    }
+    fn enter(
+        &mut self,
+        element: &XmlBytesStart<'_>,
+        names: &mut PptXmlNames,
+    ) -> Result<PptXmlScopeDelta> {
+        let mut delta = PptXmlScopeDelta::default();
+        for attr in element.attributes() {
+            let attr = attr.map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+            let raw = attr.key.as_ref();
+            let prefix = if raw == b"xmlns" {
+                ""
+            } else if let Some(prefix) = raw.strip_prefix(b"xmlns:") {
+                std::str::from_utf8(prefix)
+                    .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?
+            } else {
+                continue;
+            };
+            let value = attr
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+            delta.bindings.push((
+                prefix.to_owned(),
+                self.bindings.insert(prefix.to_owned(), names.id(&value)),
+            ));
+        }
+        let mc = names.id(PPT_MC_NS);
+        let ignorable = names.id("Ignorable");
+        for attr in element.attributes() {
+            let attr = attr.map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+            if attr.key.as_ref() == b"xmlns" || attr.key.as_ref().starts_with(b"xmlns:") {
+                continue;
+            }
+            if self.name(attr.key.as_ref(), true, names)? == (mc, ignorable) {
+                let value = attr
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                    .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+                for prefix in value.split_ascii_whitespace() {
+                    let uri = *self.bindings.get(prefix).ok_or_else(|| {
+                        invalid_shape_mutation("replace XML", "unbound mc:Ignorable prefix")
+                    })?;
+                    if self.ignorable.insert(uri) {
+                        delta.ignorable.push(uri);
+                    }
+                }
+            }
+        }
+        Ok(delta)
+    }
+    fn leave(&mut self, delta: PptXmlScopeDelta) {
+        for uri in delta.ignorable {
+            self.ignorable.remove(&uri);
+        }
+        for (prefix, previous) in delta.bindings.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.bindings.insert(prefix, previous);
+            } else {
+                self.bindings.remove(&prefix);
+            }
+        }
+    }
+}
+struct PptXmlIsland {
+    route: usize,
+    owner: usize,
+    source: std::ops::Range<usize>,
+    meaning: std::ops::Range<usize>,
+    message: &'static str,
+}
+#[derive(PartialEq, Eq, Hash)]
+struct PptXmlPolicy {
+    route: usize,
+    owner: usize,
+    name: (usize, usize),
+    value: Vec<u8>,
+    meaning: Vec<(usize, usize)>,
+}
+#[derive(Default)]
+struct PptXmlFrontiers {
+    islands: Vec<PptXmlIsland>,
+    meaning: Vec<(usize, usize)>,
+    policies: Vec<PptXmlPolicy>,
+}
+struct PptXmlFrame {
+    owner: usize,
+    owner_index: Option<usize>,
+    uri: usize,
+    local: usize,
+    route: usize,
+    children: usize,
+    modeled: bool,
+    seen: HashSet<usize>,
+    rank: Option<usize>,
+    start: usize,
+    meaning: usize,
+    violation: Option<&'static str>,
+    captured: bool,
+    scope: PptXmlScopeDelta,
+}
+fn ppt_xml_frontier(uri: &str, local: &str) -> bool {
+    matches!(
+        (uri, local),
+        (P_NS, "sp" | "sld") | (A_NS, "p" | "prstGeom")
+    )
+}
+fn ppt_xml_frontier_order(
+    uri: &str,
+    local: &str,
+    child_uri: &str,
+    child: &str,
+) -> Option<(usize, bool)> {
+    if (uri, local) == (A_NS, "prstGeom") {
+        return (child_uri == A_NS && child == "avLst").then_some((0, false));
+    }
+    let expected = if uri == P_NS && matches!(local, "txBody" | "spPr" | "grpSpPr")
+        || uri == P_NS && local == "graphicFrame" && child == "graphic"
+    {
+        A_NS
+    } else {
+        uri
+    };
+    (child_uri == expected)
+        .then(|| ppt_xml_child_order(uri, local.as_bytes(), child.as_bytes()))
+        .flatten()
+}
+fn ppt_xml_frontiers(source: &[u8], names: &mut PptXmlNames) -> Result<PptXmlFrontiers> {
+    let mut reader = quick_xml::Reader::from_reader(source);
+    let mut scope = PptXmlScope::default();
+    let mut stack: Vec<PptXmlFrame> = Vec::new();
+    let mut result = PptXmlFrontiers::default();
+    // Supported physical shape records only. Ancestor identity is interned once
+    // after parsing, because imported nonvisual properties may appear late.
+    let mut owners: Vec<(usize, usize, usize, Option<usize>, bool)> = Vec::new();
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader
+            .read_event()
+            .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+        let empty = matches!(event, XmlEvent::Empty(_));
+        match event {
+            XmlEvent::Start(element) | XmlEvent::Empty(element) => {
+                let delta = scope.enter(&element, names)?;
+                let (uri, local) = scope.name(element.name().as_ref(), false, names)?;
+                let (parent, ordinal) = stack.last_mut().map_or((0, 0), |p| {
+                    let n = p.children;
+                    p.children += 1;
+                    (p.route, n)
+                });
+                let route = names.route(parent, ordinal, uri, local);
+                let mut modeled = stack.is_empty();
+                let captured = stack
+                    .last()
+                    .is_some_and(|p| p.captured || p.violation.is_some());
+                let mut violation = None;
+                if let Some(p) = stack.last_mut() {
+                    let order = ppt_xml_frontier_order(
+                        &names.values[p.uri],
+                        &names.values[p.local],
+                        &names.values[uri],
+                        &names.values[local],
+                    );
+                    // Complex MC is a retained delegated provider, not an
+                    // ordinary typed shape branch. Its metadata is still
+                    // captured below for exact source/namespace custody.
+                    modeled = p.modeled
+                        && (order.is_some()
+                            || names.values[p.uri] == A_NS
+                                && names.values[p.local] == "graphicData"
+                                && names.values[uri] == A_NS
+                                && names.values[local] == "tbl"
+                            || (names.values[p.uri] == P_NS
+                                && matches!(names.values[p.local].as_str(), "spTree" | "grpSp")
+                                || names.values[p.uri] == PPT_MC_NS
+                                    && names.values[p.local] == "Fallback")
+                                && names.values[uri] == PPT_MC_NS
+                                && names.values[local] == "AlternateContent"
+                            || names.values[p.uri] == PPT_MC_NS
+                                && names.values[p.local] == "AlternateContent"
+                                && names.values[uri] == PPT_MC_NS
+                                && names.values[local] == "Fallback"
+                            || names.values[p.uri] == PPT_MC_NS
+                                && names.values[p.local] == "Fallback"
+                                && names.values[uri] == P_NS
+                                && matches!(
+                                    names.values[local].as_str(),
+                                    "sp" | "pic" | "graphicFrame" | "cxnSp" | "grpSp"
+                                ));
+                    if p.modeled && ppt_xml_frontier(&names.values[p.uri], &names.values[p.local]) {
+                        if let Some((rank, repeated)) = order {
+                            if p.rank
+                                .is_some_and(|last| rank < last || rank == last && !repeated)
+                                || (!p.seen.insert(local) && !repeated)
+                            {
+                                violation =
+                                    Some("finite XML child order or multiplicity is invalid");
+                            }
+                            p.rank = Some(rank);
+                        } else if !(names.values[uri] == PPT_MC_NS
+                            && names.values[local] == "AlternateContent")
+                            && (matches!(names.values[uri].as_str(), P_NS | A_NS)
+                                || !scope.ignorable.contains(&uri))
+                        {
+                            violation = Some("unknown or misplaced direct XML child");
+                        }
+                    }
+                }
+                let inherited_owner = stack.last().map_or(0, |frame| frame.owner);
+                let physical_shape = modeled
+                    && names.values[uri] == P_NS
+                    && matches!(
+                        names.values[local].as_str(),
+                        "sp" | "pic" | "cxnSp" | "graphicFrame" | "grpSp"
+                    );
+                let owner_index = physical_shape.then(|| {
+                    let index = owners.len();
+                    owners.push((route, inherited_owner, local, None, false));
+                    index
+                });
+                let owner = if physical_shape {
+                    route
+                } else {
+                    inherited_owner
+                };
+                // A cNvPr identifies only its actual supported enclosing shape,
+                // through that shape kind's qualified nonvisual-property child.
+                if names.values[uri] == P_NS && names.values[local] == "cNvPr" && stack.len() >= 2 {
+                    let shape = &stack[stack.len() - 2];
+                    let parent = &stack[stack.len() - 1];
+                    let expected = match names.values[shape.local].as_str() {
+                        "sp" => "nvSpPr",
+                        "pic" => "nvPicPr",
+                        "cxnSp" => "nvCxnSpPr",
+                        "graphicFrame" => "nvGraphicFramePr",
+                        "grpSp" => "nvGrpSpPr",
+                        _ => "",
+                    };
+                    if let Some(index) = shape.owner_index
+                        && names.values[parent.uri] == P_NS
+                        && names.values[parent.local] == expected
+                    {
+                        let record = &mut owners[index];
+                        let mut id = None;
+                        for attr in element.attributes() {
+                            let attr = attr.map_err(|e| {
+                                invalid_shape_mutation("replace XML", e.to_string())
+                            })?;
+                            if attr.key.as_ref() == b"xmlns"
+                                || attr.key.as_ref().starts_with(b"xmlns:")
+                            {
+                                continue;
+                            }
+                            if scope.name(attr.key.as_ref(), true, names)?
+                                == (names.id(""), names.id("id"))
+                            {
+                                let value = attr
+                                    .decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        element.decoder(),
+                                    )
+                                    .map_err(|e| {
+                                        invalid_shape_mutation("replace XML", e.to_string())
+                                    })?;
+                                id = value
+                                    .parse::<u32>()
+                                    .ok()
+                                    .filter(|id| *id != 0)
+                                    .map(|id| names.id(&id.to_string()));
+                            }
+                        }
+                        record.3 = if record.4 { None } else { id };
+                        record.4 = true;
+                    }
+                }
+                let meaning_start = result.meaning.len();
+                result.meaning.push((uri, local));
+                let mc = names.id(PPT_MC_NS);
+                let ignorable = names.id("Ignorable");
+                let requires = names.id("Requires");
+                for attr in element.attributes() {
+                    let attr =
+                        attr.map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+                    if attr.key.as_ref() == b"xmlns" || attr.key.as_ref().starts_with(b"xmlns:") {
+                        continue;
+                    }
+                    let name = scope.name(attr.key.as_ref(), true, names)?;
+                    result.meaning.push(name);
+                    let value = attr
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                        .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+                    let choice_requires = uri == mc
+                        && names.values[local] == "Choice"
+                        && names.values[name.0].is_empty()
+                        && name.1 == requires;
+                    let mut meaning = Vec::new();
+                    if name.0 == mc || choice_requires {
+                        for token in value.split_ascii_whitespace() {
+                            let expanded = if name.1 == ignorable
+                                || names.values[name.1] == "MustUnderstand"
+                                || choice_requires
+                            {
+                                let target = *scope.bindings.get(token).ok_or_else(|| {
+                                    invalid_shape_mutation(
+                                        "replace XML",
+                                        "unbound compatibility prefix",
+                                    )
+                                })?;
+                                (target, names.id(""))
+                            } else {
+                                scope.name(token.as_bytes(), false, names)?
+                            };
+                            meaning.push(expanded);
+                        }
+                        result.meaning.extend_from_slice(&meaning);
+                        if name.1 != ignorable {
+                            result.policies.push(PptXmlPolicy {
+                                route,
+                                owner,
+                                name,
+                                value: attr.value.to_vec(),
+                                meaning,
+                            });
+                        }
+                    }
+                }
+                // A new complex compatibility route is unsupported. Preserve only
+                // existing element metadata, allowing typed descendants to change.
+                if uri == mc {
+                    result.policies.push(PptXmlPolicy {
+                        route,
+                        owner,
+                        name: (uri, local),
+                        value: Vec::new(),
+                        meaning: Vec::new(),
+                    });
+                }
+                stack.push(PptXmlFrame {
+                    owner,
+                    owner_index,
+                    uri,
+                    local,
+                    route,
+                    children: 0,
+                    modeled,
+                    seen: HashSet::new(),
+                    rank: None,
+                    start,
+                    meaning: meaning_start,
+                    violation,
+                    captured,
+                    scope: delta,
+                });
+                if empty {
+                    ppt_xml_finish_frontier(
+                        &mut stack,
+                        &mut scope,
+                        &mut result,
+                        names,
+                        reader.buffer_position() as usize,
+                    );
+                }
+            }
+            XmlEvent::End(_) => ppt_xml_finish_frontier(
+                &mut stack,
+                &mut scope,
+                &mut result,
+                names,
+                reader.buffer_position() as usize,
+            ),
+            XmlEvent::Eof => {
+                let mut identities = HashMap::from([(0, 0)]);
+                for (route, parent, local, id, _) in owners {
+                    let parent = identities[&parent];
+                    let identity = if let Some(id) = id.filter(|_| parent != usize::MAX) {
+                        let next = names.physical_owners.len() + 1;
+                        *names
+                            .physical_owners
+                            .entry((parent, local, id))
+                            .or_insert(next)
+                    } else {
+                        usize::MAX
+                    };
+                    identities.insert(route, identity);
+                }
+                for island in &mut result.islands {
+                    island.owner = identities[&island.owner];
+                }
+                for policy in &mut result.policies {
+                    policy.owner = identities[&policy.owner];
+                }
+                return Ok(result);
+            }
+            _ => {}
+        }
+    }
+}
+fn ppt_xml_finish_frontier(
+    stack: &mut Vec<PptXmlFrame>,
+    scope: &mut PptXmlScope,
+    result: &mut PptXmlFrontiers,
+    names: &PptXmlNames,
+    end: usize,
+) {
+    let Some(mut frame) = stack.pop() else {
+        return;
+    };
+    if frame.modeled && names.values[frame.uri] == P_NS {
+        let required: &[&str] = match names.values[frame.local].as_str() {
+            "sp" => &["nvSpPr", "spPr"],
+            "sld" => &["cSld"],
+            _ => &[],
+        };
+        if required
+            .iter()
+            .any(|required| !frame.seen.iter().any(|id| names.values[*id] == *required))
+        {
+            frame.violation = Some("required finite XML child is absent");
+        }
+    }
+    if !frame.captured
+        && let Some(message) = frame.violation
+    {
+        result.islands.push(PptXmlIsland {
+            route: frame.route,
+            owner: frame.owner,
+            source: frame.start..end,
+            meaning: frame.meaning..result.meaning.len(),
+            message,
+        });
+    }
+    scope.leave(frame.scope);
+}
+fn check_ppt_frontier_changes(before: &[u8], after: &[u8]) -> Result<()> {
+    let mut names = PptXmlNames::default();
+    let old = ppt_xml_frontiers(before, &mut names)?;
+    let new = ppt_xml_frontiers(after, &mut names)?;
+    let mut old_islands: HashMap<usize, Vec<&PptXmlIsland>> = HashMap::new();
+    for island in &old.islands {
+        old_islands.entry(island.route).or_default().push(island);
+    }
+    for island in &new.islands {
+        let previous = old_islands
+            .get(&island.route)
+            .filter(|values| values.len() == 1)
+            .map(|values| values[0]);
+        if !previous.is_some_and(|previous| {
+            island.owner != usize::MAX
+                && previous.owner == island.owner
+                && before[previous.source.clone()] == after[island.source.clone()]
+                && old.meaning[previous.meaning.clone()] == new.meaning[island.meaning.clone()]
+        }) {
+            return Err(invalid_shape_mutation("replace XML", island.message));
+        }
+    }
+    let mut old_policies: HashMap<&PptXmlPolicy, usize> = HashMap::new();
+    for policy in &old.policies {
+        *old_policies.entry(policy).or_default() += 1;
+    }
+    for policy in &new.policies {
+        if policy.owner == usize::MAX || old_policies.get(policy) != Some(&1) {
+            return Err(invalid_shape_mutation(
+                "replace XML",
+                "new or reinterpreted complex markup compatibility metadata is unsupported",
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Locate only the selected supported physical owner. This is not an opaque
+// inventory: one live ancestry stack and direct-name ordinals supply context.
+struct PptXmlSourceFrame {
+    uri: usize,
+    local: usize,
+    ordinal: usize,
+    start: usize,
+    children: HashMap<(usize, usize), usize>,
+    structural: bool,
+    shape: bool,
+    scope: PptXmlScopeDelta,
+}
+fn ppt_xml_owner_range(
+    source: &[u8],
+    id: u32,
+    shape_root: &[u8],
+    steps: &[(&str, &str, usize)],
+) -> Result<std::ops::Range<usize>> {
+    let mut reader = quick_xml::Reader::from_reader(source);
+    let mut names = PptXmlNames::default();
+    let mut scope = PptXmlScope::default();
+    let mut stack: Vec<PptXmlSourceFrame> = Vec::new();
+    let mut anchor = None;
+    let mut found = 0;
+    let mut selected = None;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader
+            .read_event()
+            .map_err(|e| invalid_shape_mutation("replace XML", e.to_string()))?;
+        let empty = matches!(event, XmlEvent::Empty(_));
+        match event {
+            XmlEvent::Start(element) | XmlEvent::Empty(element) => {
+                let delta = scope.enter(&element, &mut names)?;
+                let (uri, local) = scope.name(element.name().as_ref(), false, &mut names)?;
+                let ordinal = stack.last_mut().map_or(0, |parent| {
+                    let count = parent.children.entry((uri, local)).or_default();
+                    let ordinal = *count;
+                    *count += 1;
+                    ordinal
+                });
+                let p = names.values[uri] == P_NS;
+                let tag = names.values[local].as_str();
+                let structural = p
+                    && (stack.is_empty() && matches!(tag, "sld" | "sldLayout" | "sldMaster")
+                        || stack.last().is_some_and(|parent| {
+                            parent.structural
+                                && (matches!(
+                                    names.values[parent.local].as_str(),
+                                    "sld" | "sldLayout" | "sldMaster"
+                                ) && tag == "cSld"
+                                    || names.values[parent.local] == "cSld" && tag == "spTree"
+                                    || matches!(
+                                        names.values[parent.local].as_str(),
+                                        "spTree" | "grpSp"
+                                    ) && tag == "grpSp")
+                        }));
+                let shape =
+                    p && stack.last().is_some_and(|parent| {
+                        parent.structural
+                            && matches!(names.values[parent.local].as_str(), "spTree" | "grpSp")
+                    }) && matches!(tag, "sp" | "pic" | "graphicFrame" | "cxnSp" | "grpSp");
+                if p && tag == "cNvPr" && stack.len() >= 2 {
+                    let parent = &stack[stack.len() - 1];
+                    let root = &stack[stack.len() - 2];
+                    if root.shape
+                        && names.values[root.local].as_bytes() == shape_root
+                        && names.values[parent.uri] == P_NS
+                        && matches!(
+                            names.values[parent.local].as_str(),
+                            "nvSpPr" | "nvPicPr" | "nvGraphicFramePr" | "nvCxnSpPr" | "nvGrpSpPr"
+                        )
+                    {
+                        for attr in element.attributes() {
+                            let attr = attr.map_err(|e| {
+                                invalid_shape_mutation("replace XML", e.to_string())
+                            })?;
+                            if attr.key.as_ref() == b"id"
+                                && attr
+                                    .decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        element.decoder(),
+                                    )
+                                    .map_err(|e| {
+                                        invalid_shape_mutation("replace XML", e.to_string())
+                                    })?
+                                    .parse::<u32>()
+                                    .ok()
+                                    == Some(id)
+                            {
+                                found += 1;
+                                anchor = Some((stack.len() - 2, root.start));
+                            }
+                        }
+                    }
+                }
+                stack.push(PptXmlSourceFrame {
+                    uri,
+                    local,
+                    ordinal,
+                    start,
+                    children: HashMap::new(),
+                    structural,
+                    shape,
+                    scope: delta,
+                });
+                if empty {
+                    ppt_xml_finish_owner_range(
+                        &mut stack,
+                        &mut scope,
+                        &names,
+                        anchor,
+                        steps,
+                        reader.buffer_position() as usize,
+                        &mut selected,
+                    )?;
+                }
+            }
+            XmlEvent::End(_) => ppt_xml_finish_owner_range(
+                &mut stack,
+                &mut scope,
+                &names,
+                anchor,
+                steps,
+                reader.buffer_position() as usize,
+                &mut selected,
+            )?,
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+    }
+    if found != 1 {
+        return Err(invalid_shape_mutation(
+            "replace XML",
+            "physical shape source identity is absent or ambiguous",
+        ));
+    }
+    selected.ok_or_else(|| {
+        invalid_shape_mutation("replace XML", "selected physical source owner is absent")
+    })
+}
+fn ppt_xml_finish_owner_range(
+    stack: &mut Vec<PptXmlSourceFrame>,
+    scope: &mut PptXmlScope,
+    names: &PptXmlNames,
+    anchor: Option<(usize, usize)>,
+    steps: &[(&str, &str, usize)],
+    end: usize,
+    selected: &mut Option<std::ops::Range<usize>>,
+) -> Result<()> {
+    if let Some((anchor, root_start)) = anchor
+        && stack.len() == anchor + 1 + steps.len()
+        && stack[anchor].start == root_start
+        && stack[anchor + 1..]
+            .iter()
+            .zip(steps)
+            .all(|(frame, (uri, local, ordinal))| {
+                names.values[frame.uri] == *uri
+                    && names.values[frame.local] == *local
+                    && frame.ordinal == *ordinal
+            })
+        && let Some(frame) = stack.last()
+        && selected.replace(frame.start..end).is_some()
+    {
+        return Err(invalid_shape_mutation(
+            "replace XML",
+            "selected physical source range is ambiguous",
+        ));
+    }
+    if let Some(frame) = stack.pop() {
+        scope.leave(frame.scope);
+    }
+    Ok(())
+}
+
 fn check_ppt_xml_input(xml: &[u8], expected_namespace: &str, expected_local: &[u8]) -> Result<()> {
     oxml_core::xml::validate_strict_xml_1_0(xml)
         .map_err(|error| invalid_shape_mutation("replace XML", format!("{error:?}")))?;
@@ -1540,9 +2262,10 @@ fn check_ppt_xml_input(xml: &[u8], expected_namespace: &str, expected_local: &[u
             XmlEvent::Start(element) | XmlEvent::Empty(element) => {
                 let namespace = match namespace {
                     XmlResolveResult::Bound(namespace) => {
-                        String::from_utf8(namespace.as_ref().to_vec()).map_err(|error| {
-                            invalid_shape_mutation("replace XML", error.to_string())
-                        })?
+                        import_namespace_uri(XmlResolveResult::Bound(namespace), element.decoder())
+                            .map_err(|error| {
+                                invalid_shape_mutation("replace XML", error.to_string())
+                            })?
                     }
                     XmlResolveResult::Unbound => String::new(),
                     _ => {
@@ -1604,7 +2327,10 @@ fn check_ppt_xml_input(xml: &[u8], expected_namespace: &str, expected_local: &[u
                                 && namespace
                                     == "http://schemas.openxmlformats.org/markup-compatibility/2006"
                                 && local == b"AlternateContent");
-                    if *parent_modeled && let Some((rank, repeated)) = order {
+                    if *parent_modeled
+                        && !ppt_xml_frontier(parent_namespace, &String::from_utf8_lossy(parent))
+                        && let Some((rank, repeated)) = order
+                    {
                         if last.is_some_and(|last| rank < last || rank == last && !repeated)
                             || (!seen.insert(local.clone()) && !repeated)
                         {
@@ -2322,6 +3048,11 @@ impl Presentation {
     // Every other validation issue keeps the existing save assertion.
     fn save_invariants_preserved(&self) -> bool {
         self.validate().iter().all(|issue| {
+            // Finite XML diagnostics remain report-only at ordinary save.
+            // Checked replacement owns raw/staged source admission separately.
+            if matches!(issue, ValidationIssue::InvalidXmlChild { .. }) {
+                return true;
+            }
             let ValidationIssue::DuplicateShapeId { slide, .. } = issue else {
                 return false;
             };
@@ -3944,6 +4675,34 @@ impl Presentation {
             }
         }
 
+        let mut invalid_xml = Vec::new();
+        let owners = (0..self.slides.len())
+            .map(ShapeOwner::Slide)
+            .chain((0..self.layouts.len()).map(ShapeOwner::Layout))
+            .chain((0..self.masters.len()).map(ShapeOwner::Master));
+        for owner in owners {
+            let Ok(part) = self.owner_part_name(owner) else {
+                continue;
+            };
+            let mut names = PptXmlNames::default();
+            let Some(xml) = self.current_part_xml(part) else {
+                continue;
+            };
+            match ppt_xml_frontiers(&xml, &mut names) {
+                Ok(scan) => invalid_xml.extend(scan.islands.iter().map(|island| {
+                    ValidationIssue::InvalidXmlChild {
+                        part: part.to_owned(),
+                        path: names.path(island.route),
+                        message: island.message.to_owned(),
+                    }
+                })),
+                Err(error) => invalid_xml.push(ValidationIssue::InvalidXmlChild {
+                    part: part.to_owned(),
+                    path: "/".to_owned(),
+                    message: error.to_string(),
+                }),
+            }
+        }
         duplicate_shape_ids
             .into_iter()
             .chain(out_of_range_slide_ids)
@@ -3957,6 +4716,7 @@ impl Presentation {
             .chain(custom_show_references)
             .chain(missing_layout_relationships)
             .chain(missing_theme_relationships)
+            .chain(invalid_xml)
             .collect()
     }
 
@@ -5253,15 +6013,87 @@ impl Presentation {
         )
     }
 
+    fn xml_physical_owner_range(
+        &self,
+        owner: PptXmlOwner<'_>,
+        source: &[u8],
+    ) -> Result<std::ops::Range<usize>> {
+        let mut steps = Vec::new();
+        let (part, path) = match owner {
+            PptXmlOwner::Part(_) => return Ok(0..source.len()),
+            PptXmlOwner::Shape(part, path) => (part, path),
+            PptXmlOwner::Table(part, path) => {
+                steps.extend([
+                    (A_NS, "graphic", 0),
+                    (A_NS, "graphicData", 0),
+                    (A_NS, "tbl", 0),
+                ]);
+                (part, path)
+            }
+            PptXmlOwner::Cell(part, path, row, column) => {
+                steps.extend([
+                    (A_NS, "graphic", 0),
+                    (A_NS, "graphicData", 0),
+                    (A_NS, "tbl", 0),
+                    (A_NS, "tr", row),
+                    (A_NS, "tc", column),
+                ]);
+                (part, path)
+            }
+            PptXmlOwner::TextBody(part, path, cell)
+            | PptXmlOwner::Paragraph(part, path, cell, _)
+            | PptXmlOwner::Run(part, path, cell, _, _) => {
+                if let Some((row, column)) = cell {
+                    steps.extend([
+                        (A_NS, "graphic", 0),
+                        (A_NS, "graphicData", 0),
+                        (A_NS, "tbl", 0),
+                        (A_NS, "tr", row),
+                        (A_NS, "tc", column),
+                        (A_NS, "txBody", 0),
+                    ]);
+                } else {
+                    steps.push((P_NS, "txBody", 0));
+                }
+                match owner {
+                    PptXmlOwner::Paragraph(_, _, _, paragraph) => {
+                        steps.push((A_NS, "p", paragraph))
+                    }
+                    PptXmlOwner::Run(_, _, _, paragraph, run) => {
+                        steps.extend([(A_NS, "p", paragraph), (A_NS, "r", run)])
+                    }
+                    _ => {}
+                }
+                (part, path)
+            }
+        };
+        let id = self
+            .part_shape_at(part, path)?
+            .non_visual_id()
+            .ok_or_else(|| {
+                invalid_shape_mutation("replace XML", "physical shape identity is absent")
+            })?;
+        let (_, root) = PptXmlOwner::Shape(part, path).root(self)?;
+        ppt_xml_owner_range(source, id, root, &steps)
+    }
+
     fn replace_checked_owner_xml(&mut self, owner: PptXmlOwner<'_>, xml: &str) -> Result<()> {
         let before = self.checked_owner_xml(owner)?;
+        if before == xml.as_bytes() {
+            return Ok(());
+        }
+        let before_part = self.checked_owner_xml(PptXmlOwner::Part(owner.part()))?;
         let (namespace, local) = owner.root(self)?;
         check_ppt_xml_input(xml.as_bytes(), namespace, local)?;
         self.check_xml_relationships(owner.part(), &before, xml.as_bytes())?;
-        if before == xml.as_bytes() || ppt_xml_known_owner_equivalent(&before, xml.as_bytes())? {
+        self.validate_xml_part_model(owner.part())?;
+        let range = self.xml_physical_owner_range(owner, &before_part)?;
+        let mut raw_candidate = before_part.clone();
+        raw_candidate.splice(range, xml.as_bytes().iter().copied());
+        check_ppt_frontier_changes(&before_part, &raw_candidate)?;
+        if ppt_xml_known_owner_equivalent(&before, xml.as_bytes())? {
             return Ok(());
         }
-        self.validate_xml_part_model(owner.part())?;
         let mut candidate = self.clone();
         match owner {
             PptXmlOwner::Part(ShapeOwner::Slide(index)) => {
@@ -5288,6 +6120,8 @@ impl Presentation {
                 candidate.assign_xml_run(part, path, cell, paragraph, index, xml)?
             }
         }
+        let after_part = candidate.checked_owner_xml(PptXmlOwner::Part(owner.part()))?;
+        check_ppt_frontier_changes(&before_part, &after_part)?;
         candidate.validate_xml_part_model(owner.part())?;
         // Compare the concrete modeled owner as well as retained source payload.
         // Namespace spelling alone must not publish a needless mutation.
@@ -11657,7 +12491,13 @@ impl Presentation {
 
         let mut staged = self.clone();
         staged.package.set_part(&data_part, xml);
-        let issues = staged.validate();
+        // Editing diagram data does not introduce a new shape XML admission gate.
+        // Keep all pre-existing validation categories blocking as before.
+        let issues = staged
+            .validate()
+            .into_iter()
+            .filter(|issue| !matches!(issue, ValidationIssue::InvalidXmlChild { .. }))
+            .collect::<Vec<_>>();
         if !issues.is_empty() {
             return Err(Error::InvalidPresentationMutation {
                 operation: "set SmartArt node text",
@@ -22114,6 +22954,45 @@ impl<'a> TableMut<'a> {
         }
         if self.style_id() == value.as_deref() {
             return Ok(());
+        }
+        if let Some(id) = value.as_deref() {
+            let canonical = id.to_ascii_uppercase();
+            let mut available = oxml_drawing::table::CT_TableStyle::builtin(&canonical).is_some();
+            if let ShapeMutOwner::Presentation { presentation, .. } = &self.shape.owner
+                && let Some(part) =
+                    import_table_style_part(&presentation.package, &presentation.presentation_part)?
+            {
+                if presentation.package.content_types.content_type_for(&part)
+                    != Some(oxml_opc::content_types::TABLE_STYLES)
+                {
+                    return Err(invalid_table_mutation(
+                        "set table style",
+                        "table style part has wrong content type".to_owned(),
+                    ));
+                }
+                let styles = import_table_styles(required_part(&presentation.package, &part)?)
+                    .map_err(|error| {
+                        invalid_table_mutation("set table style", error.to_string())
+                    })?;
+                let matches = styles
+                    .styles
+                    .iter()
+                    .filter(|(style, _)| style.eq_ignore_ascii_case(id))
+                    .count();
+                if matches > 1 {
+                    return Err(invalid_table_mutation(
+                        "set table style",
+                        "ambiguous table style definitions".to_owned(),
+                    ));
+                }
+                available |= matches == 1;
+            }
+            if !available {
+                return Err(invalid_table_mutation(
+                    "set table style",
+                    "style is neither built in nor defined in this presentation".to_owned(),
+                ));
+            }
         }
         table_properties_mut(self.table_mut_raw()).style_id = value;
         Ok(())
@@ -39321,4 +40200,191 @@ fn fx216_full_effective_notes_properties_match_source_after_import() {
         )
         .unwrap();
     }
+}
+
+#[cfg(test)]
+fn fx254_slide_xml(body: &str, attributes: &str) -> Vec<u8> {
+    format!(r#"<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:mc="{PPT_MC_NS}" {attributes}><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{body}</p:spTree></p:cSld></p:sld>"#).into_bytes()
+}
+
+#[test]
+fn fx254_four_xml_frontiers_refuse_before_publish() {
+    let shape = r#"<p:sp><p:nvSpPr/><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>source</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let before = fx254_slide_xml(shape, "");
+    assert!(check_ppt_frontier_changes(&before, &before).is_ok());
+    for (old, new) in [
+        ("</p:sp>", "<a:p/></p:sp>"),
+        ("<a:avLst/>", "<a:avLst/><a:bogus/>"),
+        ("<a:r>", "<a:bogus/><a:r>"),
+        ("<p:cSld>", "<p:bogus/><p:cSld>"),
+        ("<p:nvSpPr/>", ""),
+        ("<p:nvSpPr/>", "<p:nvSpPr/><p:nvSpPr/>"),
+        ("<a:avLst/>", "<z:opaque xmlns:z=\"urn:unknown\"/>"),
+    ] {
+        let source = String::from_utf8(before.clone()).unwrap();
+        assert!(source.contains(old));
+        let changed = source.replacen(old, new, 1);
+        assert!(
+            check_ppt_frontier_changes(&before, changed.as_bytes()).is_err(),
+            "{new}"
+        );
+    }
+}
+
+#[test]
+fn fx254_opaque_frontier_provenance_and_mc_scope() {
+    let original = r#"<p:sp><p:nvSpPr><p:cNvPr id="1"/></p:nvSpPr><p:spPr/><x:opaque marker="old"/><p:txBody><a:bodyPr/><a:p><a:r><a:t>before</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let before = fx254_slide_xml(original, r#"xmlns:x="urn:original""#);
+    let scalar = fx254_slide_xml(
+        &original.replace("before", "after"),
+        r#"xmlns:x="urn:original""#,
+    );
+    assert!(check_ppt_frontier_changes(&before, &scalar).is_ok());
+    let repair = fx254_slide_xml(
+        &original.replace(r#"<x:opaque marker="old"/>"#, ""),
+        r#"xmlns:x="urn:original""#,
+    );
+    assert!(check_ppt_frontier_changes(&before, &repair).is_ok());
+    let copy = fx254_slide_xml(
+        &original.replace(
+            r#"<x:opaque marker="old"/>"#,
+            r#"<x:opaque marker="old"/><x:opaque marker="old"/>"#,
+        ),
+        r#"xmlns:x="urn:original""#,
+    );
+    assert!(check_ppt_frontier_changes(&before, &copy).is_err());
+    let rebound = fx254_slide_xml(original, r#"xmlns:x="urn:other""#);
+    assert!(check_ppt_frontier_changes(&before, &rebound).is_err());
+    let empty = fx254_slide_xml("", r#"xmlns:x="urn:original" mc:Ignorable="x""#);
+    let ignored = fx254_slide_xml(original, r#"xmlns:x="urn:original" mc:Ignorable="x""#);
+    assert!(check_ppt_frontier_changes(&empty, &ignored).is_ok());
+    let blank = fx254_slide_xml(
+        &original.replace("<p:sp>", r#"<p:sp mc:Ignorable="">"#),
+        r#"xmlns:x="urn:original" mc:Ignorable="x""#,
+    );
+    assert!(check_ppt_frontier_changes(&empty, &blank).is_ok());
+    let rebound_grant = fx254_slide_xml(
+        &original.replace("<p:sp>", r#"<p:sp xmlns:x="urn:other">"#),
+        r#"xmlns:x="urn:original" mc:Ignorable="x""#,
+    );
+    assert!(check_ppt_frontier_changes(&empty, &rebound_grant).is_err());
+}
+
+#[test]
+fn fx254_finite_xml_delegates_valid_subgrammars() {
+    let before = fx254_slide_xml("", "");
+    let valid = fx254_slide_xml(
+        r#"<p:sp><p:nvSpPr/><p:spPr><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:pPr/><a:r><a:t>A</a:t></a:r><a:br/><a:fld id="one"><a:t>B</a:t></a:fld><a:r><a:t>C</a:t></a:r><a:endParaRPr/></a:p></p:txBody><p:extLst><p:ext uri="test"><foreign:payload xmlns:foreign="urn:delegated"><p:sp><p:unmodeled/></p:sp></foreign:payload></p:ext></p:extLst></p:sp>"#,
+        "",
+    );
+    assert!(check_ppt_frontier_changes(&before, &valid).is_ok());
+}
+
+#[test]
+fn fx254_retained_choice_requires_keeps_meaning() {
+    let body = r#"<mc:AlternateContent><mc:Choice Requires="x"><p:sp><p:nvSpPr/><p:spPr/></p:sp></mc:Choice><mc:Fallback/></mc:AlternateContent>"#;
+    let before = fx254_slide_xml(body, r#"xmlns:x="urn:one""#);
+    assert!(check_ppt_frontier_changes(&before, &before).is_ok());
+    let after = fx254_slide_xml(body, r#"xmlns:x="urn:two""#);
+    assert!(check_ppt_frontier_changes(&before, &after).is_err());
+}
+
+#[test]
+fn fx254_complex_mc_keeps_choice_opaque_and_checks_selected_fallback() {
+    let shape = r#"<p:sp><p:nvSpPr><p:cNvPr id="1"/></p:nvSpPr><p:spPr/></p:sp>"#;
+    let alternate = format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14"><p:sp/></mc:Choice><mc:Fallback>{shape}</mc:Fallback></mc:AlternateContent>"#
+    );
+    let source = fx254_slide_xml(&alternate, r#"xmlns:p14="urn:unsupported-choice""#);
+    let mut names = PptXmlNames::default();
+    assert!(
+        ppt_xml_frontiers(&source, &mut names)
+            .unwrap()
+            .islands
+            .is_empty()
+    );
+    let changed = String::from_utf8(source.clone())
+        .unwrap()
+        .replace("<p:spPr/>", "<p:spPr/><a:bogus/>");
+    assert!(check_ppt_frontier_changes(&source, changed.as_bytes()).is_err());
+    let moved = String::from_utf8(source.clone())
+        .unwrap()
+        .replace("</p:spTree>", &format!("{alternate}</p:spTree>"));
+    assert!(check_ppt_frontier_changes(&source, moved.as_bytes()).is_err());
+    let rebound = String::from_utf8(source.clone())
+        .unwrap()
+        .replace("urn:unsupported-choice", "urn:reinterpreted-choice");
+    assert!(check_ppt_frontier_changes(&source, rebound.as_bytes()).is_err());
+    let transition = fx254_slide_xml("", r#"xmlns:p14="urn:unsupported-choice""#);
+    let transition = String::from_utf8(transition).unwrap().replace("</p:sld>", r#"<mc:AlternateContent><mc:Choice Requires="p14"><p:transition/></mc:Choice><mc:Fallback><p:transition/></mc:Fallback></mc:AlternateContent></p:sld>"#);
+    let mut names = PptXmlNames::default();
+    assert!(
+        ppt_xml_frontiers(transition.as_bytes(), &mut names)
+            .unwrap()
+            .islands
+            .is_empty()
+    );
+    let unbound = String::from_utf8(source)
+        .unwrap()
+        .replace(r#" xmlns:p14="urn:unsupported-choice""#, "");
+    assert!(ppt_xml_frontiers(unbound.as_bytes(), &mut PptXmlNames::default()).is_err());
+}
+
+#[test]
+fn fx254_nested_selected_fallback_keeps_frontier_checks() {
+    let shape = r#"<p:sp><p:nvSpPr><p:cNvPr id="1"/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>before</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let inner =
+        format!(r#"<mc:AlternateContent><mc:Fallback>{shape}</mc:Fallback></mc:AlternateContent>"#);
+    let outer = format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14"><p:sp/></mc:Choice><mc:Fallback>{inner}</mc:Fallback></mc:AlternateContent>"#
+    );
+    let source = fx254_slide_xml(&outer, r#"xmlns:p14="urn:unsupported-choice""#);
+    assert!(
+        ppt_xml_frontiers(&source, &mut PptXmlNames::default())
+            .unwrap()
+            .islands
+            .is_empty()
+    );
+    let typed_edit = String::from_utf8(source.clone())
+        .unwrap()
+        .replace("before", "after");
+    assert!(check_ppt_frontier_changes(&source, typed_edit.as_bytes()).is_ok());
+    let changed = String::from_utf8(source.clone())
+        .unwrap()
+        .replace("<p:spPr/>", "<p:spPr/><a:bogus/>");
+    assert!(
+        check_ppt_frontier_changes(&source, changed.as_bytes()).is_err(),
+        "the actual selected nested Fallback remains a supported shape owner"
+    );
+    assert!(
+        !ppt_xml_frontiers(changed.as_bytes(), &mut PptXmlNames::default())
+            .unwrap()
+            .islands
+            .is_empty()
+    );
+}
+
+#[test]
+fn fx254_xml_scope_storage_is_linear() {
+    let uri = format!("urn:{}", "x".repeat(1024));
+    let shape = "<p:sp><p:nvSpPr/><p:spPr/><z:opaque/></p:sp>";
+    let source = fx254_slide_xml(&shape.repeat(64), &format!("xmlns:z=\"{uri}\""));
+    let mut names = PptXmlNames::default();
+    let scan = ppt_xml_frontiers(&source, &mut names).unwrap();
+    assert_eq!(scan.islands.len(), 64);
+    assert_eq!(names.values.iter().filter(|name| *name == &uri).count(), 1);
+    assert!(names.route_edges.len() < 300);
+    assert!(scan.meaning.len() < 300);
+    let nested = format!(
+        "{}{}{}",
+        "<opaque>".repeat(256),
+        "payload",
+        "</opaque>".repeat(256)
+    );
+    let source = fx254_slide_xml(&format!("<p:extLst>{nested}</p:extLst>"), "");
+    let mut names = PptXmlNames::default();
+    let scan = ppt_xml_frontiers(&source, &mut names).unwrap();
+    assert!(scan.islands.is_empty());
+    assert!(names.route_edges.len() < 270);
+    assert!(scan.meaning.len() < 270);
 }

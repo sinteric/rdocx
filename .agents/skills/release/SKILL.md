@@ -7,6 +7,6 @@ description: "Release an already prepared and reviewed Rust and Python package f
 
 Canonical source: `.claude/commands/release.md`.
 
-Source SHA-256: `707c382ee4710b5ae2f616c5b7a27e5c00ba5e9ba35671fd91d3078bd12820f6`.
+Source SHA-256: `112e51097c84f98caaad7f263521b59d0e198ef5648543d9269c7c51d4c60700`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

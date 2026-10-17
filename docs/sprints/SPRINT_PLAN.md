@@ -2762,15 +2762,19 @@ reported Python3.14 environment is separate from release qualification.
 
 #### Sprint S95.11, Remaining everyday APIs and native interoperability
 
-**Goal**: complete the remaining Issue385 repairs and the two bounded native
-interoperability carryovers. Four stories total 12 to 16 developer-days.
+**Goal**: complete the remaining Issue385 repairs and bounded native font
+interoperability. Three active stories total 10 to 13 developer-days.
 
 | F-ID | Title | Size |
 |------|-------|------|
 | F-X250 | Complete everyday Word chart equation list and note APIs | L |
 | F-X254 | Refuse invalid PowerPoint values XML and empty edits | L |
-| F-X219 | Qualify full-range text watermark interoperability | M |
 | F-X223 | Qualify native Word embedded multi-face interoperability | M |
+
+F-X219 is carried unfinished to S96 by explicit user approval. The bounded
+source investigation found no faithful full-range representation shared by Word
+and pinned LibreOffice. Preserve the0.5 restriction and failed endpoint evidence.
+This carry is not completion or native acceptance. Reopen its design at S96.
 
 #### Sprint S95.2, Bibliography, navigation and template carryovers
 
@@ -2904,13 +2908,16 @@ spreadsheet demand and broader Issue264 discussion are not added stories.
 
 **Goal**: export Word form controls as fillable AcroForm fields with an empty
 signature field, behind an opt-in option, while PDF/A and PDF/UA output stay
-valid. Three stories total about 13 developer-days.
+valid. F-X219 also carries the unfinished full-range text watermark contract.
+Four stories provisionally total15 to16 developer-days, with watermark design
+reset required before implementation.
 
 | F-ID | Title | Size |
 |------|-------|------|
 | F-X242 | Form control geometry and AcroForm field model | L |
 | F-X243 | Field appearance streams, full-font resources and conformance | L |
 | F-X244 | Signature field, bindings and CLI option | M |
+| F-X219 | Qualify full-range text watermark interoperability | M |
 
 Issue381 is accepted only when all three stories pass. F-X242 makes layout
 report each control's rectangle and maps text, rich text, checkbox,

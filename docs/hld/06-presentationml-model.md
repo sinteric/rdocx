@@ -1439,6 +1439,7 @@ pub enum ValidationIssue {
     CustomShowReference { slide_id: u32 },
     MissingLayoutRel { slide: usize },
     MissingThemeRel { master: usize },
+    InvalidXmlChild { part: String, path: String, message: String },
 }
 ```
 
@@ -1558,6 +1559,43 @@ mapping retains current slide links. Explicit mapping changes only the owning
 slide relationship target, preserving direct slide geometry, text and fields.
 
 ## Checked XML owner replacement
+
+Finite source admission covers CT_Shape, CT_Slide, CT_PresetGeometry2D and
+CT_TextParagraph direct children along supported owner routes. Shape requires
+nvSpPr then spPr, followed by optional style, txBody and extLst. Slide requires
+cSld, then optional clrMapOvr, transition, timing and extLst. Preset geometry
+admits one optional avLst. Text paragraphs admit optional pPr, any interleaving
+of r, br and fld, then optional endParaRPr. Qualified names, order and particle
+counts determine admission, independently of which content is rendered.
+
+Unknown or misplaced recognized-namespace children cannot gain admission from
+Ignorable. Foreign extension authority follows accumulated namespace URIs at
+their actual ancestor declarations. Blank local grants retain inherited ones,
+rebinding does not retarget them, and sibling scope is restored. Namespace URIs
+normalize once. Unchanged complex compatibility metadata retains raw value and
+resolved QName meaning, including unqualified Choice Requires. New unsupported
+complex metadata refuses explicitly. Namespace facts and ancestry routes use
+shared IDs and scope deltas rather than per-node copies of every ancestor.
+Compatibility traversal follows the existing provider: unsupported Choice
+branches retain opaque source, while the selected shape-tree Fallback receives
+its supported shape grammar checks, including nested AlternateContent reached
+through that Fallback. A root AlternateContent transition wrapper
+is delegated to the transition provider rather than counted as an ordinary
+slide child or flattened across mutually exclusive branches. Complex metadata
+still keeps its physical-owner, route and namespace custody. New, copied or
+reinterpreted compatibility metadata refuses. Unbound Requires prefixes remain
+invalid rather than acquiring guessed namespace authority.
+
+Ordinary imports retain malformed producer source. Validation reports finite
+frontier violations through InvalidXmlChild with part, path and message. The
+Python issue kind is invalid_xml_child. The additive public Rust enum variant
+requires downstream exhaustive matches to include the new arm. Validation does
+not become a complete recursive schema validator or reject all unsupported
+extension vocabularies. These new finite diagnostics are report-only at ordinary
+save and unrelated diagram-data edits. Existing validation categories retain
+their prior save policy. Only checked XML replacement applies the new raw and
+staged finite admission, including when the part already contains another
+preserved invalid island.
 
 Paragraph, regular run, table, cell, shape, text body, slide, layout and master
 XML use complete namespace-qualified expected roots. Captured shape kinds

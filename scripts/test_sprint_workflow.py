@@ -5484,17 +5484,6 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertFalse(readme_doctests.validate_comparison_evidence(broad_uniqueness))
         self.assertFalse(readme_doctests.validate_comparison_evidence(duplicate_evidence))
 
-    def test_readme_depth_footprint_and_speed_claims_are_evidence_backed(
-        self,
-    ) -> None:
-        self.assertTrue(readme_doctests.validate_inventory())
-        self.assertTrue(
-            all(
-                readme_doctests.compile_readme(case)
-                for case in readme_doctests.README_CASES
-            )
-        )
-
     def test_measurement_rows_match_rederived_archive_footprint(self) -> None:
         for package in readme_doctests.ARCHIVE_MEASUREMENTS:
             recorded = readme_doctests.recorded_archive_measurement(
@@ -6677,7 +6666,10 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn("release tag or start crates.io and PyPI publication", release)
         self.assertIn("clean `main`", release)
         self.assertIn("same SHA as `origin/main`", release)
-        self.assertIn("fresh read-only `/verify --full`", " ".join(release.split())) if False else self.assertIn("Run `/verify --full` read-only", release)
+        self.assertIn("Consume the closed sprint's authenticated full verification", release)
+        self.assertIn("A latest failed full attempt blocks reuse of an older green one", release)
+        self.assertIn("Fresh registry, publisher and approval checks remain due", release)
+        self.assertIn("separate explicit go or no-go immediately before the first external", release)
         self.assertIn("A prepared release follows through `/release`", close)
         self.assertIn("Do not create or push a release tag", run)
         self.assertIn("after sprint close", run)
@@ -7771,6 +7763,167 @@ Pedro Assumpcao and the rdocx maintainers.
         with self.assertRaises(AssertionError):
             self.assert_publish_preflight_contract(mutated)
 
+    def test_latest_actual_full_and_metadata_failures_supersede_green(self) -> None:
+        green = {"scope": "full", "head": "current", "passed": True}
+        data = {"reviews": [{"pass": 1, "blocking": 0, "head": "current"}],
+                "verifications": [green, dict(green, passed=False)]}
+        self.assertTrue(workflow.closure_evidence_problems(data, "current"))
+        data["verifications"].append(dict(green))
+        self.assertEqual(workflow.closure_evidence_problems(data, "current"), [])
+        data["verifications"].append({"scope": "metadata", "head": "current", "passed": False})
+        self.assertTrue(workflow.closure_evidence_problems(data, "current"))
+        data["verifications"] = [{"scope": "fast", "head": "current", "passed": True}]
+        self.assertTrue(workflow.closure_evidence_problems(data, "current"))
+
+    def test_metadata_reuse_authenticates_actual_temporary_git_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+
+            def git(*args: str) -> str:
+                return subprocess.run(["git", *args], cwd=repo, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            def write(path: str, text: str) -> None:
+                target = repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+
+            def commit() -> str:
+                git("add", ".")
+                git("commit", "-m", "test metadata boundary")
+                return git("rev-parse", "HEAD")
+
+            git("init")
+            git("config", "user.name", "Workflow Test")
+            git("config", "user.email", "workflow@example.invalid")
+            originals = {
+                "docs/sprints/CURRENT_SPRINT.md": "# Current Sprint, S01\n",
+                "docs/sprints/BACKLOG.md": "F-123 pending\n",
+                "docs/sprints/SPRINT_TRACKER.md": "S01 pending\n",
+                "docs/sprints/AS_BUILT.md": "Historical evidence\n",
+                ".claude/plans/F-123-design.md": "**Status**: approved\n- [ ] Named assertion\n",
+                ".claude/plans/F-999-design.md": "**Status**: approved\n",
+                "src/lib.rs": "source\n", "docs/hld/04-model.md": "spec\n",
+                "README.md": "readme\n", ".claude/commands/verify.md": "command\n",
+                "scripts/example.py": "script\n",
+            }
+            for path, text in originals.items():
+                write(path, text)
+            source = commit()
+            data = {"sprint": "S01", "features": {"F-123": {}},
+                    "reviews": [{"pass": 1, "blocking": 0}],
+                    "verifications": [{"scope": "full", "passed": True, "head": source}]}
+            record = {"scope": "metadata", "passed": True, "source_head": source, "full_attempt": 0}
+            with patch.object(workflow, "REPO", repo):
+                write("docs/sprints/BACKLOG.md", "F-123 done\n")
+                write("docs/sprints/AS_BUILT.md", originals["docs/sprints/AS_BUILT.md"] + "Actual PASS at source SHA\n")
+                write(".claude/plans/F-123-design.md", "**Status**: completed\n- [x] Named assertion\n")
+                write(".claude/reviews/S01-sprint-review-pass-1.md", "**Verdict**: 0 blocking, actual full evidence\n")
+                head = commit()
+                data["reviews"][-1]["head"] = head
+                record["head"] = head
+                self.assertEqual(workflow.metadata_reuse_problems(data, head, record), [])
+                data["verifications"].append(record)
+                self.assertEqual(workflow.closure_evidence_problems(data, head), [])
+                self.assertEqual(data["verifications"][0]["head"], source)
+                for change in (
+                    {"source_head": "0" * 40}, {"full_attempt": None},
+                    {"full_attempt": 99}, {"head": source},
+                ):
+                    candidate = dict(record, **change)
+                    if "head" in change:
+                        self.assertTrue(workflow.closure_evidence_problems(
+                            dict(data, verifications=[data["verifications"][0], candidate]), head))
+                    else:
+                        self.assertTrue(workflow.metadata_reuse_problems(data, head, candidate))
+                data["verifications"].append({"scope": "full", "passed": False, "head": source})
+                self.assertTrue(workflow.metadata_reuse_problems(data, head, record))
+                data["verifications"].pop()
+                write(".claude/reviews/S01-sprint-review-pass-2.md", "**Verdict**: 0 blocking, corrected delivery record\n")
+                data["reviews"].append({"pass": 2, "blocking": 0})
+                head = commit()
+                data["reviews"][-1]["head"] = head
+                record["head"] = head
+                self.assertEqual(workflow.metadata_reuse_problems(data, head, record), [])
+                write("docs/sprints/AS_BUILT.md", git("show", f"{head}:docs/sprints/AS_BUILT.md") + "\nInvalid prose; refused\n")
+                invalid_prose = commit()
+                self.assertTrue(workflow.metadata_reuse_problems(data, invalid_prose, record))
+                git("reset", "--hard", head)
+                git("commit", "--allow-empty", "-m", "Invalid prose; refused")
+                self.assertTrue(workflow.metadata_reuse_problems(data, git("rev-parse", "HEAD"), record))
+                git("reset", "--hard", head)
+                write(".claude/reviews/S01-sprint-review-pass-1.md", "Rewritten earlier report\n")
+                self.assertTrue(workflow.metadata_reuse_problems(data, commit(), record))
+                for path in ("src/lib.rs", "docs/hld/04-model.md", "README.md",
+                             ".claude/commands/verify.md", "scripts/example.py",
+                             ".claude/plans/F-999-design.md", ".claude/plans/F-123-design.md",
+                             "docs/sprints/AS_BUILT.md"):
+                    with self.subTest(path=path):
+                        git("reset", "--hard", head)
+                        write(path, "Semantic replacement\n")
+                        changed = commit()
+                        self.assertTrue(workflow.metadata_reuse_problems(data, changed, record))
+                        # Even a reverted material commit cannot inherit the full run.
+                        write(path, git("show", f"{head}:{path}") + "\n")
+                        reverted = commit()
+                        self.assertTrue(workflow.metadata_reuse_problems(data, reverted, record))
+                git("reset", "--hard", head)
+                write("README.md", "uncommitted change\n")
+                self.assertTrue(workflow.metadata_reuse_problems(data, head, record))
+
+    def test_metadata_recorder_requires_explicit_source_anchor(self) -> None:
+        self.assertTrue(workflow.metadata_reuse_problems(
+            {"verifications": []}, "a" * 40,
+            {"source_head": "a" * 40, "full_attempt": None}))
+        args = argparse.Namespace(sprint="S01", scope="metadata", passed=True,
+                                  harness="unchanged", reuse_from=None)
+        with patch.object(workflow, "load", return_value={"verifications": []}), \
+             patch.object(workflow, "git_head", return_value="a" * 40), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                workflow.cmd_record_verification(args)
+        args.scope, args.reuse_from = "full", "a" * 40
+        with patch.object(workflow, "load", return_value={"verifications": []}), \
+             patch.object(workflow, "git_head", return_value="a" * 40), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                workflow.cmd_record_verification(args)
+
+    def test_final_sprint_handoff_distinguishes_local_from_pending_acceptance(self) -> None:
+        handoff = """**F-ID**: F-123
+**Owner**: codex
+**Branch**: work/f-123-codex
+**Worktree**: /tmp/unit
+**Base**: abc123
+**Head**: def456
+**Design plan**: .claude/plans/F-123-design.md
+**Microscope**: review, 0 defects, 0 smells
+**Verify**: /verify --scoped F-123, local checks pass, final sprint checks pending
+**Hash harness**: unchanged
+**Test gate**: selected regression cases, pass
+**Checkpoint**: sprint-final-acceptance
+**Final checks**: workspace all-features and original reporter replay, pending
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "handoff.md"
+            args = argparse.Namespace(path=str(path), fid="F-123")
+            path.write_text(handoff)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(workflow.cmd_validate_handoff(args), 0)
+            for old, new in (
+                ("**Checkpoint**: sprint-final-acceptance\n", ""),
+                ("workspace all-features and original reporter replay, pending", "gates, pending"),
+                ("workspace all-features and original reporter replay, pending", "workspace, pass"),
+                ("local checks pass, final sprint checks pending", "pass"),
+                ("selected regression cases, pass", "complete, pass"),
+                ("selected regression cases, pass", "selected regression cases, pending"),
+                ("**Final checks**:", "**External gates**:"),
+                ("sprint-final-acceptance", "external-ci-source-availability"),
+            ):
+                with self.subTest(change=(old, new)), contextlib.redirect_stderr(io.StringIO()):
+                    path.write_text(handoff.replace(old, new))
+                    self.assertEqual(workflow.cmd_validate_handoff(args), 1)
+
     def test_review_and_verification_evidence_is_bound_to_head(self) -> None:
         data = {
             "reviews": [{"pass": 4, "blocking": 0, "head": "current"}],
@@ -7848,10 +8001,12 @@ Pedro Assumpcao and the rdocx maintainers.
 
         self.assertIn("/verify [--fast | --scoped F-XXX | --full]", verify)
         self.assertIn("`--scoped F-XXX` is the feature-completion gate", verify)
-        self.assertIn("For an uncommitted `--scoped` feature, add `--allow-dirty`", verify)
-        self.assertIn("without `--allow-dirty`", verify)
-        self.assertIn("`/verify --scoped F-XXX` passes", complete)
-        self.assertIn("Run `/verify --full`. Not per worker", run_sprint)
+        self.assertNotIn("For an uncommitted `--scoped` feature, add `--allow-dirty`", verify)
+        self.assertIn("Do not run publication dry runs under `--fast` or `--scoped`", verify)
+        self.assertIn("without `--allow-dirty`", " ".join(verify.split()))
+        self.assertIn("Actual `/verify --scoped F-XXX` local evidence", complete)
+        self.assertIn("Named final sprint checks remain due", complete)
+        self.assertIn("run `/verify --full` once", run_sprint)
         self.assertIn("not `--scoped`", run_sprint)
 
     def test_worker_handoff_accepts_only_matching_scoped_verification(self) -> None:

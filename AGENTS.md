@@ -127,7 +127,7 @@ Before resuming or modifying an F-ID, confirm all of:
 4. The latest microscope review and progress notes, when present.
 
 The design plan is a contract, not a suggestion. Its `## HLD impact` section is
-a file list that `/complete-feature` executes against.
+a file list implemented before verification and confirmed at completion.
 
 ## Coordination
 

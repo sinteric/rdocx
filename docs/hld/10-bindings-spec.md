@@ -306,6 +306,23 @@ line/page/column alternatives.
 
 ## Python Word formatting and checked list publication
 
+Numbering restart admission and decimal continuation use the concrete instance's
+replacement level before its abstract definition. An effective bullet cannot be
+restarted as a number or reused by the decimal helper. An effective decimal over
+an abstract bullet remains eligible. The existing abstract-level reader projection
+retains its separate inspection contract.
+
+ListLevel accepts optional nonempty XML-valid font text, carried through native
+marker properties to ascii and hAnsi font slots. Numbered-item restart=True
+creates a fresh instance starting at1. Later compatible decimal items continue
+the most recent physical explicit level restart, including after reopen, while
+unrelated plain or bullet items do not reset it. Without an active explicit
+restart, historical default selection remains. restart_numbering accepts a live
+same-document direct-body numbered non-bullet paragraph, retains its level and
+other overrides, and returns the new instance id. Its non-bool start accepts the
+full unsigned32 domain. Unprojectable imported override source refuses atomically.
+
+
 Native `Run::set_width_scale_value` accepts `Option<u32>` percent and
 `Run::set_position_value` accepts `Option<i32>` signed half-points. Some writes
 an explicit direct property, including zero. None removes only that property
@@ -3975,6 +3992,18 @@ ordered report payload.
 
 ## Python Word document operations
 
+Document.charts is a read-only tuple of owned Chart snapshots. chart_type is an
+optional integer, categories a tuple of strings and series a tuple of existing
+CategorySeriesData values. Reading preserves package bytes and held owners.
+Paragraph.add_equation retains the required format keyword and adds display=False.
+True selects existing display OfficeMath, exposed by is_display, while finite
+conversion diagnostics and inline defaults remain unchanged.
+Document.remove_footnote(id) and remove_endnote(id) use current checked native
+removal, independent of retired note handles. Non-bool signed32 ids are admitted
+before publication. Missing or reserved ids retain native refusal behavior.
+Selected note removal cannot revive retired aliases or remove unrelated notes.
+
+
 Both families' PDF diagnostic companions return the encoded payload and an
 owned diagnostic tuple from the same successful layout. Explicit Word symbols
 and numbering markers, and accepted PowerPoint character markers, preserve
@@ -4111,6 +4140,25 @@ Scoped alternate text-box replacement maps each selected logical paragraph or de
 
 ## PowerPoint Element XML surface
 
+Python save refuses a case-insensitive pdf destination before writing and names
+to_pdf. Authored changed slide dimensions must lie in the inclusive1to56 inch
+range, 914400through51206400 EMU. Exact retained imported values remain no-op,
+and changing one axis does not coerce the other. Changed horizontal or vertical
+flip flags on table and chart frames refuse before geometry materialization.
+Ordinary supported shape flips keep their established behavior.
+
+Table style selection accepts None, unchanged source, an existing built-in
+style or a uniquely defined qualified style in the actual deck style part.
+Braced GUID identity is case-insensitive without rewriting the selected spelling.
+Foreign lookalikes, absent styles and ambiguous or invalid style relationships
+refuse. Invalid imported values remain source-owned until explicitly changed.
+
+The finite XML diagnostic carrier exposes invalid_xml_child with actual part,
+path and message. Refused edits preserve package bytes, revision and held
+physical owners. The four source frontiers and inherited compatibility scope
+are the native admission contract, not a Python XML validator or a renderer
+whitelist.
+
 The exported Element exposes immutable xml:str and replace_xml(xml:str)->None.
 Paragraph, regular Run, Table, Cell, Shape, TextFrame, Slide, SlideLayout and
 SlideMaster expose element. Legacy Shape.xml remains bytes. Reads capture the
@@ -4153,6 +4201,12 @@ tag before key derivation or native publication. Licensed valid faces keep
 existing input and snapshot behavior. A permissive external font parser's
 ability to load nameless bytes does not widen that authoring contract.
 
+PowerPoint CLI replacement maps require every pair without explicit expect to
+match at least once. Explicit expect0 remains valid. An absent selected font or
+face fails without publishing a pretend removal. Non-force font commands retain
+input/alias identity checks and no-overwrite staging while their existing-output
+messages do not recommend an unavailable force option.
+
 Both CLIs use font list, font embed, font remove and font settings. Embedding
 requires --license-authorized and --license-identity, accepts --name, --font
 and --kind regular/bold/italic/bold-italic, and writes a new --output. Word also
@@ -4171,9 +4225,16 @@ The four face kinds describe authored package entries and the native-backed
 API. They are not a promise that every external application selects every
 embedded face. PowerPoint has independently qualified actual regular and bold
 use. Native Word's documented one-font-per-name behavior remains explicit,
-including synthetic bold and changed or empty saved parts, with multi-face
-interoperability owned by F-X223. API inputs, exact license authorization,
-immutable snapshots and own-renderer face selection retain their contracts.
+including synthetic bold and changed or empty saved parts. Word16.114
+build26101123 uses a genuine prepared Bold face in the qualified bold-only
+control, but uses Regular outlines with synthetic slant in the paired Italic
+control and empties that Italic part on native save. Broader native multi-face
+support remains unqualified under the accepted documented-limit outcome.
+A proper bold-slot control uses the existing
+bold kind, explicit font key and ordinary bold run without a regular face.
+It needs no family alias, new API or rewrite of the run's document semantics.
+API inputs, exact license authorization, immutable snapshots and own-renderer
+face selection retain their contracts.
 
 ## Presentation semantic text export
 

@@ -773,12 +773,13 @@ impl PyParagraph {
             .collect::<PyResult<Vec<_>>>()?;
         PyTuple::new(py, values)
     }
-    #[pyo3(signature = (source, *, format))]
+    #[pyo3(signature = (source, *, format, display=false))]
     fn add_equation(
         &self,
         py: Python<'_>,
         source: &str,
         format: &str,
+        display: bool,
     ) -> PyResult<Py<PyEquationInsertResult>> {
         let converted = match format {
             "latex" => rdocx::equation_from_latex(source),
@@ -790,7 +791,11 @@ impl PyParagraph {
             }
         }
         .map_err(|e| crate::rdocx_to_pyerr(py, e))?;
-        let equation = rdocx::OfficeMath::inline(converted.value.expressions);
+        let equation = if display {
+            rdocx::OfficeMath::display(vec![rdocx::CT_OMath::new(converted.value.expressions)])
+        } else {
+            rdocx::OfficeMath::inline(converted.value.expressions)
+        };
         let result = Py::new(
             py,
             PyEquationInsertResult {

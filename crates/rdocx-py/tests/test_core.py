@@ -8619,3 +8619,266 @@ def test_fx240_late_graph_refusal_preserves_link_run_story_and_raw_parts():
     changed.sign(key, cert)
     with pytest.raises(rdocx.StaleElementError):
         _ = old_run.text
+
+
+def test_fx250_chart_snapshots_follow_physical_occurrences():
+    import rdocx
+    d = rdocx.Document()
+    for kind, name in [(51, 'first'), (65, 'second')]:
+        data = rdocx.CategoryChartData()
+        data.categories = ['A', 'B']
+        data.add_series(name, [1, 2])
+        d.add_chart(kind, data, rdocx.Inches(4), rdocx.Inches(2))
+    d = rdocx.Document.from_bytes(d.to_bytes())
+    held = d.paragraphs[0]
+    before = d.to_bytes()
+    charts = d.charts
+    assert [(c.chart_type, c.categories, [(s.name, s.values) for s in c.series]) for c in charts] == [
+        (51, ('A', 'B'), [('first', (1.0, 2.0))]),
+        (65, ('A', 'B'), [('second', (1.0, 2.0))])]
+    assert d.to_bytes() == before and held.xml
+    with pytest.raises(AttributeError):
+        charts[0].chart_type = 5
+    for kind in (1, -4120, 5, 81, 74):
+        one = rdocx.Document()
+        if kind == 74:
+            data = rdocx.XyChartData()
+            series = data.add_series('xy')
+            series.add_data_point(1, 7)
+            series.add_data_point(2, 8)
+        else:
+            data = rdocx.CategoryChartData()
+            data.categories = ['A', 'B']
+            data.add_series('series', [7, 8])
+        one.add_chart(kind, data, rdocx.Inches(4), rdocx.Inches(2))
+        assert rdocx.Document.from_bytes(one.to_bytes()).charts[0].chart_type == kind
+
+
+def test_fx250_chart_snapshot_scope_and_refusal():
+    import copy
+    import xml.etree.ElementTree as ET
+    import rdocx
+    d = rdocx.Document()
+    data = rdocx.CategoryChartData()
+    data.categories = ['A']
+    data.add_series('one', [7])
+    d.add_chart(51, data, rdocx.Inches(4), rdocx.Inches(2))
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        parts = {n: z.read(n) for n in z.namelist()}
+    w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    c = '{http://schemas.openxmlformats.org/drawingml/2006/chart}'
+    root = ET.fromstring(parts['word/document.xml'])
+    run = root.find('.//' + w + 'r')
+    drawing = run.find(w + 'drawing')
+    run.append(copy.deepcopy(drawing))
+    opaque = ET.SubElement(run, '{urn:fx250:opaque}holder')
+    opaque.append(copy.deepcopy(drawing))
+    parts['word/document.xml'] = ET.tostring(root)
+    def package():
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, 'w', zipfile.ZIP_DEFLATED) as z:
+            for n, value in parts.items():
+                z.writestr(n, value)
+        return rdocx.Document.from_bytes(b.getvalue())
+    d = package()
+    before = d.to_bytes()
+    assert len(d.charts) == 2 and d.to_bytes() == before
+    relname = 'word/_rels/document.xml.rels'
+    rels = ET.fromstring(parts[relname])
+    relation = next(n for n in rels if n.get('Type', '').endswith('/chart'))
+    original_target = posixpath.normpath(posixpath.join('word', relation.get('Target'))).lstrip('/')
+    if relation.get('Target').startswith('/'):
+        original_target = relation.get('Target').lstrip('/')
+    renamed = 'word/renamed/physical-chart.xml'
+    parts[renamed] = parts.pop(original_target)
+    relation.set('Target', 'renamed/physical-chart.xml')
+    parts[relname] = ET.tostring(rels)
+    content_types = ET.fromstring(parts['[Content_Types].xml'])
+    for item in content_types:
+        if item.get('PartName') == '/' + original_target:
+            item.set('PartName', '/' + renamed)
+    parts['[Content_Types].xml'] = ET.tostring(content_types)
+    assert len(package().charts) == 2
+    chart = renamed
+    tree = ET.fromstring(parts[chart])
+    plot = tree.find('.//' + c + 'plotArea')
+    for item in list(plot):
+        if item.tag.endswith('barChart'):
+            item.tag = c + 'bubbleChart'
+    parts[chart] = ET.tostring(tree)
+    d = package()
+    before = d.to_bytes()
+    with pytest.raises(Exception, match='chart|Chart|plot'):
+        _ = d.charts
+    assert d.to_bytes() == before
+
+
+def test_fx250_display_equation_preserves_inline_and_diagnostics():
+    import rdocx
+    d = rdocx.Document()
+    p = d.add_paragraph('math')
+    result = p.add_equation(r'\frac{a}{b}', format='latex', display=True)
+    assert result.equation.is_display and p.equations()[0].is_display
+    p.add_equation('x', format='latex')
+    assert not p.equations()[1].is_display
+    reopened = rdocx.Document.from_bytes(d.to_bytes())
+    assert [e.is_display for e in reopened.paragraphs[0].equations()] == [True, False]
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        xml = z.read('word/document.xml')
+    assert b'<m:oMathPara' in xml and b'<m:oMath>' in xml
+    before = d.to_bytes()
+    with pytest.raises(TypeError):
+        p.add_equation('x', format='latex', display=1)
+    assert d.to_bytes() == before
+
+
+def test_fx250_numbered_restart_and_font_roundtrip():
+    import xml.etree.ElementTree as ET
+    import rdocx
+    d = rdocx.Document()
+    for text, restart in [('one', False), ('two', False), ('again one', True), ('again two', False)]:
+        d.add_numbered_list_item(text, restart=restart)
+    assert d.paragraphs[2].numbering != d.paragraphs[1].numbering
+    assert d.paragraphs[2].numbering == d.paragraphs[3].numbering
+    d = rdocx.Document.from_bytes(d.to_bytes())
+    d.add_numbered_list_item('continued')
+    assert d.paragraphs[4].numbering == d.paragraphs[3].numbering
+    new_id = d.restart_numbering(d.paragraphs[4], start=5)
+    assert d.paragraphs[4].numbering == (new_id, 0)
+    definition = d.add_numbering_definition([rdocx.ListLevel(format='bullet', text='-', font='Arial')])
+    d.add_paragraph('bullet').numbering = (d.add_numbering_instance(definition), 0)
+    d = rdocx.Document.from_bytes(d.to_bytes())
+    assert d.paragraphs[4].numbering == (new_id, 0)
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        tree = ET.fromstring(z.read('word/numbering.xml'))
+    w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    override = tree.find(f"{w}num[@{w}numId='{new_id}']/{w}lvlOverride/{w}startOverride")
+    assert override.get(w + 'val') == '5'
+    assert any(n.get(w + 'ascii') == n.get(w + 'hAnsi') == 'Arial' for n in tree.iter(w + 'rFonts'))
+    legacy = rdocx.Document()
+    definition = legacy.add_numbering_definition([rdocx.ListLevel(), rdocx.ListLevel(format='upperRoman')])
+    instance = legacy.add_numbering_instance(definition)
+    legacy.add_numbered_list_item('nested without restart', level=1)
+    assert legacy.paragraphs[0].numbering == (instance, 1)
+
+
+def test_fx250_restart_numbering_refuses_before_publication():
+    import rdocx
+    d = rdocx.Document()
+    d.add_numbered_list_item('one')
+    p = d.paragraphs[0]
+    class Index:
+        calls = 0
+        def __index__(self):
+            self.calls += 1
+            return 5
+    callback = Index()
+    for value in (True, callback, -1, 2**32):
+        before = d.to_bytes()
+        with pytest.raises((TypeError, ValueError, OverflowError)):
+            d.restart_numbering(p, start=value)
+        assert d.to_bytes() == before and p.text == 'one'
+    assert callback.calls == 0
+    plain = d.add_paragraph('plain')
+    other = rdocx.Document().add_paragraph('foreign')
+    for owner in (plain, other):
+        before = d.to_bytes()
+        with pytest.raises(Exception):
+            d.restart_numbering(owner, start=5)
+        assert d.to_bytes() == before
+    current = d.paragraphs[0]
+    new_id = d.restart_numbering(current, start=0)
+    assert d.paragraphs[0].numbering == (new_id, 0)
+    definition = d.add_numbering_definition([rdocx.ListLevel(), rdocx.ListLevel()])
+    instance = d.add_numbering_instance(definition)
+    d.add_paragraph('nested').numbering = (instance, 1)
+    nested = d.paragraphs[-1]
+    restarted = d.restart_numbering(nested, start=2**32 - 1)
+    assert d.paragraphs[-1].numbering == (restarted, 1)
+    for font in ('', 'bad\x01font'):
+        before = d.to_bytes()
+        with pytest.raises(ValueError):
+            d.add_numbering_definition([rdocx.ListLevel(font=font)])
+        assert d.to_bytes() == before
+
+
+def test_fx250_note_reference_styles_and_remove_by_id():
+    import xml.etree.ElementTree as ET
+    import rdocx
+    d = rdocx.Document()
+    d.add_paragraph('first')
+    first = d.add_footnote(d.paragraphs[0], 'remove me').id
+    d.add_paragraph('second')
+    keep = d.add_footnote(d.paragraphs[1], 'keep me').id
+    end = d.add_endnote(d.paragraphs[1], 'ending').id
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        main = z.read('word/document.xml')
+        tree = ET.fromstring(main)
+        w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        for kind, style in [('footnoteReference', 'FootnoteReference'), ('endnoteReference', 'EndnoteReference')]:
+            runs = [run for run in tree.iter(w + 'r') if run.find(w + kind) is not None]
+            assert runs and all(run.find(w + 'rPr/' + w + 'rStyle').get(w + 'val') == style for run in runs)
+        for part, marker, style in [('word/footnotes.xml', 'footnoteRef', 'FootnoteReference'), ('word/endnotes.xml', 'endnoteRef', 'EndnoteReference')]:
+            tree = ET.fromstring(z.read(part))
+            runs = [run for run in tree.iter(w + 'r') if run.find(w + marker) is not None]
+            assert runs and all(run.find(w + 'rPr/' + w + 'rStyle').get(w + 'val') == style for run in runs)
+    d.remove_footnote(first)
+    d = rdocx.Document.from_bytes(d.to_bytes())
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        notes = z.read('word/footnotes.xml')
+        assert b'keep me' in notes and b'remove me' not in notes
+        assert str(keep).encode() in notes
+    before = d.to_bytes()
+    for bad in (True, 2**31, first):
+        with pytest.raises(Exception):
+            d.remove_footnote(bad)
+        assert d.to_bytes() == before
+    d.remove_endnote(end)
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        assert b'ending' not in z.read('word/endnotes.xml')
+
+
+@pytest.mark.parametrize('abstract_format,replacement_format', [('decimal', 'bullet'), ('bullet', 'decimal')])
+def test_fx250_effective_numbering_override_restart_and_continuation(abstract_format, replacement_format):
+    import copy
+    import xml.etree.ElementTree as ET
+    import rdocx
+    w = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    d = rdocx.Document()
+    definition = d.add_numbering_definition([rdocx.ListLevel(format=abstract_format)])
+    instance = d.add_numbering_instance(definition, start=1)
+    d.add_paragraph('selected').numbering = (instance, 0)
+    with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+        parts = {name: z.read(name) for name in z.namelist()}
+    numbering = ET.fromstring(parts['word/numbering.xml'])
+    abstract = numbering.find(f"{w}abstractNum[@{w}abstractNumId='{definition}']/{w}lvl")
+    concrete = numbering.find(f"{w}num[@{w}numId='{instance}']/{w}lvlOverride")
+    level = copy.deepcopy(abstract)
+    level.find(w + 'numFmt').set(w + 'val', replacement_format)
+    level.find(w + 'lvlText').set(w + 'val', '-' if replacement_format == 'bullet' else '%1.')
+    concrete.append(level)
+    parts['word/numbering.xml'] = ET.tostring(numbering)
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name, value in parts.items():
+            z.writestr(name, value)
+    d = rdocx.Document.from_bytes(b.getvalue())
+    held = d.paragraphs[0]
+    before = d.to_bytes()
+    if replacement_format == 'bullet':
+        with pytest.raises(Exception, match='numbered|bullet'):
+            d.restart_numbering(held, start=5)
+        assert d.to_bytes() == before and held.text == 'selected'
+        d.add_numbered_list_item('decimal continuation')
+        assert d.paragraphs[-1].numbering[0] != instance
+    else:
+        new_id = d.restart_numbering(held, start=5)
+        assert d.paragraphs[0].numbering == (new_id, 0)
+        d = rdocx.Document.from_bytes(d.to_bytes())
+        d.add_numbered_list_item('continued after reopen')
+        assert d.paragraphs[-1].numbering == (new_id, 0)
+        with zipfile.ZipFile(io.BytesIO(d.to_bytes())) as z:
+            tree = ET.fromstring(z.read('word/numbering.xml'))
+        concrete = tree.find(f"{w}num[@{w}numId='{new_id}']/{w}lvlOverride")
+        assert concrete.find(w + 'startOverride').get(w + 'val') == '5'
+        assert concrete.find(w + 'lvl/' + w + 'numFmt').get(w + 'val') == 'decimal'

@@ -44,11 +44,10 @@ the stub-creation half of the command.
    sprint branch. Doing it again here puts a tracker edit on the worker branch,
    which then conflicts with every other worker at integration time.
 
-7. **Record the baseline.** For a story in M1 through M6, run the hash harness
-   and note the current digest in `.claude/scratch/F-XXX-progress.md`, so the
-   delta at completion is attributable to this story alone.
-
-8. **Report** the files created and the first checklist item to implement.
+7. **Record the source and local RED.** Record the Base and actual failing
+   regression commands in `.claude/scratch/F-XXX-progress.md`. Reuse existing
+   baseline identities. Do not run hash/pixel corpora or external oracles here.
+   Expected behavioral deltas remain declared and reviewed for the final gate.
 
 ## Refused situations
 

@@ -30,13 +30,16 @@ against the design plan as the contract.
      revise the plan** through `/design F-XXX --revise`. Do not let the code and
      the contract diverge silently.
 
-6. **Watch the harness.** For M1 through M6, run
-   `python3 scripts/hash_harness.py --check` as you go, not only at the end. A
-   delta found early is attributable to the last few edits. A delta found at
-   completion could be anything.
+6. **Update the HLD before freezing.** Execute exactly the approved plan's
+   `## HLD impact` list during implementation. Describe implemented intent,
+   without claiming pending oracle qualification passed. Source and HLD edits
+   must be present for microscope and the final sprint gate.
 
-7. **When the checklist is done**, run `/verify`, then `/microscope F-XXX
-   --working`.
+7. **When the implementation checklist is done**, consume existing applicable
+   local observations and run only missing `/verify --scoped F-XXX` checks.
+   Obtain `/microscope F-XXX --working`. Do not run a whole suite or external
+   oracle here. Record the final sprint checks still due. Source changes after
+   review require affected checks and a review of the new material.
 
 ## Progress file shape
 

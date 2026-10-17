@@ -143,6 +143,7 @@ impl From<&rpptx::ValidationIssue> for PyValidationIssue {
             Issue::CustomShowReference { .. } => "custom_show_reference",
             Issue::MissingLayoutRel { .. } => "missing_layout_rel",
             Issue::MissingThemeRel { .. } => "missing_theme_rel",
+            Issue::InvalidXmlChild { .. } => "invalid_xml_child",
         };
         Self {
             kind,
@@ -871,6 +872,18 @@ impl PyPresentation {
             .inner
             .slide_size()
             .map_or(DEFAULT_SLIDE_SIZE, |(width, height)| (width.0, height.0));
+        for (name, selected, current) in [
+            ("slide_width", width, current_width),
+            ("slide_height", height, current_height),
+        ] {
+            if selected
+                .is_some_and(|value| value != current && !(914_400..=51_206_400).contains(&value))
+            {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be between 1 and 56 inches"
+                )));
+            }
+        }
         self.inner
             .set_slide_size(
                 rpptx::Emu(width.unwrap_or(current_width)),
@@ -940,6 +953,15 @@ impl PyPresentation {
     }
 
     fn save(&self, path: PathBuf, py: Python<'_>) -> PyResult<()> {
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
+        {
+            return Err(PyValueError::new_err(
+                "save writes PPTX, use to_pdf for PDF output",
+            ));
+        }
         self.inner
             .save(path)
             .map_err(|error| rpptx_to_pyerr(py, error))

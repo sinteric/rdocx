@@ -2641,6 +2641,13 @@ parameters remain diagnostic instead of silently selecting another effect.
 
 ## Authored Word page appearance and note references
 
+New footnote and endnote reference runs and note-body markers carry their matching
+FootnoteReference or EndnoteReference character style. Missing authored character
+styles define superscript through the existing style provider. Producer styles
+are retained. Effective superscript and default note superscripting remain
+mutually exclusive, so reference paint is raised once.
+
+
 Qualified Word2010 solid text fill projects an RGB colour and alpha while
 retaining its original extension source. Gradient representations remain opaque. Style merging transports this
 semantic fill with direct-property precedence, without copying arbitrary
@@ -2792,7 +2799,21 @@ in a resource name.
 Native Word is bounded by the [documented one-font-per-name implementation](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/22da0d03-7202-4731-9518-b96bfbe4de61).
 A paired uninstalled family can paint the actual regular font with synthetic
 bold before any native save, and native saving can leave its bold part empty.
-A separate bold-body control proves that body can load, without proving
-multi-face family selection. Word multi-face interoperability belongs to
-F-X223. Neither that boundary nor native fallback weakens genuine regular,
-bold, italic and bold-italic selection in our renderer or caller overrides.
+A separate bold-body control in the regular slot proves that body can load,
+without proving bold-slot or multi-face family selection. A proper embedBold-only
+control has no embedRegular entry and uses an ordinary bold run. Its native
+selection is qualified for the tested Word16.114 build26101123 control:
+its actual glyph outlines and advances match the prepared Bold body initially,
+after native save and after normal disk reopen.
+
+The same Word build does not select the prepared Italic face in the tested
+regular-plus-italic family. All three phases use Regular outlines and advances
+with a shear transform, producing synthetic slant. Native save leaves the
+Italic font part empty. Genuine multi-face family support remains unqualified.
+The accepted investigation outcome documents this native limitation. It does
+not rename families, rewrite run semantics or change font-table serialization.
+Other controls whose PDF paint state is unsupported by the observer supply no
+face-selection verdict. HLD12 defines the evidence boundary.
+
+Neither that native limit nor fallback weakens genuine regular, bold, italic
+and bold-italic selection in our renderer or caller overrides.

@@ -2613,6 +2613,112 @@ fn tracked_ole_corpus_exposes_layout_and_master_producing_scopes() {
 }
 
 #[test]
+fn fx254_embedded_mutations_keep_imported_xml_diagnostics_report_only() {
+    for duplicate_ids in [false, true] {
+        let mut package = embedded_fixture_package(false);
+        let mut slide = String::from_utf8(package.get_part(SLIDE_ONE_PART).unwrap().to_vec())
+            .unwrap()
+            .replacen(
+                "<p:sld ",
+                &format!(r#"<p:sld xmlns:mc="{MC_NS}" xmlns:x="urn:retained-authority" mc:Ignorable="x" "#),
+                1,
+            )
+            .replace("</p:sld>", "<a:bogus/></p:sld>");
+        if duplicate_ids {
+            let shape = r#"<p:sp><p:nvSpPr><p:cNvPr id="51" name="duplicate"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#;
+            slide = slide.replace("</p:spTree>", &format!("{shape}{shape}</p:spTree>"));
+        }
+        // Seed the existing writer's namespace closure once, so subsequent
+        // unrelated mutations can be checked for exact physical slide custody.
+        let original_slide = CT_Slide::from_xml(slide.as_bytes())
+            .unwrap()
+            .to_xml()
+            .unwrap();
+        package.set_part(SLIDE_ONE_PART, original_slide.clone());
+        let source = package_bytes(package);
+        for remove in [false, true] {
+            let mut presentation = Presentation::from_bytes(&source).unwrap();
+            let issues = presentation.validate();
+            assert!(issues.iter().any(|issue| matches!(
+                issue, rpptx::ValidationIssue::InvalidXmlChild { part, .. }
+                    if part == SLIDE_ONE_PART
+            )));
+            assert_eq!(
+                issues.iter().any(|issue| matches!(
+                    issue,
+                    rpptx::ValidationIssue::DuplicateShapeId { id: 51, .. }
+                )),
+                duplicate_ids
+            );
+            let before = presentation.to_bytes().unwrap();
+            // Compare to the existing ordinary-save snapshot, whose writer closes
+            // inherited namespace scopes independently of this embedded mutation.
+            let before_package = open_opc(&before, "F254 pre-mutation save baseline");
+            let before_slide = before_package.get_part(SLIDE_ONE_PART).unwrap();
+            assert!(String::from_utf8_lossy(before_slide).contains("<a:bogus/>"));
+            assert!(String::from_utf8_lossy(before_slide).contains("urn:retained-authority"));
+            assert!(String::from_utf8_lossy(before_slide).contains(r#"mc:Ignorable="x""#));
+            let result = if remove {
+                presentation
+                    .remove_embedded_content(
+                        SLIDE_TWO_PART,
+                        "ole-rel",
+                        EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                    )
+                    .map(|_| ())
+            } else {
+                presentation
+                    .replace_embedded_content(
+                        SLIDE_TWO_PART,
+                        "ole-rel",
+                        b"replacement payload",
+                        EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                    )
+                    .map(|_| ())
+            };
+            if duplicate_ids {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("DuplicateShapeId"), "{error}");
+                assert_eq!(presentation.to_bytes().unwrap(), before);
+                assert_eq!(
+                    presentation
+                        .extract_embedded_content(SLIDE_TWO_PART, "ole-rel")
+                        .unwrap(),
+                    b"ole-executable"
+                );
+                continue;
+            }
+            result.unwrap();
+            let saved = presentation.to_bytes().unwrap();
+            let package = open_opc(
+                &saved,
+                "F254 report-only imported XML after embedded mutation",
+            );
+            assert_eq!(package.get_part(SLIDE_ONE_PART).unwrap(), before_slide);
+            let reopened = Presentation::from_bytes(&saved).unwrap();
+            assert!(reopened.validate().iter().any(|issue| matches!(
+                issue, rpptx::ValidationIssue::InvalidXmlChild { part, .. }
+                    if part == SLIDE_ONE_PART
+            )));
+            if remove {
+                assert!(
+                    reopened
+                        .extract_embedded_content(SLIDE_TWO_PART, "ole-rel")
+                        .is_err()
+                );
+            } else {
+                assert_eq!(
+                    reopened
+                        .extract_embedded_content(SLIDE_TWO_PART, "ole-rel")
+                        .unwrap(),
+                    b"replacement payload"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn embedded_extract_replace_and_remove_are_atomic_and_never_execute_payloads() {
     let mut presentation =
         Presentation::from_bytes(&package_bytes(embedded_fixture_package(false))).unwrap();
@@ -20912,7 +21018,10 @@ fn inserted_group_transform_precedes_preserved_group_properties() {
     let bytes = presentation.to_bytes().unwrap();
     let package = open_opc(&bytes, "F-109 group transform insertion");
     let xml = String::from_utf8(package.get_part(SLIDE_TWO_PART).unwrap().to_vec()).unwrap();
-    let group_start = xml.find("<p:grpSp>").unwrap();
+    let group_start = owned_xml_starts(&xml, P_NS, "grpSp")
+        .first()
+        .unwrap()
+        .offset;
     let transform = xml[group_start..].find("<a:xfrm").unwrap() + group_start;
     let preserved = xml[group_start..]
         .find("<a:solidFill><a:srgbClr val=\"112233\"/></a:solidFill>")
@@ -26892,7 +27001,7 @@ fn rich_slide_xml() -> Vec<u8> {
         text_shape("fallback")
     );
     format!(
-        r#"<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:mc="{MC_NS}"><p:cSld name="Second in storage, first in order"><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{}{picture}{table}{group}{connector}{alternate}</p:spTree></p:cSld></p:sld>"#,
+        r#"<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:mc="{MC_NS}" xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"><p:cSld name="Second in storage, first in order"><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>{}{picture}{table}{group}{connector}{alternate}</p:spTree></p:cSld></p:sld>"#,
         text_shape("plain")
     )
     .into_bytes()
@@ -33835,7 +33944,7 @@ fn fx216_imported_table_styles_remap_collisions_and_preserve_destination_default
             .unwrap()
             .table_mut()
             .unwrap()
-            .set_style_id(Some(id.into()))
+            .set_style_id(None)
             .unwrap();
         let mut source_package = saved_valid_package(&source, "table source");
         let source_style = related_part(
@@ -33861,7 +33970,27 @@ fn fx216_imported_table_styles_remap_collisions_and_preserve_destination_default
             let image = oxml_opc::relationship::rel_types::IMAGE;
             source_package.set_part_rels(&source_style, oxml_opc::Relationships::from_xml(format!(r#"<Relationships xmlns="{uri}" xmlns:z="urn:style-record"><Relationship Id="stylePicture" Type="{image}" Target="media/style-source.png" z:keep='&#69;'/></Relationships>"#).as_bytes()).unwrap());
         }
-        let source = open_package(source_package).unwrap();
+        let mut source = open_package(source_package).unwrap();
+        // Authored selection requires the actual definition installed above.
+        // Default layout placeholders are not table owners.
+        let source_table = source
+            .slide(0)
+            .unwrap()
+            .shapes()
+            .enumerate()
+            .filter(|(_, shape)| shape.table().is_some())
+            .nth(1)
+            .unwrap()
+            .0;
+        source
+            .slide_mut(0)
+            .unwrap()
+            .shape_mut(source_table)
+            .unwrap()
+            .table_mut()
+            .unwrap()
+            .set_style_id(Some(id.into()))
+            .unwrap();
         let source_before = source.to_bytes().unwrap();
         let mut destination = Presentation::new().unwrap();
         destination.add_slide(0).unwrap();
@@ -33872,7 +34001,7 @@ fn fx216_imported_table_styles_remap_collisions_and_preserve_destination_default
             .unwrap()
             .table_mut()
             .unwrap()
-            .set_style_id(Some(id.into()))
+            .set_style_id(None)
             .unwrap();
         let mut destination_package = saved_valid_package(&destination, "table destination");
         let destination_style = related_part(
@@ -33888,6 +34017,23 @@ fn fx216_imported_table_styles_remap_collisions_and_preserve_destination_default
         );
         destination_package.set_part(&destination_style, destination_xml.into_bytes());
         let mut destination = open_package(destination_package).unwrap();
+        let destination_table = destination
+            .slide(0)
+            .unwrap()
+            .shapes()
+            .enumerate()
+            .find(|(_, shape)| shape.table().is_some())
+            .unwrap()
+            .0;
+        destination
+            .slide_mut(0)
+            .unwrap()
+            .shape_mut(destination_table)
+            .unwrap()
+            .table_mut()
+            .unwrap()
+            .set_style_id(Some(id.into()))
+            .unwrap();
         let options = rpptx::ImportSlideOptions {
             layout_index: Some(0),
             ..Default::default()

@@ -20,7 +20,11 @@ the implementing session between passes.
    definition of done, and the milestone gate from
    `docs/hld/14-development-backlog.md`.
 
-3. **Review the integrated delta.** The aspects that only appear at sprint
+3. **Review the integrated delta.** Consume the actual final full and oracle
+   observations. This command does not rerun them. Completion/review-only
+   changes require bounded metadata adoption, not another product gate.
+
+   Review the aspects that only appear at sprint
    scope:
 
    | Aspect | Looks for |

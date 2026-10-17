@@ -2667,6 +2667,38 @@ impl PyStyle {
     }
 }
 
+/// Owned, read-only snapshot of one qualified direct-body chart occurrence.
+#[pyclass(name = "Chart", frozen)]
+pub struct PyChart {
+    chart_type: Option<i64>,
+    data: rdocx::ChartData,
+}
+
+#[pymethods]
+impl PyChart {
+    #[getter]
+    fn chart_type(&self) -> Option<i64> {
+        self.chart_type
+    }
+    #[getter]
+    fn categories<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.data.categories)
+    }
+    #[getter]
+    fn series<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let class = py.import("rdocx")?.getattr("CategorySeriesData")?;
+        let values = self
+            .data
+            .series
+            .iter()
+            .map(|(name, values)| {
+                class.call1((name, values.clone(), self.data.number_format.clone()))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+}
+
 /// One level of a numbering definition for `Document.add_numbering_definition`.
 ///
 /// `format` is a Word `w:numFmt` name such as `decimal`, `lowerLetter` or
@@ -2677,6 +2709,7 @@ impl PyStyle {
 #[derive(Clone, PartialEq, Eq)]
 pub struct PyListLevel {
     pub format: String,
+    pub font: Option<String>,
     pub text: Option<String>,
     pub start: Option<u32>,
     pub left_indent: Option<i64>,
@@ -2690,6 +2723,7 @@ impl PyListLevel {
     fn checklist(checked: bool) -> Self {
         Self {
             format: "bullet".to_owned(),
+            font: None,
             text: Some(if checked { "☑" } else { "☐" }.to_owned()),
             start: None,
             left_indent: None,
@@ -2698,13 +2732,14 @@ impl PyListLevel {
     }
 
     #[new]
-    #[pyo3(signature = (*, format = "decimal", text = None, start = None, left_indent = None, hanging_indent = None))]
+    #[pyo3(signature = (*, format = "decimal", text = None, start = None, left_indent = None, hanging_indent = None, font = None))]
     fn new(
         format: &str,
         text: Option<String>,
         start: Option<u32>,
         left_indent: Option<i64>,
         hanging_indent: Option<i64>,
+        font: Option<String>,
     ) -> PyResult<Self> {
         if let rdocx::ListNumberFormat::Other(_) = rdocx::ListNumberFormat::from_name(format) {
             return Err(PyValueError::new_err(format!(
@@ -2714,8 +2749,20 @@ impl PyListLevel {
         if hanging_indent.is_some_and(|value| value < 0) {
             return Err(PyValueError::new_err("hanging_indent cannot be negative"));
         }
+        if let Some(name) = &font {
+            if name.trim().is_empty() {
+                return Err(PyValueError::new_err("font must be nonempty"));
+            }
+            if name.chars().any(|c| {
+                (c < ' ' && !matches!(c, '\t' | '\n' | '\r'))
+                    || matches!(c, '\u{fffe}' | '\u{ffff}')
+            }) {
+                return Err(PyValueError::new_err("font contains a non-XML character"));
+            }
+        }
         Ok(Self {
             format: format.to_owned(),
+            font,
             text,
             start,
             left_indent,
@@ -2730,6 +2777,13 @@ impl PyListLevel {
         let mut level = rdocx::ListLevel::new(rdocx::ListNumberFormat::from_name(&self.format))
             .indentation(twips(self.left_indent), twips(self.hanging_indent), None);
         level.start = self.start;
+        if let Some(name) = &self.font {
+            level = level.marker_properties(rdocx_oxml::properties::CT_RPr {
+                font_ascii: Some(name.clone()),
+                font_hansi: Some(name.clone()),
+                ..Default::default()
+            });
+        }
         match &self.text {
             Some(text) => level.level_text(text.as_str()),
             None => level,
@@ -5732,6 +5786,26 @@ impl PyDocument {
         Ok(())
     }
 
+    fn remove_note_by_id(
+        &mut self,
+        py: Python<'_>,
+        id: &Bound<'_, PyAny>,
+        endnote: bool,
+    ) -> PyResult<()> {
+        if !id.is_instance_of::<PyInt>() || id.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err("note id must be a non-bool integer"));
+        }
+        let id = id.extract::<i32>()?;
+        let mut candidate = self.inner.clone_for_staging();
+        if endnote {
+            candidate.remove_endnote(id)
+        } else {
+            candidate.remove_footnote(id)
+        }
+        .map_err(|e| rdocx_to_pyerr(py, e))?;
+        self.publish_api_candidate(py, candidate, "Document.remove_note")
+    }
+
     fn publish_api_candidate(
         &mut self,
         py: Python<'_>,
@@ -8637,6 +8711,57 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
+    #[getter]
+    fn charts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self
+            .inner
+            .charts()
+            .map_err(|e| rdocx_to_pyerr(py, e))?
+            .into_iter()
+            .map(|(chart_type, data)| Py::new(py, PyChart { chart_type, data }))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, values)
+    }
+
+    #[pyo3(signature = (paragraph, *, start=Python::attach(|py| PyInt::new(py, 1).into_any().unbind())), text_signature = "($self, paragraph, *, start=1)")]
+    fn restart_numbering(
+        slf: Py<Self>,
+        py: Python<'_>,
+        paragraph: PyRef<'_, PyParagraph>,
+        start: Py<PyAny>,
+    ) -> PyResult<u32> {
+        let start = start.bind(py);
+        if !start.is_instance_of::<PyInt>() || start.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err("start must be a non-bool integer"));
+        }
+        let start = start.extract::<u32>()?;
+        if !paragraph.belongs_to(py, &slf) {
+            return Err(PyValueError::new_err(
+                "paragraph belongs to a different document",
+            ));
+        }
+        let ParagraphLocation::Body(index) = paragraph.validate(py)? else {
+            return Err(PyValueError::new_err(
+                "numbering restart requires a direct body paragraph",
+            ));
+        };
+        let mut document = slf.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        let id = candidate
+            .restart_numbering(index, start)
+            .map_err(|e| rdocx_to_pyerr(py, e))?;
+        document.publish_api_candidate(py, candidate, "Document.restart_numbering")?;
+        Ok(id)
+    }
+
+    fn remove_footnote(&mut self, py: Python<'_>, id: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.remove_note_by_id(py, id, false)
+    }
+
+    fn remove_endnote(&mut self, py: Python<'_>, id: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.remove_note_by_id(py, id, true)
+    }
+
     /// Effective legend properties of the live direct-body chart paragraph.
     fn chart_legend(
         slf: Py<Self>,
@@ -8825,12 +8950,13 @@ impl PyDocument {
         Ok(result)
     }
 
-    #[pyo3(signature = (text, level = 0))]
+    #[pyo3(signature = (text, level = 0, *, restart = false))]
     fn add_numbered_list_item(
         slf: Py<Self>,
         py: Python<'_>,
         text: &str,
         level: i64,
+        restart: bool,
     ) -> PyResult<Py<PyParagraph>> {
         if !(0..=8).contains(&level) {
             return Err(PyValueError::new_err("level must be between 0 and 8"));
@@ -8839,7 +8965,7 @@ impl PyDocument {
         let index = document.inner.paragraph_count();
         let mut candidate = document.inner.clone_for_staging();
         candidate
-            .try_add_numbered_list_item(text, level as u32)
+            .try_add_numbered_list_item_with_restart(text, level as u32, restart)
             .map(|_| ())
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         let prepared = document.prepare_word_revision(

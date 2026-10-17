@@ -10,8 +10,10 @@ kind.
 
 Use it during `/design`, during `/run-sprint` wave planning, and when building
 the consolidated sprint gate. **Load only the rows the proposed diff triggers.**
-A matched row adds reading and adds checks. It never replaces the story's test
-plan or lowers the `/verify` floor.
+A matched row adds reading and final integrated checks. It never replaces the
+story's local regressions or drops a qualification obligation. Run the union
+once at final sprint acceptance. Do not rerun whole suites, external oracles,
+publication, documentation, WASM or font riders per story.
 
 ## The table
 
@@ -47,8 +49,8 @@ whole sprint rather than once per worker.
 ## Why a router instead of running everything
 
 `/verify --scoped F-XXX` is the feature-completion floor, and `/verify --full`
-is the integrated sprint floor. The rows above add checks to the scoped gate
-when the feature earns them. They also join the consolidated sprint gate. The
+is the integrated sprint floor. The rows above add checks to the final integrated gate
+when the feature earns them. Scoped completion uses unique local regressions. The
 router exists so slow, manual, or environment-specific checks are chosen at
 design time rather than remembered at review time.
 

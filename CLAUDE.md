@@ -96,7 +96,7 @@ truth for what must pass.
 - **Only `/release` may create or push a `v*` release tag or start crates.io
   publication.** It requires a separate final approval at the reviewed SHA.
 - The design plan is a machine-consumed contract. Its `## HLD impact` section is
-  a file list that `/complete-feature` executes against, which is what keeps the
+  a file list implemented before verification and confirmed at completion, which is what keeps the
   spec set from rotting.
 - Commit subject is `F-XXX, short title`, with `Tests,` and `Harness,` trailer
   lines.

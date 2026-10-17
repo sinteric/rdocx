@@ -763,6 +763,17 @@ reshaping the rest.
 
 ## Python authoring and owned replacement
 
+Word Document.charts returns owned read-only snapshots from direct main-body
+paragraphs in physical occurrence order. Multiple charts in one paragraph and
+repeated references each contribute an entry. Categories and series retain the
+existing seven-family single-plot dense data projection, including the existing
+scatter X-label representation. Type uses the independent precise optional
+classifier. Unsupported subtype can return None with supported data. Unsupported
+data plots, sparse or inconsistent required vectors and malformed owners refuse
+explicitly rather than disappearing from the list. Cached snapshot reads add no
+workbook requirement. Tables, related stories and opaque descendants are excluded.
+
+
 Both package roots export `CategoryChartData`, `XyChartData` and
 `XL_CHART_TYPE` for the seven native kinds. Ordered category series use one
 shared number format. XY series require identical ordered finite X vectors.

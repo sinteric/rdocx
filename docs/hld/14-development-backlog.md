@@ -6983,7 +6983,7 @@ raise once, preserving explicit position shifts. Native typeface substitution
 and print-background preferences are reported separately from deterministic
 repository paint.
 
-The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the full-range DrawingML text opacity work in S95.11. Legacy VML text opacity and DrawingML image opacity remain unchanged.
+The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the unfinished full-range DrawingML text opacity work in S96 under an explicit user-approved carry. Legacy VML text opacity and DrawingML image opacity remain unchanged.
 
 **Depends on**: F-X206.
 **Test gate**: regression. Reproduce each missing operation or reported defect
@@ -7823,6 +7823,10 @@ Detached results carry text, owned assets and ordered diagnostics. Python string
 
 ### F-X219, Qualify full-range text watermark interoperability
 
+**Scheduling**: S96, explicitly carried unfinished from S95.11. No faithful shared
+Word and pinned LibreOffice representation was established. Preserve the0.5-only
+restriction and original failed endpoints. Reopen design before implementation.
+
 **Size**: M
 **Depends on**: F-X201
 **Test gate**: regression
@@ -7844,7 +7848,7 @@ and remove the temporary named restriction only after these controls pass.
 **Depends on**: F-X195, F-X200, F-X205, F-X210
 **Test gate**: regression
 
-Resolve Issue360 with admitted PR361. Expose existing native Word font embedding, font records and face removal in Python/CLI, plus checked Word embedding settings. Add equivalent native/Python/CLI PowerPoint face embedding, listing/removal and flags, with actual embedded font parts/relationships and schema-ordered source-preserving font lists. Explicit caller authorization, exact license identity and valid bounded font input are required. Qualify PowerPoint-produced font format before writer bytes and real uninstalled regular/bold native PowerPoint font use. Native Word acceptance uses its documented one-font-per-name limit, retaining actual synthetic bold and native save changes as evidence. All four API face kinds and genuine own-renderer face selection remain required. F-X223 carries native Word multi-face interoperability to S92 under the approved scope decision. Imported font graph preservation remains required independently. Unsupported compressed formats remain exact. Decode shared parts once, reject hostile lengths without huge allocation and preserve F195 caller override across render paths. Update existing consumer recipes and prepare concrete downstream skill guidance without falsely claiming an external submission. No new tracked font assets, product modules or dependencies are needed.
+Resolve Issue360 with admitted PR361. Expose existing native Word font embedding, font records and face removal in Python/CLI, plus checked Word embedding settings. Add equivalent native/Python/CLI PowerPoint face embedding, listing/removal and flags, with actual embedded font parts/relationships and schema-ordered source-preserving font lists. Explicit caller authorization, exact license identity and valid bounded font input are required. Qualify PowerPoint-produced font format before writer bytes and real uninstalled regular/bold native PowerPoint font use. Native Word acceptance uses its documented one-font-per-name limit, retaining actual synthetic bold and native save changes as evidence. All four API face kinds and genuine own-renderer face selection remain required. F-X223 owns native Word multi-face interoperability in S95.11. Imported font graph preservation remains required independently. Unsupported compressed formats remain exact. Decode shared parts once, reject hostile lengths without huge allocation and preserve F195 caller override across render paths. Update existing consumer recipes and prepare concrete downstream skill guidance without falsely claiming an external submission. No new tracked font assets, product modules or dependencies are needed.
 
 Current native and public contracts use checked source-owned transactions,
 immutable snapshots and distinct caller/embedded tiers. Word checked listing
@@ -7879,7 +7883,7 @@ Resolve Issue362 and assess PR363 at immutable0b9a3cccc1b31bac7ec4108c923faa176b
 **Depends on**: F-X220
 **Test gate**: differential
 
-Investigate native Word use of distinct embedded regular, bold, italic and bold-italic faces for an uninstalled family against the documented MS-OE376 one-font-per-name boundary. Preserve F-X220 API and renderer contracts. Require exact prepared font glyph and metric proof before and after native save and normal reopen, absent host installation, fresh family/key controls and recorded native normalization. A workaround must preserve document semantics and source ownership. Do not claim synthetic bold is genuine bold or rewrite family names without an approved design. This interoperability work is planned for S95.11 under the 2026-10-13 deferral. It does not gate S91 closure.
+Investigate native Word use of distinct embedded regular, bold, italic and bold-italic faces for an uninstalled family against the documented MS-OE376 one-font-per-name boundary. Preserve F-X220 API and renderer contracts. Require exact prepared font glyph and metric proof before and after native save and normal reopen, absent host installation, fresh family/key controls and recorded native normalization. A workaround must preserve document semantics and source ownership. Do not claim synthetic bold is genuine bold or rewrite family names without an approved design. This interoperability work belongs to S95.11. The bounded comparison includes proper embedBold-only with no embedRegular, authentic paired and four-role inputs, and sensitivity cases whose native outcomes are observed rather than predetermined. The historical regular-slot bold-body result does not replace the bold-slot discriminator. Genuine face attribution joins complete glyph/metric/paint evidence with actual host/source availability, source role graphs and native normalization. The concrete method is defined in HLD12. Preparation does not grant native acceptance, and a demonstrated native limit requires explicit acceptance disposition. The accepted outcome documents Word16.114 build26101123: proper Bold-only selection is genuine across initial, saved and reopened phases, while paired Italic uses Regular glyphs with synthetic slant and native save empties its Italic part. Fourteen unsupported PDF observations retain no face verdict. This completes the bounded investigation with an explicitly accepted native limitation, without claiming broader multi-face support or changing the package, API or own-renderer contracts.
 
 ### F-X224, Repair hosted release tool and stack routing
 

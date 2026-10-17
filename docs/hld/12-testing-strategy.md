@@ -3321,6 +3321,24 @@ required, and no binary fixture enters the repository.
 
 ## Binding tests
 
+Numbering replacement-level controls exercise both bullet-over-decimal refusal
+and decimal-over-bullet restart and continuation after reopen. A bounded native
+counter control requires one source build, owner discovery, item discovery and
+namespace traversal for both small and many-paragraph empty chart collections.
+The observer uses existing counters without a wall-clock threshold.
+
+Everyday Word chart, display-equation, list restart/font and note-reference/removal
+repairs use six unique local regressions with actual old-source RED and fixed-source
+GREEN observations. Independent saved-package XML observes physical chart order,
+precise type and cache values, math display boundaries, numbering overrides and
+marker font slots, both reference styles and current-id removal atomicity.
+Final integrated acceptance executes the five unchanged original Issue385 bodies
+from those four groups, with strict marker outcomes separate from body success.
+Complete installed suites, pinned structural comparisons, native appearance,
+WASM, hash/pixel and affected publication riders run in the final sprint union.
+No local regression result claims an unperformed final oracle pass.
+
+
 Word numeric qualification preserves the separate original Issue386 source and
 its four numeric rows. Tiny nonzero bare EMU spacing refuses, explicit lengths
 retain truncation, signed character spacing and intentional zero remain valid,
@@ -4433,6 +4451,23 @@ source provenance. An absent required focused input fails qualification.
 
 ## PowerPoint checked XML qualification
 
+Finite admission regressions cover all four reported owner frontiers, required
+particles, order and multiplicity before and after typed projection. Raw
+foreign children that a parser might discard cannot evade the preparse gate.
+Imported invalid inputs remain readable and receive explicit part/path
+validation diagnostics. Controls retain unique unchanged opaque source during
+valid scalar edits and reject copied, moved or rebound frontier exceptions.
+Namespace aliases, default namespaces, exact-once URI decoding, declaration-time
+Ignorable grants, blank/additive scope, sibling restoration and Choice Requires
+meaning have independent controls. Safe bounded storage counters qualify shared
+namespace and route storage without large allocation or elapsed-time claims.
+
+Local story readiness uses unique in-repo RED/GREEN tests and microscope.
+Complete ordinary installed suites, strict typing/stubs, original reporter
+markers and bodies, native PowerPoint controls and pinned external comparisons
+run once in the final sprint union. Pending native acceptance is never inferred
+from package inspection or passing local tests.
+
 Native controls exercise all nine owners and five shape variants with actual
 source-part relationships, qualified aliases, opaque inherited namespaces,
 model child sequence and save/reopen facts. Negative controls verify wrong
@@ -4490,11 +4525,63 @@ Word's positive records actual regular use, synthetic bold and empty native
 saved bold parts under the approved one-font-per-name boundary. Fresh family
 and fresh UUID controls isolate the pre-save result, and a single bold-body
 control proves font loading without substituting for multi-face acceptance.
-That additional interoperability belongs to F-X223. Word's disabled control
+The historical single bold-body control stores that body in embedRegular with
+a plain run. It does not qualify the distinct proper embedBold-only control,
+which has no embedRegular and uses an ordinary bold run. That additional
+interoperability belongs to F-X223. Word's disabled control
 retains its first loaded-face PDF and the different reopened fallback PDF
 after native font-part removal. It does not falsely assert raster continuity.
 Changed-face controls built from one regular body can synthesize a bold
 variant and do not replace the genuine PowerPoint paired-face positive.
+
+The bounded Word multi-face matrix uses licensed authentic regular, bold,
+italic and bold-italic bodies with distinguishing unchanged outlines and
+metrics, fresh family identities and explicit keys. It includes the proper
+bold-slot-only discriminator, each regular-plus-other-face pair and all four
+roles, alongside missing-font, disabled-embedding, raw-storage and changed-Bold
+sensitivity cases. Every probe has the actual 15 characters
+`afmrW0123456789`. These cases retain initial, native-saved and known-close
+normal disk-reopened observations, actual app/build and source/output custody.
+Fresh native host admission checks both the test identities and source-face
+family/path availability. Preparation-time absence is not future admission or
+proof of the application's font-cache state.
+
+An independent PDF observer resolves the actual selected resource, character
+map and embedded program for every text show. It compares nonempty complete
+probe glyph outlines, contour flags and normalized advances/bearings against
+all four prepared faces, requiring a unique intended-face match rather than
+selecting a source by resource name. Active rendering mode, stroke width,
+text/graphics transforms and repeated paint distinguish genuine selection from
+synthesis. Declare metric tolerance rules before capture from source
+units-per-em and serialized PDF width and operand quantization. Preserve actual
+character/word spacing and TJ adjustments, rather than substituting summed
+source advances for painted text geometry.
+Unsupported font programs, encodings, forms or paint state require explicit
+refusal or a reviewed bounded observer extension, never guessed attribution.
+
+Native face-use evidence joins these PDF facts with authenticated source role
+relationships, fresh host/source-face availability and sensitivity outcomes.
+Name-only derivative outlines alone cannot exclude an identical installed
+fallback. Saved font-part emptiness, key/name changes and other normalization
+are separate observations. Disabled embedding can govern saving while an
+already loaded face remains usable, and raw storage can be handled differently
+by native consumers. Neither control has a predetermined failure outcome.
+Genuine multi-face acceptance requires the actual intended positive faces or
+an explicit separately accepted native-limit disposition. Preparation and
+historical observations do not grant that acceptance.
+
+The accepted Word16.114 build26101123 qualification is bounded. The proper
+Bold-only control has a unique genuine prepared-Bold match in all three
+phases. The paired Italic control has a unique Regular-outline match with
+shear and matching Regular advances in all three phases. Its saved Italic
+part is empty. These actual glyph facts distinguish synthetic slant from
+genuine Italic use. All27 phase captures retain custody. Thirteen observations
+completed, while14 refused unsupported PDF stroke colour-space state and
+therefore have no face verdict. Missing-font and raw-storage observations do
+not match a prepared face. Accepting this documented native limit completes
+the bounded investigation without qualifying the unsupported cells or genuine
+multi-face support. Native application resave normalization remains separate
+from unchanged library package and renderer contracts.
 
 Native application normalization remains separate from the library's exact
 unrelated-edit preservation controls. Known absent historical movie and PNG

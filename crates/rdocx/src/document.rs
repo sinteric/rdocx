@@ -24413,6 +24413,16 @@ impl Document {
             ));
         }
         let mut candidate = self.clone_for_staging();
+        if candidate.style("FootnoteReference").is_none() {
+            candidate.add_style(
+                StyleBuilder::character("FootnoteReference", "footnote reference").run_properties(
+                    CT_RPr {
+                        vert_align: Some("superscript".into()),
+                        ..Default::default()
+                    },
+                ),
+            )?;
+        }
         candidate
             .read_story_paragraph(&position.location, |paragraph| paragraph.run_count())?
             .checked_sub(position.run_index)
@@ -24434,6 +24444,10 @@ impl Document {
         candidate.reserve_footnotes_bundle()?;
         let mut paragraph = CT_P::new();
         let mut note_marker = CT_R::new("");
+        note_marker.properties = Some(CT_RPr {
+            style_id: Some("FootnoteReference".into()),
+            ..Default::default()
+        });
         note_marker.content.clear();
         note_marker.extra_xml.push(b"<w:footnoteRef/>".to_vec());
         note_marker.extra_xml_positions.push(0);
@@ -24452,6 +24466,10 @@ impl Document {
         candidate.refresh_related_story_caches()?;
         candidate.invalidate_layout();
         let mut run = CT_R::new("");
+        run.properties = Some(CT_RPr {
+            style_id: Some("FootnoteReference".into()),
+            ..Default::default()
+        });
         run.content = vec![RunContent::FootnoteRef {
             id,
             custom_mark: None,
@@ -24492,6 +24510,16 @@ impl Document {
             ));
         }
         let mut candidate = self.clone_for_staging();
+        if candidate.style("EndnoteReference").is_none() {
+            candidate.add_style(
+                StyleBuilder::character("EndnoteReference", "endnote reference").run_properties(
+                    CT_RPr {
+                        vert_align: Some("superscript".into()),
+                        ..Default::default()
+                    },
+                ),
+            )?;
+        }
         candidate
             .read_story_paragraph(&position.location, |paragraph| paragraph.run_count())?
             .checked_sub(position.run_index)
@@ -24524,6 +24552,10 @@ impl Document {
         }
         let mut paragraph = CT_P::new();
         let mut note_marker = CT_R::new("");
+        note_marker.properties = Some(CT_RPr {
+            style_id: Some("EndnoteReference".into()),
+            ..Default::default()
+        });
         note_marker.content.clear();
         note_marker.extra_xml.push(b"<w:endnoteRef/>".to_vec());
         note_marker.extra_xml_positions.push(0);
@@ -24540,6 +24572,10 @@ impl Document {
         set_story_source_xml(&mut candidate, &part_name, updated)?;
         candidate.invalidate_layout();
         let mut run = CT_R::new("");
+        run.properties = Some(CT_RPr {
+            style_id: Some("EndnoteReference".into()),
+            ..Default::default()
+        });
         run.content = vec![RunContent::EndnoteRef {
             id,
             custom_mark: None,
@@ -26324,6 +26360,68 @@ impl Document {
         Ok((location, xml, reference.clone(), part))
     }
 
+    /// Owned chart snapshots in direct main-body paragraph and occurrence order.
+    /// Related stories, tables and opaque wrappers are outside this finite scope.
+    pub fn charts(&self) -> Result<Vec<(Option<i64>, oxml_chart::ChartData)>> {
+        let mut charts = Vec::new();
+        #[cfg(test)]
+        STORY_SOURCE_BUILDS.set(STORY_SOURCE_BUILDS.get() + 1);
+        let source = self.document.to_xml()?;
+        let owner = scan_story_owners(&source, StoryKind::Body)?
+            .into_iter()
+            .find(|owner| owner.kind == StoryKind::Body)
+            .ok_or_else(|| Error::Other("chart body owner is absent".into()))?;
+        let paragraphs = scan_story_items(&source, &owner)?
+            .into_iter()
+            .filter(|item| item.direct_owner_child && item.kind == StoryItemKind::Paragraph)
+            .collect::<Vec<_>>();
+        let scopes =
+            story_namespace_scopes_at(&source, paragraphs.iter().map(|item| item.full.start))?;
+        for paragraph in paragraphs {
+            let scope = scopes
+                .get(&paragraph.full.start)
+                .ok_or_else(|| Error::Other("chart paragraph namespace scope is absent".into()))?;
+            let xml = close_content_fragment_namespaces(&source[paragraph.full], scope)?;
+            for reference in word_chart_references(&xml)?.into_iter().filter(|r| r.owned) {
+                let relationships = self
+                    .package
+                    .get_part_rels(&self.doc_part_name)
+                    .ok_or_else(|| Error::Other("chart relationships are absent".into()))?;
+                let mut matching = relationships
+                    .items
+                    .iter()
+                    .filter(|r| r.id == reference.relationship_id);
+                let relationship = matching
+                    .next()
+                    .filter(|r| r.rel_type == rel_types::CHART && relationship_is_internal(r))
+                    .ok_or_else(|| {
+                        Error::Other("chart relationship is missing, external or invalid".into())
+                    })?;
+                if matching.next().is_some() {
+                    return Err(Error::Other("chart relationship is ambiguous".into()));
+                }
+                let part =
+                    OpcPackage::resolve_rel_target(&self.doc_part_name, &relationship.target);
+                if self.package.content_types.content_type_for(&part) != Some(content_types::CHART)
+                {
+                    return Err(Error::Other(format!(
+                        "chart {part} has invalid content type"
+                    )));
+                }
+                let source = self
+                    .package
+                    .get_part(&part)
+                    .ok_or_else(|| Error::Other(format!("chart {part} is absent")))?;
+                let kind = oxml_chart::read_chart_type(source)
+                    .map_err(|e| Error::Other(format!("chart {part}: {e}")))?;
+                let (_, data) = oxml_chart::read_chart_data(source)
+                    .map_err(|e| Error::Other(format!("chart {part}: {e}")))?;
+                charts.push((kind, data));
+            }
+        }
+        Ok(charts)
+    }
+
     /// Read effective legend settings from exactly one owned direct-body chart.
     pub fn chart_legend(&self, paragraph: usize) -> Result<oxml_chart::LegendSettings> {
         let (_, _, _, part) = self.chart_legend_owner(paragraph)?;
@@ -26678,6 +26776,31 @@ impl Document {
             rdocx_oxml::numbering::ST_NumberFormat::Other(_) => None,
             _ => Some(false),
         }
+    }
+
+    // Concrete instance replacement levels are complete effective levels, just
+    // as in layout. Keep the existing public abstract-level projection unchanged.
+    fn effective_numbering_format(&self, num_id: u32, level: u32) -> Option<&str> {
+        if num_id == 0 {
+            return None;
+        }
+        let numbering = self.numbering.as_ref()?;
+        let instance = numbering.nums.iter().find(|value| value.num_id == num_id)?;
+        let definition = numbering.get_abstract_num_for(num_id)?;
+        let base = definition.levels.iter().find(|value| value.ilvl == level)?;
+        let effective = instance
+            .level_overrides
+            .iter()
+            .find(|value| value.ilvl == level)
+            .and_then(|value| value.level.as_ref())
+            .unwrap_or(base);
+        Some(
+            effective
+                .num_fmt
+                .as_ref()
+                .map(ST_NumberFormat::to_str)
+                .unwrap_or("decimal"),
+        )
     }
 
     /// Resolve the public reader projection for one numbering level.
@@ -28577,6 +28700,16 @@ impl Document {
 
     /// Checked counterpart. Invalid text, levels and package graphs leave the document unchanged.
     pub fn try_add_numbered_list_item(&mut self, text: &str, level: u32) -> Result<Paragraph<'_>> {
+        self.try_add_numbered_list_item_with_restart(text, level, false)
+    }
+
+    /// Checked numbered authoring with persisted explicit restart continuation.
+    pub fn try_add_numbered_list_item_with_restart(
+        &mut self,
+        text: &str,
+        level: u32,
+        restart: bool,
+    ) -> Result<Paragraph<'_>> {
         if level > 8 {
             return Err(Error::Other(
                 "list level must be between 0 and 8".to_owned(),
@@ -28589,17 +28722,56 @@ impl Document {
         candidate.invalidate_layout();
         // Find or create a numbered list numId
         let existing = candidate.numbering.as_ref().and_then(|numbering| {
-            numbering.nums.iter().find(|n| {
+            numbering.nums.iter().find(|instance| {
                 numbering
-                    .get_abstract_num_for(n.num_id)
-                    .map(|a| {
-                        a.levels.first().and_then(|l| l.num_fmt.as_ref())
-                            == Some(&rdocx_oxml::numbering::ST_NumberFormat::Decimal)
+                    .get_abstract_num_for(instance.num_id)
+                    .is_some_and(|definition| {
+                        definition
+                            .levels
+                            .first()
+                            .and_then(|value| value.num_fmt.as_ref())
+                            == Some(&ST_NumberFormat::Decimal)
                     })
-                    .unwrap_or(false)
+                    && !matches!(
+                        candidate.effective_numbering_format(instance.num_id, level),
+                        Some("bullet" | "none")
+                    )
             })
         });
-        let num_id = if let Some(existing) = existing {
+        let continuation = candidate
+            .document
+            .body
+            .content
+            .iter()
+            .rev()
+            .filter_map(|item| {
+                let BodyContent::Paragraph(p) = item else {
+                    return None;
+                };
+                let properties = p.properties.as_ref()?;
+                let id = properties.num_id?;
+                if properties.num_ilvl != Some(level) {
+                    return None;
+                }
+                let instance = candidate
+                    .numbering
+                    .as_ref()?
+                    .nums
+                    .iter()
+                    .find(|n| n.num_id == id)?;
+                (candidate
+                    .effective_numbering_format(id, level)
+                    .is_some_and(|name| name == "decimal")
+                    && instance
+                        .level_overrides
+                        .iter()
+                        .any(|v| v.ilvl == level && v.start_override.is_some()))
+                .then_some(id)
+            })
+            .next();
+        let num_id = if let Some(id) = continuation {
+            id
+        } else if let Some(existing) = existing {
             existing.num_id
         } else {
             let (abstract_id, num_id) = candidate.identifiers.reserve_numbering_ids()?;
@@ -28626,12 +28798,72 @@ impl Document {
             .body
             .content
             .push(BodyContent::Paragraph(p));
+        if restart {
+            let index = candidate.paragraph_count() - 1;
+            candidate.restart_numbering(index, 1)?;
+        }
         candidate.validate_numbering_graph()?;
         self.commit_staged_mutation(candidate);
         match self.document.body.content.last_mut().unwrap() {
             BodyContent::Paragraph(p) => Ok(Paragraph { inner: p }),
             _ => unreachable!(),
         }
+    }
+
+    /// Restart one current direct-body numbered paragraph without changing its peers.
+    pub fn restart_numbering(&mut self, paragraph: usize, start: u32) -> Result<u32> {
+        if self.content_index_of_paragraph(paragraph).is_none() {
+            return Err(Error::Other(
+                "numbering restart requires a direct body paragraph".into(),
+            ));
+        }
+        self.validate_numbering_graph()?;
+        let properties = self
+            .paragraph(paragraph)
+            .and_then(|p| p.inner.properties.as_ref())
+            .ok_or_else(|| Error::Other("paragraph has no explicit numbering".into()))?;
+        let (id, level) = properties
+            .num_id
+            .zip(properties.num_ilvl)
+            .ok_or_else(|| Error::Other("paragraph has no explicit numbering level".into()))?;
+        if level > 8
+            || self
+                .effective_numbering_format(id, level)
+                .is_none_or(|name| matches!(name, "bullet" | "none"))
+        {
+            return Err(Error::Other(
+                "numbering restart requires a numbered non-bullet level".into(),
+            ));
+        }
+        let mut instance = self
+            .numbering_instance(id)
+            .ok_or_else(|| Error::Other("numbering instance is absent".into()))?;
+        if instance.has_unmodeled_properties {
+            return Err(Error::Other(
+                "numbering restart cannot project unsupported override source".into(),
+            ));
+        }
+        if let Some(value) = instance
+            .level_overrides
+            .iter_mut()
+            .find(|v| v.level == level)
+        {
+            value.start = Some(start);
+        } else {
+            instance
+                .level_overrides
+                .push(NumberingLevelOverride::new(level).start(start));
+        }
+        let mut candidate = self.clone_for_staging();
+        let new_id =
+            candidate.add_numbering_instance(instance.definition_id, &instance.level_overrides)?;
+        candidate
+            .paragraph_mut(paragraph)
+            .ok_or_else(|| Error::Other("numbering paragraph disappeared".into()))?
+            .set_numbering(new_id, level);
+        candidate.validate_numbering_graph()?;
+        self.commit_staged_mutation(candidate);
+        Ok(new_id)
     }
 
     /// Create a list definition with explicit per-level formats and return
@@ -36767,7 +36999,12 @@ fn word_chart_references(xml: &[u8]) -> Result<Vec<WordChartReference>> {
             .read_resolved_event()
             .map_err(|e| Error::Other(e.to_string()))?;
         let namespace = match namespace {
-            ResolveResult::Bound(Namespace(uri)) => uri.to_vec(),
+            ResolveResult::Bound(Namespace(uri)) => quick_xml::escape::unescape(
+                std::str::from_utf8(uri).map_err(|e| Error::Other(e.to_string()))?,
+            )
+            .map_err(|e| Error::Other(e.to_string()))?
+            .as_bytes()
+            .to_vec(),
             _ => Vec::new(),
         };
         let after = reader.buffer_position() as usize;
@@ -36793,6 +37030,7 @@ fn word_chart_references(xml: &[u8]) -> Result<Vec<WordChartReference>> {
                     && parents[5].0 == oxml_chart::A_NS.as_bytes()
                     && parents[5].1 == b"graphicData"
                     && parents[5].2;
+                let previous_references = references.len();
                 let mut chart_data = false;
                 for attribute in element.attributes() {
                     let attribute = attribute.map_err(|e| Error::Other(e.to_string()))?;
@@ -36803,7 +37041,10 @@ fn word_chart_references(xml: &[u8]) -> Result<Vec<WordChartReference>> {
                         chart_data = true;
                     }
                     let (ns, name) = reader.resolver().resolve_attribute(attribute.key);
-                    if matches!(ns,ResolveResult::Bound(Namespace(uri)) if uri==rdocx_oxml::namespace::R_NS.as_bytes())
+                    if matches!(ns, ResolveResult::Bound(Namespace(uri)) if
+                        quick_xml::escape::unescape(std::str::from_utf8(uri)
+                            .map_err(|e| Error::Other(e.to_string()))?)
+                            .map_err(|e| Error::Other(e.to_string()))?.as_ref() == rdocx_oxml::namespace::R_NS)
                     {
                         let (start, end) =
                             story_attribute_value_span(&xml[before..after], attribute.key.as_ref())
@@ -36816,6 +37057,20 @@ fn word_chart_references(xml: &[u8]) -> Result<Vec<WordChartReference>> {
                             owned: owned && name.as_ref() == b"id",
                         });
                     }
+                }
+                if owned
+                    && (references[previous_references..]
+                        .iter()
+                        .filter(|r| r.owned)
+                        .count()
+                        != 1
+                        || references[previous_references..]
+                            .iter()
+                            .any(|r| r.owned && r.relationship_id.is_empty()))
+                {
+                    return Err(Error::Other(
+                        "owned chart requires exactly one relationship id".into(),
+                    ));
                 }
                 if !empty {
                     parents.push((namespace, local, chart_data));
@@ -38797,6 +39052,60 @@ mod tests {
             (legacy, combined) => {
                 panic!("inventory admission changed: legacy={legacy:?} combined={combined:?}")
             }
+        }
+    }
+
+    #[test]
+    fn fx250_chart_reader_ignores_unrelated_missing_header() {
+        let mut document = Document::new();
+        let data = oxml_chart::ChartData {
+            categories: vec!["A".into()],
+            series: vec![("series".into(), vec![7.0])],
+            ..Default::default()
+        };
+        document
+            .add_chart(
+                ChartKind::Bar,
+                Length::inches(4.0),
+                Length::inches(2.0),
+                &data,
+            )
+            .unwrap();
+        document.set_header("unrelated");
+        let (id, _) = document.header_footer_rel_ids().into_iter().next().unwrap();
+        let part = document.header_footer_part_name(&id, true).unwrap();
+        document.package.remove_part(&part);
+        assert!(document.story_sources().is_err());
+        let before = document.document.to_xml().unwrap();
+        let charts = document.charts().unwrap();
+        assert_eq!(charts.len(), 1);
+        assert_eq!(charts[0].1.categories, ["A"]);
+        assert_eq!(document.document.to_xml().unwrap(), before);
+        assert!(document.package.get_part(&part).is_none());
+    }
+
+    #[test]
+    fn fx250_chart_empty_collection_discovers_body_once() {
+        for paragraphs in [1, 64] {
+            let mut document = Document::new();
+            for _ in 0..paragraphs {
+                document.add_paragraph("No chart here");
+            }
+            STORY_SOURCE_BUILDS.set(0);
+            STORY_OWNER_SCANS.set(0);
+            FX237_ITEM_SCANS.set(0);
+            STORY_NAMESPACE_SCANS.set(0);
+            assert!(document.charts().unwrap().is_empty());
+            assert_eq!(
+                (
+                    STORY_SOURCE_BUILDS.get(),
+                    STORY_OWNER_SCANS.get(),
+                    FX237_ITEM_SCANS.get(),
+                    STORY_NAMESPACE_SCANS.get()
+                ),
+                (1, 1, 1, 1),
+                "empty chart collection must discover the body once for {paragraphs} paragraphs"
+            );
         }
     }
 

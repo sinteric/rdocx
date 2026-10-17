@@ -12,7 +12,7 @@ use rpptx_oxml::presentation::CT_Presentation;
 use rpptx_oxml::slide_parts::{CT_Slide, CT_SlideLayout, CT_SlideMaster};
 use sha2::{Digest, Sha256};
 
-use crate::{Error, Presentation, Result};
+use crate::{Error, Presentation, Result, ValidationIssue};
 
 const P_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
 const STRICT_P_NS: &str = "http://purl.oclc.org/ooxml/presentationml/main";
@@ -526,7 +526,13 @@ impl Presentation {
         let mut output = Cursor::new(Vec::new());
         package.write_to(&mut output)?;
         let mut reopened = Self::from_bytes(output.get_ref())?;
-        let issues = reopened.validate();
+        // Finite XML diagnostics remain report-only for unrelated embedded edits.
+        // Preserve every validation category that blocked this transaction before.
+        let issues = reopened
+            .validate()
+            .into_iter()
+            .filter(|issue| !matches!(issue, ValidationIssue::InvalidXmlChild { .. }))
+            .collect::<Vec<_>>();
         if !issues.is_empty() {
             return Err(invalid(
                 "mutate embedded content",

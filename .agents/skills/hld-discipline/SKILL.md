@@ -7,6 +7,6 @@ description: "How an F-ID updates docs/hld/. The spec set describes current inte
 
 Canonical source: `.claude/skills/hld-discipline.md`.
 
-Source SHA-256: `ffeef9a0dac583be1baf7ef117f2d460a92818717e3e87aa1377cdce86666926`.
+Source SHA-256: `3fec27552228fad12c87b8583210fbdd5ea92142ace51638e5cc615a3779694b`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

@@ -222,6 +222,28 @@ impl PyShape {
         let current = presentation
             .current_path(&self.path)
             .ok_or_else(|| PyIndexError::new_err("shape owner absent"))?;
+        let shape = native_shape_ref_at(&presentation.inner, &current)
+            .ok_or_else(|| PyIndexError::new_err("shape owner absent"))?;
+        let current_flags = shape
+            .flips()
+            .ok_or_else(|| PyValueError::new_err("opaque shape has no flip flags"))?;
+        if value
+            == if horizontal {
+                current_flags.0
+            } else {
+                current_flags.1
+            }
+        {
+            return Ok(());
+        }
+        if matches!(
+            shape.shape_type(),
+            Some(rpptx::ShapeType::Table | rpptx::ShapeType::Chart)
+        ) {
+            return Err(PyValueError::new_err(
+                "PowerPoint does not support flip flags on table or chart frames",
+            ));
+        }
         let mut candidate = presentation.inner.clone();
         candidate
             .materialize_owner_geometry(

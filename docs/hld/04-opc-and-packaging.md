@@ -1890,6 +1890,22 @@ DrawingML text watermark compatibility preserves one WPS choice and a real VML t
 
 ## Checked Word operation source ownership
 
+The bulk chart reader serializes only the main body once, without resolving
+unrelated story relationships. It discovers body owners and direct items once, then closes
+paragraph namespace scope from one batched traversal. Empty chart collections do
+not rescan or rebuild the complete body for each paragraph.
+
+Direct-body Word chart snapshots enumerate physical paragraph and drawing occurrences,
+including repeated references to shared targets. Only the qualified direct
+paragraph/run/drawing/inline-or-anchor/graphic/graphicData/chart chain grants
+read authority. Namespace URI references are normalized once. Unique internal
+relationships resolve from the actual document part with checked chart content
+types. Reads do not publish revisions or normalize retained chart source.
+Tables, related stories and opaque wrappers remain outside this finite collection.
+Numbering restart and note removal stage the existing native candidate and
+publish only after validation, preserving other physical owners on refusal.
+
+
 Captured hyperlink records bind the current physical owner and its ordinal.
 Unrelated link changes retain a proven surviving owner. Removing a link
 retires its captured record even when an identical public record remains or
@@ -2002,6 +2018,23 @@ contracts, and success JSON follows file publication.
 
 ## Checked PowerPoint XML transactions
 
+The finite admission gate checks both raw incoming XML spliced into its actual
+physical owning part and the typed candidate after parsing. Qualified shape-tree
+identity and the selected table, cell, body, paragraph or regular-run path locate
+the raw range without borrowing another owner's namespace authority. A parser
+cannot hide a newly invalid child by dropping or normalizing it before the gate.
+The owning part snapshot includes live typed edits and retained root scope.
+
+Only direct children of qualified sp, sld, prstGeom and text p at supported
+physical traversal frontiers receive the new grammar checks. Original opaque
+exceptions survive only at the same unique physical route and qualified
+enclosing shape identity, including enclosing group identities, with exact
+source and namespace/compatibility meaning. Whole-part replacement cannot
+transfer an exception by changing or swapping nonvisual shape IDs. Removing an invalid child can repair the
+source. Delegated payloads keep their existing providers, without a recursive
+unknown-element policy. Exact no-op precedes admission. The existing cloned
+transaction and relationship cleanup still publish once after all checks.
+
 Checked replacement resolves relationships from the selected physical owner
 part. Internal slide targets must be actual slide parts. Image targets must
 match their actual format and registered content type, with bounded complete
@@ -2072,6 +2105,13 @@ embedding can remove font parts on native save even while the already loaded
 document still paints an embedded face. A normal reopened copy can then use
 fallback. These observed native changes do not authorize the library to discard
 opaque source or reinterpret missing decoded bytes as a successfully used font.
+Four authored relationship slots describe the package graph, not a guarantee
+that native Word consumes all four faces. Initial, native-saved and normally
+reopened graph observations remain separate from PDF face-selection evidence.
+Word16.114 build26101123 can also empty the Italic part of a regular-plus-italic
+family on save. The corresponding native PDFs use Regular outlines with an
+affine slant before save and after normal reopen. This native normalization
+is not permission for the library to drop an authored face or its source bytes.
 
 ## Presentation semantic export resources
 

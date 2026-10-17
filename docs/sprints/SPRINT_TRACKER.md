@@ -112,6 +112,8 @@ defended.
 | S94 | M24, X | 5 | 5 | 0 | 14 to 19 | 1 | Five Python, CLI and finite conversion contracts completed. Actual days count the single worked date 2026-10-16, not person-effort. Independent sprint review pass2 has 0 blocking and 0 should-fix findings, with one optional formatting nit. Fresh reviewed-HEAD full verification at 588f2640 passed all 18 native/repository commands, 49 unchanged hashes, seven deterministic pixels and 22 verified archives, with authenticated installed, hosted and finite oracle evidence. Hosted acceptance remains the authenticated build-only 27-job run at 9cdbea00, with four publication guards skipped. M24 continues to S99. No release prepared |
 | S95 | M24, X | 9 | 9 | 0 | 22 to 31 | 1 | Nine contracts completed, including the user-approved Issue386 expansion and Word0.16.2/shared-PowerPoint0.14.2 release preparation. Actual days count the single worked date2026-10-16, not person-effort. Actual6b source has1908 installed tests with no skips, hosted27success4publicationSKIP/26payloads/172 runtime calls, public23, PPT four routes, Issue38619+16 and pinned reporter12strictXPASS/raw1 plus12bodies/raw0. Integrated native18commands,49hashes,7pixels and22verified archives pass at6b7c9798. Formal sprint review remains due. S95.11 scope remains future backlog, not S95 carries. Main merge, sprint close and separately approved publication have not occurred |
 
+| S95.11 | M24, X | 4 | 3 | 1 | 12 to 16 | 2 | F-X250/F-X254 repairs and F-X223 bounded native investigation completed. User accepted documenting Word's native limit, broader genuine multi-face use remains unqualified and fourteen observer refusals remain unsupported. F-X219 full-range opacity remains unfinished and is carried to S96, which has not started. Retained three-story estimate10 to13 developer-days. Actual source-bound verification at 05ba6cc8461a896fa751ca7dc1fe209a8fa70045 joins H3/H5/836/H7 observations, with6616 unique native passes/73ignored,11doctests,955Word/1007PPT installed plus typing/stubs,27 distinct Issue385 bodies,49hashes/7pixels and22verified package union. Actual developer effort not recorded. Close actuals count worked dates2026-10-16and17. No release or new version |
+
 ## Completed features
 
 | F-ID | Sprint | Size | Est. days | Actual days | Completed | Notes |
@@ -586,6 +588,10 @@ defended.
 
 | F-X185 | S90 | M | 2 | 1 | 2026-10-08 | Checked typed comment anchors and nested paragraph snapshots for hadim Issues283/289, clean ALL, native1761/XML629/CLI64 and current rebuilt Python93, hash49 unchanged |
 
+| F-X250 | S95.11 | L | 4 to 5 | not recorded | 2026-10-17 | Direct-main-body chart snapshots with finite data fields, display math, list restart/font and note style/removal. Independent clean feature reviews, five unchanged Word reporter bodies, independent XML and bounded native/own appearance. Shared accepted 05ba6cc8461a896fa751ca7dc1fe209a8fa70045 evidence retains H3/H5/836/H7 producer epochs and actual receipts, no duplicated full-suite or native claim |
+| F-X254 | S95.11 | L | 4 to 5 | not recorded | 2026-10-17 | Atomic PowerPoint value/XML/CLI refusals, ten unchanged reporter cases, native PowerPoint save/reopen and independent XML, affected native/CLI GREEN, explicit user-approved ValidationIssue enum exhaustive-match compatibility boundary. Shared 05ba6cc8461a896fa751ca7dc1fe209a8fa70045 verification and current H7 CLI genuine archive proof, no release |
+| F-X223 | S95.11 | M | 2 to 3 | not recorded | 2026-10-17 | User accepted documented Word limit after27 actual phases,13 finite observations/14unsupported refusals. Genuine properBold in3phases, pairedItalic Regular outlines with shear, native normalization and sensitivities retained. Bounded investigation complete, broader genuine paired/four-face consumption unqualified. No speculative writer repair or F-X223 carry |
+
 ## Velocity
 
 Recalculated at each sprint close. The backlog assumes about 2 stories per week
@@ -696,6 +702,7 @@ five working days.
 | S93 | 7 | 2 | 17.50 |
 | S94 | 5 | 1 | 25.00 |
 | S95 | 9 | 1 | 45.00 |
+| S95.11 | 3 | 2 | 7.50 |
 
 S90 velocity measures calendar throughput for a parallel team. It does not
 measure person effort or establish a sustainable single-developer forecast.
@@ -724,6 +731,7 @@ was done about it. Empty is the expected state.
 
 | Date | Trigger | F-ID or sprint | Response |
 |------|---------|----------------|----------|
+| 2026-10-17 | Sprint throughput variance exceeds30percent | S95.11 | Record7.50stories/week,83.33percent below S95, as parallel calendar throughput across two worked dates. Preserve S95.2/S95.3/S95.4 dependency boundaries and developer estimates. No person-effort or elapsed-time forecast is inferred |
 | 2026-10-16 | Sprint throughput variance exceeds30percent | S95 | Record45.00stories/week,80.00percent above S94,as parallel calendar throughput. The last three windows yield26.25stories/week. Preserve22to31developer-day effort estimates and the explicit user-approved expansion to nine stories. Retain S95.11 and later dependency boundaries without converting throughput into elapsed delivery promises. Formal review,close and publication remain separate |
 | 2026-10-16 | Sprint throughput variance exceeds30percent | S93 | Record17.50stories/week,41.67percent below S92, as parallel calendar throughput. The last three windows yield21.25stories/week, above the2story/week planning assumption. Preserve effort estimates and require the existing S95 capacity split before opening that sprint |
 | 2026-10-15 | Three-sprint throughput differs from the2-stories/week assumption by983percent | S91, S91.1, S92 | Record21.67 stories/week as parallel calendar throughput. Retain dependency-defined roadmap boundaries and developer-effort estimates. Do not convert this observation into elapsed delivery promises or invent person-effort actuals |
@@ -1171,3 +1179,44 @@ WIP reconciliation. The final nine-story union, actual hosted acceptance and
 sprint review remain due. No publication or measured person-effort credit.
 
 | F-X255 | S95 | L | 4 to 5 | not recorded | 2026-10-16 | Exact Word0.16.2/shared-PPT0.14.2 preparation. Clean source/numeric reviews, scoped verified22 archives and actual6b final installed1908/no skips, hosted27success4publicationSKIP/26payloads/172 priority calls, public23, PPT four routes, Issue38619+16 and reporter12strictXPASS/raw1 plus12bodies/raw0. Integrated native18commands,49hashes,7pixels and22verified archives pass at6b7c9798. Formal sprint review and publication remain separate |
+
+## S95.11 close evidence
+
+Planned four contracts, completed F-X250/F-X254/F-X223 and carried F-X219 unfinished
+to S96. Original estimate12 to16 developer-days, retained completed scope10 to13.
+Actual worked calendar dates are2026-10-16and17, two dates, authenticated by
+`git log main..HEAD --format=%cs`. Feature developer-effort actuals remain not
+recorded. Existing calendar-throughput velocity is3/2*5 =7.50 stories/week,
+83.33percent below S95's45.00. This variance records observed parallel calendar
+throughput. Preserve the S95.2/S95.3/S95.4 capacity split and developer estimates,
+without deriving elapsed-time promises from this figure. The
+user's "document word limitation" disposition completes F-X223's bounded native
+investigation without broadening its genuine-face qualification or erasing14
+unsupported observer outcomes. No S96 implementation has started.
+
+Accepted full source 05ba6cc8461a896fa751ca7dc1fe209a8fa70045 binds actual H3/H5/836/H7 observations, rather than
+pretending all commands ran at one new metadata HEAD. Native union32 binaries
+contains6616 unique passes and73ignored, plus11complete doctests. Actual ordinary
+installed suites pass955Word and1007PowerPoint with strict typing and stubtest.
+Issue385's27 distinct bodies join12prior and15new, each epoch separately recording
+strict XPASS/raw1 and body PASS/raw0. Hash49/pixels7 unchanged. No-default fonts,
+WASM, documentation, README and deny observations remain source-applicable.
+Genuine package verification is21 applicable H5 crates plus current H7 CLI.
+Source/archive/recovered-wrapper distinctions and actual failures remain intact.
+F250 bounded Word/LO/own appearances and source XML are separate from F254 native
+PowerPoint custody/XML and F223's documented native limitation.
+
+Receipt identities: installed cff97a3605b2b32601881e5727cbc926b392294f66c79e02062fa0b6747d7805,
+reporter15 6109789870f72fa7b7a4892b27ce8f7adf583fa3b8c97b717201f54f06306070,
+runtime/doc partial99787cf314315b25f5e66d89812c15cc37423f133fd68b52b314b0a9b1e2dcda,
+build-tail partial921e51101707792aba8d34bbc8792af35e36906986ad988319dcfc47c12cdca2,
+and current CLI b656c2c672dc5ee6f3d18d6a82d457373d86715b8c6421d69c0d467f58789ea9.
+Partial receipts retain passed:false with their explicit stage flags. The final qualification receipt SHA256
+6bd76990051cb4e095fdbd673692aca7dfbc1398c3b7b2905f1dda29571b09d1
+records passed:true at05ba6cc8461a896fa751ca7dc1fe209a8fa70045 by joining
+actual external evidence, source correspondence and the user limitation
+disposition, without replaying any producer. Policy aggregate is188 tests,
+186 passes and two retained skips, with its original failed command retained. Formal sprint review and close operate against the
+actual final metadata/source correspondence. No release tag, publication or new
+version is part of this close. Fresh registry/publisher checks and separate final
+approval at the exact reviewed main SHA remain release obligations.

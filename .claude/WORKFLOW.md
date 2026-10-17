@@ -27,12 +27,27 @@ Required before completion:
 defects and zero smells, iterating in numbered passes until it reaches that.
 
 Keep each F-ID implementation limited to its approved design. The worker runs
-focused tests, the plan's applicable oracle and risk checks, `/verify --scoped`,
-and a zero-finding `/microscope`. Run `/verify --full` and `/sprint-review` once over the final integrated
+unique local RED/GREEN regressions, F-ID-bound fast `/verify --scoped`,
+and a zero-finding `/microscope`. External oracles, complete suites and risk
+riders run once in the final integrated union, with pending checks explicit.
+Run `/verify --full` and `/sprint-review` once over the final integrated
 sprint result. A formal dependency-prefix checkpoint completes its reviewed
 prerequisite using scoped evidence and focused integration checks so a
-dependent F-ID can start. It does not run the full workspace or sprint review.
-The release workflow retains its separate full gate and final approval after
+dependent F-ID can start. This narrow provider implementation completion
+exception requires an explicitly approved genuine LOCAL provider gate actually
+passed, applicable scoped evidence, clean microscope and an integrated source
+ancestor of the consumer Base. It may set existing run state completed and
+BACKLOG/CURRENT_SPRINT done to satisfy the dependency edge, while the plan stays
+approved with named final rider debt retained. AS_BUILT, SPRINT_TRACKER and final
+plan completion wait for actual final acceptance and are written once. An
+unperformed oracle-only dependency gate cannot qualify. Reviewed status alone
+cannot unblock a formal dependency. No full workspace or sprint review runs at
+this prefix checkpoint.
+The release workflow consumes the closed sprint's applicable full and metadata
+proof when the reviewed sprint and clean main merge trees are exact and relevant
+inputs remain unchanged. It shares that evidence across requested families,
+consumes included packaging evidence, and retains fresh mutable preflights and
+final approval after
 `/close-sprint` has merged and pushed `main`. A prepared family tag points to
 that exact reviewed main merge SHA.
 
@@ -47,8 +62,8 @@ review from remediation, not one agent session from the next.
 When an approved feature requires actual external CI execution of its new
 workflow, that gate can require reviewed source on GitHub before feature
 completion. Use the source availability checkpoint in `/run-sprint`. Every
-local check, applicable local risk rider and independent microscope must pass
-first. Record the named external gates as pending. The feature remains
+named focused local check and independent microscope must pass first. Record
+external gates and final sprint hash/oracle/rider checks explicitly as pending. The feature remains
 approved and in-progress, without completion ledgers or dependency unblocking.
 Only the clean reviewed canonical sprint ref may be pushed at this checkpoint.
 No worker push, force push, main merge, tag or publication is permitted.
@@ -319,8 +334,9 @@ DrawingML text model, and F-098, shape text layout.
 
 1. Read `.claude/plans/F-XXX-design.md`, which is the contract.
 2. Read `.claude/scratch/F-XXX-progress.md`, which is the in-flight memory.
-3. Re-run `/verify --fast` to establish the current state. Run `/verify
-   --scoped F-XXX` only when the feature is ready to complete.
+3. Authenticate recorded local evidence against current source. Run only
+   missing or invalidated affected checks. Run F-ID-bound `/verify --scoped`
+   when locally ready, reusing applicable observations without rerunning them.
 4. Continue.
 
 Never resume from the diff alone.
@@ -330,7 +346,7 @@ Never resume from the diff alone.
 | Signal | Response |
 |--------|----------|
 | An F-ID consistently exceeds 2x its estimate | Split into `F-XXXa`/`b`. Update both backlogs |
-| `/verify --scoped` exceeds 10 minutes on changed files | Investigate the slow check and narrow the feature scope without dropping declared risk riders |
+| `/verify --scoped` exceeds 10 minutes on changed files | Investigate the slow check and narrow the feature scope without dropping named final qualification |
 | The hash harness shows an unexplained delta | Stop. Do not proceed until it is explained |
 | Corpus round-trip failures appear with no recent parser change | A corpus deck changed, or a dependency did. Find the root cause |
 | A sprint exceeds 4 calendar weeks with no completion | Replan. Too many F-IDs in flight, or the scope is wrong |
