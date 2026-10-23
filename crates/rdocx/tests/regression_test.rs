@@ -30865,16 +30865,22 @@ fn dense_form_matches_reviewed_one_page_geometry() {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     });
     let non_white_pixels = rgba
-        .chunks_exact(4)
-        .filter(|pixel| *pixel != [255, 255, 255, 255])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| **pixel != [255, 255, 255, 255])
         .count();
     let behind_pixels = rgba
-        .chunks_exact(4)
-        .filter(|pixel| *pixel == [221, 235, 255, 255])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| **pixel == [221, 235, 255, 255])
         .count();
     let foreground_pixels = rgba
-        .chunks_exact(4)
-        .filter(|pixel| *pixel == [255, 215, 215, 255])
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| **pixel == [255, 215, 215, 255])
         .count();
     // F-X183 reviewed zero side padding changes cell and nested content geometry.
     assert_eq!(checksum, 12_522_878_329_634_332_671);
@@ -42799,16 +42805,17 @@ mod advanced_table_geometry_regressions {
             .expect("table")
             .set_bidi_visual(Some(true));
 
-        // The painted cells reverse. A left-to-right row paints the narrow
-        // first column at the table origin, and a bidirectional row paints it
-        // last, at the table's trailing edge.
+        // The painted cells reverse. With no authored justification, the
+        // 432 point table starts at its leading margin: x = 72 for LTR and
+        // x = 108 for RTL in the 468 point body band. The narrow first column
+        // paints last in RTL, ending at the right text margin at x = 540.
         assert_eq!(
             painted_cells(&forward),
             vec![(72.0, 72.0), (144.0, 144.0), (288.0, 216.0)]
         );
         assert_eq!(
             painted_cells(&reversed),
-            vec![(72.0, 216.0), (288.0, 144.0), (432.0, 72.0)]
+            vec![(108.0, 216.0), (324.0, 144.0), (468.0, 72.0)]
         );
 
         // Logical cell ownership does not reverse. Every cell keeps its source
@@ -42832,6 +42839,8 @@ mod advanced_table_geometry_regressions {
         let reversed_block = lay_out(&table, 468.0);
         assert!(!forward_block.bidi_visual);
         assert!(reversed_block.bidi_visual);
+        assert_eq!(forward_block.table_indent, 0.0);
+        assert_eq!(reversed_block.table_indent, 36.0);
         let logical_geometry = |block: &rdocx_layout::table::TableBlock| {
             block.rows[0]
                 .cells
@@ -59535,7 +59544,8 @@ fn direct_table_alignment_overrides_style_and_reopens() {
     // Authenticated Word16.113.2/build16.113.26092012 indices: minimal37eef91c,
     // official Grid178761ce. Both direct/style conflicts move to direct jc.
     // Compare own-control offsets with bundled Caladea, not absolute Arial ink.
-    // Legacy compatibility offsets and RTL logical-side changes belong to F-X183.
+    // Legacy compatibility offsets belong to F-X183. RTL offsets retain the
+    // fork's leading-margin contract and are compared in physical coordinates.
     const ORACLE: &str = "Word16.113.2 build16.113.26092012";
     const NATIVE_INDEX: &str = "178761cef0306259d178d32078f1b2044b4bad0e4757ab999202f768f2e84131";
     fn paragraph(text: &str) -> String {
@@ -59692,6 +59702,9 @@ fn direct_table_alignment_overrides_style_and_reopens() {
                             Some("right" | "end") => free + if legacy { 10.8 } else { 0.0 },
                             _ => 0.0,
                         };
+                        // Moving from the RTL leading margin toward the center
+                        // or trailing margin decreases the physical x offset.
+                        let expected = if rtl { -expected } else { expected };
                         let position = |text: &[(String, f64, f64)], name: &str| {
                             text.iter().find(|(t, _, _)| t == name).unwrap().clone()
                         };
@@ -110597,7 +110610,7 @@ fn bibliography_ieee_all_kind_locales_and_rich_runs_match_actual_word() {
         no_proof: Some(true),
         ..Default::default()
     };
-    for ((locale, texts), actual) in observed.iter().zip(fields.chunks_exact(17)) {
+    for ((locale, texts), actual) in observed.iter().zip(fields.as_chunks::<17>().0.iter()) {
         for (kind, (field, expected)) in actual.iter().zip(texts).enumerate() {
             assert_eq!(field.cached_result, *expected, "LCID {locale}, kind {kind}");
             assert_eq!(

@@ -13387,7 +13387,9 @@ mod header_footer_pdf {
     fn parse_hex(value: &[u8]) -> Vec<u8> {
         assert!(value.len().is_multiple_of(2));
         value
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }
@@ -13462,7 +13464,9 @@ mod header_footer_pdf {
             let unicode_bytes = parse_hex(&fields[1][1..fields[1].len() - 1]);
             let glyph = u16::from_be_bytes([glyph_bytes[0], glyph_bytes[1]]);
             let utf16 = unicode_bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
                 .collect::<Vec<_>>();
             let text = char::decode_utf16(utf16)
@@ -13523,7 +13527,9 @@ mod header_footer_pdf {
                         .expect("ActualText hex string");
                 let bytes = parse_hex(&line[open..close]);
                 let utf16 = bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
                     .skip_while(|unit| *unit == 0xfeff)
                     .collect::<Vec<_>>();
@@ -13575,7 +13581,7 @@ mod header_footer_pdf {
                     }
                     _ => unreachable!(),
                 };
-                for pair in glyph_bytes.chunks_exact(2) {
+                for pair in glyph_bytes.as_chunks::<2>().0.iter() {
                     let glyph = u16::from_be_bytes([pair[0], pair[1]]);
                     text.push_str(mapping.get(&glyph).expect("mapped PDF glyph"));
                 }

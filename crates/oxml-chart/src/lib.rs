@@ -1354,18 +1354,21 @@ pub fn render_chart(
         .first()
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
-    let legend_layout = layout_legend(chart, plot, bounds, fonts)?;
+    let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
+    let legend_layout = layout_legend_or_omit_category_legend(chart, plot, bounds, fonts)?;
+    let legend_colours = if chart.legend.is_some() {
+        legend_entries(plot, &colours)?
+            .into_iter()
+            .map(|(_, colour)| colour)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let plot_bounds = legend_layout.plot;
-    let series_colours = resolve_series_colours(plot, theme, color_map)?;
     let axes = chart.plot_area.axes()?;
     let options = geometry_options(plot, &axes, chart.disp_blanks_as)?;
-    let plot_children = render_plot_geometry(
-        plot,
-        plot_bounds,
-        chart.disp_blanks_as,
-        options,
-        &series_colours,
-    )?;
+    let plot_children =
+        render_plot_geometry(plot, plot_bounds, chart.disp_blanks_as, options, &colours)?;
     if plot_children.is_empty() && !plot_can_render_without_marks(plot) {
         return Err(ChartError::InvalidValue {
             element: "c:plotArea".to_owned(),
@@ -1386,7 +1389,7 @@ pub fn render_chart(
     )?;
     render_legend(
         legend_layout,
-        &series_colours,
+        &legend_colours,
         &mut annotations,
         &mut chart_annotations.labels,
     );
@@ -1464,13 +1467,13 @@ pub fn render_geometry(
         .first()
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
-    let series_colours = resolve_series_colours(plot, theme, color_map)?;
+    let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
     let children = render_plot_geometry(
         plot,
         plot_bounds,
         chart.disp_blanks_as,
         geometry_options(plot, &[], chart.disp_blanks_as)?,
-        &series_colours,
+        &colours,
     )?;
     if children.is_empty() && !plot_can_render_without_marks(plot) {
         return Err(ChartError::InvalidValue {
@@ -3065,6 +3068,205 @@ fn point_in_rect(point: Point, bounds: Rect) -> bool {
         && point.y <= bounds.y + bounds.height + EPSILON
 }
 
+struct PlotColours {
+    series: Vec<Color>,
+    pie_points: Vec<BTreeMap<usize, Color>>,
+}
+
+impl PlotColours {
+    fn pie_point(&self, series: usize, point: usize) -> Result<Color> {
+        self.pie_points
+            .get(series)
+            .and_then(|points| points.get(&point))
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| series_colour(&self.series, series))
+    }
+}
+
+fn resolve_plot_colours(
+    chart: &CT_Chart,
+    plot: &Plot,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+) -> Result<PlotColours> {
+    let mut colours = PlotColours {
+        series: resolve_series_colours(plot, theme, color_map)?,
+        pie_points: Vec::new(),
+    };
+    if !matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        return Ok(colours);
+    }
+    let mut vary = None;
+    if let Some(markup) = chart.plot_area.plot_markup.first() {
+        let mut root = BytesStart::new("c:plot");
+        push_attributes(&mut root, &markup.raw_attributes);
+        let namespaces = chart_bindings(&chart.plot_area.namespace_bindings, &root)?;
+        for raw in markup.raw_children.at(0) {
+            if chart_root_local(raw, &namespaces)?.as_deref() == Some(b"varyColors") {
+                set_once(
+                    &mut vary,
+                    parse_bool_value(raw, "varyColors")?.0,
+                    "c:varyColors",
+                )?;
+            }
+        }
+    }
+    let lookup = theme_colour_lookup(theme);
+    for (series_index, series) in plot_series(plot).iter().enumerate() {
+        let overrides = point_paint_overrides(series)?;
+        let (_, values) = logical_numeric_values(&series.values)?;
+        let mut points = BTreeMap::new();
+        for (index, _) in values {
+            let colour = if let Some(fill) = overrides
+                .get(&index)
+                .and_then(|properties| properties.as_ref())
+                .and_then(|properties| properties.fill.as_ref())
+            {
+                resolve_series_paint(
+                    fill,
+                    series_index,
+                    &format!("point[{index}] fill"),
+                    theme,
+                    color_map,
+                    &lookup,
+                )?
+            } else if vary.unwrap_or(false)
+                && series
+                    .sp_pr
+                    .as_ref()
+                    .and_then(|properties| properties.fill.as_ref())
+                    .is_none()
+            {
+                resolve_series_accent(index, theme, color_map, &lookup)?
+            } else {
+                series_colour(&colours.series, series_index)?
+            };
+            points.insert(index, colour);
+        }
+        colours.pie_points.push(points);
+    }
+    Ok(colours)
+}
+
+fn point_paint_overrides(series: &Series) -> Result<BTreeMap<usize, Option<CT_ShapeProperties>>> {
+    let mut root = BytesStart::new("c:ser");
+    push_attributes(&mut root, &series.namespace_declarations);
+    let namespaces = chart_bindings(&chart_namespace_defaults(), &root)?;
+    let mut points = BTreeMap::new();
+    for raw in series.raw_children.at(4) {
+        if chart_root_local(raw, &namespaces)?.as_deref() != Some(b"dPt") {
+            continue;
+        }
+        let (index, properties) = parse_point_paint(raw, &namespaces)?;
+        if points.insert(index, properties).is_some() {
+            return Err(ChartError::DuplicateElement(format!(
+                "c:dPt[c:idx={index}]"
+            )));
+        }
+    }
+    for point in &series.authored_data_points {
+        let index = usize::try_from(point.index).map_err(|_| ChartError::InvalidValue {
+            element: "c:dPt/c:idx".to_owned(),
+            value: point.index.to_string(),
+        })?;
+        if points.insert(index, Some(point.sp_pr.clone())).is_some() {
+            return Err(ChartError::DuplicateElement(format!(
+                "c:dPt[c:idx={index}]"
+            )));
+        }
+    }
+    Ok(points)
+}
+
+fn parse_point_paint(
+    xml: &[u8],
+    inherited: &NamespaceBindings,
+) -> Result<(usize, Option<CT_ShapeProperties>)> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut namespaces = None;
+    let mut index = None;
+    let mut properties = None;
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(OxmlError::from)?
+        {
+            Event::Start(element) if namespaces.is_none() => {
+                if !matches_local_name(element.name().as_ref(), b"dPt")
+                    || !element_is_in_namespace(&element, C_NS, inherited)?
+                {
+                    return Err(ChartError::UnexpectedElement(element_name(&element)));
+                }
+                namespaces = Some(chart_bindings(inherited, &element)?);
+            }
+            Event::Start(element) => {
+                let bindings = namespaces
+                    .as_ref()
+                    .ok_or_else(|| ChartError::UnexpectedElement(element_name(&element)))?;
+                let name = chart_child_local(&element, bindings)?;
+                let raw = capture_element(&mut reader, &element)?;
+                parse_point_paint_child(
+                    &mut index,
+                    &mut properties,
+                    name.as_deref(),
+                    &raw,
+                    bindings,
+                )?;
+            }
+            Event::Empty(element) if namespaces.is_some() => {
+                let bindings = namespaces
+                    .as_ref()
+                    .ok_or_else(|| ChartError::UnexpectedElement(element_name(&element)))?;
+                let name = chart_child_local(&element, bindings)?;
+                let raw = capture_empty_element(&element)?;
+                parse_point_paint_child(
+                    &mut index,
+                    &mut properties,
+                    name.as_deref(),
+                    &raw,
+                    bindings,
+                )?;
+            }
+            Event::End(_) | Event::Empty(_) => {
+                let index =
+                    index.ok_or_else(|| ChartError::MissingElement("c:dPt/c:idx".to_owned()))?;
+                let index = usize::try_from(index).map_err(|_| ChartError::InvalidValue {
+                    element: "c:dPt/c:idx".to_owned(),
+                    value: index.to_string(),
+                })?;
+                return Ok((index, properties));
+            }
+            Event::Eof => return Err(missing_end("c:dPt")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn parse_point_paint_child(
+    index: &mut Option<u32>,
+    properties: &mut Option<CT_ShapeProperties>,
+    name: Option<&[u8]>,
+    raw: &[u8],
+    namespaces: &NamespaceBindings,
+) -> Result<()> {
+    match name {
+        Some(b"idx") => set_once(index, parse_u32_scalar(raw, "idx")?.0, "c:dPt/c:idx")?,
+        Some(b"spPr") => {
+            reject_conflicting_prefix_in_xml(raw, b"a", A_NS)?;
+            let parsed = CT_ShapeProperties::from_xml(raw)?;
+            let mut writer = Writer::new(Vec::new());
+            parsed.write_xml_as(&mut writer, "c:spPr")?;
+            reject_rewritten_foreign_elements(raw, &writer.into_inner(), namespaces, b"spPr")?;
+            set_once(properties, parsed, "c:dPt/c:spPr")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn resolve_series_colours(
     plot: &Plot,
     theme: &CT_OfficeStyleSheet,
@@ -3270,15 +3472,13 @@ fn layout_legend(
         settings.position,
         LegendPosition::Top | LegendPosition::Bottom
     );
-    if plot_series(plot).len() > MAX_CATEGORY_ANNOTATIONS {
+    let entries = legend_entry_names(plot)?;
+    if entries.len() > MAX_CATEGORY_ANNOTATIONS {
         return Err(invalid_authoring_value("legend entry limit"));
     }
-    let mut labels = plot_series(plot)
+    let mut labels = entries
         .iter()
-        .enumerate()
-        .map(|(index, series)| {
-            shape_label(fonts, &series_name(series, index), Point { x: 0.0, y: 0.0 })
-        })
+        .map(|name| shape_label(fonts, name, Point { x: 0.0, y: 0.0 }))
         .collect::<Result<Vec<_>>>()?;
     let available = if settings.overlay { full_plot } else { bounds };
     let capacity = available.width - 12.0;
@@ -3383,6 +3583,212 @@ fn layout_legend(
     })
 }
 
+/// Diagnostic code carried by [`ChartLegendOmitted`] messages.
+pub const CHART_LEGEND_OMITTED: &str = "chart-legend-omitted";
+
+/// Which measured legend limit caused a pie or doughnut category legend to be
+/// omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegendOmissionReason {
+    /// The legend rows are taller than the chart allows.
+    EntriesExceedHeight,
+    /// One legend label is wider than the chart allows.
+    LabelExceedsWidth,
+    /// Reserving legend space leaves no room for the plot margins.
+    ChartTooSmall,
+}
+
+impl LegendOmissionReason {
+    /// Stable kebab-case token used in diagnostic messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EntriesExceedHeight => "entries-exceed-height",
+            Self::LabelExceedsWidth => "label-exceeds-width",
+            Self::ChartTooSmall => "chart-too-small",
+        }
+    }
+
+    fn from_error(error: &ChartError) -> Option<Self> {
+        match error {
+            ChartError::InvalidValue { value, .. } => match value.as_str() {
+                "legend entries exceed chart height" => Some(Self::EntriesExceedHeight),
+                "legend label exceeds chart width" => Some(Self::LabelExceedsWidth),
+                "chart is too small for the fixed plot margins" => Some(Self::ChartTooSmall),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        [
+            Self::EntriesExceedHeight,
+            Self::LabelExceedsWidth,
+            Self::ChartTooSmall,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_str() == token)
+    }
+}
+
+/// A pie or doughnut category legend that was omitted so the plot could render.
+///
+/// Its [`Display`](fmt::Display) form is the stable diagnostic message prefix
+/// `chart-legend-omitted reason=<reason> width_pt=<w> height_pt=<h> entries=<n>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartLegendOmitted {
+    /// The limit that fired.
+    pub reason: LegendOmissionReason,
+    /// Chart frame width in points.
+    pub width_pt: f64,
+    /// Chart frame height in points.
+    pub height_pt: f64,
+    /// Number of category legend entries that did not fit.
+    pub entry_count: usize,
+}
+
+impl ChartLegendOmitted {
+    /// Recover the notice from a diagnostic message produced by rdocx or rpptx.
+    /// Text after the structured fields (such as the chart source) is ignored.
+    pub fn from_diagnostic_message(message: &str) -> Option<Self> {
+        let mut fields = message
+            .strip_prefix(CHART_LEGEND_OMITTED)?
+            .split_whitespace();
+        let mut value = |key: &str| fields.next()?.strip_prefix(key)?.strip_prefix('=');
+        Some(Self {
+            reason: LegendOmissionReason::parse(value("reason")?)?,
+            width_pt: value("width_pt")?.parse().ok()?,
+            height_pt: value("height_pt")?.parse().ok()?,
+            entry_count: value("entries")?.parse().ok()?,
+        })
+    }
+}
+
+impl fmt::Display for ChartLegendOmitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{CHART_LEGEND_OMITTED} reason={} width_pt={} height_pt={} entries={}",
+            self.reason.as_str(),
+            self.width_pt,
+            self.height_pt,
+            self.entry_count
+        )
+    }
+}
+
+/// [`render_chart`] plus a notice when a pie or doughnut category legend was
+/// omitted because it exceeded the measured legend limits.
+pub fn render_chart_with_legend_notice(
+    chart: &CT_Chart,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    let group = render_chart(chart, bounds, theme, color_map, fonts)?;
+    let notice = match chart.plot_area.plots()?.first() {
+        Some(plot @ (Plot::Pie { .. } | Plot::Doughnut { .. })) if chart.legend.is_some() => {
+            match layout_legend(chart, plot, bounds, fonts) {
+                Err(error) => LegendOmissionReason::from_error(&error)
+                    .map(|reason| -> Result<_> {
+                        Ok(ChartLegendOmitted {
+                            reason,
+                            width_pt: bounds.width,
+                            height_pt: bounds.height,
+                            entry_count: legend_entry_names(plot)?.len(),
+                        })
+                    })
+                    .transpose()?,
+                Ok(_) => None,
+            }
+        }
+        _ => None,
+    };
+    Ok((group, notice))
+}
+
+/// Fork policy: a pie or doughnut category legend that cannot fit the
+/// measured legend limits is omitted so the plot still renders. Other plots
+/// keep upstream's errors unchanged.
+fn layout_legend_or_omit_category_legend(
+    chart: &CT_Chart,
+    plot: &Plot,
+    bounds: Rect,
+    fonts: &mut FontManager,
+) -> Result<LegendLayout> {
+    match layout_legend(chart, plot, bounds, fonts) {
+        Err(error)
+            if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. })
+                && is_legend_size_limit(&error) =>
+        {
+            Ok(LegendLayout {
+                plot: geometry_plot_bounds(bounds)?,
+                labels: Vec::new(),
+                keys: Vec::new(),
+            })
+        }
+        result => result,
+    }
+}
+
+fn is_legend_size_limit(error: &ChartError) -> bool {
+    LegendOmissionReason::from_error(error).is_some()
+}
+
+/// Legend entries in paint order. Varied pie and doughnut plots list their
+/// categories with per-point colours; other plots list one entry per series.
+fn legend_entries(plot: &Plot, colours: &PlotColours) -> Result<Vec<(String, Color)>> {
+    let names = legend_entry_names(plot)?;
+    if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        let indices = match plot_series(plot).first() {
+            Some(series) => logical_numeric_values(&series.values)?
+                .1
+                .into_iter()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        return names
+            .into_iter()
+            .zip(indices)
+            .map(|(name, index)| Ok((name, colours.pie_point(0, index)?)))
+            .collect();
+    }
+    Ok(names
+        .into_iter()
+        .zip(colours.series.iter().copied())
+        .collect())
+}
+
+/// Legend entry names. Pie and doughnut plots list the first series'
+/// categories (by cached point index); other plots list one entry per series.
+fn legend_entry_names(plot: &Plot) -> Result<Vec<String>> {
+    if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        let Some(series) = plot_series(plot).first() else {
+            return Ok(Vec::new());
+        };
+        let categories = series_categories(series, None)?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let (_, values) = logical_numeric_values(&series.values)?;
+        return Ok(values
+            .into_iter()
+            .map(|(index, _)| {
+                categories
+                    .get(&index)
+                    .cloned()
+                    .unwrap_or_else(|| (index + 1).to_string())
+            })
+            .collect());
+    }
+    Ok(plot_series(plot)
+        .iter()
+        .enumerate()
+        .map(|(index, series)| series_name(series, index))
+        .collect())
+}
+
 fn render_legend(
     layout: LegendLayout,
     series_colours: &[Color],
@@ -3433,8 +3839,9 @@ fn render_plot_geometry(
     bounds: Rect,
     blanks: DispBlanksAs,
     options: GeometryOptions,
-    series_colours: &[Color],
+    colours: &PlotColours,
 ) -> Result<Vec<PositionedElement>> {
+    let series_colours = &colours.series;
     match plot {
         Plot::Bar {
             direction,
@@ -3471,7 +3878,7 @@ fn render_plot_geometry(
             first_slice_angle,
             series,
             ..
-        } => render_pie_geometry(*first_slice_angle, None, series, bounds, series_colours),
+        } => render_pie_geometry(*first_slice_angle, None, series, bounds, colours),
         Plot::Doughnut {
             first_slice_angle,
             hole_size,
@@ -3482,7 +3889,7 @@ fn render_plot_geometry(
             Some(*hole_size),
             series,
             bounds,
-            series_colours,
+            colours,
         ),
         Plot::Area {
             grouping, series, ..
@@ -4016,14 +4423,14 @@ fn render_pie_geometry(
     hole_size: Option<u8>,
     series: &[Series],
     bounds: Rect,
-    series_colours: &[Color],
+    colours: &PlotColours,
 ) -> Result<Vec<PositionedElement>> {
     pie_slices(first_slice_angle, hole_size, series, bounds)?
         .into_iter()
         .map(|slice| {
             Ok(filled_path(
                 slice.path,
-                series_colour(series_colours, slice.series_index)?,
+                colours.pie_point(slice.series_index, slice.logical_index)?,
             ))
         })
         .collect()
@@ -12762,6 +13169,439 @@ mod tests {
 
             assert!((actual_alpha - expected_alpha).abs() < 1.0e-12);
         }
+    }
+
+    fn pie_chart_fixture(kind: &str, vary: &str, series: &str) -> CT_ChartSpace {
+        let hole = if kind == "doughnutChart" {
+            r#"<q:holeSize val="60"/>"#
+        } else {
+            ""
+        };
+        let plot = format!("<q:{kind}>{vary}{series}{hole}</q:{kind}>");
+        let xml = chart_with_optional_axes(&plot, false).replace(
+            "</q:plotArea></q:chart>",
+            "</q:plotArea><q:legend/></q:chart>",
+        );
+        CT_ChartSpace::from_xml(xml.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn pie_and_doughnut_vary_colours_use_category_legends() {
+        for kind in ["pieChart", "doughnutChart"] {
+            for vary in [
+                r#"<q:varyColors val="1"/>"#,
+                r#"<q:varyColors val="true"/>"#,
+                "<q:varyColors/>",
+            ] {
+                let chart = pie_chart_fixture(kind, vary, &plot_series(0));
+                let geometry = render_geometry(&chart.chart, chart_bounds()).unwrap();
+                let expected = vec![Color::from_hex("156082"), Color::from_hex("E97132")];
+                assert_eq!(path_colours(&geometry), expected);
+                let mut fonts = FontManager::new_deterministic().unwrap();
+                let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+                let labels = group
+                    .children
+                    .iter()
+                    .filter_map(|element| match element {
+                        PositionedElement::Text(run) => Some(run.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(labels, vec!["North", "South"]);
+                let swatches = group
+                    .children
+                    .iter()
+                    .filter_map(|element| match element {
+                        PositionedElement::Path(path) => path.fill.as_ref(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    swatches,
+                    expected
+                        .iter()
+                        .map(|colour| Paint::Solid(*colour))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_vary_false_or_absent_retains_series_colour() {
+        for vary in [
+            "",
+            r#"<q:varyColors val="0"/>"#,
+            r#"<q:varyColors val="false"/>"#,
+        ] {
+            let chart = pie_chart_fixture("pieChart", vary, &plot_series(0));
+            assert_eq!(
+                path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+                vec![Color::from_hex("156082")]
+            );
+        }
+    }
+
+    fn korean_pie_series(count: usize, long: bool) -> String {
+        let names = [
+            "구독 서비스 매출",
+            "라이선스",
+            "유지보수 및 기술 지원",
+            "교육",
+            "컨설팅 프로젝트",
+            "기타 수익",
+            "하드웨어 판매",
+            "클라우드 호스팅",
+            "광고",
+            "파트너 수수료",
+        ];
+        let mut categories = String::new();
+        let mut values = String::new();
+        for (index, name) in names.iter().take(count).enumerate() {
+            let name = if long {
+                format!("{name} ({}분기 실적 합계)", index + 1)
+            } else {
+                (*name).to_owned()
+            };
+            categories.push_str(&format!(r#"<q:pt idx="{index}"><q:v>{name}</q:v></q:pt>"#));
+            values.push_str(&format!(
+                r#"<q:pt idx="{index}"><q:v>{}</q:v></q:pt>"#,
+                index + 1
+            ));
+        }
+        format!(
+            r#"<q:ser><q:idx val="0"/><q:order val="0"/><q:cat><q:strRef><q:f>S!A1</q:f><q:strCache><q:ptCount val="{count}"/>{categories}</q:strCache></q:strRef></q:cat><q:val><q:numRef><q:f>S!B1</q:f><q:numCache><q:ptCount val="{count}"/>{values}</q:numCache></q:numRef></q:val></q:ser>"#
+        )
+    }
+
+    #[test]
+    fn small_korean_pie_and_doughnut_omit_oversized_category_legends() {
+        for kind in ["pieChart", "doughnutChart"] {
+            for (count, long) in [(8, false), (10, false), (3, true), (10, true)] {
+                let chart = pie_chart_fixture(
+                    kind,
+                    r#"<q:varyColors val="1"/>"#,
+                    &korean_pie_series(count, long),
+                );
+                let mut fonts = FontManager::new_deterministic().unwrap();
+                let group = render_chart(&chart.chart, chart_bounds(), &mut fonts)
+                    .unwrap_or_else(|error| panic!("{kind} {count} {long}: {error}"));
+                assert!(
+                    !group
+                        .children
+                        .iter()
+                        .any(|element| matches!(element, PositionedElement::Text(_))),
+                    "{kind} {count} {long} kept an oversized legend"
+                );
+                assert_eq!(
+                    path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()).len(),
+                    count
+                );
+            }
+        }
+    }
+
+    fn render_with_notice(
+        chart: &CT_ChartSpace,
+        bounds: Rect,
+    ) -> Option<super::ChartLegendOmitted> {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        super::render_chart_with_legend_notice(
+            &chart.chart,
+            bounds,
+            &CT_OfficeStyleSheet::office_default(),
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap()
+        .1
+    }
+
+    #[test]
+    fn omitted_korean_pie_legend_reports_a_structured_notice() {
+        for (count, long, reason) in [
+            (10, false, super::LegendOmissionReason::EntriesExceedHeight),
+            (3, true, super::LegendOmissionReason::ChartTooSmall),
+        ] {
+            let chart = pie_chart_fixture(
+                "pieChart",
+                r#"<q:varyColors val="1"/>"#,
+                &korean_pie_series(count, long),
+            );
+            let notice = render_with_notice(&chart, chart_bounds()).expect("legend notice");
+            assert_eq!(
+                notice,
+                super::ChartLegendOmitted {
+                    reason,
+                    width_pt: 200.0,
+                    height_pt: 140.0,
+                    entry_count: count,
+                }
+            );
+            let message = format!("{notice} source=word:rId4");
+            assert!(message.starts_with(super::CHART_LEGEND_OMITTED));
+            assert_eq!(
+                super::ChartLegendOmitted::from_diagnostic_message(&message),
+                Some(notice)
+            );
+        }
+    }
+
+    #[test]
+    fn fitting_or_legendless_charts_report_no_legend_notice() {
+        let fitting = pie_chart_fixture(
+            "doughnutChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(10, true),
+        );
+        let large = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 432.0,
+            height: 252.0,
+        };
+        assert_eq!(render_with_notice(&fitting, large), None);
+        let small = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(3, false),
+        );
+        assert_eq!(render_with_notice(&small, chart_bounds()), None);
+        assert_eq!(
+            super::ChartLegendOmitted::from_diagnostic_message("Word chart relationship rId1: x"),
+            None
+        );
+    }
+
+    #[test]
+    fn fitting_korean_pie_legend_keeps_every_category() {
+        let chart = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(10, true),
+        );
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 432.0,
+            height: 252.0,
+        };
+        let group = render_chart(&chart.chart, bounds, &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter(|element| matches!(element, PositionedElement::Text(_)))
+            .count();
+        assert_eq!(labels, 10);
+    }
+
+    #[test]
+    fn oversized_series_legends_keep_upstream_errors() {
+        let series = (0..12).map(plot_series).collect::<String>();
+        let plot = format!(
+            r#"<q:barChart><q:barDir val="col"/><q:grouping val="clustered"/>{series}<q:axId val="-1884094432"/><q:axId val="-1884097184"/></q:barChart>"#
+        );
+        let xml = chart_with_optional_axes(&plot, true).replace(
+            "</q:plotArea></q:chart>",
+            "</q:plotArea><q:legend/></q:chart>",
+        );
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let error = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap_err();
+        assert!(super::is_legend_size_limit(&error), "{error}");
+    }
+
+    #[test]
+    fn korean_doughnut_legend_retains_all_three_category_names() {
+        let series = plot_series(0)
+            .replace("North", "구독")
+            .replace("South", "라이선스")
+            .replace("<q:ptCount val=\"2\"/>", "<q:ptCount val=\"3\"/>")
+            .replace(
+                "</q:strCache>",
+                "<q:pt idx=\"2\"><q:v>서비스</q:v></q:pt></q:strCache>",
+            )
+            .replace("<q:v>1</q:v>", "<q:v>55</q:v>")
+            .replace("<q:v>2</q:v>", "<q:v>30</q:v>")
+            .replace(
+                "</q:numCache>",
+                "<q:pt idx=\"2\"><q:v>15</q:v></q:pt></q:numCache>",
+            );
+        let chart = pie_chart_fixture("doughnutChart", r#"<q:varyColors val="1"/>"#, &series);
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["구독", "라이선스", "서비스"]);
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+            vec![
+                Color::from_hex("156082"),
+                Color::from_hex("E97132"),
+                Color::from_hex("196B24")
+            ]
+        );
+    }
+
+    #[test]
+    fn pie_point_fill_overrides_series_fill_and_vary_colours() {
+        for vary in [r#"<q:varyColors val="1"/>"#, r#"<q:varyColors val="0"/>"#] {
+            for fill in [
+                "<a:solidFill><a:srgbClr val=\"ABCDEF\"/></a:solidFill>",
+                "<a:noFill/>",
+            ] {
+                let series = plot_series(0).replace("<q:cat>", &format!("<q:spPr>{fill}</q:spPr><q:dPt><q:idx val=\"1\"/><q:spPr><a:solidFill><a:srgbClr val=\"123456\"/></a:solidFill></q:spPr></q:dPt><q:cat>"));
+                let chart = pie_chart_fixture("doughnutChart", vary, &series);
+                let colours = path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap());
+                assert_eq!(colours[1], Color::from_hex("123456"));
+                if fill.contains("noFill") {
+                    assert_eq!(colours[0].a, 0.0);
+                } else {
+                    assert_eq!(colours[0], Color::from_hex("ABCDEF"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pie_sparse_point_indices_keep_palette_and_legend_alignment() {
+        let chart = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            sparse_category_series(),
+        );
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+            vec![Color::from_hex("156082"), Color::from_hex("196B24")]
+        );
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["North", "West"]);
+        let series = sparse_category_series().replace(
+            "<q:cat>",
+            r#"<q:dPt><q:idx val="2"/><q:spPr><a:noFill/></q:spPr></q:dPt><q:cat>"#,
+        );
+        let chart = pie_chart_fixture("pieChart", r#"<q:varyColors val="1"/>"#, &series);
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap())[1].a,
+            0.0
+        );
+    }
+
+    #[test]
+    fn pie_point_scheme_colour_uses_theme_map_and_alpha() {
+        let series = plot_series(0).replace("<q:cat>", r#"<q:dPt><q:idx val="1"/><q:spPr><a:solidFill><a:schemeClr val="accent1"><a:alpha val="50000"/></a:schemeClr></a:solidFill></q:spPr></q:dPt><q:cat>"#);
+        let chart = pie_chart_fixture("pieChart", r#"<q:varyColors val="1"/>"#, &series);
+        let map =
+            ColorMap::default().with_overrides(&[(ColorMapSlot::Accent1, ThemeColorSlot::Accent4)]);
+        let colours = path_colours(
+            &render_geometry_with_theme(
+                &chart.chart,
+                chart_bounds(),
+                &CT_OfficeStyleSheet::office_default(),
+                &map,
+            )
+            .unwrap(),
+        );
+        assert_eq!(colours[0], Color::from_hex("0F9ED5"));
+        let transformed = Color::from_hex("109DD5");
+        assert_eq!(
+            (colours[1].r, colours[1].g, colours[1].b),
+            (transformed.r, transformed.g, transformed.b)
+        );
+        assert_eq!(colours[1].a, 128.0 / 255.0);
+    }
+
+    #[test]
+    fn pie_preserves_raw_point_xml_and_ignores_foreign_namesakes() {
+        let raw = r#"<q:dPt x:keep="point"><q:idx val="1"/><q:spPr><a:solidFill><a:srgbClr val="123456"/></a:solidFill><x:extension/></q:spPr><x:tail/></q:dPt>"#;
+        let series = plot_series(0).replace(
+            "<q:cat>",
+            &format!("{raw}<x:dPt><x:idx val=\"0\"/></x:dPt><q:cat>"),
+        );
+        let mut chart = pie_chart_fixture("pieChart", "<x:varyColors val=\"1\"/>", &series);
+        let before = chart.to_xml().unwrap();
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+            vec![Color::from_hex("156082"), Color::from_hex("123456")]
+        );
+        assert_eq!(chart.to_xml().unwrap(), before);
+        assert!(
+            before
+                .windows(raw.len())
+                .any(|window| window == raw.as_bytes())
+        );
+        let Plot::Pie { series, .. } = &mut chart.chart.plot_area.plots_mut().unwrap()[0] else {
+            panic!("expected pie");
+        };
+        series[0].values.values[0] = 3.0;
+        assert!(
+            chart
+                .to_xml()
+                .unwrap()
+                .windows(raw.len())
+                .any(|window| window == raw.as_bytes())
+        );
+    }
+
+    #[test]
+    fn malformed_pie_colour_options_return_contextual_errors() {
+        for vary in [
+            r#"<q:varyColors val="maybe"/>"#,
+            r#"<q:varyColors val="1"/><q:varyColors val="0"/>"#,
+        ] {
+            let chart = pie_chart_fixture("pieChart", vary, &plot_series(0));
+            assert!(render_geometry(&chart.chart, chart_bounds()).is_err());
+        }
+        for point in [
+            "<q:dPt/>",
+            r#"<q:dPt><q:idx val="bad"/></q:dPt>"#,
+            r#"<q:dPt><q:idx val="0"/><q:idx val="1"/></q:dPt>"#,
+            r#"<q:dPt><q:idx val="0"/></q:dPt><q:dPt><q:idx val="0"/></q:dPt>"#,
+            r#"<q:dPt><q:idx val="0"/><q:spPr><a:gradFill/></q:spPr></q:dPt>"#,
+        ] {
+            let series = plot_series(0).replace("<q:cat>", &format!("{point}<q:cat>"));
+            let chart = pie_chart_fixture("pieChart", "", &series);
+            let result = std::panic::catch_unwind(|| render_geometry(&chart.chart, chart_bounds()));
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_err(), "accepted {point}");
+        }
+    }
+
+    #[test]
+    fn authored_pie_point_paints_render_before_and_after_serialization() {
+        let mut chart = pie_chart_fixture("pieChart", "", &plot_series(0));
+        let Plot::Pie { series, .. } = &mut chart.chart.plot_area.plots_mut().unwrap()[0] else {
+            panic!("expected pie");
+        };
+        series[0].authored_data_points.push(super::DataPoint { index: 1, sp_pr: oxml_drawing::shape_props::CT_ShapeProperties::from_xml(br#"<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:solidFill><a:srgbClr val="123456"/></a:solidFill></c:spPr>"#).unwrap() });
+        let expected = path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap());
+        assert_eq!(
+            expected,
+            vec![Color::from_hex("156082"), Color::from_hex("123456")]
+        );
+        let parsed = CT_ChartSpace::from_xml(&chart.to_xml().unwrap()).unwrap();
+        assert_eq!(
+            path_colours(&render_geometry(&parsed.chart, chart_bounds()).unwrap()),
+            expected
+        );
     }
 
     #[test]

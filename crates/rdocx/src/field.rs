@@ -16312,7 +16312,7 @@ fn parse_custom_styles(value: &str) -> std::result::Result<Vec<(String, u8)>, St
         return Err("TOC custom styles require style and level pairs".to_owned());
     }
     let mut styles = Vec::with_capacity(parts.len() / 2);
-    for pair in parts.chunks_exact(2) {
+    for pair in parts.as_chunks::<2>().0.iter() {
         let name = pair[0].trim();
         if name.is_empty() {
             return Err("TOC custom style name must not be empty".to_owned());
