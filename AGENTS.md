@@ -136,7 +136,7 @@ a file list implemented before verification and confirmed at completion.
 - Alternating agents use the sprint worktree and leave an explicit progress
   checkpoint in `.claude/scratch/F-XXX-progress.md` before handing over.
 - Parallel implementation uses different F-IDs and different worktrees, claimed
-  through `/claim-feature F-XXX {claude|codex} <path>`. The agent name goes into
+  through `/claim-feature F-XXX <agent> <path>`. Use the actual lowercase implementing host, such as claude, codex or grok. The agent name goes into
   the `Owner` column and into the `work/<fid-lower>-<agent>` branch name.
 - A worker owns its feature and not the sprint's totals. Never append to
   `AS_BUILT.md` or `SPRINT_TRACKER.md` from a worker branch. The integrator does

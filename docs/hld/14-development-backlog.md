@@ -3074,6 +3074,13 @@ Schedule this unfinished story in S95.2. Close all numbering interactions across
 TOC, STYLEREF, REF, PAGEREF, captions,
 and document outline results, including table-cell headings and suppressed
 paragraphs.
+The native numbered outline retains accepted physical body, cell and nested
+control owners using production cascade and numbering facts. Numbered STYLEREF
+and relative REF share those facts and actual placement. Generated caches do
+not supply source headings or copied sequence events. Explicit cache publication
+retains its transaction and final-pagination boundaries. Native lifecycle
+qualification remains part of the integrated gate, with unavailable historical
+captures requiring fresh observation.
 **Depends on**: F-248, F-279 through F-282, F-X200.
 **Test gate**: regression. One multilevel numbered document stays consistent
 across visible markers, navigation structures, references, and saved caches.
@@ -3089,7 +3096,10 @@ body, table, header, footer, note, and text-box locations without run-split loss
 ### F-285, Content control creation and lifecycle (L)
 Create, inspect, edit, move, clone, and remove block, row, cell, paragraph, and
 inline content controls with typed identity, alias, tag, lock, appearance, and
-placeholder behavior.
+placeholder behavior. Public creation admits rich text and plain text. Other
+kinds name F-286 and publish nothing. Python exposes insert, metadata, remove,
+and unwrap on the frozen snapshot. Move and clone stay on the Rust facade.
+WASM and CLI gain no method.
 **Depends on**: F-253, F-254.
 **Test gate**: round-trip. Each control location and property survives public
 creation and mutation with no raw-XML fallback.
@@ -3097,14 +3107,25 @@ creation and mutation with no raw-XML fallback.
 ### F-286, Rich, repeating, and typed content controls (L)
 Author rich text, plain text, date, checkbox, picture, combo, drop-down, group,
 repeating-section, and repeating-item controls with type-specific validation.
+`set_content_control_type` writes the payload onto an F-285 shell.
+`repeat_content_control` clones the first repeating item. The last repeating
+item stays through `remove_content_control`. Citation, equation, bibliography,
+and document-part kinds stay refused.
 **Depends on**: F-285.
-**Test gate**: differential. Every supported control matches the pinned Word
-structure and behavior under replacement and repetition.
+**Test gate**: differential. Every supported control passes the pinned native
+Word comparison under replacement and documented equivalent repetition.
+Q24 retains clone-first append and last-item refusal as explicit intentional
+differences from Word's addressed-item default and whole-section deletion.
+Authentic Word provenance, version and input identity are mandatory. Locally
+constructed expectations do not certify Word.
 
 ### F-287, Custom XML stores and data binding authoring (L)
-Create custom XML data stores, item properties, schema references, namespace
-mappings, XPath bindings, and two-way controlled updates without exposing raw
-package surgery.
+`add_custom_xml_store` creates one custom XML item and its properties part
+through the bibliography relationship sequence and returns the braced item id.
+Schema URIs are stored in caller order and are not fetched.
+`set_content_control_binding` writes the three `CT_DataBinding` strings onto an
+existing shell. Value updates stay on the existing tag and bind setters.
+Unknown item bytes stay byte-identical. Bibliography keeps its own item bytes.
 **Depends on**: F-285.
 **Test gate**: round-trip. Bound controls resolve, update, and reopen against the
 correct store while unknown store content remains byte-identical.
@@ -6699,8 +6720,7 @@ before sprint close.
 
 ### F-X192, Complete the remaining Word bibliography catalogue (L)
 
-Complete the Word bibliography work deferred from S90 and now carried to S95.2
-by the user. F-282 delivers the native source-authoring foundation and its measured
+Complete the unfinished Word bibliography catalogue scheduled for S96. F-282 delivers the native source-authoring foundation and its measured
 formatter subset. This story owns the full pinned Word catalogue result
 contract, without claiming the existing subset establishes complete parity.
 
@@ -8457,3 +8477,113 @@ Qualify every named row individually, with before/after bytes and held-owner
 checks for assignments and explicit supported controls.
 
 The acceptance source is [Issue386](https://github.com/tensorbee/rdocx/issues/386), reported against main d44a69af. Pin its original body and script separately from the existing Issue385 twelve-case union. Its self-catching script exit status is not acceptance. Report actual row outcomes and independent saved-package observations. A reported Python3.14 environment is not a new runtime qualification claim. This story is included in active S95 at the user's explicit request and gates F-X255 final release preparation. Completion alone does not authorize issue closure.
+
+
+### F-X259, Repair reviewed consistency defects and strengthen acceptance gates
+
+**Size**: M
+**Depends on**: F-283, F-284, F-X254
+**Test gate**: regression
+**Spec reference**: `08-rendering-spec.md`, Numbering-aware heading placement, `03-architecture.md`, structured template evaluation, `02-scope-and-non-goals.md`, Modern DOCX capability matrix, and `12-testing-strategy.md`, Numbering-aware navigation regression and template controls.
+
+Own B1, S1, S2 and N1 from `.claude/reviews/S95.11-S95.2-code-quality-evaluation.md`. Share unnumbered STYLEREF caller semantics in the existing numbering formatter, retaining REF full-context behavior. Compare multilevel n/r/w and t values across evaluation, actual positioned rendering, update and save/reopen. Preserve implicit and explicit template lexical scopes for empty, single and multiple records in both grammars, while still rejecting malformed syntax, wrong intermediate kinds and known missing root properties. Keep late-error rollback and opaque XML ownership intact. Simplify the reviewed XML traversal predicate without changing its acceptance grammar.
+
+Reconcile completed capability rows and enforce their live-owner invariant during metadata adoption. Strengthen the canonical design, implementation, review, verification, integration and completion commands and their existing reference skills with consumer maps, measurable acceptance, discriminating cases and final-state checks. Regenerate adapters. Process changes remain separate from behavioral commits. No new public API, crate, module or dependency is required. Final sprint full/hash/pixel/rider acceptance and independent review remain due, without rewriting historical acceptance records.
+
+The 2026-10-22 scope includes [Issue400](https://github.com/tensorbee/rdocx/issues/400)
+and candidate [PR401](https://github.com/tensorbee/rdocx/pull/401) at
+62124737c428a77e0c4fec52b56665c67f221e7c. TOC outline-derived entries must
+respect an explicit heading range while outline-only, body-text suppression and
+custom-style selectors keep their own semantics. Qualify native, Python and CLI
+rebuild with inherited/direct outline sources, lower and upper range bounds,
+and saved/reopened entries. Contributor-reported Word observations are not
+workspace-native acceptance evidence.
+
+### F-X260, Restore live handles and bound structural edit cost
+
+**Size**: L
+**Depends on**: F-X211c, F-X237
+**Test gate**: regression
+**Spec reference**: `10-bindings-spec.md`, Python handle ownership and checked XML mutation, `03-architecture.md`, owned publication, and `12-testing-strategy.md`, Binding tests and Integrated Python compatibility qualification.
+
+Resolve [Issue388](https://github.com/tensorbee/rdocx/issues/388) and [Issue389](https://github.com/tensorbee/rdocx/issues/389). [PR393](https://github.com/tensorbee/rdocx/pull/393) at beb9c448d0d99636a799d95f718acccb9ea55646 stays a candidate and is not merged.
+
+Word cell, row and table property setters keep held and fresh paragraph and run handles when every current owner relocates to one candidate address. A real content replacement still retires the removed owner. PowerPoint `add_run`, `add_field` and `add_paragraph` keep earlier paragraph and run handles. An already materialised paragraph collection is not refreshed.
+
+The seven Issue389 operations edit one owner. They are PowerPoint `add_textbox`, alt text, `left`, `fill.solid` and `replace_xml`, plus Word `replace_xml` and `remove_content`. A visit counter fails when the edit reads an unrelated slide or body block. The release-build large-to-small ratio below 3 is recorded with the final sprint. Debug timings do not pass. `Document.remove_content_range(start, end)` removes a half-open direct body range in one transaction, returns the removed count, and refuses a reversed or out-of-bounds range without publishing. It does not recurse into tables. Shared media and a refused XML edit stay on the checked package transaction.
+
+The local tests are the Issue388 handle tests and `issue389_local_edits_do_not_scale_with_unrelated_package`. Installed product suites, the unchanged hash harness and the release ratio remain final-sprint evidence. Neither issue closes from this story.
+
+The 2026-10-22 scope also includes read-only handle creation from
+[Issue398](https://github.com/tensorbee/rdocx/issues/398) and candidate
+[PR399](https://github.com/tensorbee/rdocx/pull/399) at
+34dfd42782de08bc331a5f6c819774720bb60067. Preserve all three reporter
+large/small ratios below3, including cold calls, whole body/cell walks,
+first/last table position and nested/related owner correctness after edits and
+reopen. Per-state warm-up is not acceptance for a failing first-call script.
+Derived current-state indexes must not become a second ownership authority or
+survive a mutation with stale routes. Candidate
+[PR397](https://github.com/tensorbee/rdocx/pull/397) at
+d9721353314ba969c05bd9f886bdd24d15d51a8d contributes another Issue389
+approach but leaves Word edit costs unresolved. Its range signature/error and
+new public comparison APIs do not replace the approved contract. All candidates
+remain unmerged and all new acceptance remains pending.
+
+### F-X261, Resolve Word package preservation and inspection contributions
+
+**Size**: L
+**Depends on**: F-X238, F-X220, F-X241
+**Test gate**: regression
+**Spec reference**: `04-opc-and-packaging.md`, checked Word source ownership and embedded fonts, `10-bindings-spec.md`, Word properties and checked XML owners, and `12-testing-strategy.md`, Binding tests and Word checked XML qualification.
+
+Python custom properties iterate, measure, pair and look up names on the existing class, in native part order. An absent part has length 0. Style edits keep unmodelled root children, including `w:latentStyles`, in schema order. Picture removal drops a media part only when the candidate package proves it unreachable. Shared targets, pop then reinsert, and caller-embedded unused media stay. A plain sfnt font part is copied as stored. Other accepted faces are deobfuscated. An unsupported content type names the part. `validate` names a header or footer relationship whose target is not that story part. `CommentRef::resolved` is `Option<bool>`. Python is `bool` or `None`. A missing `commentsExtended` entry is unknown. A library-written comment that still has an extension is unresolved. The CLI lists only an explicit true as resolved.
+
+Checked `replace_xml` binds a root attribute whose prefix is declared on the same root, in either order. An unbound prefix refuses without publishing. `StoryItem.xml` carries the namespace declarations a paragraph snapshot already writes. `part_names` is lexicographic and includes an unreferenced part. `part_xml` reads staged UTF-8 and refuses missing, binary and non-UTF-8 parts, including UTF-16. Default paragraph format accepts `Length` for `space_before`, `space_after` and `line_spacing`. A float line spacing refuses. `exact` and `atLeast` read as a length. `auto` and a missing rule read as the stored value divided by 240. A story-item paragraph edit updates a qualified text box and its admitted alternate together, or changes neither, and then the handle is stale.
+
+The constructed remove, reinsert and `set_header_image` sequence keeps a reachable image. The private unreduced control-owner document stays unqualified. Six reduced rows do not close Issue 390. PR395 and PR396 stay unmerged. Installed product suites, deterministic font render, both WASM graphs and the unchanged hash harness remain final-sprint evidence.
+
+### F-X262, Resolve PowerPoint authoring and table-render contributions
+
+**Size**: L
+**Depends on**: F-X205, F-X206, F-X258
+**Test gate**: regression
+**Spec reference**: `06-presentationml-model.md`, shape and text models, `08-rendering-spec.md`, preset geometry and Tables, `10-bindings-spec.md`, Python PowerPoint surfaces, and `12-testing-strategy.md`, Binding tests and render fidelity controls.
+
+Slide placeholders iterate by ascending idx. Layout and master placeholders iterate in document order. Idx lookup stays on `placeholders[idx]`. Percentage transparency, gradient position, bullet percent, and baseline use ties-to-even rounding. EMU, twips, time, and adjustments still truncate. `MSO_SHAPE.UP_ARROW` is 35. The generator adds the published `upArrow` geometry because the ECMA source duplicates `upDownArrow` and omits `upArrow`. Painted table rows grow for wrapped text, spans, margins, and unwrapped vertical text. Stored `a:tr/@h` stays. `TextFrame.clear` leaves one paragraph, keeps its properties, and drops runs. Empty text leaves no runs. An empty notes line keeps the first regular run. A cell-run address uses the slide hyperlink relationship. `target_slide` on a cell stays refused. Bullet size accepts a percentage float or a `Length`. `remove_style` removes `p:style` from a shape or connector. An unsupported kind raises and does not publish.
+
+[Issue392](https://github.com/tensorbee/rdocx/issues/392) stays open until the final sprint evidence exists. Candidate [PR394](https://github.com/tensorbee/rdocx/pull/394) at e9f9fbe7b86388b8702af5757bdfa7e4e4fc6596 stays unmerged. Its functional parent f9d165e77392b57a58223046d8cd551220c61a3a could not be re-read from this repository. Installed suites, the pinned viewer, the PowerPoint pixel baseline, both WASM graphs, and the hash harness remain final-sprint evidence. This story owns any PowerPoint paint baseline. The Word 49 hash and seven-pixel baseline stay unchanged.
+
+
+### F-X263, Prepare Word 0.16.3 and PowerPoint 0.14.3 patch releases
+
+**Size**: L
+**Depends on**: F-X259, F-X260, F-X261, F-X262, F-285, F-286, F-287
+**Test gate**: release regression
+**Spec reference**: `10-bindings-spec.md`, Packaging and CI, `15-build-and-toolchain.md`, Packaging, Publishing, Release process and CI job matrix.
+
+The user requests both Rust and PyPI releases after S95.3 completion and all
+verification, explicitly retaining Word0.16.x and PowerPoint0.14.x. Fresh
+registry inventories select absent0.16.3 and0.14.3 across the exact seven and
+fifteen published Rust packages and matching Python projects. Recheck absence
+before publication. Align current manifests, workspace pins, lock records,
+Python projects, examples, current assertions and family contribution notes.
+Preserve immutable historical evidence, external dependency versions and the
+separate nonpublished WASM boundary. Preparation adds no product behavior.
+
+Require genuine verified22-package publication dryrun, ordinary source-bound
+wheels and CLIs, clean Python3.9/3.12 priority runs, strict3.12 typing/stub
+checks, both WASM graphs and unchanged output baselines. Actual build-only
+wheels.yml execution must bind reviewed source, all deciding jobs and exact
+unique artifacts. Inspect and test downloaded host wheels as actual producers.
+Keep unresolved native, fidelity and private-input qualifications explicit.
+The source-availability checkpoint may push only the reviewed clean sprint
+ref after all named local checks and independent microscope pass. It does
+not permit a merge, tag, upload or feature completion before hosted acceptance.
+
+All seven prerequisites must reach their applicable actual completion or
+approved genuine local prefix checkpoint before implementation. Drafting and
+registry/carrier research do not satisfy that boundary. This release-preparation
+story is the eighth S95.3 story under the user's added release request, an
+explicit scope expansion beyond the normal seven-story planning cadence.
+Only close-sprint closes the sprint. Subsequent release commands require the
+separate exact-main-SHA final approval, shared/PowerPoint family first.

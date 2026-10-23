@@ -30,7 +30,10 @@ publication.
 2. **Consume final verification.** Require the latest applicable passing full
    sprint evidence and any validated completion-only metadata adoption. Run
    missing or invalidated categories only, never the full gate a second time
-   because `/close-sprint` was invoked. Failed or missing evidence blocks close.
+   because `/close-sprint` was invoked. Completion metadata requires applicable
+   post-edit policy checks as well as prose. A clean code tree cannot excuse
+   capability rows still owned by done stories. Failed or missing evidence
+   blocks close.
 
 3. **Consume `/sprint-review SNN`.** Require its latest clean bounded review.
    Invoke it only when absent or invalidated by material changes. Do not run a

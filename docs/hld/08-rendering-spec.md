@@ -535,7 +535,7 @@ downloaded as `ECMA-376-1_5th_edition_december_2016.zip`. The source inside it
 is `OfficeOpenXML-DrawingMLGeometries.zip/presetShapeDefinitions.xml`. It has
 187 preset shape definitions and SHA-256
 `2f7c868d857c1e3c4b5a6068759fe0e07d77ad58377a6618d1b02ba3507b6939`.
-The generator refuses a different count or digest.
+The generator refuses a different count or digest. The ECMA source lists `upDownArrow` twice and omits `upArrow`. When that name is absent, the generator inserts the published `upArrow` definition, including adjustment defaults `50000` and `50000`. The checked-in table then contains 187 generated names. The source digest, the direct definition count of 187, and the 186 unique source names stay unchanged.
 
 The [Ecma software policy](https://ecma-international.org/policies/by-ipr/ecma-international-policy-on-submission-inclusion-and-licensing-of-software/)
 identifies XML data sets as source code and makes software incorporated in a
@@ -874,6 +874,8 @@ group transform to each annotation rectangle. Unsupported actions never create
 an annotation, but their visible text remains in the line.
 
 ## Tables
+
+PresentationML table paint keeps each stored `a:tr/@h` value. The painted row grows when wrapped text, a span, cell margins, or unwrapped vertical text needs more room than the current span. The extra height is added to the last row of that span while later cells are measured. Fills, borders, the table background, and text then use those grown offsets together. A short cell stays at the stored height. Wrapped vertical text does not grow when its longest oriented line already fits the current content height.
 
 Table lowering derives cumulative row and column offsets from the resolved
 active grid columns. A preserved historical table-grid change is inspection and
@@ -1516,8 +1518,10 @@ list output cannot express it, without claiming unrestricted Word numbering
 parity in that format.
 
 Relationship-resolved embedded font faces enter `LayoutInput.embedded_fonts` under the
-font-table record name. Their OOXML font key deobfuscates the package bytes
-before shaping. This explicit document input has priority over bundled fallback
+font-table record name. A plain sfnt content type is copied as stored, including
+under a null font key. Every other accepted face is deobfuscated with its OOXML
+font key before shaping. An unsupported content type names the part and supplies
+no face bytes. This explicit document input has priority over bundled fallback
 and needs no system-font discovery. Authored major and minor theme typefaces
 therefore resolve to the embedded face in deterministic layout. Theme or font
 mutation invalidates completed normal and deterministic layouts while reusable
@@ -2143,6 +2147,78 @@ seekable RIFF buffer. The writer patches header sizes in place, retains only one
 bounded 16-byte index record per frame, and appends `idx1` after `movi`. Every
 codec write is capped before growth. Neither format invokes a subprocess or a
 system codec.
+
+## Numbering-aware heading placement
+
+Heading level follows the shared effective paragraph cascade, including table
+styles and direct outline suppression. Number suppression does not erase an
+otherwise eligible heading. Physical accepted order supplies numbering, while
+actual positioned source spans supply navigation pages. Repeated table-header
+painting contributes one navigation source. Unplaced headings have no invented
+page. Existing direct-paragraph outline destinations retain their coordinates.
+
+The facade's qualified generated-result exclusions suppress cache-only heading
+and copied SEQ sources, retaining genuine accepted runs before and after partial
+paragraph caches. Valid visible numPr list advancement retains its established
+provider behavior. Only exact current-input facts survive fresh sequence
+snapshot regeneration. Lower detached layout inputs without those facade facts
+do not infer generated-range ownership. Header/footer STYLEREF rendering selects
+from actual page placements, independently from one shared part's saved cache.
+Style aliases and physical page candidates are indexed once per operation.
+The paginator retains alignment metadata for physical fields. Only qualified
+STYLEREF replacements consume that metadata through existing tab realignment.
+Unsupported fields are not reinterpreted. Rich multilingual runs retain the
+existing limitation that they carry no tab-alignment metadata.
+
+Unplaced eligible headings are limited to sources admitted by the existing
+shared effective-paragraph provider. Raw storage in vertical-merge continuation
+cells remains outside that provider, as in established table layout. No skipped
+cell traversal or counter is added. An actually unplaced admitted source has no
+invented page, and unsupported STYLEREF source selection retains its cache.
+
+Direct resolved numbering-level `marker_rpr.vanish=true` suppresses marker ink
+and the outline's visible marker only. The numbering counter, suffix layout,
+accepted heading and counter-derived REF/STYLEREF values remain independent.
+No paragraph-mark or ordinary-text hidden property is inferred as marker
+formatting. The captured Word 16.114 hidden-marker result matches those
+counters. REF returns 1 and STYLEREF returns 2.
+
+REF and STYLEREF `\w` keep each level's literal level text. A level whose
+text already contains every ancestor placeholder replaces the accumulated
+path. Any other formatted level is appended, and one trailing full stop is
+removed. `\w` with `\t` keeps the literal-free full context. An unnumbered
+STYLEREF caller has no list context, so `\r` returns the current level, the
+same result as `\n`. The existing resolved-number formatter owns this default
+for both field evaluation/cache updates and positioned rendering. Callers pass
+their actual numbering rather than selecting a second fallback policy.
+REF `\r` with no caller numbering keeps the full
+context. `\r` shares context across concrete instances of one abstract
+definition when neither instance has a start override. A different
+definition, or any instance start override, keeps the full context. The
+same concrete instance still omits only its shared prefix.
+
+An ambiguous generated-owner scan becomes a private stamped failure fact on
+WordSequenceSnapshot through the narrow doc-hidden
+`set_navigation_failure(&mut self, &LayoutInput, String) -> Result<()>` bridge.
+Fresh sequence regeneration preserves only the exact-current-document and
+physical-part-qualified failure. Ordinary rendering keeps existing stored cache
+paint and counter behavior and reports an existing layout Diagnostic. The new
+numbered outline refuses through `WordLayoutResult::navigation_failure() ->
+Option<&str>`, and newly supported STYLEREF retains cache with an ordered
+diagnostic. Explicit ambiguous rebuilds retain their existing atomic refusal.
+This is not an empty successful source discovery or a new ordinary REF/SEQ
+policy. Snapshot equality includes the private status and invalidates caches.
+
+TOC selectors reuse the existing source-qualified navigation tuple. Explicit
+custom-style selection remains independent. Heading-style selection without
+u keeps its established rule, while u requires the qualified shared heading
+eligibility, including effective inherited or direct outline9 suppression.
+When a heading range is explicit, its lower and upper bounds also filter the
+outline-derived fallback. An outline-only instruction without that range keeps
+all admitted outline levels. Explicit custom-style assignments remain independent
+of this range, including their assigned TOC levels.
+An unavailable owner is an explicit refusal, not a fabricated suppression fact.
+No additional cascade, flag, counter or per-field source scan is introduced.
 
 ## Word bookmark field pagination
 

@@ -3563,11 +3563,11 @@ impl<'a> Importer<'a> {
     fn project_list(&mut self, list: &XmlNode, path: &str, level: usize) -> Result<()> {
         let mut paragraphs = Vec::new();
         self.collect_list_paragraphs(list, path, level, &mut paragraphs)?;
-        self.document
-            .document
-            .body
-            .content
-            .extend(paragraphs.into_iter().map(BodyContent::Paragraph));
+        self.document.document.body.content.extend(
+            paragraphs
+                .into_iter()
+                .map(|paragraph| BodyContent::Paragraph(Box::new(paragraph))),
+        );
         Ok(())
     }
 
@@ -3680,7 +3680,7 @@ impl<'a> Importer<'a> {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         Ok(())
     }
 
@@ -4025,7 +4025,7 @@ impl<'a> Importer<'a> {
             .document
             .body
             .content
-            .push(BodyContent::Table(tbl));
+            .push(BodyContent::Table(Box::new(tbl)));
         Ok(())
     }
 
@@ -5501,7 +5501,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(paragraph));
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         }
 
         let reopened = Document::from_odt_bytes(&document.to_odt_bytes().unwrap().bytes)
@@ -5687,7 +5687,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
 
         let written = document.to_odt_bytes().unwrap();
         let mut archive = ZipArchive::new(Cursor::new(&written.bytes)).unwrap();
@@ -6953,7 +6953,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
         assert!(document.to_odt_bytes().is_err());
     }
 
@@ -7102,17 +7102,19 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(revision_paragraph()));
+            .push(BodyContent::Paragraph(Box::new(revision_paragraph())));
         document
             .document
             .body
             .content
-            .push(BodyContent::RawXml(b"<w:custom/>".to_vec()));
+            .push(BodyContent::RawXml(Box::new(b"<w:custom/>".to_vec())));
         document
             .document
             .body
             .content
-            .push(BodyContent::ContentControl(content_control("body control")));
+            .push(BodyContent::ContentControl(Box::new(content_control(
+                "body control",
+            ))));
         {
             let mut table = document.add_table(1, 1);
             table.cell(0, 0).unwrap().set_text("cell");

@@ -5033,7 +5033,7 @@ fn comment_move_outputs_reopen_with_unchanged_thread() {
     );
     assert_eq!(reopened.comments().len(), 2);
     assert_eq!(reopened.comments()[0].id(), id);
-    assert!(reopened.comments()[0].resolved());
+    assert_eq!(reopened.comments()[0].resolved(), Some(true));
     assert_eq!(reopened.comments()[1].parent_id(), Some(id));
     assert_eq!(fs::read(&input).unwrap(), before);
 }
@@ -7278,4 +7278,65 @@ fn fx240_text_and_json_io_failures_exit_one_without_panicking() {
             }
         }
     }
+}
+
+#[test]
+fn issue390_comment_resolution_preserves_unknown_state() {
+    let temp = TempWorkspace::new("comment-unknown");
+    let input = temp.path.join("input.docx");
+    let mut document = Document::new();
+    document.add_paragraph("Comment target");
+    let id = document
+        .add_comment(
+            rdocx::RunRange {
+                start: rdocx::RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: rdocx::RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Alice",
+            Some("AL"),
+            "Review this",
+        )
+        .unwrap();
+    assert_eq!(document.comments()[0].resolved(), Some(false));
+    assert!(document.resolve_comment(id, true).unwrap());
+    document.save(&input).unwrap();
+    let mut package = OpcPackage::from_reader(fs::File::open(&input).unwrap()).unwrap();
+    let parts = package
+        .parts
+        .keys()
+        .filter(|name| name.to_ascii_lowercase().contains("commentsextended"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(parts.len(), 1);
+    for part in &parts {
+        package.remove_part(part);
+        package.content_types.remove_override(part);
+    }
+    package
+        .get_part_rels_mut("/word/document.xml")
+        .unwrap()
+        .items
+        .retain(|relationship| {
+            !relationship
+                .target
+                .to_ascii_lowercase()
+                .contains("commentsextended")
+        });
+    let unknown = temp.path.join("unknown.docx");
+    package
+        .write_to(fs::File::create(&unknown).unwrap())
+        .unwrap();
+    let reopened = Document::open(&unknown).unwrap();
+    assert_eq!(reopened.comments()[0].resolved(), None);
+    let listed = cli(&["comment", "list", path_text(&unknown), "--json"]);
+    assert_success(&listed, "comment list unknown resolution");
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["comments"][0]["resolved"], json!(false));
+    assert_eq!(value["comments"][0]["id"], json!(id));
 }

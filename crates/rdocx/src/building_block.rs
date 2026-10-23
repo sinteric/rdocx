@@ -517,7 +517,13 @@ impl Document {
         let mut candidate = self.clone_for_staging();
         candidate.prepare_staged_package()?;
         let part_name = candidate.ensure_glossary_staged()?;
-        let content = fragment.import_content_staged(&mut candidate, &part_name, policy)?;
+        let content = fragment.import_content_staged(
+            &mut candidate,
+            &part_name,
+            policy,
+            false,
+            &mut Vec::new(),
+        )?;
         let part = CT_DocPart::from_body_xml(&content)?;
         block.body = part.body.clone();
         let ordinal = candidate.add_building_block_staged(part, block)?;
@@ -569,8 +575,13 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.prepare_staged_package()?;
-        let content =
-            fragment.import_content_staged(&mut candidate, &entry.glossary_part, policy)?;
+        let content = fragment.import_content_staged(
+            &mut candidate,
+            &entry.glossary_part,
+            policy,
+            false,
+            &mut Vec::new(),
+        )?;
         let glossary = candidate
             .glossary
             .as_mut()

@@ -62,6 +62,12 @@ pub struct ResolvedNumbering {
     /// Concrete numbering instance that owns this counter sequence.
     #[doc(hidden)]
     pub num_id: u32,
+    /// Abstract numbering definition that owns this counter sequence.
+    #[doc(hidden)]
+    pub definition_id: u32,
+    /// Whether any level of this concrete instance carries a start override.
+    #[doc(hidden)]
+    pub has_start_override: bool,
     /// Run properties for the marker.
     pub marker_rpr: CT_RPr,
     /// Item that follows the marker before paragraph content begins.
@@ -78,9 +84,12 @@ impl ResolvedNumbering {
         source: Option<&Self>,
     ) -> std::result::Result<String, String> {
         use rdocx_oxml::text::FieldArgument;
-        if instruction.name != "REF" {
-            return Err("paragraph-number reference formatting requires REF".into());
+        if !matches!(instruction.name.as_str(), "REF" | "STYLEREF") {
+            return Err("paragraph-number reference formatting requires REF or STYLEREF".into());
         }
+        // STYLEREF without a numbered caller compares the target with itself,
+        // so relative context is its current level. REF still keeps full context.
+        let source = source.or_else(|| (instruction.name == "STYLEREF").then_some(self));
         let has = |name| {
             instruction
                 .switches
@@ -105,6 +114,9 @@ impl ResolvedNumbering {
         } else {
             return Err("REF paragraph-number formatting requires n, r or w".into());
         };
+        if instruction.name == "STYLEREF" {
+            return Ok(value);
+        }
         let mut delimiters = instruction
             .switches
             .iter()
@@ -147,8 +159,14 @@ impl ResolvedNumbering {
     /// Format this paragraph number relative to a source paragraph.
     #[doc(hidden)]
     pub fn relative_to(&self, source: Option<&Self>, omit_text: bool) -> String {
+        let shares_context = source.is_some_and(|source| {
+            source.num_id == self.num_id
+                || (source.definition_id == self.definition_id
+                    && !source.has_start_override
+                    && !self.has_start_override)
+        });
         let mut start = source
-            .filter(|source| source.num_id == self.num_id)
+            .filter(|_| shares_context)
             .map(|source| {
                 self.number_context
                     .iter()
@@ -194,6 +212,7 @@ pub struct NumberingState {
     consumed_overrides: HashSet<(u32, u32)>,
     pending_sections: HashSet<u32>,
     resolved_by_source: HashMap<SourceNodeId, ResolvedNumbering>,
+    pub(crate) navigation: HashMap<SourceNodeId, crate::ParagraphNavigation>,
     bookmark_sources: HashMap<String, SourceNodeId>,
     resolved_by_bookmark: HashMap<String, (SourceNodeId, ResolvedNumbering)>,
     main_story_sources: HashSet<SourceNodeId>,
@@ -214,6 +233,7 @@ impl NumberingState {
             consumed_overrides: HashSet::new(),
             pending_sections: HashSet::new(),
             resolved_by_source: HashMap::new(),
+            navigation: HashMap::new(),
             bookmark_sources: HashMap::new(),
             resolved_by_bookmark: HashMap::new(),
             main_story_sources: HashSet::new(),
@@ -331,6 +351,29 @@ impl NumberingState {
         self.advance(num_id, level, base_start)
     }
 
+    pub(crate) fn record_navigation(
+        &mut self,
+        source: SourceNodeId,
+        facts: crate::ParagraphNavigation,
+    ) {
+        self.navigation.insert(source, facts);
+    }
+
+    pub(crate) fn remove_navigation(
+        &mut self,
+        source: SourceNodeId,
+    ) -> Option<crate::ParagraphNavigation> {
+        self.navigation.remove(&source)
+    }
+
+    pub(crate) fn take_navigation(&mut self) -> HashMap<SourceNodeId, crate::ParagraphNavigation> {
+        std::mem::take(&mut self.navigation)
+    }
+
+    pub(crate) fn resolved_for_source(&self, source: SourceNodeId) -> Option<&ResolvedNumbering> {
+        self.resolved_by_source.get(&source)
+    }
+
     pub(crate) fn record(&mut self, source: SourceNodeId, numbering: &ResolvedNumbering) {
         self.resolved_by_source.insert(source, numbering.clone());
     }
@@ -347,6 +390,12 @@ impl NumberingState {
 
     pub(crate) fn record_bookmark_source(&mut self, name: &str, source: SourceNodeId) {
         self.bookmark_sources.insert(name.to_owned(), source);
+    }
+
+    pub(crate) fn bookmark_sources(&self) -> impl Iterator<Item = (&str, SourceNodeId)> {
+        self.bookmark_sources
+            .iter()
+            .map(|(name, node)| (name.as_str(), *node))
     }
 
     pub(crate) fn bookmark_source(&self, name: &str) -> Option<SourceNodeId> {
@@ -378,6 +427,12 @@ impl NumberingState {
             consumed_overrides: HashSet::new(),
             pending_sections: HashSet::new(),
             resolved_by_source: HashMap::new(),
+            navigation: self
+                .navigation
+                .iter()
+                .filter(|(_, facts)| facts.suppressed_numbering)
+                .map(|(node, facts)| (*node, facts.clone()))
+                .collect(),
             bookmark_sources: self.bookmark_sources.clone(),
             resolved_by_bookmark: self.resolved_by_bookmark.clone(),
             main_story_sources: self.main_story_sources.clone(),
@@ -622,11 +677,12 @@ pub fn generate_marker(
 ) -> Option<ResolvedNumbering> {
     let (base_lvl, lvl, start_override) = resolved_numbering_level(num_id, ilvl, numbering)?;
     let num_fmt = lvl.num_fmt.clone().unwrap_or(ST_NumberFormat::Decimal);
-    let definition_id = numbering
-        .nums
+    let numbering_instance = numbering.nums.iter().find(|item| item.num_id == num_id)?;
+    let definition_id = numbering_instance.abstract_num_id;
+    let has_start_override = numbering_instance
+        .level_overrides
         .iter()
-        .find(|instance| instance.num_id == num_id)?
-        .abstract_num_id;
+        .any(|level| level.start_override.is_some());
     let start = base_lvl.start.unwrap_or(1);
     let lvl_text = lvl.lvl_text.as_deref().unwrap_or("%1.");
     let legal = lvl.legal == Some(true);
@@ -739,14 +795,7 @@ pub fn generate_marker(
         .first()
         .cloned()
         .unwrap_or_default();
-    let number_full = if (0..ilvl).all(|level| lvl_text.contains(&format!("%{}", level + 1))) {
-        number_level.clone()
-    } else {
-        match number_full_without_text.strip_suffix(&number_level_without_text) {
-            Some(prefix) => format!("{prefix}{number_level}"),
-            None => number_level.clone(),
-        }
-    };
+    let number_full = full_number_keeping_literals(num_id, ilvl, numbering, &number_context);
 
     let marker_rpr = lvl.rpr.clone().unwrap_or_default();
 
@@ -761,9 +810,62 @@ pub fn generate_marker(
         number_context,
         number_suffixes_without_text,
         num_id,
+        definition_id,
+        has_start_override,
         marker_rpr,
         suffix: lvl.suffix.unwrap_or(ST_LvlSuffix::Tab),
     })
+}
+
+fn format_lvl_text_keeping_literals(template: &str, context: &[String]) -> String {
+    let mut result = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '%'
+            && let Some(digit @ '1'..='9') = chars.peek().copied()
+        {
+            chars.next();
+            let level = digit as usize - '1' as usize;
+            if let Some(value) = context.get(level) {
+                result.push_str(value);
+            }
+        } else {
+            result.push(character);
+        }
+    }
+    result
+}
+
+/// Build `\w` by keeping each level's literal text.
+///
+/// A level whose template already names every ancestor placeholder replaces
+/// the accumulated path. Any other level is appended. One trailing full stop
+/// is removed from the finished path.
+fn full_number_keeping_literals(
+    num_id: u32,
+    ilvl: u32,
+    numbering: &CT_Numbering,
+    context: &[String],
+) -> String {
+    let mut accumulated = String::new();
+    for level in 0..=ilvl {
+        let Some((_, lvl, _)) = resolved_numbering_level(num_id, level, numbering) else {
+            continue;
+        };
+        let template = lvl.lvl_text.as_deref().unwrap_or("%1.");
+        let formatted = format_lvl_text_keeping_literals(template, context);
+        let contains_every_ancestor =
+            (0..level).all(|ancestor| template.contains(&format!("%{}", ancestor + 1)));
+        if contains_every_ancestor {
+            accumulated = formatted;
+        } else {
+            accumulated.push_str(&formatted);
+        }
+    }
+    if accumulated.ends_with('.') {
+        accumulated.pop();
+    }
+    accumulated
 }
 
 fn format_lvl_text_without_literals(template: &str, context: &[String]) -> String {
@@ -2382,9 +2484,24 @@ mod tests {
                 "2".to_owned(),
             ],
             num_id: 7,
+            definition_id: 1,
+            has_start_override: false,
             marker_rpr: CT_RPr::default(),
             suffix: ST_LvlSuffix::Tab,
         };
+        for (instruction, expected) in [
+            (r"REF target \r", "4.5.Clause 2"),
+            (r"REF target \r \t", "4.5.2"),
+            (r#"STYLEREF "Heading 3" \r"#, "Clause 2"),
+            (r#"STYLEREF "Heading 3" \r \t"#, "2"),
+        ] {
+            let instruction =
+                rdocx_oxml::text::Field::new(instruction, "old").effective_instruction();
+            assert_eq!(
+                target.numbered_reference_text(&instruction, None).unwrap(),
+                expected
+            );
+        }
         let mut source = target.clone();
         source.number_context = vec!["4".to_owned(), "3".to_owned(), "1".to_owned()];
         assert_eq!(target.relative_to(Some(&source), false), "4.5.Clause 2");
@@ -2415,7 +2532,14 @@ mod tests {
         assert_eq!(embedded.relative_to(Some(&source), false), "5.2");
 
         source.num_id = 8;
+        source.definition_id = 99;
+        source.number_context = vec!["4".to_owned(), "5".to_owned(), "9".to_owned()];
         assert_eq!(target.relative_to(Some(&source), false), "4.5.Clause 2");
+        source.definition_id = target.definition_id;
+        source.has_start_override = true;
+        assert_eq!(target.relative_to(Some(&source), false), "4.5.Clause 2");
+        source.has_start_override = false;
+        assert_eq!(target.relative_to(Some(&source), false), "Clause 2");
         assert_eq!(target.relative_to(None, true), "4.5.2");
     }
 

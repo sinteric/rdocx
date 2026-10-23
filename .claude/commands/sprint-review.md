@@ -20,8 +20,22 @@ the implementing session between passes.
    definition of done, and the milestone gate from
    `docs/hld/14-development-backlog.md`.
 
-3. **Review the integrated delta.** Consume the actual final full and oracle
-   observations. This command does not rerun them. Completion/review-only
+3. **Review the integrated delta.** Record the actual implementer and reviewer.
+   Honor any requested reviewer in run state, without impersonating another
+   model. Inspect consumer maps, A-ID evidence and discriminating fixture inputs.
+   Challenge cross-story policy agreement and final completion state, not only
+   isolated code. Check actual rendered outputs for rendering criteria, empty
+   cases combined with compatibility/scoping modes, and before/after mutation
+   state. Compare the reviewed final metadata with policy-test inputs.
+
+   Challenge lifecycle-wide placement invariants, promised binding methods and
+   raw-XML validation, even when creation and round-trip tests pass. Distinguish
+   a failed intermediate build from a later identified successful artifact.
+   Read the semantic outcome of performance/render reports, not only their
+   process exit. Keep source-bound timing, structural work bounds and native
+   qualification separate. A passing ratio cannot discharge another blocker.
+
+   Consume the actual final full and oracle observations. This command does not rerun them. Completion/review-only
    changes require bounded metadata adoption, not another product gate.
 
    Review the aspects that only appear at sprint
@@ -61,6 +75,8 @@ and left.
 # SNN sprint review, pass N
 
 **Reviewed**: sprint/sNN against <base>, N files, N lines, crates: ...
+**Implementer**: actual identity
+**Reviewer**: actual independent identity
 **Verdict**: N blocking, N should-fix, N nice-to-have
 
 ## Blocking

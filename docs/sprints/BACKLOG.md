@@ -39,9 +39,9 @@ regenerated, never hand-edited.
 | M21, Presentation depth | 15 | 15 | 0 | 0 |
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
-| M24, Modern DOCX authoring completeness | 54 | 24 | 0 | 30 |
-| X, Cross-cutting | 272 | 263 | 0 | 5 |
-| **Total** | **603** | **537** | **0** | **62** |
+| M24, Modern DOCX authoring completeness | 54 | 29 | 0 | 25 |
+| X, Cross-cutting | 277 | 268 | 0 | 5 |
+| **Total** | **608** | **547** | **0** | **57** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -513,11 +513,11 @@ regenerated, never hand-edited.
 | F-280 | Captions, sequences, and complete cross-references | S90 | M | done |
 | F-281 | Indexes and tables of figures and authorities | S90 | L | done |
 | F-282 | Citations and bibliography authoring | S90 | L | done |
-| F-283 | Complete numbering-aware navigation fields | S95.2 | L | pending |
-| F-284 | Stable container-wide template grammar | S95.2 | L | pending |
-| F-285 | Content control creation and lifecycle | S95.3 | L | pending |
-| F-286 | Rich, repeating, and typed content controls | S95.3 | L | pending |
-| F-287 | Custom XML stores and data binding authoring | S95.3 | L | pending |
+| F-283 | Complete numbering-aware navigation fields | S95.2 | L | done |
+| F-284 | Stable container-wide template grammar | S95.2 | L | done |
+| F-285 | Content control creation and lifecycle | S95.3 | L | done |
+| F-286 | Rich, repeating, and typed content controls | S95.3 | L | done |
+| F-287 | Custom XML stores and data binding authoring | S95.3 | L | done |
 | F-288 | Legacy form field creation | S95.4 | M | pending |
 | F-289 | Modern Word form authoring | S95.4 | L | pending |
 | F-290 | Mail-merge package and data-source authoring | S95.4 | M | pending |
@@ -754,7 +754,7 @@ HLD14 contract before adopting contributor changes.
 | F-X187 | Scoped paragraph and cell text replacement | S90 | M | done |
 | F-X188 | Preserve comment ownership when replacing or removing whole stories | S90 | L | done |
 | F-X190 | Preserve cached text in multi-run complex field story snapshots | S90 | M | done |
-| F-X192 | Complete the remaining Word bibliography catalogue | S95.2 | L | pending |
+| F-X192 | Complete the remaining Word bibliography catalogue | S96 | L | pending |
 | F-X191 | Ignore namespace declarations in numbering reader completeness | S90 | S | done |
 | F-X189 | Prepare Word 0.16.0 and PowerPoint 0.14.0 families | S90 | L | done |
 | F-X193 | Preserve semantic mark highlights through nested HTML runs | S91 | S | done |
@@ -827,4 +827,9 @@ HLD14 contract before adopting contributor changes.
 | F-X256 | Refuse ambiguous Word numeric units and preserve line spacing | S95 | M | done |
 | F-X257 | Complete remaining Word names and legacy dropdown diagnostics | S95 | L | done |
 | F-X258 | Complete remaining PowerPoint names color and language contracts | S95 | M | done |
+| F-X259 | Repair reviewed consistency defects and strengthen acceptance gates | S95.3 | M | done |
+| F-X260 | Restore live handles and bound structural edit cost | S95.3 | L | done |
+| F-X261 | Resolve Word package preservation and inspection contributions | S95.3 | L | done |
+| F-X262 | Resolve PowerPoint authoring and table-render contributions | S95.3 | L | done |
+| F-X263 | Prepare Word 0.16.3 and PowerPoint 0.14.3 patch releases | S95.3 | L | done |
 <!-- AUTOGEN:backlog-MX END -->

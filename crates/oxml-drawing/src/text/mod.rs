@@ -735,7 +735,7 @@ mod tests {
                 r#"<a:txBody xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:x"><a:bodyPr/>"#,
                 r#"<a:p xmlns:x="urn:x"><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t>one</a:t></a:r><x:in-paragraph/><a:endParaRPr sz="1200"/></a:p>"#,
                 r#"<a:p><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t>two</a:t></a:r><a:br><a:rPr b="1"/></a:br><a:r><a:rPr b="1"/><a:t>soft</a:t></a:r><a:br><a:rPr b="1"/></a:br><a:endParaRPr sz="1200"/></a:p>"#,
-                r#"<a:p><a:pPr algn="ctr"/><a:r><a:rPr b="1"/><a:t/></a:r><a:endParaRPr sz="1200"/></a:p>"#,
+                r#"<a:p><a:pPr algn="ctr"/><a:endParaRPr sz="1200"/></a:p>"#,
                 r#"<x:after-paragraphs/></a:txBody>"#,
             )
         );

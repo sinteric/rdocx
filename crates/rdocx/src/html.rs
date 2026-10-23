@@ -3066,7 +3066,8 @@ impl Importer<'_> {
                 numbering: None,
             };
             let paragraph = self.build_paragraph(model)?;
-            self.output.push(BodyContent::Paragraph(paragraph));
+            self.output
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         } else {
             pieces.clear();
         }
@@ -3097,7 +3098,8 @@ impl Importer<'_> {
                     inner: &mut paragraph,
                 }
                 .set_border_bottom(crate::BorderStyle::Single, 4, "000000");
-                self.output.push(BodyContent::Paragraph(paragraph));
+                self.output
+                    .push(BodyContent::Paragraph(Box::new(paragraph)));
                 Ok(())
             }
             "div" => self.project_container(element, inherited),
@@ -3160,7 +3162,8 @@ impl Importer<'_> {
                     numbering: None,
                 };
                 let paragraph = self.build_paragraph(model)?;
-                self.output.push(BodyContent::Paragraph(paragraph));
+                self.output
+                    .push(BodyContent::Paragraph(Box::new(paragraph)));
                 Ok(())
             }
             _ => {
@@ -3389,7 +3392,8 @@ impl Importer<'_> {
                 numbering: None,
             })?;
             Self::attach_list_paragraph(&mut paragraph, list_id, level, first);
-            self.output.push(BodyContent::Paragraph(paragraph));
+            self.output
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         } else {
             pieces.clear();
         }
@@ -3444,7 +3448,8 @@ impl Importer<'_> {
                                     level,
                                     &mut first,
                                 );
-                                self.output.push(BodyContent::Paragraph(paragraph));
+                                self.output
+                                    .push(BodyContent::Paragraph(Box::new(paragraph)));
                             }
                             if matches!(name, "ul" | "ol") {
                                 // Separate nested definitions preserve mixed ordered/unordered siblings.
@@ -3488,7 +3493,8 @@ impl Importer<'_> {
                     numbering: None,
                 })?;
                 Self::attach_list_paragraph(&mut paragraph, list_id, level, &mut first);
-                self.output.push(BodyContent::Paragraph(paragraph));
+                self.output
+                    .push(BodyContent::Paragraph(Box::new(paragraph)));
             }
             let path = self.html_container_path(item);
             self.retain_container_path(start, &path)?;
@@ -3549,7 +3555,8 @@ impl Importer<'_> {
                 paragraph_style: None,
                 numbering: None,
             })?;
-            self.output.push(BodyContent::Paragraph(paragraph));
+            self.output
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         }
         let row_selector = Selector::parse("tr").expect("static selector");
         let rows: Vec<_> = table
@@ -3735,7 +3742,7 @@ impl Importer<'_> {
             output.rows.push(row);
         }
         self.bump_blocks(&element_path(table))?;
-        self.output.push(BodyContent::Table(output));
+        self.output.push(BodyContent::Table(Box::new(output)));
         Ok(())
     }
 

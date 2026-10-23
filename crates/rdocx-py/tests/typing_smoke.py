@@ -13,6 +13,8 @@ from rdocx import (
     Comment,
     ComparisonDiagnostic,
     ContentFragment,
+    ContentLocation,
+    ContentControlTypePayload,
     CoreProperties,
     Document,
     HtmlDiagnostic,
@@ -452,6 +454,8 @@ def fx203_owned_document_operations(document: Document, paragraph: Paragraph, pa
         FragmentConflictPolicy, OdtExportResult, RtfExportResult, EpubExportResult,
         TextReport, ValidationReport, validate_bytes, validate_file,
     )
+    assert_type(document.render_template({"name": "Ada"}, grammar_version=1), int)
+    assert_type(document.render_template({"name": "Ada"}, grammar_version=None), int)
     assert_type(document.text_report(), TextReport)
     assert_type(document.validate(), ValidationReport)
     assert_type(validate_bytes(document.to_bytes()), ValidationReport)
@@ -635,3 +639,12 @@ if TYPE_CHECKING:
     _parity_document.save(io.BytesIO())
     _parity_document = Document.open(io.BytesIO())
     assert_type(_parity_document.styles, tuple[Style, ...])
+
+
+def s953_typed_authoring_contract(owner: Document, location: ContentLocation) -> None:
+    payload = ContentControlTypePayload.date("yyyy-MM-dd")
+    assert_type(payload, ContentControlTypePayload)
+    owner.set_content_control_type(location, payload)
+    assert_type(owner.add_custom_xml_store(b"<root/>"), str)
+    assert_type(owner.add_custom_xml_store(b"<root/>", ("urn:example",)), str)
+    assert_type(owner.remove_content_range(0, 0), int)

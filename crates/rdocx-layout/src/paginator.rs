@@ -4631,7 +4631,7 @@ fn tab_aligned_fields(items: &[LineItem]) -> Vec<Option<TabAlignedField>> {
             let LineItem::Text(text) = item else {
                 continue;
             };
-            if text.field_kind.is_some() {
+            if text.field_kind.is_some() || text.field_source.is_some() {
                 fields[index + offset] = Some(TabAlignedField {
                     start,
                     end,

@@ -152,13 +152,19 @@ fn run_index(path: &ContentPath) -> Option<usize> {
 }
 
 fn names_cell(path: &ContentPath) -> bool {
-    path.segs
-        .iter()
-        .any(|segment| matches!(segment, PathSeg::Row(_)))
-        && path
-            .segs
-            .iter()
-            .any(|segment| matches!(segment, PathSeg::Cell(_)))
+    cell_coordinates(path).is_some()
+}
+
+fn cell_coordinates(path: &ContentPath) -> Option<(usize, usize)> {
+    let row = path.segs.iter().find_map(|segment| match segment {
+        PathSeg::Row(index) => Some(*index),
+        _ => None,
+    })?;
+    let column = path.segs.iter().find_map(|segment| match segment {
+        PathSeg::Cell(index) => Some(*index),
+        _ => None,
+    })?;
+    Some((row, column))
 }
 
 fn text_frame_ref_at<'a>(
@@ -414,6 +420,31 @@ impl PyTextFrame {
         let prepared = presentation.prepare_owners(
             &candidate,
             "TextFrame.text",
+            &survivors,
+            false,
+            false,
+            false,
+        )?;
+        presentation.publish_owners(candidate, prepared)?;
+        Ok(())
+    }
+
+    /// Leaves one paragraph, keeps its properties, and drops its runs.
+    /// Held runs of this frame become stale. Other shapes stay live.
+    fn clear(&self, py: Python<'_>) -> PyResult<()> {
+        self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let current = presentation
+            .current_path(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("owner is absent"))?;
+        let mut candidate = presentation.inner.clone();
+        native_text_frame_mut_at(&mut candidate, &current)
+            .map(|mut frame| frame.set_text(""))
+            .ok_or_else(|| PyValueError::new_err("shape has no text frame"))?;
+        let survivors = presentation.text_changed_owners(&self.path)?;
+        let prepared = presentation.prepare_owners(
+            &candidate,
+            "TextFrame.clear",
             &survivors,
             false,
             false,
@@ -1324,43 +1355,68 @@ impl PyParagraph {
         })
     }
 
-    /// The bullet or number size as a fraction of the text size, from 0.25
-    /// to 4.0. `None` means no percentage value, including retained point-size
-    /// values. Assigning `None` removes only the explicit size owner.
+    /// The bullet or number size. A float from 0.25 to 4.0 is a fraction of
+    /// the text size. A `Length` is an absolute point size. `None` removes
+    /// the explicit size owner. The getter returns the stored kind.
     #[getter]
-    fn bullet_size(&self, py: Python<'_>) -> PyResult<Option<f64>> {
-        let size = self.read_bullet(py, |bullet| match &bullet.size.as_ref()?.value {
-            TextBulletSizeValue::Percent(value) => Some(value.clone()),
-            TextBulletSizeValue::Points(_) => None,
+    fn bullet_size(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let size = self.read_bullet(py, |bullet| {
+            bullet.size.as_ref().map(|size| size.value.clone())
         })?;
-        size.map(|value| {
-            match value.strip_suffix('%') {
-                Some(percent) => percent.parse::<f64>().map(|percent| percent / 100.0),
-                None => value.parse::<f64>().map(|value| value / 100_000.0),
+        match size {
+            Some(TextBulletSizeValue::Percent(value)) => {
+                let fraction = match value.strip_suffix('%') {
+                    Some(percent) => percent.parse::<f64>().map(|percent| percent / 100.0),
+                    None => value.parse::<f64>().map(|value| value / 100_000.0),
+                }
+                .map_err(|_| {
+                    PyValueError::new_err(format!("bullet size {value:?} is not a number"))
+                })?;
+                Ok(Some(fraction.into_pyobject(py)?.unbind().into()))
             }
-            .map_err(|_| PyValueError::new_err(format!("bullet size {value:?} is not a number")))
-        })
-        .transpose()
+            Some(TextBulletSizeValue::Points(centipoints)) => {
+                length_object(py, i64::from(centipoints) * EMU_PER_CENTIPOINT).map(Some)
+            }
+            None => Ok(None),
+        }
     }
 
     #[setter]
-    fn set_bullet_size(&self, py: Python<'_>, value: Option<f64>) -> PyResult<()> {
-        let size = value
-            .map(|value| {
+    fn set_bullet_size(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let size = match value {
+            None => None,
+            Some(value) if value.is_none() => None,
+            Some(value) if value.is_instance_of::<PyBool>() => {
+                return Err(PyTypeError::new_err(
+                    "bullet size rejects bool. Use a fraction from 0.25 to 4.0 or rpptx.util.Pt(17.85)",
+                ));
+            }
+            Some(value) if value.is_instance(&py.import("rpptx")?.getattr("Length")?)? => {
+                let emu = value.extract::<i64>()?;
+                let centipoints = i32::try_from(emu / EMU_PER_CENTIPOINT).map_err(|_| {
+                    PyValueError::new_err("bullet point size is outside the stored range")
+                })?;
+                Some(TextBulletSize::points(centipoints).map_err(|_| {
+                    PyValueError::new_err("bullet point size must be from 1 to 4000 points")
+                })?)
+            }
+            Some(value) => {
+                let value = value.extract::<f64>()?;
                 if !value.is_finite() || !(0.25..=4.0).contains(&value) {
                     return Err(PyValueError::new_err(
                         "bullet size must be from 0.25 to 4.0",
                     ));
                 }
-                TextBulletSize::percent(((value * 100_000.0).trunc() as i64).to_string()).map_err(
-                    |_| {
+                let thousandths = crate::dml::percentage_thousandths(value);
+                Some(
+                    TextBulletSize::percent(thousandths.to_string()).map_err(|_| {
                         PyValueError::new_err(format!(
                             "bullet size must be from 0.25 to 4.0, got {value}"
                         ))
-                    },
+                    })?,
                 )
-            })
-            .transpose()?;
+            }
+        };
         self.edit_bullet(py, |bullet| bullet.size = size)
     }
 
@@ -1752,24 +1808,29 @@ impl PyHyperlink {
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
         let run =
             run_index(&current).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
-        if names_cell(&current) {
-            return Err(PyValueError::new_err(
-                "cell hyperlink assignment is not supported",
-            ));
-        }
         let shape_id = crate::shape::native_shape_ref_at(&presentation.inner, &current)
             .and_then(|shape| shape.non_visual_id())
             .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
-        presentation
-            .inner
-            .set_run_hyperlink(
+        let address = value.filter(|value| !value.is_empty());
+        let result = if let Some((row, column)) = cell_coordinates(&current) {
+            presentation.inner.set_cell_run_hyperlink(
+                slide_index(&current)?,
+                shape_id,
+                (row, column),
+                paragraph,
+                run,
+                address,
+            )
+        } else {
+            presentation.inner.set_run_hyperlink(
                 slide_index(&current)?,
                 shape_id,
                 paragraph,
                 run,
-                value.filter(|value| !value.is_empty()),
+                address,
             )
-            .map_err(|error| rpptx_to_pyerr(py, error))
+        };
+        result.map_err(|error| rpptx_to_pyerr(py, error))
     }
 }
 
@@ -2306,18 +2367,24 @@ impl PyFont {
     }
 
     #[setter]
-    fn set_baseline(&self, py: Python<'_>, value: Option<f64>) -> PyResult<()> {
-        let baseline = value
-            .map(|value| {
-                if (-1.0..=1.0).contains(&value) {
-                    Ok(((value * 100_000.0).trunc() as i32).to_string())
+    fn set_baseline(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let baseline = match value {
+            None => None,
+            Some(value) if value.is_none() => None,
+            Some(value) if value.is_instance_of::<PyBool>() => {
+                return Err(PyTypeError::new_err("baseline rejects bool"));
+            }
+            Some(value) => {
+                let value = value.extract::<f64>()?;
+                if value.is_finite() && (-1.0..=1.0).contains(&value) {
+                    Some(crate::dml::percentage_thousandths(value).to_string())
                 } else {
-                    Err(PyValueError::new_err(format!(
+                    return Err(PyValueError::new_err(format!(
                         "baseline must be from -1.0 to 1.0, got {value}"
-                    )))
+                    )));
                 }
-            })
-            .transpose()?;
+            }
+        };
         self.update(py, |properties| properties.baseline = baseline)
     }
 

@@ -208,6 +208,11 @@ mod tests {
         let rectangle = preset_shape_definition("rect").expect("known rectangle preset");
         assert!(CT_CustomGeometry2D::from_xml(rectangle).is_ok());
         assert!(preset_shape_definition("notAStandardPreset").is_none());
+        let up_arrow = preset_shape_definition("upArrow").expect("published upArrow preset");
+        let up_arrow_text = std::str::from_utf8(up_arrow).expect("upArrow geometry is UTF-8");
+        assert_eq!(up_arrow_text.matches("fmla=\"val 50000\"").count(), 2);
+        assert!(up_arrow_text.contains("+- y2  0 dy1"));
+        assert!(CT_CustomGeometry2D::from_xml(up_arrow).is_ok());
     }
 
     #[test]
@@ -227,7 +232,7 @@ mod tests {
     #[test]
     fn oxml_drawing_is_an_explicit_publication_candidate() {
         let manifest = include_str!("../Cargo.toml");
-        assert!(manifest.contains("version = \"0.14.2\""));
+        assert!(manifest.contains("version = \"0.14.3\""));
         assert!(manifest.contains("publish = true"));
     }
 }

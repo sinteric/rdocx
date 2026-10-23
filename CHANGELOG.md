@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.16.3
+
+### Highlights
+
+Word 0.16.3 completes the bounded navigation, template and content-control work since v0.16.2, adds custom XML store authoring, and repairs reported owner-lifetime, package-preservation and access-cost defects. The exact seven Rust packages, CLI and `rdocx` Python distribution share this version. Approved Rust source compatibility changes and native Word differences are described below.
+
+### Added
+
+- Rust and Python author rich/plain content-control shells at qualified locations, edit metadata, move, clone, remove and unwrap them through checked transactions. Typed payloads cover dates, checkboxes, pictures, combo/drop-down lists, groups and repeating sections/items. Unsupported placements and invalid payloads refuse atomically. WASM and CLI gain no control-creation surface.
+- Rust and Python create custom XML stores with properties, relationships and content types, bind existing controls through the supported absolute-child-path subset, and update the addressed store. Schema references are stored without fetching. Unknown store bytes remain verbatim.
+- Numbering-aware REF, STYLEREF, PAGEREF, captions, outlines and TOC rebuilding share source-qualified numbering context. Explicit TOC heading ranges also bound outline-derived entries.
+- Opt-in template grammar version 1 supports the approved paths, filters, escaping and container expansion across existing stories. Legacy calls retain their grammar. Empty and populated implicit scopes follow the same lookup policy.
+- Read-only chart snapshots expose the qualified direct-body occurrences and finite data families. Optional display equations, persisted list restart/start and marker-font selection, plus note reference styles and current-id removal, complete the selected everyday authoring gaps.
+- Python adds ordered custom-property iteration/lookup, read-only package part names/XML and default paragraph spacing access. Missing, binary and unsupported part encodings produce explicit diagnostics.
+
+### Fixed
+
+- Held Word paragraph/run handles survive resolvable table and cell property edits. Cached reads stay current after tab/break insertion and mirrored edits, and read/write lookup selects the same physical owner inside mixed controlled content.
+- Named read-only handle operations and structural edits avoid unrelated package inventory scans. Half-open direct-body range removal publishes one transaction and returns the removed count.
+- Style edits retain opaque root children in schema order. Image pruning keeps shared and reinserted resources, plain embedded font bytes stay intact, header validation names wrong targets, and qualified alternate text-box edits publish together or not at all.
+- Comment resolution preserves the three states of true, false and unknown. Checked XML retains admitted namespaces and unchanged opaque sections while refusing invalid newly authored placement and malformed custom XML. DTD declarations are explicitly refused.
+- Nested control relocation, unwrapping and repeating-section admission inspect decoded text and the actual destination content model before publication. Repeating types also retain their permitted physical level and section/item ownership across type changes and unwrap. Imported type-marker aliases retain namespace identity through modeled edits, including locally shadowed canonical prefixes.
+
+### Compatibility
+
+`rdocx_oxml::document::BodyContent` now boxes the `Paragraph`, `Table`, `ContentControl` and `RawXml` payloads. Wrap downstream constructors in `Box::new`, and account for boxes when consuming owned matches. `CommentRef::resolved` is `Option<bool>`, with Python `bool | None`. Missing extension metadata is unknown, not false. `ResolvedNumbering` also has the documented hidden definition/start-override metadata. Patch numbering does not imply unrestricted Rust source compatibility.
+
+Repeating controls intentionally append a clone of the first item and refuse removal of the last item. Native Word defaults instead clone the addressed item and delete the whole section when its last item is removed. The approved API retains its explicit behavior. Authentic Word for Mac 16.114 (26101123) qualification compares equivalent native operations and retains both default differences. Native opening/saving and individual XML normalizations are distinct from whole-page rendering parity.
+
+Native embedded-font qualification establishes genuine proper Bold-only use through initial, saved and reopened phases. Paired Italic can use Regular outlines with synthetic slant, and Word can empty the Italic part when saving. This is a documented native limitation, without a speculative writer workaround or a claim of general multi-face interoperability.
+
+The private unreduced Issue 390 document remains unqualified. Its reduced cases and constructed image-reinsert controls are included, so the report is partially addressed. Custom XML store removal, general XPath, citation/equation/bibliography/document-part control authoring, later form work, Python 3.14 and npm publication are excluded. Default paragraph line-spacing reads stored auto values as multiples and exact/atLeast values as Length. Assigning Length writes an exact rule, an omitted keyword preserves its element, and None clears only the selected property. The shared 0.14.3 family must precede Word publication where the internal pins require it.
+
+### Contributors
+
+- [@hadim](https://github.com/hadim), Hadrien Mary, reported the remaining everyday compatibility groups in [Issue 385](https://github.com/tensorbee/rdocx/issues/385) and the font work underlying the bounded native qualification in [Issue 360](https://github.com/tensorbee/rdocx/issues/360). Earlier shipped APIs are not counted as new outcomes here.
+- Hadrien reported custom-property iteration in [Issue 387](https://github.com/tensorbee/rdocx/issues/387), handles in [Issue 388](https://github.com/tensorbee/rdocx/issues/388), structural-edit costs in [Issue 389](https://github.com/tensorbee/rdocx/issues/389), package preservation in [Issue 390](https://github.com/tensorbee/rdocx/issues/390), and source/API gaps in [Issue 391](https://github.com/tensorbee/rdocx/issues/391). He supplied candidate [PR 393](https://github.com/tensorbee/rdocx/pull/393), [PR 395](https://github.com/tensorbee/rdocx/pull/395), [PR 396](https://github.com/tensorbee/rdocx/pull/396) and [PR 397](https://github.com/tensorbee/rdocx/pull/397). The integrated outcomes use reviewed adaptations and repairs, not an assertion that a candidate was merged unchanged.
+- Hadrien reported read-only handle costs in [Issue 398](https://github.com/tensorbee/rdocx/issues/398) with candidate [PR 399](https://github.com/tensorbee/rdocx/pull/399), and TOC outline range behavior in [Issue 400](https://github.com/tensorbee/rdocx/issues/400) with candidate [PR 401](https://github.com/tensorbee/rdocx/pull/401). The accepted implementation preserves the approved ownership, timing and TOC selector contracts.
+- Atul Sharma maintained the integration, qualification and release preparation. Publication retains separate approval and verification.
+
+## rpptx-v0.14.3
+
+### Highlights
+
+PowerPoint 0.14.3 repairs reported authoring, handle and edit-cost defects, improves table text placement, and completes the selected checked-XML/value/CLI gaps since rpptx-v0.14.2. The exact fifteen shared OOXML and PowerPoint Rust packages, CLI and `rpptx` Python distribution share this version.
+
+### Added
+
+- Python TextFrame.clear retains one paragraph and its properties, drops its runs and retires those held runs while unrelated owners remain live. Bullet size distinguishes percentage floats, Length point values and clearing with None.
+- Table-cell run hyperlinks use the slide relationship scope. Shapes and connectors support checked removal of their style element, while unsupported kinds refuse atomically.
+- The regenerated preset table includes upArrow and the matching UP_ARROW enum value.
+
+### Fixed
+
+- Appending paragraphs, runs and fields preserves earlier live handles without silently refreshing previously materialized collections. Named scalar and structural edits avoid unrelated slide/package inventory walks.
+- Slide placeholders iterate by ascending idx, including gaps. Layout and master placeholders retain tree order, and indexing remains lookup by idx.
+- Transparency, gradient position, percentage bullet size and font baseline use the pinned ties-to-even conversion. Unrelated EMU, twips, time and adjustment truncation remains unchanged.
+- Painted table rows grow for the approved text, span, margin and vertical-text cases so following rows do not overlap. Stored row heights and frame dimensions are preserved.
+- Checked mutation refuses unsupported table/chart-frame flips, invalid slide dimensions, unknown styles, wrong output formats and malformed finite XML content models before publication. The CLI refuses no-match replacement-map operations under the documented expectation contract, and missing-family font removal produces an actionable refusal.
+
+### Compatibility
+
+Rust `ValidationIssue` gains `InvalidXmlChild`. Update downstream exhaustive matches. Slide placeholders change their iteration order, and the percentage tie rule changes intentionally. Length-valued bullet reads reflect the stored element, and invalid values or booleans refuse. A previously materialized collection is not automatically refreshed after an append.
+
+Table growth is an intentional rendering change, not a rewrite of document row geometry. The pinned LibreOffice corpus comparison renders all 421 slides without dropped bounded shapes, while its SSIM trend remains below the advisory target. This is not a claim of full PowerPoint conformance or pixel parity. Python 3.14 and npm publication remain outside qualification. The unpublished `rpptx-wasm` carrier stays 0.12.1 with its separate npm authority. Shared/PowerPoint publication precedes Word where the prepared pins require it, with separate final approval for each family.
+
+### Contributors
+
+- [@hadim](https://github.com/hadim), Hadrien Mary, reported the selected remaining PowerPoint value, XML and CLI gaps in [Issue 385](https://github.com/tensorbee/rdocx/issues/385).
+- Hadrien reported handle lifetime in [Issue 388](https://github.com/tensorbee/rdocx/issues/388), structural-edit costs in [Issue 389](https://github.com/tensorbee/rdocx/issues/389) and the authoring/rendering cases in [Issue 392](https://github.com/tensorbee/rdocx/issues/392). Candidate [PR 393](https://github.com/tensorbee/rdocx/pull/393), [PR 394](https://github.com/tensorbee/rdocx/pull/394) and [PR 397](https://github.com/tensorbee/rdocx/pull/397) supplied inputs to the reviewed integrated work. Candidates were not merged unchanged, and archive-measurement-only commits are not counted as product features.
+- Atul Sharma maintained the integration, qualification and release preparation. Publication retains separate approval and verification.
+
 ## v0.16.2
 
 ### Highlights

@@ -1041,6 +1041,78 @@ fn stack_shape_text(
     Ok((content_box, text_transform, stacked))
 }
 
+fn table_cell_span(
+    table: &ResolvedTable,
+    row_index: usize,
+    column_index: usize,
+    cell: &rpptx_layout::ResolvedTableCell,
+) -> Option<(usize, usize, usize)> {
+    if cell.horizontal_merge || cell.vertical_merge || column_index >= table.column_widths.len() {
+        return None;
+    }
+    let row_span = usize::try_from(cell.row_span)
+        .unwrap_or(usize::MAX)
+        .max(1)
+        .min(table.rows.len().saturating_sub(row_index));
+    let column_span = usize::try_from(cell.grid_span)
+        .unwrap_or(usize::MAX)
+        .max(1)
+        .min(table.column_widths.len().saturating_sub(column_index));
+    let visual_column = if table.right_to_left {
+        table
+            .column_widths
+            .len()
+            .saturating_sub(column_index + column_span)
+    } else {
+        column_index
+    };
+    Some((row_span, column_span, visual_column))
+}
+
+/// The painted height one cell needs, measured against its current span.
+///
+/// Horizontal text uses the stacked line advance. Any other direction uses
+/// the longest oriented line, which is the visual vertical size after
+/// rotation. The measure pass discards its diagnostics. Stored `a:tr/@h`
+/// is not an input this function writes.
+fn painted_row_text_extent(
+    font_manager: &mut FontManager,
+    width: f64,
+    height: f64,
+    cell: &rpptx_layout::ResolvedTableCell,
+    page_number: usize,
+    paragraph_directions: &[oxml_layout::TextDirection],
+) -> Result<f64, RenderInputError> {
+    let Some(source) = &cell.text else {
+        return Ok(0.0);
+    };
+    let mut text_body = source.clone();
+    text_body.insets = cell.margins;
+    let content = Rect {
+        x: text_body.insets.left,
+        y: text_body.insets.top,
+        width: (width - text_body.insets.left - text_body.insets.right).max(0.0),
+        height: (height - text_body.insets.top - text_body.insets.bottom).max(0.0),
+    };
+    let (content, _) = text::oriented_content_box(content, text_body.vertical);
+    let stacked = text::stack_text_for_page_with_directions(
+        font_manager,
+        content,
+        &text_body,
+        page_number,
+        paragraph_directions,
+    )
+    .map_err(|error| RenderInputError::TextLayout {
+        detail: error.to_string(),
+    })?;
+    let content_extent = if text_body.vertical == rpptx_layout::TextDirection::Horizontal {
+        stacked.height
+    } else {
+        stacked.width
+    };
+    Ok(text_body.insets.top + content_extent + text_body.insets.bottom)
+}
+
 fn lower_table(
     table: &ResolvedTable,
     font_manager: &mut FontManager,
@@ -1053,8 +1125,41 @@ fn lower_table(
         physical_column_widths.reverse();
     }
     let column_offsets = cumulative_offsets(&physical_column_widths);
-    let row_heights = table.rows.iter().map(|row| row.height).collect::<Vec<_>>();
-    let row_offsets = cumulative_offsets(&row_heights);
+    let mut required_heights = table.rows.iter().map(|row| row.height).collect::<Vec<_>>();
+    let mut measure_index = 0usize;
+    for (row_index, row) in table.rows.iter().enumerate() {
+        for (column_index, cell) in row.cells.iter().enumerate() {
+            let paragraph_directions = text_directions
+                .get(measure_index)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            measure_index += 1;
+            let Some((row_span, column_span, visual_column)) =
+                table_cell_span(table, row_index, column_index, cell)
+            else {
+                continue;
+            };
+            if cell.text.is_none() {
+                continue;
+            }
+            let width = column_offsets[visual_column + column_span] - column_offsets[visual_column];
+            let height = required_heights[row_index..row_index + row_span]
+                .iter()
+                .sum::<f64>();
+            let needed = painted_row_text_extent(
+                font_manager,
+                width,
+                height,
+                cell,
+                page_number,
+                paragraph_directions,
+            )?;
+            if needed > height + 0.01 {
+                required_heights[row_index + row_span - 1] += needed - height;
+            }
+        }
+    }
+    let row_offsets = cumulative_offsets(&required_heights);
     let mut fills = Vec::new();
     if let Some(background) = &table.background {
         fills.push(PositionedElement::Path(PathElement {
@@ -2409,6 +2514,190 @@ mod tests {
         assert!((grouped_rect.y - plain_rect.y - 40.0).abs() < 1.0e-10);
         assert!((grouped_rect.width - plain_rect.width).abs() < 1.0e-10);
         assert!((grouped_rect.height - plain_rect.height).abs() < 1.0e-10);
+    }
+
+    fn filled_rects(page: &oxml_layout::PageFrame) -> Vec<Rect> {
+        only_group(&page.elements[0])
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Path(path) if path.fill.is_some() => path.path.bounds(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_origins(element: &PositionedElement, origins: &mut Vec<Point>) {
+        match element {
+            PositionedElement::Text(run) => origins.push(run.origin),
+            PositionedElement::Group(group) => {
+                for child in &group.children {
+                    text_origins(child, origins);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn layout_table(table: ResolvedTable) -> oxml_layout::PageFrame {
+        let width = table.column_widths.iter().sum::<f64>();
+        let height = table.rows.iter().map(|row| row.height).sum::<f64>();
+        layout_slide(
+            &render_input(vec![slide(
+                (width, height.max(1.0)),
+                vec![table_shape(table)],
+            )]),
+            0,
+        )
+        .expect("table layout")
+    }
+
+    #[test]
+    fn issue392_table_rows_grow_without_overlapping_following_rows() {
+        let short = ResolvedTable {
+            column_widths: vec![40.0],
+            rows: vec![
+                ResolvedTableRow {
+                    height: 40.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("FF0000"))),
+                        text: Some(table_text("hi")),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 10.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("00FF00"))),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+            ],
+            ..ResolvedTable::default()
+        };
+        let short_heights: Vec<_> = short.rows.iter().map(|row| row.height).collect();
+        let short_fills = filled_rects(&layout_table(short.clone()));
+        assert_eq!(
+            short.rows.iter().map(|row| row.height).collect::<Vec<_>>(),
+            short_heights
+        );
+        assert!((short_fills[0].height - 40.0).abs() < 1.0e-9);
+        assert!((short_fills[1].y - 40.0).abs() < 1.0e-9);
+
+        let wrapped = ResolvedTable {
+            column_widths: vec![18.0],
+            rows: vec![
+                ResolvedTableRow {
+                    height: 4.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("FF0000"))),
+                        text: Some(table_text("alpha beta gamma delta")),
+                        margins: TextInsets {
+                            left: 1.0,
+                            top: 1.0,
+                            right: 1.0,
+                            bottom: 1.0,
+                        },
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 8.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("00FF00"))),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+            ],
+            ..ResolvedTable::default()
+        };
+        let wrapped_page = layout_table(wrapped.clone());
+        let wrapped_fills = filled_rects(&wrapped_page);
+        assert_eq!(wrapped.rows[0].height, 4.0);
+        assert_eq!(wrapped.rows[1].height, 8.0);
+        assert!(wrapped_fills[0].height > 4.0);
+        assert!((wrapped_fills[1].y - wrapped_fills[0].height).abs() < 1.0e-6);
+        let mut origins = Vec::new();
+        text_origins(&wrapped_page.elements[0], &mut origins);
+        assert!(!origins.is_empty());
+        assert!(origins.iter().all(|origin| origin.y < wrapped_fills[1].y));
+        assert!(origins.iter().all(|origin| origin.y >= wrapped_fills[0].y));
+
+        let mut spanned_text = table_text("one two three four five six");
+        spanned_text.wrap = true;
+        let spanned = ResolvedTable {
+            column_widths: vec![16.0],
+            rows: vec![
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("FF0000"))),
+                        text: Some(spanned_text),
+                        row_span: 2,
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        vertical_merge: true,
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("00FF00"))),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+            ],
+            ..ResolvedTable::default()
+        };
+        let spanned_fills = filled_rects(&layout_table(spanned.clone()));
+        assert_eq!(
+            spanned
+                .rows
+                .iter()
+                .map(|row| row.height)
+                .collect::<Vec<_>>(),
+            vec![6.0, 6.0, 6.0]
+        );
+        assert!(spanned_fills[0].height > 12.0);
+        assert!((spanned_fills[1].y - spanned_fills[0].height).abs() < 1.0e-6);
+
+        let mut vertical_text = table_text("VERTICALOVERFLOW");
+        vertical_text.vertical = TextDirection::Vertical;
+        vertical_text.wrap = false;
+        let vertical = ResolvedTable {
+            column_widths: vec![30.0],
+            rows: vec![
+                ResolvedTableRow {
+                    height: 8.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("FF0000"))),
+                        text: Some(vertical_text),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 8.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("00FF00"))),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+            ],
+            ..ResolvedTable::default()
+        };
+        let vertical_fills = filled_rects(&layout_table(vertical.clone()));
+        assert_eq!(vertical.rows[0].height, 8.0);
+        assert!(vertical_fills[0].height > 8.0);
+        assert!((vertical_fills[1].y - vertical_fills[0].height).abs() < 1.0e-6);
+        assert!(
+            vertical_fills[1].y + vertical_fills[1].height
+                > vertical_fills[0].y + vertical_fills[0].height
+        );
     }
 
     #[test]
@@ -4756,7 +5045,7 @@ mod tests {
         ] {
             assert!(!oxml_manifest.contains("rpptx-render"));
         }
-        assert!(manifest.contains("version = \"0.14.2\""));
+        assert!(manifest.contains("version = \"0.14.3\""));
         assert!(manifest.contains("publish = true"));
     }
     #[test]

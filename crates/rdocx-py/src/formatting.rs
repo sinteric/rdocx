@@ -1221,6 +1221,26 @@ pub(crate) fn apply_paragraph_update(
     update: ParagraphUpdate,
 ) -> PyResult<()> {
     let mut document = document.borrow_mut(py);
+    // A text-box paragraph is rewritten through its physical part. That
+    // publication retires the handle, including the one that made the edit.
+    // Other related stories keep the direct property edit.
+    if let ParagraphLocation::Related(related) = &location
+        && related.story().kind() == rdocx::StoryKind::TextBox
+    {
+        let mut candidate = document.inner.clone_for_staging();
+        ParagraphLocation::Related(related.clone())
+            .edit(&mut candidate, |paragraph| update.apply(paragraph))
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let native = location
+            .native(&document.inner)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        return document.publish_owner_candidate(
+            py,
+            candidate,
+            "ParagraphFormat",
+            crate::document::WordPublication::ParagraphText(native),
+        );
+    }
     location
         .edit(&mut document.inner, |paragraph| update.apply(paragraph))
         .map_err(|error| crate::rdocx_to_pyerr(py, error))

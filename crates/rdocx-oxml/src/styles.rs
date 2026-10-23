@@ -1559,6 +1559,10 @@ fn merge_defaults_source(
 pub struct CT_Styles {
     pub doc_defaults: Option<CT_DocDefaults>,
     pub styles: Vec<CT_Style>,
+    /// Root children the model does not read, such as `w:latentStyles`.
+    /// They stay in source order and are written after `w:docDefaults` and
+    /// before the first `w:style`.
+    pub extra_xml: Vec<Vec<u8>>,
 }
 
 #[allow(non_snake_case)]
@@ -1567,6 +1571,7 @@ impl CT_Styles {
         CT_Styles {
             doc_defaults: None,
             styles: Vec::new(),
+            extra_xml: Vec::new(),
         }
     }
 
@@ -1577,6 +1582,7 @@ impl CT_Styles {
 
         let mut doc_defaults = None;
         let mut styles = Vec::new();
+        let mut extra_xml = Vec::new();
         let mut buf = Vec::new();
         let mut word_prefixes = Vec::new();
         let mut namespace_bindings = Vec::new();
@@ -1606,18 +1612,33 @@ impl CT_Styles {
                         word_prefixes = prefixes;
                         namespace_bindings = namespace_bindings_at(e, &namespace_bindings)?;
                     } else {
-                        reader.read_to_end_into(name, &mut Vec::new())?;
+                        let bindings = namespace_bindings_at(e, &namespace_bindings)?;
+                        reader.config_mut().trim_text(false);
+                        let captured = capture_element(&mut reader, e)?;
+                        reader.config_mut().trim_text(true);
+                        extra_xml.push(make_style_raw_self_contained(&captured, &bindings)?);
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
                     let prefixes = word_prefixes_at(e, &word_prefixes)?;
+                    let bindings = namespace_bindings_at(e, &namespace_bindings)?;
                     if is_word_element(e.name().as_ref(), b"docDefaults", &prefixes) {
-                        let bindings = namespace_bindings_at(e, &namespace_bindings)?;
                         let raw = crate::text::raw_with_external_bindings(
                             &capture_empty_element(e)?,
                             &bindings,
                         )?;
                         doc_defaults = Some(CT_DocDefaults::from_source_xml(&raw, &prefixes)?);
+                    } else if is_word_element(e.name().as_ref(), b"style", &prefixes) {
+                        let owned = e.to_owned();
+                        let mut empty = Reader::from_reader(&[] as &[u8]);
+                        styles.push(CT_Style::from_xml_with_prefixes(
+                            &mut empty, &owned, &prefixes, &bindings,
+                        )?);
+                    } else if !is_word_element(e.name().as_ref(), b"styles", &prefixes) {
+                        extra_xml.push(make_style_raw_self_contained(
+                            &capture_empty_element(e)?,
+                            &bindings,
+                        )?);
                     }
                 }
                 Ok(Event::Eof) => break,
@@ -1630,6 +1651,7 @@ impl CT_Styles {
         Ok(CT_Styles {
             doc_defaults,
             styles,
+            extra_xml,
         })
     }
 
@@ -1653,6 +1675,10 @@ impl CT_Styles {
 
         if let Some(ref defaults) = self.doc_defaults {
             defaults.to_xml(&mut writer)?;
+        }
+
+        for raw in &self.extra_xml {
+            writer.get_mut().extend_from_slice(raw);
         }
 
         for style in &self.styles {
@@ -1771,6 +1797,7 @@ impl CT_Styles {
         CT_Styles {
             doc_defaults: Some(doc_defaults),
             styles: vec![normal, heading1],
+            extra_xml: Vec::new(),
         }
     }
 }
@@ -2471,6 +2498,41 @@ fn write_style_priority<W: std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmodelled_root_children_round_trip_before_the_styles() {
+        let xml = format!(
+            concat!(
+                r#"<w:styles xmlns:w="{}" xmlns:x="urn:x">"#,
+                r#"<w:docDefaults/>"#,
+                r#"<w:latentStyles w:count="1"><w:lsdException w:name="Normal" x:a="1"/></w:latentStyles>"#,
+                r#"<x:empty/>"#,
+                r#"<w:style w:type="paragraph" w:styleId="Empty"/>"#,
+                r#"<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+                r#"</w:styles>"#,
+            ),
+            W_NS
+        );
+        let styles = CT_Styles::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(styles.extra_xml.len(), 2);
+        assert_eq!(styles.styles.len(), 2);
+        assert_eq!(styles.styles[0].style_id, "Empty");
+        let written = String::from_utf8(styles.to_xml().unwrap()).unwrap();
+        let latent = written
+            .find(concat!(
+                r#"<w:latentStyles w:count="1" xmlns:x="urn:x">"#,
+                r#"<w:lsdException w:name="Normal" x:a="1"/></w:latentStyles>"#,
+            ))
+            .unwrap_or_else(|| panic!("{written}"));
+        let empty = written.find(r#"<x:empty xmlns:x="urn:x"/>"#).unwrap();
+        let empty_style = written
+            .find(r#"<w:style w:type="paragraph" w:styleId="Empty">"#)
+            .unwrap();
+        assert!(written.find("<w:docDefaults").unwrap() < latent);
+        assert!(latent < empty);
+        assert!(empty < empty_style);
+        assert_eq!(CT_Styles::from_xml(written.as_bytes()).unwrap(), styles);
+    }
 
     #[test]
     fn round_trip_styles() {

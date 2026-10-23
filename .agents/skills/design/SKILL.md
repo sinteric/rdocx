@@ -7,6 +7,6 @@ description: "Design a feature before implementing. Writes a design plan, no cod
 
 Canonical source: `.claude/commands/design.md`.
 
-Source SHA-256: `8af5b9adc5b4369ba61585ccd1d97e68a77f3898c4d7b246fe19d7df59aad728`.
+Source SHA-256: `4200a5757cddf34660e649d3cf88c6e16f509324eed75745dfca30208becccd4`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

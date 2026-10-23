@@ -12,8 +12,8 @@ A Rust workspace for Office Open XML. Three families of crates:
 - **`oxml-*`**, format-neutral OOXML infrastructure. The OPC container, units,
   DrawingML, image handling, layout primitives, the PDF backend.
 - **`rdocx-*`**, WordprocessingML. A shipped port of `python-docx`, prepared at
-  0.16.2 across the exact seven-package stable family and Python distribution.
-  The previous complete family release was 0.16.1. The immutable v0.11.0
+  0.16.3 across the exact seven-package stable family and Python distribution.
+  The previous complete family release was 0.16.2. The immutable v0.11.0
   attempt published only `rdocx-opc` and `rdocx-oxml`. Historical releases
   remain available.
 - **`rpptx-*`**, PresentationML. A port of `python-pptx`, under construction.
@@ -95,6 +95,10 @@ truth for what must pass.
 - **Only `/close-sprint` may merge to `main` or create an `sNN` sprint tag.**
 - **Only `/release` may create or push a `v*` release tag or start crates.io
   publication.** It requires a separate final approval at the reviewed SHA.
+- Every model uses the canonical commands and skills. New designs name consumers,
+  observable acceptance criteria and discriminating state/mode tests. Completion
+  reruns affected metadata checks. A requested independent reviewer is actually
+  invoked or receives an explicit handoff, never impersonated.
 - The design plan is a machine-consumed contract. Its `## HLD impact` section is
   a file list implemented before verification and confirmed at completion, which is what keeps the
   spec set from rotting.

@@ -3481,7 +3481,7 @@ fn compare_body(
         content
             .iter()
             .map(|content| match content {
-                BodyContent::Paragraph(paragraph) => Some(paragraph),
+                BodyContent::Paragraph(paragraph) => Some(paragraph.as_ref()),
                 _ => None,
             })
             .collect()
@@ -8890,7 +8890,7 @@ fn body_content_xml(content: &BodyContent) -> Result<String> {
         BodyContent::Paragraph(paragraph) => paragraph_xml(paragraph),
         BodyContent::Table(table) => table_xml(table),
         BodyContent::ContentControl(control) => control_xml(control),
-        BodyContent::RawXml(raw) => String::from_utf8(raw.clone()).map_err(utf8_error),
+        BodyContent::RawXml(raw) => String::from_utf8(raw.as_ref().clone()).map_err(utf8_error),
     }
 }
 
@@ -9056,7 +9056,7 @@ fn cell_xml(cell: &CT_Tc) -> Result<String> {
 fn control_xml(control: &CT_Sdt) -> Result<String> {
     let document = CT_Document {
         body: rdocx_oxml::document::CT_Body {
-            content: vec![BodyContent::ContentControl(control.clone())],
+            content: vec![BodyContent::ContentControl(Box::new(control.clone()))],
             sect_pr: None,
         },
         ..CT_Document::new()

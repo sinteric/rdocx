@@ -44,6 +44,7 @@ pub mod style;
 mod svg;
 pub mod table;
 mod template;
+pub use template::{TEMPLATE_GRAMMAR_VERSION, TemplateFormatContext};
 
 pub use bibliography::{
     BibliographyAuthor, BibliographyContributor, BibliographyContributorRole, BibliographyOptions,
@@ -59,7 +60,10 @@ pub use comments::{
 pub use comparison::{
     ComparisonDiagnostic, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind,
 };
-pub use content_control::ContentControlRef;
+pub use content_control::{
+    ContentControlAppearance, ContentControlLock, ContentControlPlacement, ContentControlRef,
+    ContentControlSpec, ContentControlTypePayload,
+};
 pub use document::{
     AccessibilityIssue, BodyContentRef, BodyItemRef, ContentFragment, ContentLocation,
     ContentMeasurement, Document, DocumentFragment, DrawingHorizontalAlignment,
@@ -68,13 +72,13 @@ pub use document::{
     FragmentConflictPolicy, HeaderFooterKind, ImageInfo, ImageWatermarkOptions, IssueSeverity,
     LinkInfo, ListLevel, ListLevelRestart, ListLevelSuffix, ListNumberFormat, NoteFamily,
     NoteNumberFormat, NotePlacement, NotePolicy, NoteRestart, NoteSpecialRecord,
-    NumberingDefinition, NumberingDefinitionLevel, NumberingFormat, NumberingInstance,
-    NumberingLevel, NumberingLevelOverride, OutlineNode, PictureAnchor, PictureCrop,
-    PictureOccurrence, PictureOptions, RenderOptions, ReplacementCountMismatch, Section,
-    SectionRef, SectionStory, StoryError, StoryId, StoryItemKind, StoryItemRef, StoryItemSnapshot,
-    StoryKind, StoryText, StoryTextItem, TextBoxDirection, TextBoxOptions, TextDiagnostic,
-    TextReport, TextWatermarkOptions, UnsupportedXmlRef, ValidationFinding, ValidationReport,
-    ValidationSeverity, WordCreationProfile, WordPackageClass, derive_font_key,
+    NumberedOutlineNode, NumberingDefinition, NumberingDefinitionLevel, NumberingFormat,
+    NumberingInstance, NumberingLevel, NumberingLevelOverride, OutlineNode, PictureAnchor,
+    PictureCrop, PictureOccurrence, PictureOptions, RenderOptions, ReplacementCountMismatch,
+    Section, SectionRef, SectionStory, StoryError, StoryId, StoryItemKind, StoryItemRef,
+    StoryItemSnapshot, StoryKind, StoryText, StoryTextItem, TextBoxDirection, TextBoxOptions,
+    TextDiagnostic, TextReport, TextWatermarkOptions, UnsupportedXmlRef, ValidationFinding,
+    ValidationReport, ValidationSeverity, WordCreationProfile, WordPackageClass, derive_font_key,
     validate_document_bytes, validate_document_file,
 };
 pub use embedded::{

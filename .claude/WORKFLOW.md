@@ -28,7 +28,11 @@ defects and zero smells, iterating in numbered passes until it reaches that.
 
 Keep each F-ID implementation limited to its approved design. The worker runs
 unique local RED/GREEN regressions, F-ID-bound fast `/verify --scoped`,
-and a zero-finding `/microscope`. External oracles, complete suites and risk
+and a zero-finding `/microscope`. Batch related local regressions that share a
+test binary when practical, preserving each case's actual RED/GREEN outcome.
+Use scoped checks between edits and rerun affected cases after meaningful
+source changes. Do not repeatedly compile a large binary solely to add one
+more case. External oracles, complete suites and risk
 riders run once in the final integrated union, with pending checks explicit.
 Run `/verify --full` and `/sprint-review` once over the final integrated
 sprint result. A formal dependency-prefix checkpoint completes its reviewed
@@ -56,6 +60,138 @@ such as `/run-sprint` invokes a review, the completed review returns control to
 the orchestrator. It may enter a separate remediation phase and launch the next
 independent review pass in the same user invocation. The boundary separates
 review from remediation, not one agent session from the next.
+
+### Acceptance contracts and composition checks
+
+Every model follows the same canonical commands and skills. Model names do not
+relax gates or permit an implementer to claim another model's independent
+review. A requested reviewer is retained in sprint run state. If the host
+cannot invoke that reviewer, stop at a review handoff with actual source,
+findings, evidence and pending checks. Do not record a clean review on its behalf.
+
+Before implementation, the design must include a consumer map, numbered
+observable acceptance criteria and a discriminating test matrix. Each criterion
+names concrete input, expected output or refusal, affected consumers and exact
+local/final evidence. Map every issue criterion separately. Missing or
+unreduced criteria remain explicit, not silently dropped by a passing PR script.
+Public signatures, compatibility changes and resource budgets need an explicit
+design decision. Do not infer them from a contributed patch.
+
+Apply `/design`'s validation checklist before approval. Verify factual
+compatibility claims against pinned primary sources before proposing product
+choices. Public contracts cover omission, clearing, units, numeric ties,
+ownership and schema-valid placement where applicable. Every unresolved
+decision has a stable sprint-wide ID and appears in the consolidated question
+round. Improving instructions does not approve existing draft recommendations.
+
+Approval also requires `/design`'s contract closure pass: every promised
+operation has a callable API and evidence, supported kinds match payloads,
+repeated signatures agree, and imported states have explicit read/preserve/edit
+behavior. A populated template and answered decisions are insufficient.
+
+An active worker may predate a canonical contract revision. Before continuing,
+its owner acknowledges the applicable plan and instruction revisions and their
+effect on local work in the existing progress record. Preserve dirty work and
+keep shared trackers on the canonical branch. Integration reconciles against
+the latest approved contract without replacing it with an older worker copy.
+
+Plan in dependency order without pretending the providers are implemented.
+Dependent drafts may use proposed in-sprint contracts. Dependent approval
+requires approved provider contracts. Implementation still requires actual
+dependency completion, including the required prefix checkpoint. External
+unfinished dependencies remain explicit blockers.
+
+Identify where the same rule reaches evaluation, cached state, serialized
+output, layout, bindings or CLI. Compare the same source through the affected
+consumers and lifecycle stages. A shared formatter does not prove its callers
+supply equivalent defaults or context. Audit copied selection, scope, unit and
+refusal policy. Reuse an existing concrete policy owner when practical.
+
+Choose risk-based combinations, not an exhaustive product of every dimension.
+Use zero/one/many collections, implicit/explicit scope, legacy/versioned modes,
+direct/nested owners and before/after update and reopen where applicable. Name
+the plausible wrong implementation each decisive fixture rejects. A one-level
+number cannot distinguish relative and full context. Save/reopen cannot prove
+that earlier live handles survived the mutation. Inspect actual positioned or
+rendered values when the criterion promises rendering, not only cached XML.
+These are local regressions unless an external oracle is explicitly needed.
+
+After completion metadata changes, run the checks whose inputs changed. Product
+evidence can remain applicable while a backlog/capability policy result becomes
+stale. Reconcile status, ownership, capability evidence and plan text before
+final freeze. The metadata-adoption helper checks current capability ownership,
+including unresolved rows pointing at completed stories. It does not replace
+other affected policy checks or invent an execution at the new metadata SHA.
+Never rerun unaffected product/native gates solely for completion paperwork.
+
+The trigger is the S95.11/S95.2 independent evaluation: local tests missed
+cross-consumer numbering, empty implicit-loop scopes and post-gate status drift.
+Record this trigger in F-X259's eventual AS_BUILT Notes for future sessions.
+
+The S95.3 review adds concrete closure checks to the existing design and review
+commands: lifecycle destination invariants, exact binding coverage and actual
+raw-XML validation. `/verify` owns the distinct build, artifact and semantic
+outcome requirements. Preserve that review as historical evidence. Process
+clarifications do not fix its product findings, satisfy missing native evidence
+or permit closure. Attribute this follow-up trigger in the eventual process
+change's delivery notes, separately from product remediation.
+
+S95.3 pass 2 retained the same nested-placement and XML-validation defects on
+different inputs after direct-case repairs. `/implement-feature` owns the
+targeted remediation discipline: invariant and caller analysis, a different
+discriminating case where applicable, honest RED provenance and escalation
+after repeated failed repairs. Preserve supported input contracts during fixes.
+This instruction update does not close those findings or supply Word evidence.
+
+The later focused S95.3 reviews also exposed a separate repeating-section
+publisher using an equivalent predicate. Consumer coverage therefore includes
+all publishers of the invalid state, not only callers of the first repaired
+helper. Keep that coverage in the existing plan. Escalation names the actual
+recipient and role and preserves sole-writer ownership. Review and repair
+handoffs are distinct. These controls are defined in `/implement-feature` and
+do not replace a missing native acceptance observation.
+
+S95.3 Issue398 review found stale accepted text in a Codex-authored cache after
+`Run.add_tab` and `Run.add_break`. Those existing publishers preserve owner
+scopes. The design, implementation and differential-testing instructions now
+require fact-changing publication coverage even when identity or revision stays
+unchanged. Its follow-up also requires proving immutable and mutable accessors
+select the same physical owner, since controlled content can change ordinal
+meaning. This applies to every model. Record the trigger in F-X259 delivery
+notes. These instructions do not close the product finding or replace pending
+release measurements and native qualification.
+
+The S95.3 release qualification exposed a separate binding-contract gap after
+runtime suites passed: a missing export and range stub, an unusable typed
+factory constructor, a misleading visible empty-sequence default and a stale
+bullet return union in typed smoke. Implementation, microscope and the
+binding reference now require concrete public typed uses, aligned export paths
+and observable default signatures. Whole installed typing/stub checks remain
+final riders. Record this trigger in F-X263 delivery notes. Instruction changes
+do not repair a package or turn a failed typing run into a pass.
+
+S95.3 pass4 found a remaining context-dependent customXml wrapper bypass after
+nested-sdt checks passed. Implementation and microscope now require admitted
+wrapper inventories, inherited destination grammar and compatible metadata
+controls. This refines the existing placement invariant, not general imported
+XML validation. Record this trigger with the B2 amendment, without rewriting
+prior reports or treating instructions as product remediation.
+
+The subsequent typed-context investigation found compatible empty payloads
+still published repeating types inline. Type changes could also retire an
+owner marker without preserving item context. Design, implementation and
+microscope now separate physical type placement, payload grammar and enclosing
+owner requirements, including inverse transitions. Preserve primary-source
+containment versus immediate-parent distinctions. Record this refinement with
+the B2 amendment. Instructions do not qualify a changed product artifact.
+
+S95.3 pass5 exposed a modeled serializer changing imported type-marker identity
+before a namespace-qualified placement guard. Implementation and microscope now
+trace transformations before validation, distinguish raw passthrough from
+modeled serialization, and compare expanded namespace identity after staging.
+Alias and local-shadow controls must preserve compatible edits and opaque
+metadata as well as prove refusal. Record this trigger with the B2 amendment.
+Instruction changes do not qualify repaired source or its installed artifacts.
 
 ### External CI source availability
 
@@ -144,10 +280,10 @@ reading it.
 The reference material commands cite lives in `.claude/skills/`:
 `voice-rules`, `hld-discipline`, `risk-routing`, `differential-testing`.
 
-## Two agents, one workflow
+## Every agent, one workflow
 
-Claude and Codex follow the same rules. `.claude/commands/` and
-`.claude/skills/` are canonical for both, and `AGENTS.md` is the entry point
+Claude, Codex, Grok and other implementing models follow the same rules. `.claude/commands/` and
+`.claude/skills/` are canonical for every agent, and `AGENTS.md` is the entry point
 for any agent that does not read `CLAUDE.md`.
 
 Codex discovers repository skills under `.agents/skills/<name>/SKILL.md`. Those
@@ -166,7 +302,7 @@ Adding a command means adding `.claude/commands/<name>.md` with a `description`
 in its frontmatter, then regenerating. The description is required, since it is
 what both hosts show in their command list.
 
-An agent claims work as `claude` or `codex`, which is what the `Owner` column
+An agent claims work under its actual lowercase host identity, such as `claude`, `codex` or `grok`, which is what the `Owner` column
 in `CURRENT_SPRINT.md` records and what the `work/<fid-lower>-<agent>` branch
 name carries.
 
@@ -217,7 +353,12 @@ commands execute against them:
 | Section | Consumed by |
 |---|---|
 | `## Spec reference` | `/start-feature`, which **refuses a whole-document citation.** Name sections |
-| `## Test plan` | `/start-feature` step 3, which creates the stubs |
+| `## Consumer map` | implementation and review, including caller context and lifecycle comparisons |
+| `## Behavior contracts and evidence` | design validation, exact API/numeric/schema behavior and pinned factual sources |
+| `## Dependency readiness` | approved provider contracts for design, actual completion before implementation |
+| `## Acceptance criteria` | numbered observable behavior, linked local and final evidence |
+| `## Test matrix` | discriminating combinations and the wrong behavior each rejects |
+| `## Test plan` | `/start-feature` step 5, which creates the stubs |
 | `## Implementation checklist` | The implementing session |
 | `## HLD impact` | `/complete-feature`, which updates **exactly those files** |
 | `## Open questions` | `/design`, which asks them before writing code |

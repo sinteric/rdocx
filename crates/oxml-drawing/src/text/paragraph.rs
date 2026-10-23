@@ -3955,9 +3955,27 @@ impl CT_TextParagraph {
     /// unmodelled run content for the replacement. A paragraph without one
     /// formats the new run with its end-of-paragraph properties, without
     /// their hyperlinks, as PowerPoint formats text typed into an empty
-    /// paragraph.
+    /// paragraph. Empty text leaves the paragraph properties and drops every
+    /// run, including run-local preserved children.
     pub fn set_text(&mut self, text: &str) {
         let old_run_count = self.runs.len();
+        if text.is_empty() {
+            let mut raw_children = OrderedRawChildren::default();
+            for boundary in 0..=2 + old_run_count {
+                if boundary <= 1 {
+                    for child in self.raw_children.at(boundary) {
+                        raw_children.push(boundary, child.to_vec());
+                    }
+                } else if boundary > 1 + old_run_count {
+                    for child in self.raw_children.at(boundary) {
+                        raw_children.push(2, child.to_vec());
+                    }
+                }
+            }
+            self.raw_children = raw_children;
+            self.runs.clear();
+            return;
+        }
         let retained_run = self.runs.iter().find_map(|run| match run {
             TextRun::Run(run) => Some(run.clone()),
             TextRun::Break(_) | TextRun::Field(_) => None,

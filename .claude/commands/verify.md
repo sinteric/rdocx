@@ -29,6 +29,73 @@ call an unperformed final oracle a passed local gate.
 Record in-flight evidence and pending checks in the feature's existing
 `.claude/scratch/<F-ID>-progress.md` before handing over.
 
+## Acceptance applicability
+
+### Build, artifact and semantic outcome
+
+Dependent batches stop after a failed prerequisite. Use `set -e` in a shell
+build/test batch or check the actual child status before the next stage. A
+failed extension build must not fall through to tests or timings on an older
+installed module. Preserve the failed attempt and authenticate the replacement
+artifact after a successful build.
+
+Keep the wrapper/transport exit, checked child exit and semantic acceptance
+outcome separate. A wrapper that successfully records Cargo exit 101 has
+recorded a failed build. Exit zero with a reported target of false is successful
+measurement execution, not a satisfied target. Classify an approved trend as a
+trend and a required threshold miss as a failed criterion.
+
+Do not measure or test a leftover binary after a failed rebuild. Record the
+successful build command, actual child exit, source identity, profile/features,
+artifact path and content hash. Link the observation to that artifact and
+source, including the actual imported extension path for Python. A diagnostic
+such as enum size or body_content_bytes alone does not identify a binary.
+Retain failed attempts separately. A later successful build and run can
+supersede their applicable result, but must not relabel them as successful or
+claim to qualify newer source without an applicability check.
+
+For benchmarks, retain every required operation, small/large workload sizes,
+raw sample values and units, aggregation, ratios, threshold and pass/fail.
+Preserve relevant runtime/load observations. Near-threshold success remains
+success under the approved protocol. Do not retry to select a favorable result,
+change the denominator or relax the threshold after seeing it. Repeat only for
+an explicit invalidation or a predeclared sampling rule. Keep structural work
+bounds, timing, functional correctness and final native evidence distinct.
+Measure the acceptance consumer itself. Native timing does not qualify a
+Python API workload: retain the imported release extension path and hash, and
+include binding lookup, validation and publication in the timed call. Trace
+work counters through the actual loops they claim to bound. A constant marker
+beside an uncounted inventory scan is not a structural work-bound control.
+
+### Selecting applicable checks
+
+For scoped Python checks, select the A-ID tests and their affected controls
+before launching a broad file. Preflight only their required dependencies,
+oracle pins, installed extension identity and environment configuration. Avoid
+running a large known-unready suite to rediscover missing imports or settings.
+Final installed-product and oracle suites remain mandatory at their scheduled
+boundary. If a selected run fails for an environment reason, retain its failure
+and repair the environment or leave that check pending. Do not turn a required
+case into a skip. A broader failed command is still failed even when selected
+cases passed inside it. Cite those cases individually, and do not infer
+correctness from the absence of AssertionError or a particular error class.
+
+Before choosing commands, map each A-ID to the observation that proves it.
+Check selected test membership and discriminators, not just exit status. Cases
+that promise consumer agreement compare the same input across those paths.
+Keep internal agreement, round-trip correctness and native/oracle parity as
+separate claims. Preserve expected output, actual output and the failing
+assertion for semantic RED. A compile failure or self-catching reporter exit
+cannot replace that observation.
+
+After completion/status/capability edits, run only the metadata-dependent checks
+whose inputs changed, even when the earlier full product gate remains valid.
+At minimum run the existing live-capability-owner policy after status changes,
+plus classification checks when capability rows change. The metadata-adoption
+helper enforces the owner invariant but does not cover every possible delivery
+policy. Record exact post-edit applicability. Do not repeat unrelated product
+suites, native UI or corpora for metadata alone.
+
 ## Steps
 
 1. **Format.** `cargo fmt --all --check`.
@@ -48,9 +115,15 @@ Record in-flight evidence and pending checks in the feature's existing
    suite already covers the same tests and configuration. Retain a distinct
    focused configuration only when the broader suite does not cover it.
 
+   Batch related local cases sharing a test binary when practical, using exact
+   libtest filters or a bounded named group. Retain per-case outcomes and check
+   the selected membership. A successful batch does not cover filtered-out
+   cases. Reuse unaffected observations without another binary invocation.
+
 4. **Test the workspace.**
-   `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py`.
-   `--full` only.
+   `RUST_MIN_STACK=8388608 cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py`.
+   Use the native test-thread budget documented in HLD15 and CI. It does not
+   change product runtime or input-depth limits. `--full` only.
 
 5. **The hash harness.** `python3 scripts/hash_harness.py --check`. Run once under
    `--full`, not under `--fast` or `--scoped`.
@@ -64,8 +137,10 @@ Record in-flight evidence and pending checks in the feature's existing
 6. **The repository-policy checks.** Run once under `--full`. A workflow-only
    change runs its unique affected policy tests locally, without product gates.
    Newly written completion/review Markdown and commit messages receive their
-   cheap prose check after the full gate. Metadata adoption enforces this check
-   without repeating product verification.
+   cheap prose check after the full gate. Also rerun affected completion-policy
+   assertions against final metadata, including live capability ownership.
+   Metadata adoption enforces prose and owner consistency without repeating
+   product verification.
    Do not run the entire policy suite after each product story.
 
    Run `python3 scripts/prose_check.py` over tracked Markdown and the commit

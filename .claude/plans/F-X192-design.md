@@ -1,181 +1,306 @@
 # F-X192, Complete the remaining Word bibliography catalogue
 
-**Status**: approved
-**Sprint**: S95
+**Status**: draft
+**Sprint**: S96
 **Size**: L
 **Depends on**: F-282
 
-## Scheduling
+## Recovery and scheduling
 
-The user parked this unfinished S90 carryover at S92. The repair sprint
-insertion moved its prospective target to S94. The Issue379 through381
-roadmap insertion now schedules it in S95. Preserve its worker
-branch, dirty worktree, reviews and native evidence. S91 issue and PR repairs
-continue without requiring this story to complete. The contract is unchanged.
+The user explicitly carried this unfinished full contract from S95.2 to S96.
+It is not complete and S96 has not started. Reset the design before any later
+implementation, reassessing evidence custody, the actual comparator/runtime
+observation route and sprint capacity. F-282 remains done. The retained S95.2
+recovery analysis establishes neither reconstructed source nor full acceptance.
+
+Preserve the partial registered worker at `/private/tmp/rdocx-f-x192-codex`,
+`work/f-x192-codex`, its Git metadata/index, surviving files, progress, numbered
+reviews and native evidence unchanged. The four missing original unstaged
+carriers are bibliography.rs, document.rs, field.rs and regression_test.rs. The
+surviving index entries equal the old committed baseline, not those missing
+edits. The exact five whole-feature findings mentioned by old progress are not
+reconstructable from the available bounded records. Do not invent their content,
+claim them resolved or substitute a clean preparation review for a whole-feature
+verdict.
+
+The retained recovery decision is
+`/private/tmp/S95.2-F192-recovery-decision-preflight-2.md`. It authorizes no
+Git repair. After the S96 recovery design is approved, use the normal serial
+`/start-feature F-X192` on canonical `sprint/s96`, without `--claimed`.
+Record a fresh actual current-source Base and scoped readiness in the existing
+canonical progress carrier. Keep the old worker inactive as history. Do not
+rename its branch, reuse its stale claim, create an owner alias or copy old
+baseline files over integrated repairs. Authenticated individual fragments may
+inform reconstruction only with actual bytes, origin and current applicability.
+A fresh whole-feature microscope judges the reconstructed current diff against
+this complete contract, without rewriting the unknown old verdict.
+
+### Current evidence custody checkpoint
+
+The17October2026 bounded read-only inventory at
+`/private/tmp/S95.2-F192-next-step-1.md` found zero regular files or symlinks in
+all nine exact historical comparator/APA evidence roots cited by this plan,
+including the six AuthorKind part subdirectories. Recorded manifest and
+measurement hashes survive in the historical appendices, but their missing
+bodies cannot currently be authenticated. This proves present absence at those
+paths only, not the cause or date of loss or absence of every possible copy.
+No alternate authoritative copy is identified in the inspected records.
+
+Recover and hash-admit the original immutable packet before reusing those
+specific results. If no original copy is available, revise a bounded fresh
+provenance/diagnostic route with concrete inputs and operation boundaries before
+executing it. Do not replay the old broad comparator grids, infer a portable
+backend from prose or silently call reconstructed evidence an old producer.
+The historical appendices remain unchanged and the full catalogue gate stays
+pending. This custody gap does not create a dependency from navigation onto the
+full bibliography catalogue.
 
 ## Problem
 
-The measured native foundation refuses standard non-APA sparse or non-ASCII
-operands at `crates/rdocx/src/bibliography.rs:12169`. Localized APA sparse,
-repeated and corporate branches refuse at `bibliography.rs:12005`. Sorting
-rejects non-ASCII source operands at `bibliography.rs:7781`. Standard selected
-and empty bibliography output refuse at `bibliography.rs:2701` and `:2845`.
-Citation modifier, multiple-source and script branches also remain unfinished.
-These cannot become unsupported-producer cache retention.
+The current source still refuses more than one selected bibliography operand at
+`crates/rdocx/src/bibliography.rs:2700`, empty output at`:2844` and non-ASCII
+collection sorting at`:7781`. `bibliography_sort_key` at`:7723` still constructs
+a lowercased people/year/title tuple, which the retained complete-key native
+collision and tie evidence does not establish as Word's general comparator.
+`source_bibliography_paragraph` at`:11999` retains localized sparse/contributor
+admission limits and the non-APA path at`:12169` admits a narrow one-person ASCII
+subset. Citation kinds, modifiers, selection and context also remain incomplete.
+These recognized standard branches cannot become unsupported-extension cache
+retention.
+
+The existing `full_bibliography_catalogue_matches_pinned_word` at
+`crates/rdocx/tests/regression_test.rs:65224` currently checks one source's metadata
+only. Its passing start contract does not certify the named full catalogue gate.
+The current concrete update transaction at `bibliography.rs:16187` already
+stages the document, invokes physical cache rebuilding and publishes once.
+Reconstruct missing consumers inside that mechanism rather than replacing it.
 
 ## Spec reference
 
-- `docs/hld/02-scope-and-non-goals.md`, citation/bibliography boundary DOCX-049.
-- `docs/hld/03-architecture.md`, What stays put, native bibliography ownership and physical field caches.
-- `docs/hld/04-opc-and-packaging.md`, The package, bibliography source graph and atomic publication.
-- `docs/hld/08-rendering-spec.md`, Word field caches and deterministic script rendering.
-- `docs/hld/10-bindings-spec.md`, native bibliography and Python/WASM preservation boundaries.
-- `docs/hld/12-testing-strategy.md`, Word corpus, measured bibliography gate.
-- `docs/hld/14-development-backlog.md`, F-X192 complete catalogue contract.
+- `docs/hld/02-scope-and-non-goals.md`, DOCX-049 citations and bibliography capability boundary.
+- `docs/hld/03-architecture.md`, What stays put, native bibliography versus physical field/cache ownership, current measured admissions and the common label-font provider.
+- `docs/hld/04-opc-and-packaging.md`, The package, qualified source graph, bibliography source transactions and atomic structured cache publication.
+- `docs/hld/08-rendering-spec.md`, Word bookmark field pagination and physical field-cache/rich result context, with deterministic script rendering separate from native cache equality.
+- `docs/hld/10-bindings-spec.md`, native bibliography source/options/update records and the existing native-only API boundary, with Python/WASM preservation compatibility.
+- `docs/hld/12-testing-strategy.md`, The Word corpus, measured bibliography catalogue, exact rich results, interrupted versus completed updates and finite source-qualified projections.
+- `docs/hld/14-development-backlog.md`, F-X192 complete catalogue scope, exact dependency and differential gate.
 
 ## Approach
 
-Retain the existing public API, concrete formatter ownership and staged
-transaction. Extend existing bibliography.rs, field.rs and existing regression
-entrypoint. No new dependency is selected. No new module, file, trait, generic
-or feature flag is needed for known formatting consumers.
+### Existing carriers and full contract
 
-Complete the thirteen remaining dense APA selectors from each own completed
-native result:1054,1105,1107,1108,1109,1111,1112,1113,1115,1121,2117,2128,2145.
-Do not infer neighboring grammars. Complete all seventeen source kinds and223
-ordinary selectors across the eleven other styles, retaining pinned editions,
-rich properties and IEEE table geometry. Independently vary sparse/repeated
-operands, contributors, corporate/plural names, missing dates and mixed scripts.
+Keep existing public native signatures and report types. In particular,
+`Document::update_bibliography(&mut self) -> Result<BibliographyUpdateReport>`
+and `update_bibliography_with_default_locale(&mut self, locale: u32)` continue
+through `update_bibliography_transaction`. Source authoring and formatting stay
+in bibliography.rs. Physical field discovery, recursive instruction spans and
+structured paragraph/table result replacement stay in field.rs. Tests extend
+the existing regression entrypoint. No new module, file, crate, trait, generic,
+feature flag or dependency is proposed. No dedicated Python/WASM/CLI API is
+implied. A concrete need outside these carriers requires revision before editing.
+
+Retain all twelve pinned installed style editions, all seventeen source kinds
+and all223 ordinary locale selectors. Cover the thirteen remaining dense APA
+selectors1054,1105,1107,1108,1109,1111,1112,1113,1115,1121,2117,2128 and2145 from
+each selector's own completed authority. The historical210 dense admissions do
+not prove arbitrary inputs. Finish the eleven other styles, sparse and repeated
+properties, personal/corporate/plural contributors, missing author/date and
+mixed scripts. Preserve rich runs, paragraph properties and IEEE table geometry.
+
 Complete grouped citations, suppression, locators, prefixes/suffixes, numeric
-assignment, disambiguation, multiple-source/empty selection and all locale
-precedence/application-default/filter branches.
+assignment, disambiguation, multiple-source and empty selections, locale
+precedence, actual application default and filtering. Source LCID, field locale,
+absent/zero/default and filter selectors remain operationally distinct. Do not
+insert ambient or guessed en-US defaults. Unsupported producer extensions retain
+complete caches with diagnostics, while unfinished recognized standard owners
+abort the whole staged candidate, including earlier successful candidate edits.
+Locks, stale owners and protected producer topology retain their own boundaries.
 
-Derive actual sorting strings and comparator discriminators before extending
-bibliography_sort_key. The installed Harvard XSL assembles Last+initials for
-up to four people, Year/no-date and Title without delimiters. APA uses its
-formatted contributor representation and source-kind-specific title keys.
-IEEE uses numeric RefOrder. Existing tuple Last/Title probes do not establish
-those string keys. Retained ICU probes tested partial operands and tuples,
-not complete Harvard or APA SortingString values. Their failure does not prove
-complete-key ICU failure. The separately authenticated complete-key ICU
-counterexample and same-key native controls below establish bounded results.
-Default ICU, Core Foundation and ASCII fallback remain prohibited.
-The approved implementation route is source-kind-specific native sort-key
-assembly plus an independently demonstrated portable comparator and stable
-source/citation tie policy. No comparator backend is presumed approved.
+### Recover authority before implementing each missing consumer
 
-Before comparator production edits, run the bounded native key/host study:
-fixed first/middle/year/title with varied last names, then reverse title and
-vary year independently. Distinct Tag/Guid with equal semantic keys and
-independently reversed source/citation order distinguish ties. Concatenation
-collision pairs distinguish one string from tuples. Harvard and APA controls
-must record exact identities, actual selected style, completed F9 and normal
-reopen. Retain numeric styles' separate encounter-order authority.
-If a new dependency is demonstrated necessary, revise this plan with exact
-versions, data and all dependency riders before adding it. Missing exact
-comparator evidence blocks completion and dependent work, not independent
-sprint repairs. It is a technical implementation barrier, not a request for
-the user to guess a library or waive parity.
-
-Authenticate the existing census rather than repeating broad captures:
+Authenticate the existing census and selected completed source/result owners
+before using them. The retained census at
 `/private/tmp/S90-F282-full-catalogue-oracle-readiness-census-20261009.json`
-records223 selectors,17 kinds,3791 records per style,1475 file bindings and
-zero census errors. It does not prove arbitrary-input, sparse/context or
-comparator parity. The paired Thai/Tibetan Book capture completed F9 and
-normal reopen with equal output hashes. Its finite four-source/eight-field
-control can be independently audited. The exact own1054/own1105 dense compact
-controls now have native F9/save and ordinary no-F9 reopen authority, as
-recorded below. Their original prepared working files remain untouched.
+records223 selectors, seventeen kinds,3791 records per style and1475 file
+bindings. It is inventory, not arbitrary-input/comparator acceptance. The
+retained appendices below distinguish actual completed native results, ordinary
+no-F9 reopen, prepared-only files, interrupted caches and rejected hypotheses.
+They remain historical evidence at their own epochs, not freshly reauthenticated
+by this revision.
 
-Keep source identities, raw XML, namespaces, physical begin/separate/end
-owners, rich paragraphs and IEEE cells/grids. Stage the entire update through
-update_bibliography_transaction at `bibliography.rs:16186`. One unfinished
-recognized standard owner aborts the whole candidate. Preserve locked and
-producer extension contracts. Prove public source mutation, repeat update and
-library save/reopen against completed controls.
+Use existing independently observed output to author the smallest concrete
+formatter and discriminating local regressions for each missing branch. Do not
+replay the old eighteen-command prepared queue, broad native matrix or font-cache
+recovery chain merely because it survived. Reuse applicable actual observations.
+Current authored source, actual native update and normal reopened output must
+remain independently bound. Comparison projections may join only the already
+proved finite equivalent adjacent runs, with raw expectations retained. No
+font stripping, generic coalescing or guessed rich properties are authorized.
+
+### Sorting and APA person-key barrier
+
+Before production comparator changes, establish actual style/source-kind key
+assembly, comparison operands/context and independent tie authority. Harvard's
+retained concatenation-collision controls reject tuple equivalence. Source and
+citation order reversals separately constrain stable ties. IEEE encounter-order
+numbering retains its own authority. The existing APA formatted person author0
+runtime properties and DefaultLCID remain a separate missing provenance input.
+Do not infer them from neighboring literals or assume corporate/Case evidence
+proves person-key assembly.
+
+Retained complete-key ICU, Core Foundation, generic XSLT and isolated host probes
+reject only their measured configurations. They establish no portable comparator,
+universal script bucket, native call flags or supported Mac ABI. Stop repeated
+locale/flag grids without a concrete authority lead. The remaining lead is the
+actual transient SortingString and comparison identity/context, separately from
+APA person-formatting runtime properties. Static imports and a successful
+isolated call are not those observations.
+
+The smallest viable production route remains independently authored concrete
+style/source-kind key assembly plus a demonstrated portable comparison route,
+inside the existing bibliography carrier with stable source/citation tie rules.
+No backend is selected by this draft. No proprietary stylesheet execution,
+signed-bundle modification, process attachment or diagnostic installation is
+authorized here. A needed native diagnostic must first name its concrete safe
+route, source/tool/operation bounds and review. A demonstrated new collation
+dependency requires explicit approval and a revised plan with exact version,
+data/licence, MSRV, WASM, no-default, dependency graph, supply-chain and archive
+riders before implementation. Do not ask the user to guess a comparator library.
+
+These are technical execution barriers, not permission to reduce the catalogue.
+Other independently proved consumers can be reconstructed without claiming this
+barrier resolved. If it prevents the full contract within the estimate, root
+must make the normal explicit split/capacity/carry decision, preserving all
+remaining criteria. F-283 has no dependency on F-X192 full completion and need
+not wait on comparator research, but shared field/regression/HLD writes remain
+exclusive and serially integrated.
 
 ## Rejected alternatives
 
-- Alias adjacent locale grammars or substitute modern style editions.
-- Lookup expected native caches in production or execute producer XSL.
-- Treat incomplete standard branches as unsupported extensions.
-- Assume a Unicode-capable comparator is Word-equivalent.
-- Repeat the full dense capture matrix despite existing indexed authority.
+- Restore missing implementation from baseline index blobs or copy another worker's surviving files without provenance.
+- Invent the five lost findings or call them resolved through a new clean preparation report.
+- Alias adjacent locale grammars, substitute modern style editions or skip catalogue rows.
+- Read expected caches from a production lookup or execute a producer stylesheet.
+- Reclassify recognized unfinished standard consumers as unsupported producer extensions.
+- Adopt ASCII/en-US, raw Unicode ordering, a script bucket or an unmeasured backend as Word-equivalent.
+- Replace the staged transaction, introduce another formatter framework or expand bindings without a demonstrated contract need.
+- Rerun broad historical captures, complete suites or final risk riders per local formatter change.
 
 ## Test plan
 
-**Test gate**: differential, full_bibliography_catalogue_matches_pinned_word.
+**Test gate**: differential. `full_bibliography_catalogue_matches_pinned_word`
+checks exact source identities, instructions, selection, ordering, readable
+text, rich properties and reopened packages across the complete independently
+observed catalogue. No catalogue row is skipped, mapped by assumed language
+alias or accepted from a cache fallback. All remaining branch and context
+controls pass. Unsupported producer extensions still preserve caches and
+metadata with diagnostics. Scoped verification, independent zero-finding
+review, unchanged or explicitly reviewed harness output and all earned risk
+riders are required before completion.
 
-| Category | Test | Asserts |
-|---|---|---|
-| differential | full_bibliography_catalogue_matches_pinned_word | Every style/kind/selector row has exact identity, instructions, selection, order, text, rich properties and reopen semantics, without skips/assumed aliases/cache fallback |
-| differential | bibliography_sparse_and_repeated_operands_match_word | Missing/repeated properties, roles, names, dates and scripts match independent controls |
-| differential | citation_groups_and_modifiers_match_word | Grouping, suppression, locators, prefix/suffix, disambiguation and numeric interaction |
-| differential | bibliography_sort_discriminators_match_word | Exact keys, locales, normalization, independent source/citation order and stable ties |
-| differential | bibliography_locale_precedence_matches_word | Source, field, omitted/default-zero, explicit default and filtering remain distinct |
-| regression | one_unfinished_bibliography_owner_preserves_every_owner | Mixed-owner failure retains package, caches and revision |
-| round-trip | bibliography_mutation_and_repeat_updates_reopen_consistently | Public CRUD, repeat update and ordinary save/reopen retain published identity and cache |
-| round-trip | bibliography_namespace_aliases_preserve_opaque_xml | Equivalent prefixes produce equal output with retained opaque bytes |
-| integration | ieee_bibliography_preserves_table_and_story_geometry | Rich labels/grid/cells and first/interior/end paragraph context |
-| golden | bibliography_render_uses_matched_content_and_deterministic_fonts | Declared finite script controls compare matched content and actual rendering |
+| Timing | Category | Test or existing carrier | Asserts |
+|---|---|---|---|
+| local scoped | regression | Named missing-consumer cases in existing regression_test.rs, selected only after their exact retained authority is authenticated | Actual current-Base RED for the missing formatter branch and fixed GREEN, exact source identities/rich output, not a prepared wrapper or metadata-only pass |
+| local scoped | regression | `one_unfinished_bibliography_owner_preserves_every_owner` and existing source/refusal controls | Reuse applicable actual source/owner/cache atomicity observations. Add or rerun only the affected discriminating case when implementation changes that path |
+| local scoped | round-trip | `bibliography_mutation_and_repeat_updates_reopen_consistently` and `bibliography_namespace_aliases_preserve_opaque_xml` | Source mutation, repeat update, no-op/stale/late failure, physical ownership and exact opaque XML through ordinary library reopen, scoped to changed paths |
+| final sprint | differential | Extend existing `full_bibliography_catalogue_matches_pinned_word` beyond its metadata start contract | Entire twelve-style/seventeen-kind/223-selector inventory, exact independent identities/results/instructions/selection/order/text/rich properties and normal reopened packages, no skipped rows or cache fallback |
+| final sprint | differential | `bibliography_sparse_and_repeated_operands_match_word` and `citation_groups_and_modifiers_match_word` in the existing carrier | Missing/repeated names, roles, dates/scripts, grouping/suppression/locators/prefix/suffix/disambiguation and numeric interaction |
+| final sprint | differential | `bibliography_sort_discriminators_match_word` and `bibliography_locale_precedence_matches_word` | Demonstrated exact key/context/comparator route, independent source/citation order and ties, source/field/absent/zero/application-default/filter distinctions |
+| final sprint | integration | `ieee_bibliography_preserves_table_and_story_geometry` | Labels, grid/cells, rich paragraph context and physical begin/separate/end/cache boundaries |
+| final sprint | golden | `bibliography_render_uses_matched_content_and_deterministic_fonts` | Finite matched-content/script controls with pinned fonts/tools and metric/tolerance declared before capture, not broad native font or renderer parity inferred from equal caches |
+| final sprint | compatibility/risk union | Actual affected native, installed runtime/strict typing/stub, WASM, publication and preservation checks | Shared native changes retain existing APIs and source behavior. Run each actual suite/configuration once, consuming included local cases rather than adding duplicate complete runs |
 
-Pin Microsoft Word for Mac16.113.2 build16.113.26092012. Bind source/native
-output hashes, actual update/reopen provenance and normalization classification.
-Use existing test files and source-built inputs. No cache implies completion.
+The retained native catalogue authority is Microsoft Word for Mac16.113.2
+build16.113.26092012 with exact pinned style editions and source/results.
+Current Word16.114 observations from S95.11 do not silently replace that oracle.
+Authenticate original completed operations and normal reopen. If missing controls
+require a different available app/style epoch, first identify the exact edition
+and context compatibility evidence and revise qualification explicitly. No fresh
+native comparison runs during local implementation merely to repeat a retained
+valid result. Final oracle/rider qualification stays pending until the integrated
+sprint union and source-bound evidence pass.
 
 ## HLD impact
 
-- `docs/hld/02-scope-and-non-goals.md`
-- `docs/hld/03-architecture.md`
-- `docs/hld/04-opc-and-packaging.md`
-- `docs/hld/08-rendering-spec.md`
-- `docs/hld/10-bindings-spec.md`
-- `docs/hld/12-testing-strategy.md`
-- `docs/hld/14-development-backlog.md`
+- `docs/hld/02-scope-and-non-goals.md`, DOCX-049 complete versus measured bibliography boundary.
+- `docs/hld/03-architecture.md`, What stays put, concrete formatter/field/cache ownership and actual admitted catalogue.
+- `docs/hld/04-opc-and-packaging.md`, qualified bibliography source graph, physical caches and atomic candidate publication.
+- `docs/hld/08-rendering-spec.md`, field cache/rich paragraph/table context and deterministic script/control rendering.
+- `docs/hld/10-bindings-spec.md`, existing native bibliography APIs and actual formatting/context admissions, retaining wrapper preservation boundaries.
+- `docs/hld/12-testing-strategy.md`, The Word corpus, complete independently observed catalogue and retained finite rich comparisons.
+- `docs/hld/14-development-backlog.md`, F-X192 current full scope and explicit remaining qualification, without completion before evidence.
+
+Update exactly these current-intent sections before source freeze and microscope.
+Do not insert historical execution logs into mechanism HLDs. Delivery records
+claim actual final observations only after they occur.
 
 ## Risk routing
 
-- Parser/serializer: HLD04/HLD06, schema order, qualified owners and exact
-  opaque subtree retention.
-- Layout/shaping: HLD08, deterministic fonts, actual finite script controls
-  and declared independently reviewed rendering deltas.
-- External oracle: exact Word pin and completed-operation source-bound evidence.
-- Public API: existing additive pre-1.0 foundation, package dry-run and10MiB
-  archive checks. No new public API is planned.
-- Crate graph: existing facade dependencies only. No reversed format edge.
-- Any earned collation dependency requires design revision with exact MSRV1.93,
-  WASM, no-default, graph, data/licence/provenance, supply-chain and packaging
-  riders before implementation. No dependency is selected by this approval.
+- Parser/serializer: read HLD04 The package and HLD06 preservation/order rules. Final source/field round-trip controls prove namespace-qualified physical owners, schema order and byte-preserved unmodelled branches, including mixed-owner late failure.
+- Layout/rich result/script output: read HLD08 field/cache and deterministic rendering contracts. Final matched-content controls use bundled fonts on our side, actual independent native content and a declared supported metric/tolerance. No font asset or shaping algorithm change is proposed. Such a need requires revision before editing.
+- External oracle: canonical differential-testing rules, original Word/style/source/result pins, explicit completed update and normal reopen authority. Run the consolidated actual comparisons once, preserving unsupported and failed results honestly.
+- Published crate behavior: preserve existing native signatures/structs, with no source break or new wrapper surface proposed. Final genuine `cargo publish -p rdocx --dry-run --locked` uses all required local patches and the existing archive measurement assertions below10MiB. Root consumes it through the sprint's publication union once, without a redundant per-feature packaging run.
+- Shared native changes affecting existing bindings: HLD10 compatibility and final actual affected installed runtime/strict typing/stub checks. Final `cargo check --locked --target wasm32-unknown-unknown -p rdocx-wasm -p rpptx-wasm` and workspace tests excluding rdocx-py/rpptx-py run once in the integrated union. No dedicated bibliography bindings are added.
+- Crate graph, dependency, bundled assets, feature flags and new constructs: none proposed. A demonstrated need for any new dependency, module/file, trait/generic or flag requires the exact normal approval and earned graph/MSRV/data/licence/WASM/no-default/supply-chain/publication riders before implementation. Do not infer that approval from this draft.
 
 ## Hash harness
 
-Expected unchanged for the existing49 entries. Diagnose unexplained deltas.
-An intentional change needs separately labelled, declared and reviewed evidence.
+Expected unchanged for the existing49 hash cases and seven deterministic pixel
+cases. These new formatting consumers do not authorize baseline rewriting.
+Diagnose any actual output delta. An intentional behavior change needs its own
+labelled reviewed commit, declared expected delta and exclusive baseline lease.
+The integrated final harness runs once, not per reconstructed consumer.
 
 ## Exclusive file claims
 
-- `crates/rdocx/src/bibliography.rs`
-- `crates/rdocx/src/field.rs`
-- `crates/rdocx/tests/regression_test.rs`
-- Exact listed HLD sections, oracle capture and all Cargo/test execution
+- `crates/rdocx/src/bibliography.rs`, existing source/style/formatter/context/update carriers.
+- `crates/rdocx/src/field.rs`, existing physical instruction/result/cache publication.
+- `crates/rdocx/tests/regression_test.rs`, existing native/regression/oracle entrypoint, no new test binary.
+- The exact HLD sections listed above, serialized against F-283/F-284 writers.
+
+Root separately leases compiler/cache, native Word sessions, retained input and
+capture/output custody, final archive catalogue and deterministic baselines.
+F-283/F-284 overlap field/document/regression and HLD providers. Integrate each
+reviewed prefix before another writer uses those shared carriers. This plan
+permits no source edits during the design batch.
 
 ## Implementation checklist
 
-- [ ] Authenticate census and completed locale/script owners.
-- [ ] Finish remaining own dense APA grammar consumers.
-- [ ] Complete eleven style families and sparse/contributor branches.
-- [ ] Complete citation, selection and application context.
-- [ ] Derive exact style keys, comparator and independent tie authority.
-- [ ] Revise before any newly justified dependency.
-- [ ] Pass full catalogue plus atomicity, mutation, reopen and rendering gate.
-- [ ] Run scoped verification and independent zero-finding microscope.
+- [ ] Approve this revised current-source/recovery plan and record the actual fresh canonical Base before normal start.
+- [ ] Preserve old worker/index/branch/progress/reviews/evidence, with missing source and lost finding identities explicitly historical.
+- [ ] Authenticate census and each selected completed source/native/reopen authority without replaying unaffected evidence.
+- [ ] Establish actual independent sort-key/comparison/tie authority and APA person author0 context before production comparator edits.
+- [ ] Implement missing dense APA and remaining style/kind/sparse/contributor consumers in the existing carriers with unique actual local RED/GREEN.
+- [ ] Complete citation/selection/default/filter contexts and affected rich/IEEE/source-ownership atomicity controls.
+- [ ] Revise and obtain required approval before a newly justified dependency/API/module/file or unplanned renderer change.
+- [ ] Update exactly the HLD current-intent impact sections before source freeze and obtain a fresh whole-feature zero-defect/zero-smell microscope.
+- [ ] Consume actual scoped checks and prepare named pending final obligations without a completion or oracle claim.
+- [ ] Complete the entire independent catalogue, reopen/render and compatibility/risk union at integrated final source, with actual receipts and reviewed harness behavior.
 
 ## Open questions
 
-No unresolved product decision. The user authorized the full deferred contract.
-The comparator and own-locale native evidence are explicit technical execution
-barriers. This approval does not permit approximation, a new dependency or
-completion before those barriers are resolved.
+No new public API, struct-literal break, dependency, module or file is proposed,
+so there is no such approval request to answer by guessing. The fresh canonical
+implementation route follows the explicit S95.2 recovery direction. Old source
+and finding loss is not being hidden as an answered product question.
+
+The material unresolved items are technical: actual native SortingString and
+comparison context, exact APA person author0 runtime provenance, and a supported
+source/app/style route for any missing authoritative native controls. Before
+selecting a new backend, attaching to a process, modifying an app bundle,
+executing a producer stylesheet or adding code outside the approved carriers,
+root must present the concrete bounded need/route and its normal approval rather
+than silently changing the contract. No such action is selected by this draft.
+If exact authority remains unavailable, report that blocker and make the normal
+explicit capacity/split/carry decision while retaining the full catalogue.
+This draft does not approve approximation or completion with those items open.
+
+## Retained historical evidence
+
+The appendices below are preserved from the earlier plan as historical native
+study/provenance classifications. Their recorded epochs, limits and rejected
+hypotheses are unchanged. This revision neither reran nor reauthenticated their
+artifacts and does not turn them into current source acceptance.
 
 ## Bounded native key and tie evidence
 

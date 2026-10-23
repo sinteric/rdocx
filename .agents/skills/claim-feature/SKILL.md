@@ -7,6 +7,6 @@ description: "Claim an F-ID for parallel work. Creates its isolated branch and w
 
 Canonical source: `.claude/commands/claim-feature.md`.
 
-Source SHA-256: `6510b14bc8b7a089054f7470039e06c77cb06fad902c2e8ed42c525568fc3e95`.
+Source SHA-256: `162126da60e5b3342d6f67276487536c4b15d505be9b8f724af18a2657c2287a`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

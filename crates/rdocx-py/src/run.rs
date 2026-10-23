@@ -173,8 +173,10 @@ impl PyRun {
                 paragraph.edit_run(&self.run_path, edit)
             })
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
-        document.inner = candidate;
-        Ok(())
+        let text = location
+            .read(&candidate, |paragraph| paragraph.text())
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        document.publish_run_content_candidate(candidate, self.owner.as_ref(), text)
     }
 }
 

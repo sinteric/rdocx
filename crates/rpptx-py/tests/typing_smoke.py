@@ -677,8 +677,10 @@ def _fx205_typed_parity_surface(prs: Presentation) -> None:
     paragraph.auto_number_start = 3
     paragraph.bullet_color = RGBColor(0x33, 0x66, 0x99)
     paragraph.bullet_font = "Arial"
-    assert_type(paragraph.bullet_size, float | None)
+    assert_type(paragraph.bullet_size, float | Length | None)
     paragraph.bullet_size = 1.25
+    paragraph.bullet_size = Pt(17.85)
+    paragraph.bullet_size = None
     fill = slide.shapes[0].fill
     assert_type(fill.transparency, float | None)
     fill.gradient_path = "circle"

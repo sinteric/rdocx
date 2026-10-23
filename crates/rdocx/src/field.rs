@@ -1662,6 +1662,109 @@ pub enum BarcodeCaseStyle {
     Add,
 }
 
+#[cfg(test)]
+thread_local! {
+    static NAVIGATION_OWNER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Document {
+    pub(crate) fn navigation_exclusions_for_input(
+        &self,
+        input: &rdocx_layout::LayoutInput,
+    ) -> Result<Option<Arc<rdocx_layout::WordSequenceSnapshot>>> {
+        let xml = input.document.to_xml()?;
+        let mut spans = scan_dynamic_table_spans(&xml, DynamicOwnerPolicy::Bibliography)?;
+        spans.retain(|span| {
+            Field::new(&span.instruction, "")
+                .effective_instruction()
+                .name
+                != "CITATION"
+        });
+        if spans.is_empty() {
+            return Ok(None);
+        }
+        let mut snapshot = rdocx_layout::engine::evaluate_sequence_fields(input)?;
+        let mut paths = Vec::new();
+        for index in 1.. {
+            let Some(node) = rdocx_layout::SourceNodeId::new(index) else {
+                break;
+            };
+            let Some(path) = snapshot.source_node(node) else {
+                break;
+            };
+            if path.story == rdocx_layout::WordStory::Document {
+                paths.push(path.clone());
+            }
+        }
+        let mut paragraphs = Vec::new();
+        collect_body_paragraphs(&input.document.body, &mut paragraphs);
+        if paragraphs.len() != paths.len() {
+            return Err(Error::Other(
+                "navigation generated-range physical source inventory disagrees".into(),
+            ));
+        }
+        let mut exclusions = Vec::new();
+        // Scanner spans are disjoint and physically ordered. Advance the paragraph
+        // window once, then search end positions only inside that window. A single
+        // paragraph may contain many owners, so scanning its whole window per run
+        // would still amplify legal input quadratically.
+        let mut span_start = 0;
+        let mut span_end = 0;
+        for (paragraph_index, (paragraph, path)) in paragraphs.iter().zip(paths).enumerate() {
+            while span_start < spans.len() {
+                #[cfg(test)]
+                NAVIGATION_OWNER_VISITS.set(NAVIGATION_OWNER_VISITS.get() + 1);
+                if spans[span_start].end_paragraph >= paragraph_index {
+                    break;
+                }
+                span_start += 1;
+            }
+            span_end = span_end.max(span_start);
+            while span_end < spans.len() {
+                #[cfg(test)]
+                NAVIGATION_OWNER_VISITS.set(NAVIGATION_OWNER_VISITS.get() + 1);
+                if spans[span_end].begin_paragraph > paragraph_index {
+                    break;
+                }
+                span_end += 1;
+            }
+            let relevant = &spans[span_start..span_end];
+            if relevant.is_empty() {
+                continue;
+            }
+            let excluded = accepted_toc_runs(paragraph)
+                .iter()
+                .enumerate()
+                .filter_map(|(index, run)| {
+                    let position = TocOwnedPosition {
+                        paragraph: paragraph_index,
+                        run: TocRunPosition {
+                            run_boundary: run.run_boundary,
+                            raw_order: run.raw_order,
+                            nested_order: run.nested_order,
+                        },
+                    };
+                    let candidate = relevant.partition_point(|span| {
+                        #[cfg(test)]
+                        NAVIGATION_OWNER_VISITS.set(NAVIGATION_OWNER_VISITS.get() + 1);
+                        TocOwnedPosition {
+                            paragraph: span.end_paragraph,
+                            run: span.result_end_position,
+                        } <= position
+                    });
+                    relevant.get(candidate).and_then(|span| {
+                        toc_source_position_is_owned(std::slice::from_ref(span), position)
+                            .then_some(index)
+                    })
+                })
+                .collect();
+            exclusions.push((path, excluded));
+        }
+        snapshot.set_navigation_exclusions(input, exclusions)?;
+        Ok(Some(Arc::new(snapshot)))
+    }
+}
+
 impl Document {
     /// Evaluate every typed field without mutating stored results.
     pub fn evaluate_fields(
@@ -3040,7 +3143,7 @@ fn combine_mail_merge_sections(mut candidates: Vec<Document>) -> Result<Document
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(paragraph));
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         }
     }
     combined.invalidate_layout();
@@ -3276,6 +3379,8 @@ fn import_rich_fragment(
         FragmentConflictPolicy::rename_all().with_style_reuse(true),
         &document.doc_part_name.clone(),
         identity_state,
+        false,
+        &mut Vec::new(),
     )
     .map(|imported| imported.typed)
 }
@@ -3286,6 +3391,8 @@ pub(crate) fn import_document_fragment_content(
     include_final_section_properties: bool,
     policy: FragmentConflictPolicy,
     destination_part: &str,
+    source_owned_numbering: bool,
+    note_copy_sources: &mut Vec<(StoryKind, String, i32, String, i32)>,
 ) -> Result<Vec<u8>> {
     let mut identity_state = BodyIdentityState::from_documents(std::slice::from_ref(document))?;
     import_fragment_content_with_state(
@@ -3296,6 +3403,8 @@ pub(crate) fn import_document_fragment_content(
         policy,
         destination_part,
         &mut identity_state,
+        source_owned_numbering,
+        note_copy_sources,
     )
     .map(|imported| imported.xml)
 }
@@ -3320,6 +3429,8 @@ fn import_fragment_content_with_state(
     policy: FragmentConflictPolicy,
     destination_part: &str,
     identity_state: &mut BodyIdentityState,
+    source_owned_numbering: bool,
+    note_copy_sources: &mut Vec<(StoryKind, String, i32, String, i32)>,
 ) -> Result<ImportedFragmentContent> {
     let mut fragment = Document::from_bytes(bytes)
         .map_err(|error| Error::Other(format!("invalid document fragment: {error}")))?;
@@ -3345,7 +3456,7 @@ fn import_fragment_content_with_state(
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
     }
     let dependency_source = if document.glossary_part_name.as_deref() == Some(destination_part) {
         wrap_fragment_companion(&crate::document::package_authoritative_body_fragment(
@@ -3366,12 +3477,16 @@ fn import_fragment_content_with_state(
         }
     }
     validate_fragment_identity_ownership(&fragment_identity_values)?;
+    if source_owned_numbering {
+        document.source_owned_numbering_remap(&fragment)?;
+    }
     remap_fragment_style_collisions(
         document,
         &mut fragment,
         &mut fragment_xml,
         policy.reuse_styles(),
         policy.reuse_numbering(),
+        source_owned_numbering,
     )?;
     let dependency_xml =
         wrap_fragment_companion(&crate::document::package_authoritative_body_fragment(
@@ -3569,6 +3684,13 @@ fn import_fragment_content_with_state(
             })?;
         }
         used.insert(new_id);
+        note_copy_sources.push((
+            kind,
+            source_part.clone(),
+            old_id,
+            destination_note_part.clone(),
+            new_id,
+        ));
         note_id_maps
             .entry(kind)
             .or_default()
@@ -4018,6 +4140,7 @@ fn import_fragment_content_with_state(
         insert_at,
         &fragment,
         policy.reuse_numbering(),
+        source_owned_numbering,
     )?;
     let typed = document.document.body.content.drain(insert_at..).collect();
     let numbering_values = numbering_remap
@@ -4209,7 +4332,8 @@ fn word_value_attributes(xml: &[u8], elements: &[&[u8]]) -> Result<HashSet<Strin
 
 // The final direct owned numId is modeled. Earlier duplicates and Word-looking
 // descendants below opaque owners remain exact. Only the writer's redundant
-// canonical Word closure on the selected numPr/numId is comparison bookkeeping.
+// canonical Word closure on the selected pPr, numPr and numId is comparison
+// bookkeeping.
 fn fragment_style_numbering_projection(
     style: &rdocx_oxml::styles::CT_Style,
     mapped_num_id: Option<u32>,
@@ -4252,7 +4376,7 @@ fn fragment_style_numbering_projection(
                     .resolve_element(quick_xml::name::QName(b"w:reference"));
                 let w_is_word = namespace_is_word(&w_namespace);
                 let mut closure = None;
-                if owned && matches!(path.len(), 3 | 4)
+                if owned && matches!(path.len(), 2..=4)
                     && path.last().is_some_and(|parent| parent.word_prefix)
                     && let Some((name_start, _value_start, value_end)) = attribute_source_span(&wrapped[before..after], b"xmlns:w")
                     && &wrapped[before + name_start..before + value_end + 1]
@@ -4278,12 +4402,18 @@ fn fragment_style_numbering_projection(
                                 "fragment style numbering attribute source was not found".into(),
                             )
                         })?;
+                    let mut closures = path
+                        .iter()
+                        .filter_map(|frame| frame.closure)
+                        .collect::<Vec<_>>();
+                    if let Some(closure) = closure {
+                        closures.push(closure);
+                    }
                     selected = Some((
                         value,
                         before + start - prefix.len(),
                         before + end - prefix.len(),
-                        closure,
-                        path.last().and_then(|parent| parent.closure),
+                        closures,
                     ));
                 }
                 if is_start {
@@ -4303,7 +4433,7 @@ fn fragment_style_numbering_projection(
         buffer.clear();
     }
     let mut edits = Vec::new();
-    if let Some((value, start, end, leaf_closure, parent_closure)) = selected {
+    if let Some((value, start, end, closures)) = selected {
         if Some(
             value
                 .parse::<u32>()
@@ -4317,7 +4447,7 @@ fn fragment_style_numbering_projection(
         if let Some(id) = mapped_num_id {
             edits.push((start, end, id.to_string().into_bytes()));
         }
-        for (start, end) in leaf_closure.into_iter().chain(parent_closure) {
+        for (start, end) in closures {
             edits.push((start, end, Vec::new()));
         }
     } else if mapped_num_id.is_some() {
@@ -4339,6 +4469,7 @@ fn remap_fragment_style_collisions(
     fragment_xml: &mut Vec<u8>,
     reuse_equivalent: bool,
     reuse_equivalent_numbering: bool,
+    source_owned_numbering: bool,
 ) -> Result<bool> {
     let mut replacements = BTreeMap::new();
     let mut used = destination
@@ -4355,7 +4486,13 @@ fn remap_fragment_style_collisions(
         let source_num_id = style.ppr.as_ref().and_then(|properties| properties.num_id);
         let reusable_num_id = source_num_id
             .filter(|_| reuse_equivalent_numbering)
-            .and_then(|num_id| destination.equivalent_numbering_dependency_id(fragment, num_id));
+            .and_then(|num_id| {
+                if source_owned_numbering {
+                    Some(num_id)
+                } else {
+                    destination.equivalent_numbering_dependency_id(fragment, num_id)
+                }
+            });
         let numbering_is_reusable = source_num_id.is_none() || reusable_num_id.is_some();
         // Compare the source-owned projection with only the selected numbering
         // reference remapped. Preservation snapshots and generated namespace
@@ -4519,7 +4656,7 @@ fn remap_rich_rows(
         .iter_mut()
         .map(|item| std::mem::take(&mut item.row))
         .collect();
-    let mut content = vec![BodyContent::Table(table)];
+    let mut content = vec![BodyContent::Table(Box::new(table))];
     remap_rich_body_content(document, &mut content, identity_state)?;
     let Some(BodyContent::Table(table)) = content.pop() else {
         return Err(Error::Other(
@@ -8270,7 +8407,7 @@ fn discover_toc_sources(
             .transpose()?;
         let mut sources = Vec::new();
         let mut evaluator = Evaluator::new(document, &context);
-        evaluator.numbering_layout = Some(Arc::clone(numbering_layout));
+        evaluator.bind_numbering_layout(Arc::clone(numbering_layout));
         evaluator.sequence_snapshot = Some(Arc::clone(&sequence_snapshot));
         let mut sequence_value = None;
         for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
@@ -8368,7 +8505,12 @@ fn discover_toc_sources(
             if !paragraph_in_bookmark {
                 continue;
             }
-            let Some(level) = toc_paragraph_level(document, toc, paragraph) else {
+            let effective_heading = evaluator
+                .numbering_source(sequence_nodes[paragraph_index])
+                .and_then(|node| numbering_layout.paragraph_navigation_source(node))
+                .map(|(_, level, ..)| level);
+            let Some(level) = toc_paragraph_level(document, toc, paragraph, effective_heading)?
+            else {
                 continue;
             };
             let title = accepted_runs
@@ -8594,6 +8736,13 @@ fn toc_section_text_width(body: &CT_Body, paragraph_index: usize) -> i32 {
 
 fn toc_source_position_is_owned(spans: &[DynamicTocSpan], position: TocOwnedPosition) -> bool {
     spans.iter().any(|span| {
+        #[cfg(test)]
+        NAVIGATION_OWNER_VISITS.set(NAVIGATION_OWNER_VISITS.get() + 1);
+        if span.begin_paragraph == span.end_paragraph && position.paragraph == span.begin_paragraph
+        {
+            return position.run >= span.result_start_position
+                && position.run < span.result_end_position;
+        }
         if position.paragraph > span.begin_paragraph && position.paragraph < span.end_paragraph {
             return true;
         }
@@ -8868,9 +9017,17 @@ fn toc_accepts_tc(toc: &TocField, tc: &TcField) -> bool {
     }
 }
 
-fn toc_paragraph_level(document: &Document, toc: &TocField, paragraph: &CT_P) -> Option<u8> {
-    let properties = paragraph.properties.as_ref()?;
-    if let Some(style_id) = properties.style_id.as_deref() {
+fn toc_paragraph_level(
+    document: &Document,
+    toc: &TocField,
+    paragraph: &CT_P,
+    effective_heading: Option<Option<u32>>,
+) -> Result<Option<u8>> {
+    let style_id = paragraph
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.style_id.as_deref());
+    if let Some(style_id) = style_id {
         for (name, level) in &toc.custom_styles {
             let matches_id = style_id.eq_ignore_ascii_case(name);
             let matches_name = document
@@ -8879,26 +9036,37 @@ fn toc_paragraph_level(document: &Document, toc: &TocField, paragraph: &CT_P) ->
                 .and_then(|style| style.name.as_deref())
                 .is_some_and(|style_name| style_name.eq_ignore_ascii_case(name));
             if matches_id || matches_name {
-                return Some(*level);
+                return Ok(Some(*level));
             }
         }
-        if let Some((start, end)) = toc.heading_levels
-            && let Some(level) = heading_style_level(document, style_id)
-            && (start..=end).contains(&level)
-        {
-            return Some(level);
-        }
     }
-    if toc.use_outline_levels {
-        let level = properties
-            .outline_lvl
-            .and_then(|level| level.checked_add(1))
-            .and_then(|level| u8::try_from(level).ok())?;
-        if (1..=9).contains(&level) {
-            return Some(level);
+    let outline = if toc.use_outline_levels {
+        match effective_heading {
+            Some(Some(level)) => u8::try_from(level)
+                .ok()
+                .filter(|level| (1..=9).contains(level)),
+            Some(None) => return Ok(None),
+            None => {
+                return Err(Error::Other(
+                    "TOC outline source has no qualified current layout facts".into(),
+                ));
+            }
         }
+    } else {
+        None
+    };
+    if let Some(style_id) = style_id
+        && let Some((start, end)) = toc.heading_levels
+        && let Some(level) = heading_style_level(document, style_id)
+        && (start..=end).contains(&level)
+    {
+        return Ok(Some(level));
     }
-    None
+    // Apply an explicit heading range to outline-derived entries as well.
+    Ok(outline.filter(|level| {
+        toc.heading_levels
+            .is_none_or(|(start, end)| (start..=end).contains(level))
+    }))
 }
 
 fn heading_style_level(document: &Document, style_id: &str) -> Option<u8> {
@@ -13178,6 +13346,10 @@ struct Evaluator<'a> {
     context: &'a FieldEvaluationContext,
     bookmarks: BTreeMap<String, BookmarkValue>,
     numbering_layout: Option<Arc<rdocx_layout::WordLayoutResult>>,
+    numbering_nodes: HashMap<rdocx_layout::WordSourcePath, rdocx_layout::SourceNodeId>,
+    navigation_styles: HashMap<String, Vec<rdocx_layout::SourceNodeId>>,
+    navigation_style_pages: HashMap<String, BTreeMap<usize, Vec<rdocx_layout::SourceNodeId>>>,
+    navigation_field_pages: HashMap<oxml_layout::FieldSource, BTreeSet<usize>>,
     results: Vec<FieldEvaluation>,
     visible_results: Vec<bool>,
     general_field_contexts: Vec<bool>,
@@ -13202,10 +13374,11 @@ fn field_needs_numbering_layout(field: &Field) -> bool {
     let instruction = field.effective_instruction();
     let own = unsupported_switch(&instruction).is_none()
         && validate_instruction_shape(&instruction).is_ok()
-        && instruction.name == "REF"
-        && ["n", "r", "w"]
-            .iter()
-            .any(|name| has_switch(&instruction, name));
+        && (instruction.name == "STYLEREF"
+            || (instruction.name == "REF"
+                && ["n", "r", "w"]
+                    .iter()
+                    .any(|name| has_switch(&instruction, name))));
     own || field
         .effective_nested_fields_in_source_order(&instruction)
         .into_iter()
@@ -13275,6 +13448,10 @@ impl<'a> Evaluator<'a> {
             context,
             bookmarks,
             numbering_layout: None,
+            numbering_nodes: HashMap::new(),
+            navigation_styles: HashMap::new(),
+            navigation_style_pages: HashMap::new(),
+            navigation_field_pages: HashMap::new(),
             results: Vec::new(),
             visible_results: Vec::new(),
             general_field_contexts: Vec::new(),
@@ -13418,7 +13595,7 @@ impl<'a> Evaluator<'a> {
                 })
             })
         {
-            self.numbering_layout = Some(self.document.layout_deterministic()?);
+            self.prepare_numbering_layout()?;
         }
         if self.sequence_snapshot.is_some() && self.sequence_nodes.len() != paragraphs.len() {
             return Err(Error::Other(format!(
@@ -13483,9 +13660,83 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn prepare_numbering_layout(&mut self) -> Result<()> {
+        let layout = self.document.layout_deterministic()?;
+        self.bind_numbering_layout(layout);
+        Ok(())
+    }
+
+    fn bind_numbering_layout(&mut self, layout: Arc<rdocx_layout::WordLayoutResult>) {
+        self.numbering_nodes.clear();
+        for index in 1.. {
+            let Some(node) = rdocx_layout::SourceNodeId::new(index) else {
+                break;
+            };
+            let Some(path) = layout.source_node(node) else {
+                break;
+            };
+            self.numbering_nodes.insert(path.clone(), node);
+        }
+        self.navigation_styles.clear();
+        self.navigation_style_pages.clear();
+        self.navigation_field_pages.clear();
+        let mut aliases: HashMap<&str, Vec<String>> = HashMap::new();
+        for style in &self.document.styles.styles {
+            let names = aliases.entry(&style.style_id).or_default();
+            names.push(style.style_id.to_lowercase());
+            if let Some(name) = &style.name {
+                names.push(name.to_lowercase());
+            }
+            names.sort();
+            names.dedup();
+        }
+        for (node, path, _, _, style, _, page) in layout.paragraph_navigation() {
+            if path.story != rdocx_layout::WordStory::Document {
+                continue;
+            }
+            for alias in style
+                .and_then(|style| aliases.get(style))
+                .into_iter()
+                .flatten()
+            {
+                self.navigation_styles
+                    .entry(alias.clone())
+                    .or_default()
+                    .push(node);
+                if let Some(page) = page {
+                    self.navigation_style_pages
+                        .entry(alias.clone())
+                        .or_default()
+                        .entry(page)
+                        .or_default()
+                        .push(node);
+                }
+            }
+        }
+        for nodes in self.navigation_styles.values_mut() {
+            nodes.sort_unstable_by_key(|node| node.get());
+            nodes.dedup();
+        }
+        for placement in layout.field_placements() {
+            self.navigation_field_pages
+                .entry(placement.source)
+                .or_default()
+                .insert(placement.physical_page);
+        }
+        self.numbering_layout = Some(layout);
+    }
+
+    fn numbering_source(
+        &self,
+        node: rdocx_layout::SourceNodeId,
+    ) -> Option<rdocx_layout::SourceNodeId> {
+        let path = self.sequence_snapshot.as_ref()?.source_node(node)?;
+        self.numbering_nodes.get(path).copied()
+    }
+
     fn ensure_numbering_layout_for_field(&mut self, field: &Field) -> Result<()> {
         if self.numbering_layout.is_none() && field_needs_numbering_layout(field) {
-            self.numbering_layout = Some(self.document.layout_deterministic()?);
+            self.prepare_numbering_layout()?;
         }
         Ok(())
     }
@@ -13782,8 +14033,8 @@ impl<'a> Evaluator<'a> {
     fn evaluate_ref(
         &self,
         instruction: &FieldInstruction,
-        story: &str,
-        paragraph_index: usize,
+        _story: &str,
+        _paragraph_index: usize,
     ) -> FieldOutcome {
         let Some(target) = text_argument(instruction, 0) else {
             return keep("REF requires a bookmark name");
@@ -13839,7 +14090,15 @@ impl<'a> Evaluator<'a> {
                     .as_ref()
                     .and_then(|layout| layout.bookmark_numbering(target))
                 else {
-                    let mut value = bookmark.text.clone();
+                    let mut value = if self
+                        .numbering_layout
+                        .as_ref()
+                        .is_some_and(|layout| layout.bookmark_numbering_suppressed(target))
+                    {
+                        "0".into()
+                    } else {
+                        bookmark.text.clone()
+                    };
                     if let Some(position) = position {
                         value.push(' ');
                         value.push_str(&position);
@@ -13848,13 +14107,9 @@ impl<'a> Evaluator<'a> {
                 };
                 let mut value = match numbering.numbered_reference_text(
                     instruction,
-                    (story == "main")
-                        .then(|| {
-                            self.numbering_layout.as_ref().and_then(|layout| {
-                                layout.document_paragraph_numbering(paragraph_index)
-                            })
-                        })
-                        .flatten(),
+                    self.current_field_source
+                        .and_then(|source| self.numbering_source(source.node))
+                        .and_then(|node| self.numbering_layout.as_ref()?.paragraph_numbering(node)),
                 ) {
                     Ok(value) => value,
                     Err(diagnostic) => return keep(&diagnostic),
@@ -14031,76 +14286,112 @@ impl<'a> Evaluator<'a> {
     fn evaluate_styleref(
         &self,
         instruction: &FieldInstruction,
-        paragraphs: &[&CT_P],
-        paragraph_index: usize,
+        _paragraphs: &[&CT_P],
+        _paragraph_index: usize,
     ) -> FieldOutcome {
         let Some(target) = text_argument(instruction, 0) else {
             return keep("STYLEREF requires a style name");
         };
-        let style_ids = self
-            .document
-            .styles
-            .styles
-            .iter()
-            .filter(|style| {
-                style.style_id.eq_ignore_ascii_case(target)
-                    || style
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(target))
+        let Some(layout) = &self.numbering_layout else {
+            return keep("STYLEREF source layout is unavailable");
+        };
+        if let Some(failure) = layout.navigation_failure() {
+            return keep(&format!(
+                "STYLEREF navigation source discovery unavailable: {failure}"
+            ));
+        }
+        let Some(field_source) = self.current_field_source else {
+            return keep("STYLEREF field lacks an accepted physical binding");
+        };
+        let Some(caller) = self.numbering_source(field_source.node) else {
+            return keep("STYLEREF field source is unavailable in this layout");
+        };
+        let caller_path = layout.source_node(caller).expect("registered caller");
+        let key = target.to_lowercase();
+        let candidates = self.navigation_styles.get(&key);
+        let source = if caller_path.story == rdocx_layout::WordStory::Document
+            && !has_switch(instruction, "l")
+        {
+            candidates.and_then(|nodes| {
+                let boundary = nodes.partition_point(|node| node.get() < caller.get());
+                boundary
+                    .checked_sub(1)
+                    .and_then(|i| nodes.get(i))
+                    .or_else(|| nodes.iter().find(|node| **node != caller))
+                    .copied()
             })
-            .map(|style| style.style_id.as_str())
-            .collect::<Vec<_>>();
-        let matches = |paragraph: &&CT_P| {
-            paragraph
-                .properties
-                .as_ref()
-                .and_then(|properties| properties.style_id.as_deref())
-                .is_some_and(|id| style_ids.contains(&id))
-        };
-        let source = if has_switch(instruction, "l") {
-            paragraphs
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(index, paragraph)| *index != paragraph_index && matches(paragraph))
         } else {
-            paragraphs[..paragraph_index]
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, paragraph)| matches(paragraph))
-                .or_else(|| {
-                    paragraphs[paragraph_index + 1..]
-                        .iter()
-                        .enumerate()
-                        .find(|(_, paragraph)| matches(paragraph))
-                        .map(|(index, paragraph)| (paragraph_index + 1 + index, paragraph))
-                })
+            let source = oxml_layout::FieldSource {
+                node: caller,
+                index: field_source.index,
+            };
+            let Some(pages) = self
+                .navigation_field_pages
+                .get(&source)
+                .filter(|pages| pages.len() == 1)
+            else {
+                return keep("STYLEREF page selection requires one actual placement");
+            };
+            let page = *pages.first().expect("one actual placement");
+            self.navigation_style_pages.get(&key).and_then(|pages| {
+                pages
+                    .get(&page)
+                    .and_then(|nodes| {
+                        if has_switch(instruction, "l") {
+                            nodes.iter().rev().find(|node| **node != caller)
+                        } else {
+                            nodes.iter().find(|node| **node != caller)
+                        }
+                    })
+                    .copied()
+                    .or_else(|| {
+                        pages
+                            .range(..page)
+                            .next_back()
+                            .and_then(|(_, nodes)| nodes.last())
+                            .copied()
+                    })
+                    .or_else(|| {
+                        pages
+                            .range((std::ops::Bound::Excluded(page), std::ops::Bound::Unbounded))
+                            .next()
+                            .and_then(|(_, nodes)| nodes.first())
+                            .copied()
+                    })
+            })
         };
-        let Some((source_index, source)) = source else {
+        let Some(node) = source else {
             return keep(&format!("STYLEREF target {target} was not found"));
         };
-        let mut effective = style::resolve_paragraph_properties(
-            source
-                .properties
-                .as_ref()
-                .and_then(|properties| properties.style_id.as_deref()),
-            &self.document.styles,
-        );
-        if let Some(properties) = source.properties.as_ref() {
-            effective.merge_from(properties);
+        let Some((path, _, text, _, numbering, placed)) = layout.paragraph_navigation_source(node)
+        else {
+            return keep("STYLEREF selected source is unavailable");
+        };
+        if placed.is_none() {
+            return keep("STYLEREF selected source is unplaced");
         }
-        if ["n", "r", "t", "w"]
+        let numbered = ["n", "r", "w"]
             .iter()
-            .any(|name| has_switch(instruction, name))
-            && effective.num_id.is_some_and(|num_id| num_id != 0)
-        {
-            return keep("STYLEREF numbered source formatting is unsupported");
-        }
-        let mut value = source.text();
+            .any(|name| has_switch(instruction, name));
+        let mut value = if numbered {
+            match numbering {
+                Some(numbering) => match numbering
+                    .numbered_reference_text(instruction, layout.paragraph_numbering(caller))
+                {
+                    Ok(value) => value,
+                    Err(diagnostic) => return keep(&diagnostic),
+                },
+                None if layout.paragraph_numbering_suppressed(node) => "0".into(),
+                None => return keep("STYLEREF source numbering is unavailable"),
+            }
+        } else {
+            text.to_owned()
+        };
         if has_switch(instruction, "p") {
-            value.push_str(if source_index < paragraph_index {
+            if path.story != caller_path.story {
+                return keep("STYLEREF relative position lacks a comparable physical story");
+            }
+            value.push_str(if path.children < caller_path.children {
                 " above"
             } else {
                 " below"
@@ -14946,12 +15237,14 @@ struct LegacyStoryParagraph {
 fn parsed_physical_field_paragraph(xml: &[u8]) -> Result<CT_P> {
     let mut body = CT_Body::default();
     body.content
-        .push(BodyContent::Paragraph(CT_P::from_xml_fragment(xml)?));
+        .push(BodyContent::Paragraph(Box::new(CT_P::from_xml_fragment(
+            xml,
+        )?)));
     prepare_physical_story_projection(&mut body, &mut [])?;
     let BodyContent::Paragraph(paragraph) = body.content.remove(0) else {
         unreachable!()
     };
-    Ok(paragraph)
+    Ok(*paragraph)
 }
 
 fn legacy_story_paragraphs(
@@ -16912,6 +17205,52 @@ fn weekday(value: FieldDateTime) -> usize {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn f283_navigation_disjoint_generated_owners_have_bounded_visits() {
+        const OWNERS: usize = 64;
+        let mut body = String::new();
+        for index in 0..OWNERS {
+            body.push_str(&format!(r#"<w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>CACHED {index}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>REAL {index}</w:t></w:r></w:p>"#));
+        }
+        let mut document = Document::new();
+        document.document = CT_Document::from_xml(
+            format!(r#"<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        NAVIGATION_OWNER_VISITS.set(0);
+        let outline = document.numbered_document_outline().unwrap();
+        let visits = NAVIGATION_OWNER_VISITS.get();
+        assert_eq!(outline.len(), OWNERS);
+        assert!(
+            outline
+                .iter()
+                .enumerate()
+                .all(|(index, node)| node.text == format!("REAL {index}"))
+        );
+        assert!(
+            visits <= 32 * OWNERS,
+            "{visits} owner comparisons for {OWNERS} disjoint owners"
+        );
+    }
+
+    #[test]
+    fn f283_navigation_same_paragraph_generated_owners_have_bounded_visits() {
+        const OWNERS: usize = 64;
+        let owner = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>CACHED</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        let mut document = Document::new();
+        document.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr>{}</w:p><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>REAL</w:t></w:r></w:p></w:body></w:document>"#, owner.repeat(OWNERS)).as_bytes()).unwrap();
+        NAVIGATION_OWNER_VISITS.set(0);
+        let outline = document.numbered_document_outline().unwrap();
+        let visits = NAVIGATION_OWNER_VISITS.get();
+        assert_eq!(outline.len(), 1);
+        assert_eq!(outline[0].text, "REAL");
+        assert!(
+            visits <= 48 * OWNERS,
+            "{visits} owner comparisons for {OWNERS} same-paragraph owners"
+        );
+    }
+
+    #[test]
     fn fx222_evaluator_reuses_one_owned_paragraph_inventory() {
         let mut document = Document::new();
         document
@@ -16977,7 +17316,8 @@ mod tests {
                 &mut source,
                 &mut Vec::new(),
                 true,
-                true
+                true,
+                false,
             )
             .unwrap()
         );
@@ -16990,7 +17330,8 @@ mod tests {
                 &mut changed,
                 &mut Vec::new(),
                 true,
-                true
+                true,
+                false,
             )
             .unwrap()
         );
@@ -17097,7 +17438,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         document
     }
 
@@ -17120,7 +17461,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         document
     }
 
@@ -17367,7 +17708,7 @@ mod tests {
         let BodyContent::Paragraph(paragraph) = &document.document.body.content[0] else {
             unreachable!()
         };
-        let paragraphs = [paragraph];
+        let paragraphs = [paragraph.as_ref()];
         let mut evaluator = Evaluator::new(&document, &context);
         evaluator.evaluate_story("main", &paragraphs).unwrap();
         evaluator.evaluate_story("header:one", &paragraphs).unwrap();
@@ -18403,7 +18744,7 @@ mod tests {
         let BodyContent::Paragraph(paragraph) = &story_document.document.body.content[0] else {
             unreachable!()
         };
-        let paragraphs = [paragraph];
+        let paragraphs = [paragraph.as_ref()];
         let story_context = FieldEvaluationContext::default();
         let mut evaluator = Evaluator::new(&story_document, &story_context);
         evaluator.evaluate_story("header:one", &paragraphs).unwrap();
@@ -18442,7 +18783,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(paragraph));
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         }
         assert_eq!(
             heading_restart
@@ -18499,7 +18840,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(source));
+            .push(BodyContent::Paragraph(Box::new(source)));
         let mut field = CT_P::new();
         field.runs.push(CT_R {
             properties: None,
@@ -18515,15 +18856,12 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(field));
+            .push(BodyContent::Paragraph(Box::new(field)));
         let results = document
             .evaluate_fields(&FieldEvaluationContext::default())
             .unwrap();
         assert_eq!(results.len(), 1, "style fields must be reported");
-        assert_eq!(
-            results[0].outcome,
-            keep("STYLEREF numbered source formatting is unsupported")
-        );
+        assert_eq!(results[0].outcome, FieldOutcome::Resolved("1".to_owned()));
 
         let BodyContent::Paragraph(source) = &mut document.document.body.content[0] else {
             unreachable!()
@@ -18534,7 +18872,7 @@ mod tests {
                 .evaluate_fields(&FieldEvaluationContext::default())
                 .unwrap()[0]
                 .outcome,
-            FieldOutcome::Resolved("numbered heading".to_owned())
+            FieldOutcome::Resolved("0".to_owned())
         );
     }
 
@@ -18584,7 +18922,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         assert_eq!(
             document
@@ -18671,7 +19009,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
         assert!(
             document
                 .add_paragraph("numbered target")
@@ -18717,7 +19055,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(field_paragraph));
+            .push(BodyContent::Paragraph(Box::new(field_paragraph)));
 
         assert_eq!(
             document
@@ -18784,7 +19122,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         assert_eq!(
             document
@@ -18854,7 +19192,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(relative));
+            .push(BodyContent::Paragraph(Box::new(relative)));
         assert_eq!(
             document
                 .evaluate_fields(&FieldEvaluationContext::default())
@@ -18895,7 +19233,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(fallback));
+            .push(BodyContent::Paragraph(Box::new(fallback)));
         assert_eq!(
             plain
                 .evaluate_fields(&FieldEvaluationContext::default())
@@ -18953,7 +19291,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(field_paragraph));
+            .push(BodyContent::Paragraph(Box::new(field_paragraph)));
         for index in 4..=5 {
             assert!(
                 document
@@ -19103,7 +19441,7 @@ mod tests {
         let BodyContent::Paragraph(paragraph) = &document.document.body.content[0] else {
             unreachable!()
         };
-        let paragraphs = [paragraph];
+        let paragraphs = [paragraph.as_ref()];
         let context = FieldEvaluationContext::default();
         let mut evaluator = Evaluator::new(&document, &context);
         evaluator.bookmarks.insert(
@@ -19200,7 +19538,7 @@ mod tests {
                 extra_xml_positions: Vec::new(),
                 alt_drawings: Vec::new(),
             });
-            BodyContent::Paragraph(paragraph)
+            BodyContent::Paragraph(Box::new(paragraph))
         };
         let crossed = [
             marker("TableStart:Outer"),

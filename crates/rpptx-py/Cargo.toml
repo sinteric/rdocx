@@ -2,7 +2,7 @@
 name = "rpptx-py"
 description = "Native PPTX creation, editing, comments, notes, and rendering for Python"
 readme = "README.md"
-version = "0.14.2"
+version = "0.14.3"
 publish = false
 edition.workspace = true
 license.workspace = true
@@ -27,8 +27,10 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+oxml-drawing = { workspace = true }
 oxml-layout = { workspace = true }
 oxml-py-support = { workspace = true }
 pyo3 = { workspace = true }
 rpptx = { workspace = true, features = ["default-template", "render", "system-fonts", "digital-signatures"] }
+rpptx-oxml = { workspace = true }
 smallvec = { workspace = true }

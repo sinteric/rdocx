@@ -1649,9 +1649,9 @@ mod writer_tests {
                 .document
                 .body
                 .content
-                .push(rdocx_oxml::document::BodyContent::RawXml(
+                .push(rdocx_oxml::document::BodyContent::RawXml(Box::new(
                     format!("<p:item id=\"{index}\"/>").into_bytes(),
-                ));
+                )));
         }
 
         let written = document.to_rtf_bytes().unwrap();

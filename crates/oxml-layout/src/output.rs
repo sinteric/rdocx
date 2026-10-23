@@ -87,7 +87,7 @@ impl MediaId {
 }
 
 /// Result-local identity of one format-specific source node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceNodeId(NonZeroU32);
 
 impl SourceNodeId {
@@ -117,7 +117,7 @@ pub struct SourceSpan {
 ///
 /// It is separate from [`SourceSpan`] so that attributing a field does not
 /// change which runs a backend groups as contiguous source text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FieldSource {
     pub node: SourceNodeId,
     /// Zero-based preorder position among the node's fields, including nested operands and result fields.

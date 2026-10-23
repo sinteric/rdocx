@@ -2090,3 +2090,235 @@ def test_fx202_table_look_setter_preserves_default_banding():
     assert table.first_row is True
     assert table.banded_rows is True
     assert table.banded_columns is True
+
+
+def _fresh_run_text(document, table=0, row=0, cell=0, run=0):
+    return document.tables[table].cell(row, cell).paragraphs[0].runs[run].text
+
+
+def _one_pixel_png():
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    pixels = zlib.compress(bytes((0, 1, 2, 3)))
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
+
+
+def test_issue388_cell_property_edits_preserve_live_owners():
+    """Expected on old source: a fresh cell run lookup raises ValueError
+    'element has no current checked physical owner'. A nested held run raises
+    RdocxError because its story item is no longer a paragraph. Reopen of the
+    edited package still contains the cell text.
+    """
+    from rdocx import Document
+
+    document = Document()
+    table = document.add_table(rows=1, cols=2)
+    cell = table.cell(0, 0)
+    cell.text = "kept"
+    held = cell.paragraphs[0].runs[0]
+    cell.shading = "D9D9D9"
+    cell.width = 914400
+    table.set_column_width(0, 914400)
+    assert held.text == "kept"
+    assert cell.paragraphs[0].runs[0].text == "kept"
+    assert _fresh_run_text(document) == "kept"
+    held.text = "later"
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.tables[0].cell(0, 0).paragraphs[0].runs[0].text == "later"
+    assert reopened.tables[0].cell(0, 0).shading == RGBColor.from_string("D9D9D9")
+
+    nested_document = Document()
+    nested = nested_document.add_table(rows=1, cols=1).cell(0, 0).add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "nested"
+    nested_held = nested.cell(0, 0).paragraphs[0].runs[0]
+    nested.cell(0, 0).shading = "ABCDEF"
+    nested.cell(0, 0).width = 457200
+    assert nested_held.text == "nested"
+    fresh_nested = nested_document.tables[0].cell(0, 0).tables[0].cell(0, 0)
+    assert fresh_nested.paragraphs[0].runs[0].text == "nested"
+
+    empty = Document()
+    empty_cell = empty.add_table(rows=1, cols=1).cell(0, 0)
+    assert empty_cell.paragraphs[0].text == ""
+    assert len(empty_cell.paragraphs[0].runs) == 0
+    empty_cell.shading = "010203"
+    assert empty_cell.paragraphs[0].text == ""
+    assert len(empty_cell.paragraphs[0].runs) == 0
+    assert Document.from_bytes(empty.to_bytes()).tables[0].cell(0, 0).paragraphs[0].text == ""
+
+    many = Document()
+    many_cell = many.add_table(rows=1, cols=1).cell(0, 0)
+    many_cell.text = "one"
+    many_cell.paragraphs[0].add_run(" two")
+    many_cell.shading = "ABCDEF"
+    assert [_fresh_run_text(many, run=index) for index in (0, 1)] == ["one", " two"]
+    with pytest.raises(IndexError, match="run index out of range"):
+        many.tables[0].cell(0, 0).paragraphs[0].runs[2].text
+
+
+def test_issue388_property_edit_owner_boundaries():
+    """Expected on old source: vertical alignment, borders, margins, grid
+    widths, a non-removing grid span and vertical merge leave a fresh run
+    lookup without a physical owner. Replacing the cell text still retires
+    the held run. A grid span that removes a cell still retires that run.
+    """
+    from rdocx import Document, RdocxError, StaleElementError, WD_CELL_VERTICAL_ALIGNMENT
+
+    document = Document()
+    table = document.add_table(rows=2, cols=2)
+    cell = table.cell(0, 0)
+    cell.text = "kept"
+    held = cell.paragraphs[0].runs[0]
+    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.BOTTOM
+    cell.set_border("bottom", "single", size=4, color="000000")
+    cell.set_margins(top=0, right=635, bottom=0, left=635)
+    table.grid_widths = [914400, 914400]
+    table.set_cell_grid_span(0, 0, 1)
+    table.set_cell_vertical_merge(1, 0, "restart")
+    assert held.text == "kept"
+    assert cell.paragraphs[0].runs[0].text == "kept"
+    assert _fresh_run_text(document) == "kept"
+    assert document.tables[0].cell(1, 0).paragraphs[0].text == ""
+
+    replaced = Document()
+    replaced_cell = replaced.add_table(rows=1, cols=1).cell(0, 0)
+    replaced_cell.text = "before"
+    replaced_run = replaced_cell.paragraphs[0].runs[0]
+    before = replaced.to_bytes()
+    replaced_cell.text = "after"
+    assert replaced.to_bytes() != before
+    with pytest.raises(StaleElementError, match="Cell.text"):
+        _ = replaced_run.text
+    assert replaced.tables[0].cell(0, 0).paragraphs[0].runs[0].text == "after"
+    assert Document.from_bytes(replaced.to_bytes()).tables[0].cell(0, 0).text == "after"
+
+    spanned = Document()
+    spanned_table = spanned.add_table(rows=1, cols=2)
+    spanned_table.cell(0, 0).text = "origin"
+    removed_paragraph = spanned_table.cell(0, 1).paragraphs[0]
+    spanned_table.set_cell_grid_span(0, 0, 2)
+    with pytest.raises(StaleElementError, match="Table.set_cell_grid_span"):
+        _ = removed_paragraph.text
+    assert _fresh_run_text(spanned) == "origin"
+
+    refused = Document()
+    refused_table = refused.add_table(rows=1, cols=2)
+    refused_table.cell(0, 0).text = "origin"
+    refused_table.cell(0, 1).text = "kept"
+    kept_run = refused_table.cell(0, 1).paragraphs[0].runs[0]
+    before_refusal = refused.to_bytes()
+    with pytest.raises(RdocxError, match="nonempty"):
+        refused_table.set_cell_grid_span(0, 0, 2)
+    assert refused.to_bytes() == before_refusal
+    assert kept_run.text == "kept"
+
+
+def test_issue389_range_removal_is_one_owned_transaction():
+    """Additive API. Old source has no remove_content_range, so this fails
+    while resolving the method. That absence is not the owner-regression RED.
+    The assertions below are the contract once the method exists.
+    """
+    from rdocx import Document, RdocxError
+
+    document = Document()
+    for text in ("zero", "one", "two", "three"):
+        document.add_paragraph(text)
+    assert document.remove_content_range(1, 1) == 0
+    assert document.remove_content_range(4, 4) == 0
+    assert [paragraph.text for paragraph in document.paragraphs] == [
+        "zero",
+        "one",
+        "two",
+        "three",
+    ]
+    assert document.remove_content_range(1, 2) == 1
+    assert [paragraph.text for paragraph in document.paragraphs] == ["zero", "two", "three"]
+    assert document.remove_content_range(1, 3) == 2
+    assert [paragraph.text for paragraph in document.paragraphs] == ["zero"]
+    reopened = Document.from_bytes(document.to_bytes())
+    assert [paragraph.text for paragraph in reopened.paragraphs] == ["zero"]
+
+    blocked = Document()
+    blocked.add_paragraph("before")
+    table = blocked.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "inside"
+    nested = table.cell(0, 0).add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "nested"
+    blocked.add_paragraph("after")
+    assert blocked.remove_content_range(2, 3) == 1
+    assert blocked.tables[0].cell(0, 0).paragraphs[0].text == "inside"
+    assert blocked.tables[0].cell(0, 0).tables[0].cell(0, 0).paragraphs[0].text == "nested"
+    assert blocked.remove_content_range(1, 2) == 1
+    assert len(blocked.tables) == 0
+    assert [paragraph.text for paragraph in blocked.paragraphs] == ["before"]
+
+    invalid = Document()
+    invalid.add_paragraph("stay")
+    invalid.add_paragraph("put")
+    before = invalid.to_bytes()
+    with pytest.raises((ValueError, IndexError, RdocxError)):
+        invalid.remove_content_range(2, 1)
+    with pytest.raises((ValueError, IndexError, RdocxError)):
+        invalid.remove_content_range(0, 3)
+    assert invalid.to_bytes() == before
+    assert [paragraph.text for paragraph in invalid.paragraphs] == ["stay", "put"]
+
+
+def test_issue389_edit_cost_preserves_checked_mutation_contract():
+    """Control. A refused XML edit publishes nothing. Removing one of two
+    body drawings that share one image part leaves that part in the package.
+    """
+    from rdocx import Document, XmlError
+
+    document = Document()
+    paragraph = document.add_paragraph("stay")
+    before = document.to_bytes()
+    with pytest.raises(XmlError):
+        paragraph.replace_xml("<not-xml")
+    assert document.to_bytes() == before
+    assert paragraph.text == "stay"
+
+    pictured = Document()
+    pictured.add_paragraph("keep")
+    png = _one_pixel_png()
+    pictured.add_picture(png, "shared.png", 914400, 914400)
+    xml = _document_xml(pictured.to_bytes())
+    embed = xml.find('r:embed="rId1"')
+    assert embed > 0
+    start = xml.rfind("<w:p", 0, embed)
+    end = xml.find("</w:p>", embed) + len("</w:p>")
+    shared = _replace_document_xml(pictured.to_bytes(), b"</w:body>", (xml[start:end] + "</w:body>").encode())
+    opened = Document.from_bytes(shared)
+    assert opened.remove_content(1) is True
+    package = ZipFile(BytesIO(opened.to_bytes()))
+    assert "word/media/image1.png" in package.namelist()
+    assert package.read("word/media/image1.png") == png
+    assert 'r:embed="rId1"' in _document_xml(opened.to_bytes())
+
+
+def test_issue389_local_edits_do_not_scale_with_unrelated_package():
+    """Replace and remove the same paragraph in a 50-paragraph document and
+    an 800-paragraph document. The edited paragraph changes and a later
+    paragraph keeps its text. The visit bound is a library test. The release
+    ratio is final-sprint evidence.
+    """
+    from rdocx import Document
+
+    for count in (50, 800):
+        document = Document()
+        for index in range(count):
+            document.add_paragraph(f"p{index}")
+        paragraph = document.paragraphs[0]
+        xml = paragraph.xml
+        changed = xml.replace(">p0<", ">q0<", 1)
+        assert changed != xml
+        paragraph.replace_xml(changed)
+        assert paragraph.text == "q0"
+        assert document.remove_content(1) is True
+        assert document.paragraphs[0].text == "q0"
+        assert document.paragraphs[count - 2].text == f"p{count - 1}"

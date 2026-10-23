@@ -207,11 +207,13 @@ enum TextBoxSourceBinding {
 /// Immutable source identities allocated once before layout starts.
 pub(crate) struct SourceRegistry {
     nodes: Vec<WordSourcePath>,
+    navigation_sources: HashMap<SourceNodeId, crate::ParagraphNavigation>,
     ids: HashMap<WordSourcePath, SourceNodeId>,
     body_ids: Vec<Option<SourceNodeId>>,
     field_descendants: HashMap<FieldSource, Vec<u32>>,
     field_source_xml: HashMap<FieldSource, Vec<u8>>,
     field_source_contexts: HashMap<FieldSource, (String, bool, bool)>,
+    styleref_requests: HashMap<FieldSource, FieldInstruction>,
     text_box_owner_indices: HashMap<WordStory, usize>,
     story_part_names: HashMap<WordStory, String>,
     story_owner_children: HashMap<WordStory, Vec<usize>>,
@@ -223,11 +225,13 @@ impl SourceRegistry {
     fn for_body(input: &LayoutInput, body: &CT_Body) -> Self {
         let mut registry = Self {
             nodes: Vec::new(),
+            navigation_sources: HashMap::new(),
             ids: HashMap::new(),
             body_ids: Vec::new(),
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
             field_source_contexts: HashMap::new(),
+            styleref_requests: HashMap::new(),
             text_box_owner_indices: HashMap::new(),
             story_part_names: input.story_part_names.clone(),
             story_owner_children: HashMap::new(),
@@ -402,11 +406,13 @@ impl SourceRegistry {
     fn for_input(input: &LayoutInput) -> Self {
         let mut registry = Self {
             nodes: Vec::new(),
+            navigation_sources: HashMap::new(),
             ids: HashMap::new(),
             body_ids: Vec::with_capacity(input.document.body.content.len()),
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
             field_source_contexts: HashMap::new(),
+            styleref_requests: HashMap::new(),
             text_box_owner_indices: HashMap::new(),
             story_part_names: input.story_part_names.clone(),
             story_owner_children: HashMap::new(),
@@ -604,6 +610,19 @@ impl SourceRegistry {
     }
 
     fn register_fields(&mut self, node: SourceNodeId, paragraph: &CT_P) {
+        self.navigation_sources.insert(
+            node,
+            crate::ParagraphNavigation {
+                level: None,
+                suppressed_numbering: false,
+                accepted_runs: project_paragraph_runs(paragraph, RevisionView::Accepted).len(),
+                text: projected_paragraph_text(paragraph, self.revision_view),
+                style: paragraph
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.style_id.clone()),
+            },
+        );
         fn register(
             field: &rdocx_oxml::text::Field,
             node: SourceNodeId,
@@ -639,6 +658,10 @@ impl SourceRegistry {
                 index: *index,
             };
             let locked = locked || field.locked() == Some(true);
+            let instruction = field.effective_instruction();
+            if !locked && !cached && supported_styleref(&instruction) {
+                registry.styleref_requests.insert(source, instruction);
+            }
             registry
                 .field_source_contexts
                 .insert(source, (field.effective_instruction_text(), locked, cached));
@@ -1269,6 +1292,50 @@ struct SequenceCollector<'a> {
     bookmark_requests: Vec<(FieldSource, FieldInstruction)>,
 }
 
+pub(crate) fn validate_navigation_exclusions(
+    input: &LayoutInput,
+    facts: &HashMap<WordSourcePath, Vec<usize>>,
+) -> Result<()> {
+    if input.revision_view != RevisionView::Accepted
+        || !input.story_part_names.contains_key(&WordStory::Document)
+    {
+        return Err(LayoutError::Layout(
+            "navigation exclusions require a qualified accepted main story".into(),
+        ));
+    }
+    let sources = SourceRegistry::for_input(input);
+    let mut counts = HashMap::new();
+    for (index, path) in sources.nodes.iter().enumerate() {
+        let node = SourceNodeId::new(
+            u32::try_from(index + 1)
+                .map_err(|_| LayoutError::Layout("navigation source limit".into()))?,
+        )
+        .expect("one based source");
+        if let Some(source) = sources.navigation_sources.get(&node)
+            && counts.insert(path, source.accepted_runs).is_some()
+        {
+            return Err(LayoutError::Layout(
+                "ambiguous navigation physical path".into(),
+            ));
+        }
+    }
+    for (path, runs) in facts {
+        let count = counts.get(path);
+        if path.story != WordStory::Document
+            || count.is_none()
+            || runs.windows(2).any(|pair| pair[0] >= pair[1])
+            || runs
+                .last()
+                .is_some_and(|run| *run >= count.copied().unwrap_or(0))
+        {
+            return Err(LayoutError::Layout(
+                "navigation exclusion lacks a unique bounded physical source".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn sequence_snapshot(
     input: &LayoutInput,
     sources: &SourceRegistry,
@@ -1284,10 +1351,33 @@ fn sequence_snapshot(
             )
         })
         .collect();
+    let navigation = input
+        .sequence_snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.navigation_document.is_some());
+    if let Some(snapshot) = navigation {
+        if snapshot.navigation_document.as_ref() != Some(&input.document)
+            || snapshot.navigation_part.as_ref() != input.story_part_names.get(&WordStory::Document)
+        {
+            return Err(LayoutError::Layout(
+                "stale navigation exclusion source stamp".into(),
+            ));
+        }
+        validate_navigation_exclusions(input, &snapshot.navigation_exclusions)?;
+    }
     let mut collector = SequenceCollector {
         input,
         snapshot: crate::WordSequenceSnapshot {
             source_nodes: sources.nodes.clone(),
+            navigation_document: navigation.and_then(|s| s.navigation_document.clone()),
+            navigation_failure: navigation.and_then(|s| s.navigation_failure.clone()),
+            navigation_part: navigation.and_then(|s| s.navigation_part.clone()),
+            navigation_exclusions: navigation
+                .map(|s| s.navigation_exclusions.clone())
+                .unwrap_or_default(),
+            navigation_owners: navigation
+                .map(|s| s.navigation_owners.clone())
+                .unwrap_or_default(),
             source_ids,
             field_source_xml: sources.field_source_xml.clone(),
             field_source_contexts: sources.field_source_contexts.clone(),
@@ -1632,7 +1722,14 @@ impl SequenceCollector<'_> {
             let heading_level = properties.outline_lvl.or_else(|| {
                 detect_heading_level(paragraph, &self.input.styles).map(|level| level - 1)
             });
-            if let Some(level) = heading_level.filter(|level| *level < 9) {
+            let cached = self
+                .snapshot
+                .navigation_exclusions
+                .get(path)
+                .is_some_and(|runs| {
+                    runs.len() == project_paragraph_runs(paragraph, RevisionView::Accepted).len()
+                });
+            if !cached && let Some(level) = heading_level.filter(|level| *level < 9) {
                 self.headings[level as usize] = Some(self.paragraph_index);
             }
             self.paragraph_index += 1;
@@ -1695,7 +1792,10 @@ impl SequenceCollector<'_> {
                                 main,
                                 context,
                                 false,
-                                false,
+                                self.snapshot
+                                    .navigation_exclusions
+                                    .get(path)
+                                    .is_some_and(|runs| runs.binary_search(&run_index).is_ok()),
                             );
                         }
                         if main {
@@ -1825,6 +1925,9 @@ impl SequenceCollector<'_> {
         };
         *index += 1;
         let locked = locked || field.locked() == Some(true);
+        if cached && let Some(context) = self.snapshot.field_source_contexts.get_mut(&source) {
+            context.2 = true;
+        }
         if !cached {
             self.snapshot.field_run_positions.insert(source, run);
         }
@@ -2654,7 +2757,9 @@ pub struct Engine {
     header_footer_cache_reads_enabled: bool,
     restart_cache: Option<RestartCache>,
     numbering_by_source: HashMap<SourceNodeId, ResolvedNumbering>,
+    navigation_by_source: HashMap<SourceNodeId, crate::ParagraphNavigation>,
     bookmark_numbering: HashMap<String, ResolvedNumbering>,
+    bookmark_suppressed: std::collections::HashSet<String>,
     last_body_fragments: Vec<Vec<WordBodyLayoutFragment>>,
     last_page_sections: Vec<crate::WordPageSection>,
     last_field_placements: Vec<crate::WordFieldPlacement>,
@@ -2673,6 +2778,8 @@ pub struct Engine {
     last_rebuilt_page_range: Option<std::ops::Range<usize>>,
     #[cfg(test)]
     last_shared_block_counts: (usize, usize),
+    #[cfg(test)]
+    last_table_variant_counts: Vec<usize>,
     #[cfg(test)]
     page_layout_invocations: usize,
     #[cfg(test)]
@@ -3483,7 +3590,9 @@ impl Engine {
             header_footer_cache_reads_enabled: false,
             restart_cache: None,
             numbering_by_source: HashMap::new(),
+            navigation_by_source: HashMap::new(),
             bookmark_numbering: HashMap::new(),
+            bookmark_suppressed: std::collections::HashSet::new(),
             last_body_fragments: Vec::new(),
             last_page_sections: Vec::new(),
             last_field_placements: Vec::new(),
@@ -3502,6 +3611,8 @@ impl Engine {
             last_rebuilt_page_range: None,
             #[cfg(test)]
             last_shared_block_counts: (0, 0),
+            #[cfg(test)]
+            last_table_variant_counts: Vec::new(),
             #[cfg(test)]
             page_layout_invocations: 0,
             #[cfg(test)]
@@ -3675,8 +3786,16 @@ impl Engine {
         std::mem::take(&mut self.last_body_fragments)
     }
 
+    pub(crate) fn take_bookmark_suppressed(&mut self) -> std::collections::HashSet<String> {
+        std::mem::take(&mut self.bookmark_suppressed)
+    }
+
     pub(crate) fn take_bookmark_numbering(&mut self) -> HashMap<String, ResolvedNumbering> {
         std::mem::take(&mut self.bookmark_numbering)
+    }
+
+    pub(crate) fn take_navigation(&mut self) -> HashMap<SourceNodeId, crate::ParagraphNavigation> {
+        std::mem::take(&mut self.navigation_by_source)
     }
 
     pub(crate) fn numbering_by_source(
@@ -3697,13 +3816,21 @@ impl Engine {
         input: &LayoutInput,
         sources: Option<&SourceRegistry>,
     ) -> Result<LayoutResult> {
+        self.navigation_by_source.clear();
         self.numbering_by_source.clear();
         self.bookmark_numbering.clear();
+        self.bookmark_suppressed.clear();
         self.last_body_fragments.clear();
         let needs_ref_projection = document_has_ref_projection(input);
         let needs_sequences = document_has_sequence_fields(input);
         let generated_sources = (sources.is_none()
-            && (needs_ref_projection || needs_sequences || document_has_section_fields(input)))
+            && (needs_ref_projection
+                || needs_sequences
+                || document_has_section_fields(input)
+                || input
+                    .sequence_snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.navigation_document.is_some())))
         .then(|| SourceRegistry::for_input(input));
         let sources = sources.or(generated_sources.as_ref());
         // Caller hints never establish provenance or freshness. Derive once,
@@ -3711,7 +3838,12 @@ impl Engine {
         let derived_input =
             if needs_sequences || needs_ref_projection || input.sequence_snapshot.is_some() {
                 let mut derived = input.clone();
-                derived.sequence_snapshot = if (needs_sequences || needs_ref_projection)
+                derived.sequence_snapshot = if (needs_sequences
+                    || needs_ref_projection
+                    || input
+                        .sequence_snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.navigation_document.is_some()))
                     && input.revision_view == RevisionView::Accepted
                 {
                     Some(Arc::new(sequence_snapshot(
@@ -3792,8 +3924,10 @@ impl Engine {
         let mut result =
             match self.layout_transaction(input, sources, has_wrapping_drawing, None, None) {
                 Ok((first, references)) if needs_ref_projection => {
+                    self.navigation_by_source.clear();
                     self.numbering_by_source.clear();
                     self.bookmark_numbering.clear();
+                    self.bookmark_suppressed.clear();
                     if let Some(pending) = &mut self.pending_paragraph_cache {
                         pending.clear();
                     }
@@ -3826,8 +3960,10 @@ impl Engine {
             result = result.and_then(|mut current| {
                 for _ in 0..4 {
                     let pages = note_reference_pages(&current);
+                    self.navigation_by_source.clear();
                     self.numbering_by_source.clear();
                     self.bookmark_numbering.clear();
+                    self.bookmark_suppressed.clear();
                     self.pending_paragraph_cache.as_mut().map(VecDeque::clear);
                     self.pending_table_cache.as_mut().map(VecDeque::clear);
                     self.pending_header_footer_cache
@@ -3973,6 +4109,15 @@ impl Engine {
         }
         let media = MediaRegistry::new(&input.images);
         let mut diagnostics = Vec::new();
+        if let Some(failure) = input
+            .sequence_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.navigation_failure.as_deref())
+        {
+            diagnostics.push(Diagnostic {
+                message: format!("numbering-aware navigation unavailable: {failure}"),
+            });
+        }
 
         // Re-breaking a paragraph around a floating drawing needs its line
         // breaking inputs kept alive past layout. Nearly no document has a
@@ -3989,6 +4134,7 @@ impl Engine {
         // Build sections: each section has blocks + geometry + header/footer
         let mut sections: Vec<paginator::SharedSection> = Vec::new();
         let mut current_blocks: Vec<SharedLayoutBlock> = Vec::new();
+        let mut body_heading_sources = Vec::new();
         let items = body_layout_items(&input.document.body);
         let item_sections = main_story_item_sections(&items, &final_sect_pr);
 
@@ -4089,41 +4235,37 @@ impl Engine {
                         registry.bind_text_boxes(paragraph, Some(source))?;
                     }
 
-                    // Detect heading style for outline generation
-                    if let Some(level) = detect_heading_level(para, styles) {
-                        let heading_text = projected_paragraph_text(para, input.revision_view);
-                        let replacement = match &mut block {
-                            SharedLayoutBlock::Owned { block, .. } => match block.as_mut() {
-                                LayoutBlock::Paragraph(paragraph) => {
-                                    paragraph.heading_level = Some(level);
-                                    paragraph.heading_text = Some(heading_text);
-                                    None
-                                }
+                    if let Some(source) = source {
+                        let paragraph = match &block {
+                            SharedLayoutBlock::Owned { block, .. } => match block.as_ref() {
+                                LayoutBlock::Paragraph(paragraph) => paragraph,
                                 LayoutBlock::Table(_) => unreachable!(),
                             },
-                            SharedLayoutBlock::Paragraph {
-                                block: shared,
-                                semantics,
-                                ..
-                            } => {
-                                let mut paragraph = shared.as_ref().clone();
-                                rebind_paragraph_source(&mut paragraph, semantics.source_node)?;
-                                paragraph.heading_level = Some(level);
-                                paragraph.heading_text = Some(heading_text);
-                                Some(SharedLayoutBlock::Owned {
-                                    border_group_before: false,
-                                    block: Box::new(LayoutBlock::Paragraph(paragraph)),
-                                    reflow_direction: semantics.reflow_direction,
-                                    body_index: None,
-                                })
-                            }
+                            SharedLayoutBlock::Paragraph { block, .. } => block,
                             SharedLayoutBlock::Table { .. } => unreachable!(),
                         };
-                        if let Some(replacement) = replacement {
-                            block = replacement;
+                        let mut facts = num_state.remove_navigation(source).unwrap_or_else(|| {
+                            crate::ParagraphNavigation {
+                                level: None,
+                                suppressed_numbering: false,
+                                accepted_runs: 0,
+                                text: String::new(),
+                                style: None,
+                            }
+                        });
+                        facts.level = paragraph.heading_level;
+                        // Cache hits return before layout records this count.
+                        facts.accepted_runs =
+                            project_paragraph_runs(para, input.revision_view).len();
+                        if !excluded_owner_for_source(input, source) {
+                            facts.text = projected_paragraph_text(para, input.revision_view);
+                            facts.style = para.properties.as_ref().and_then(|p| p.style_id.clone());
                         }
+                        if facts.level.is_some() {
+                            body_heading_sources.push(source);
+                        }
+                        num_state.record_navigation(source, facts);
                     }
-
                     if sources.is_some() {
                         block.set_body_index(path[0]);
                     }
@@ -4243,6 +4385,15 @@ impl Engine {
                         &path,
                         sect_pr_for_layout.doc_grid.as_deref(),
                     )?;
+                    if let (
+                        Some(registry),
+                        SharedLayoutBlock::Table {
+                            block, semantics, ..
+                        },
+                    ) = (sources, &table_block)
+                    {
+                        record_table_navigation(block, semantics, registry, &mut num_state);
+                    }
                     for width in variant_widths {
                         let variant = if width == geometry.body_measure() {
                             if let SharedLayoutBlock::Table { block, .. } = &table_block {
@@ -4251,6 +4402,8 @@ impl Engine {
                                 unreachable!("body tables use shared layout")
                             }
                         } else {
+                            // Only font/width caches are shared. Source bindings are immutable,
+                            // and list, bookmark and navigation mutations stay in this clone.
                             let mut numbering = numbering_before
                                 .as_ref()
                                 .expect("alternative measures retain preceding numbering")
@@ -4357,6 +4510,14 @@ impl Engine {
         let structure = assign_shared_document_structure(&mut sections);
         #[cfg(test)]
         {
+            self.last_table_variant_counts = sections
+                .iter()
+                .flat_map(|section| &section.blocks)
+                .filter_map(|block| match block {
+                    SharedLayoutBlock::Table { variants, .. } => Some(variants.len()),
+                    _ => None,
+                })
+                .collect();
             self.last_shared_block_counts = sections
                 .iter()
                 .flat_map(|section| &section.blocks)
@@ -4931,6 +5092,15 @@ impl Engine {
         }
         self.last_page_sections = page_sections;
         self.last_field_placements = field_placements;
+        let styleref_values = sources.map_or_else(HashMap::new, |registry| {
+            placed_styleref_values(
+                input,
+                registry,
+                &num_state,
+                &pages,
+                &self.last_field_placements,
+            )
+        });
         // Post-pagination pass: record bookmark targets and substitute fields.
         let total_pages = pages.len();
         let bookmark_pages = pages
@@ -5013,7 +5183,9 @@ impl Engine {
         let mut substitution_inputs = Vec::with_capacity(pages.len());
         let mut reuse_result_pages = vec![false; pages.len()];
         for (page_index, page) in pages.iter_mut().enumerate() {
-            if !page_has_substitution_state(page) {
+            if !page_has_substitution_state(page)
+                && !styleref_values.contains_key(&page.page_number)
+            {
                 reuse_result_pages[page_index] = self.restart_cache.as_ref().is_some_and(|cache| {
                     cache.substitution_inputs.get(page_index) == Some(&None)
                         && cache
@@ -5093,6 +5265,19 @@ impl Engine {
                 sequence_boundaries[page_index],
                 &mut self.font_manager,
             );
+            if let Some(values) = styleref_values.get(&page.page_number) {
+                let mut changes = Vec::new();
+                substitute_styleref(
+                    &mut page.elements,
+                    values,
+                    &mut std::collections::HashSet::new(),
+                    &mut self.font_manager,
+                    &mut changes,
+                );
+                if !changes.is_empty() {
+                    realign_tab_aligned_text(&mut page.elements, &changes);
+                }
+            }
             substitution_inputs.push(Some(inputs));
         }
 
@@ -5276,6 +5461,62 @@ impl Engine {
             self.last_restart_identity_memo_peak_bytes = restart_identity_memo.peak_retained_bytes;
         }
         drop(restart_identity_memo);
+        self.navigation_by_source
+            .extend(num_state.take_navigation());
+        if let Some(registry) = sources
+            && input
+                .sequence_snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.navigation_failure.is_none())
+        {
+            let mut positions = HashMap::new();
+            for (page_index, page) in pages.iter().enumerate() {
+                oxml_layout::walk(&page.elements, &mut |element, transform| {
+                    let (source, origin) = match element {
+                        PositionedElement::Text(run) => (run.source, run.origin),
+                        PositionedElement::MultilingualText(run) => (run.source, run.origin),
+                        _ => return,
+                    };
+                    if let Some(source) = source {
+                        positions
+                            .entry(source.node)
+                            .or_insert((page_index, transform.apply(origin).y));
+                    }
+                });
+            }
+            for (node, outline) in body_heading_sources.iter().zip(&outlines) {
+                positions.insert(*node, (outline.page_index, outline.y_position));
+            }
+            outlines = registry
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, path)| {
+                    if path.story != WordStory::Document {
+                        return None;
+                    }
+                    let node = SourceNodeId::new(u32::try_from(index + 1).ok()?)?;
+                    let facts = self.navigation_by_source.get(&node)?;
+                    let level = facts.level?;
+                    let (page_index, y_position) = positions.get(&node).copied()?;
+                    let title = match num_state.resolved_for_source(node) {
+                        Some(number)
+                            if !number.marker_text.is_empty()
+                                && number.marker_rpr.vanish != Some(true) =>
+                        {
+                            format!("{} {}", number.marker_text, facts.text)
+                        }
+                        _ => facts.text.clone(),
+                    };
+                    Some(oxml_layout::OutlineEntry {
+                        title,
+                        level,
+                        page_index,
+                        y_position,
+                    })
+                })
+                .collect();
+        }
         let mut result = LayoutResult::new(pages, fonts, metadata, outlines);
         diagnostics.extend(self.font_manager.current_font_diagnostics().iter().cloned());
         result.diagnostics = diagnostics;
@@ -5293,6 +5534,17 @@ impl Engine {
                             .then(|| (name.to_owned(), numbering.clone()))
                     }),
             );
+        self.bookmark_suppressed.extend(
+            num_state
+                .bookmark_sources()
+                .filter(|(name, source)| {
+                    self.navigation_by_source
+                        .get(source)
+                        .is_some_and(|facts| facts.suppressed_numbering)
+                        && bookmark_text(input, name).is_some()
+                })
+                .map(|(name, _)| name.to_owned()),
+        );
         self.numbering_by_source.extend(num_state.take_resolved());
         self.last_body_fragments = body_fragments;
         Ok((result, references))
@@ -5311,7 +5563,15 @@ impl Engine {
         source_node: Option<SourceNodeId>,
         doc_grid: Option<&CT_DocGrid>,
     ) -> Result<SharedLayoutBlock> {
-        if !paragraph_is_cache_safe(paragraph, styles) {
+        let excluded_owner = source_node
+            .and_then(|node| input.sequence_snapshot.as_ref()?.source_node(node))
+            .is_some_and(|path| {
+                input
+                    .sequence_snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.navigation_exclusions.contains_key(path))
+            });
+        if !paragraph_is_cache_safe(paragraph, styles) || excluded_owner {
             // Traversal-sensitive content can change generated state consumed
             // by later blocks. The conservative boundary is the first such
             // block, after which no retained block is read in this layout.
@@ -5325,6 +5585,7 @@ impl Engine {
                 &mut self.font_manager,
                 numbering,
                 diagnostics,
+                source_node,
                 source_node,
                 doc_grid,
             )?;
@@ -5378,6 +5639,7 @@ impl Engine {
             numbering,
             diagnostics,
             Some(CACHE_SOURCE_NODE),
+            source_node,
             doc_grid,
         );
         let font_trace = self.font_manager.finish_paragraph_font_events();
@@ -5444,7 +5706,13 @@ impl Engine {
         path: &[usize],
         doc_grid: Option<&CT_DocGrid>,
     ) -> Result<SharedLayoutBlock> {
-        if !table_is_cache_safe(table, styles) {
+        let excluded_owner = input.sequence_snapshot.as_ref().is_some_and(|s| {
+            s.navigation_owners.contains(&WordSourcePath {
+                story: story.clone(),
+                children: path.to_vec(),
+            })
+        });
+        if !table_is_cache_safe(table, styles) || excluded_owner {
             self.paragraph_cache_reads_enabled = false;
             return table::layout_table_with_provenance(
                 table,
@@ -7942,6 +8210,320 @@ fn extract_background_color(xml: &str) -> Option<Color> {
     None
 }
 
+fn supported_styleref(instruction: &FieldInstruction) -> bool {
+    instruction.name == "STYLEREF"
+        && instruction.quotes_are_balanced()
+        && instruction.arguments.len() == 1
+        && field_text_argument(instruction, 0).is_some()
+        && instruction
+            .switches
+            .iter()
+            .all(|switch| match switch.name.as_str() {
+                "*" | "#" => matches!(switch.argument, Some(FieldArgument::Text(_))),
+                "l" | "n" | "r" | "w" | "t" | "p" => switch.argument.is_none(),
+                _ => false,
+            })
+}
+
+fn placed_styleref_values(
+    input: &LayoutInput,
+    registry: &SourceRegistry,
+    numbering: &NumberingState,
+    pages: &[Arc<oxml_layout::PageFrame>],
+    placements: &[crate::WordFieldPlacement],
+) -> HashMap<usize, HashMap<FieldSource, String>> {
+    if input
+        .sequence_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.navigation_failure.is_some())
+    {
+        return HashMap::new();
+    }
+    let mut source_pages = HashMap::new();
+    for page in pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            let source = match element {
+                PositionedElement::Text(run) => run.source,
+                PositionedElement::MultilingualText(run) => run.source,
+                _ => None,
+            };
+            if let Some(source) = source {
+                source_pages.entry(source.node).or_insert(page.page_number);
+            }
+        });
+    }
+    let mut aliases: HashMap<&str, Vec<String>> = HashMap::new();
+    for style in &input.styles.styles {
+        let names = aliases.entry(&style.style_id).or_default();
+        names.push(style.style_id.to_lowercase());
+        if let Some(name) = &style.name {
+            names.push(name.to_lowercase());
+        }
+        names.sort();
+        names.dedup();
+    }
+    let mut styles: HashMap<String, Vec<SourceNodeId>> = HashMap::new();
+    let mut style_pages: HashMap<String, std::collections::BTreeMap<usize, Vec<SourceNodeId>>> =
+        HashMap::new();
+    for (index, path) in registry.nodes.iter().enumerate() {
+        if path.story != WordStory::Document {
+            continue;
+        }
+        let Some(node) = u32::try_from(index + 1).ok().and_then(SourceNodeId::new) else {
+            continue;
+        };
+        let style = numbering
+            .navigation
+            .get(&node)
+            .and_then(|facts| facts.style.as_deref());
+        for alias in style
+            .and_then(|style| aliases.get(style))
+            .into_iter()
+            .flatten()
+        {
+            styles.entry(alias.clone()).or_default().push(node);
+            if let Some(page) = source_pages.get(&node) {
+                style_pages
+                    .entry(alias.clone())
+                    .or_default()
+                    .entry(*page)
+                    .or_default()
+                    .push(node);
+            }
+        }
+    }
+    let mut values: HashMap<usize, HashMap<FieldSource, String>> = HashMap::new();
+    for placement in placements {
+        let Some(instruction) = registry.styleref_requests.get(&placement.source) else {
+            continue;
+        };
+        let Some(target) = field_text_argument(instruction, 0) else {
+            continue;
+        };
+        let key = target.to_lowercase();
+        let caller = &registry.nodes[placement.source.node.get() as usize - 1];
+        let last = field_has_switch(instruction, "l");
+        let selected = if caller.story == WordStory::Document && !last {
+            styles.get(&key).and_then(|nodes| {
+                let boundary =
+                    nodes.partition_point(|node| node.get() < placement.source.node.get());
+                boundary
+                    .checked_sub(1)
+                    .and_then(|i| nodes.get(i))
+                    .or_else(|| nodes.iter().find(|node| **node != placement.source.node))
+                    .copied()
+            })
+        } else {
+            style_pages.get(&key).and_then(|pages| {
+                pages
+                    .get(&placement.physical_page)
+                    .and_then(|nodes| {
+                        if last {
+                            nodes
+                                .iter()
+                                .rev()
+                                .find(|node| **node != placement.source.node)
+                        } else {
+                            nodes.iter().find(|node| **node != placement.source.node)
+                        }
+                    })
+                    .copied()
+                    .or_else(|| {
+                        pages
+                            .range(..placement.physical_page)
+                            .next_back()
+                            .and_then(|(_, nodes)| nodes.last())
+                            .copied()
+                    })
+                    .or_else(|| {
+                        pages
+                            .range((
+                                std::ops::Bound::Excluded(placement.physical_page),
+                                std::ops::Bound::Unbounded,
+                            ))
+                            .next()
+                            .and_then(|(_, nodes)| nodes.first())
+                            .copied()
+                    })
+            })
+        };
+        let Some(selected) = selected.filter(|node| source_pages.contains_key(node)) else {
+            continue;
+        };
+        let Some(facts) = numbering.navigation.get(&selected) else {
+            continue;
+        };
+        let numbered = ["n", "r", "w"]
+            .into_iter()
+            .any(|name| field_has_switch(instruction, name));
+        let value = if numbered {
+            match numbering.source(selected) {
+                Some(number) => number
+                    .numbered_reference_text(instruction, numbering.source(placement.source.node)),
+                None if facts.suppressed_numbering => Ok("0".into()),
+                None => continue,
+            }
+        } else {
+            Ok(facts.text.clone())
+        };
+        let Ok(mut value) = value else { continue };
+        if field_has_switch(instruction, "p") {
+            if caller.story != WordStory::Document {
+                continue;
+            }
+            value.push_str(if selected.get() < placement.source.node.get() {
+                " above"
+            } else {
+                " below"
+            });
+        }
+        let Ok(value) = format_numeric_field_general(instruction, &value) else {
+            continue;
+        };
+        values
+            .entry(placement.physical_page)
+            .or_default()
+            .insert(placement.source, value);
+    }
+    values
+}
+
+fn substitute_styleref(
+    elements: &mut Vec<PositionedElement>,
+    values: &HashMap<FieldSource, String>,
+    seen: &mut std::collections::HashSet<FieldSource>,
+    fonts: &mut FontManager,
+    changes: &mut Vec<FieldWidthChange>,
+) {
+    for element in elements.iter_mut() {
+        match element {
+            PositionedElement::Text(run) => {
+                let Some((source, value)) = run
+                    .field_source
+                    .and_then(|source| values.get(&source).map(|value| (source, value)))
+                else {
+                    continue;
+                };
+                let value = if seen.contains(&source) {
+                    ""
+                } else {
+                    value.as_str()
+                };
+                if let Ok(shaped) = fonts.shape_text(run.font_id, value, run.font_size) {
+                    let old_width: f64 = run.advances.iter().sum();
+                    run.text = value.to_owned();
+                    run.glyph_ids = shaped.glyph_ids;
+                    run.advances = shaped.advances;
+                    seen.insert(source);
+                    if let Some(aligned) = run.tab_aligned {
+                        changes.push(FieldWidthChange {
+                            aligned,
+                            baseline: run.origin.y,
+                            font_size: run.font_size,
+                            x: run.origin.x,
+                            delta: run.advances.iter().sum::<f64>() - old_width,
+                        });
+                    }
+                }
+            }
+            PositionedElement::MultilingualText(run) => {
+                let Some((source, value)) = run
+                    .field_source
+                    .and_then(|source| values.get(&source).map(|value| (source, value)))
+                else {
+                    continue;
+                };
+                let value = if seen.contains(&source) {
+                    ""
+                } else {
+                    value.as_str()
+                };
+                if value.is_empty() {
+                    seen.insert(source);
+                    run.logical_text.clear();
+                    run.glyph_ids.clear();
+                    run.x_advances.clear();
+                    run.y_advances.clear();
+                    run.x_offsets.clear();
+                    run.y_offsets.clear();
+                    run.clusters.clear();
+                    continue;
+                }
+                let segment = TextSegment {
+                    text: value.to_owned(),
+                    direction: run.direction,
+                    source: run.source,
+                    font_id: run.font_id,
+                    font_size: run.font_size,
+                    glyph_ids: Vec::new(),
+                    advances: Vec::new(),
+                    width: 0.0,
+                    ascent: 0.0,
+                    descent: 0.0,
+                    line_gap: 0.0,
+                    color: run.color,
+                    bold: run.bold,
+                    italic: run.italic,
+                    underline: None,
+                    strike: false,
+                    dstrike: false,
+                    highlight: None,
+                    baseline_offset: 0.0,
+                    hyperlink_url: None,
+                    field_kind: run.field_kind,
+                    field_source: run.field_source,
+                    note: run.note,
+                    note_reference_source: run.note_reference_source,
+                };
+                if let Ok(mut shaped) = fonts.shape_multilingual_text(
+                    segment,
+                    run.language.as_deref(),
+                    run.direction,
+                    true,
+                ) && shaped.len() == 1
+                    && let Some(shaped) = shaped.pop()
+                {
+                    run.font_id = shaped.font_id();
+                    run.glyph_ids = shaped.glyph_ids().to_vec();
+                    run.x_advances = shaped.x_advances().to_vec();
+                    run.y_advances = shaped.y_advances().to_vec();
+                    run.x_offsets = shaped.x_offsets().to_vec();
+                    run.y_offsets = shaped.y_offsets().to_vec();
+                    run.clusters = shaped.clusters().to_vec();
+                    run.logical_text = value.to_owned();
+                    run.script = shaped.script();
+                    run.language = shaped.language().map(str::to_owned);
+                    run.direction = shaped.direction();
+                    run.bidi_level = shaped.bidi_level();
+                    seen.insert(source);
+                }
+            }
+            PositionedElement::Group(group) => {
+                substitute_styleref(&mut group.children, values, seen, fonts, changes)
+            }
+            PositionedElement::MarkedContent { children, .. } => {
+                substitute_styleref(children, values, seen, fonts, changes)
+            }
+            _ => {}
+        }
+    }
+    elements.retain(|element| match element {
+        PositionedElement::Text(run) => {
+            !(run.text.is_empty()
+                && run
+                    .field_source
+                    .is_some_and(|source| values.contains_key(&source)))
+        }
+        PositionedElement::MultilingualText(run) => {
+            !(run.logical_text.is_empty()
+                && run
+                    .field_source
+                    .is_some_and(|source| values.contains_key(&source)))
+        }
+        _ => true,
+    });
+}
+
 fn sequence_event_boundary(elements: &[PositionedElement], previous: usize) -> usize {
     elements
         .iter()
@@ -8454,7 +9036,11 @@ fn assign_shared_document_structure(
                     block, semantics, ..
                 } => {
                     lists.clear();
-                    let paragraph_id = builder.add(StructureRole::Paragraph, Some(root));
+                    let role = block
+                        .heading_level
+                        .map(|level| StructureRole::Heading(level.min(6) as u8))
+                        .unwrap_or(StructureRole::Paragraph);
+                    let paragraph_id = builder.add(role, Some(root));
                     semantics.structure_id = Some(paragraph_id);
                     debug_assert!(block.list.is_none());
                     debug_assert!(block.anchored.is_empty());
@@ -8747,6 +9333,54 @@ fn assign_paragraph_figures(
     }
 }
 
+fn excluded_owner_for_source(input: &LayoutInput, source: SourceNodeId) -> bool {
+    input.sequence_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot
+            .source_node(source)
+            .is_some_and(|path| snapshot.navigation_exclusions.contains_key(path))
+    })
+}
+
+fn record_table_navigation(
+    table: &crate::table::TableBlock,
+    semantics: &TableSemantics,
+    sources: &SourceRegistry,
+    state: &mut NumberingState,
+) {
+    for (row, row_semantics) in table.rows.iter().zip(&semantics.rows) {
+        for (cell, cell_semantics) in row.cells.iter().zip(&row_semantics.cells) {
+            for (block, semantics) in cell.blocks.iter().zip(&cell_semantics.blocks) {
+                match (block, semantics) {
+                    (
+                        crate::table::CellBlock::Paragraph(paragraph),
+                        CellBlockSemantics::Paragraph(semantics),
+                    ) => {
+                        if let Some((source, original)) = semantics.source_node.and_then(|node| {
+                            sources
+                                .navigation_sources
+                                .get(&node)
+                                .map(|facts| (node, facts))
+                        }) {
+                            let mut facts = state
+                                .remove_navigation(source)
+                                .unwrap_or_else(|| original.clone());
+                            facts.level = paragraph.heading_level;
+                            state.record_navigation(source, facts);
+                        }
+                    }
+                    (
+                        crate::table::CellBlock::Table(table),
+                        CellBlockSemantics::Table(semantics),
+                    ) => {
+                        record_table_navigation(table, semantics, sources, state);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Detect if a paragraph has a heading style, returning the level (1-9).
 fn detect_heading_level(para: &CT_P, styles: &CT_Styles) -> Option<u32> {
     let style_id = para.properties.as_ref()?.style_id.as_deref()?;
@@ -8814,6 +9448,7 @@ pub(crate) fn layout_paragraph_with_grid(
         None,
         None,
         None,
+        None,
         doc_grid,
         false,
     )
@@ -8840,6 +9475,7 @@ pub(crate) fn layout_paragraph_with_source(
         num_state,
         diagnostics,
         source_node,
+        source_node,
         None,
         None,
         None,
@@ -8859,6 +9495,7 @@ pub(crate) fn layout_paragraph_with_source_and_direction(
     num_state: &mut NumberingState,
     diagnostics: &mut Vec<Diagnostic>,
     source_node: Option<SourceNodeId>,
+    navigation_node: Option<SourceNodeId>,
     doc_grid: Option<&CT_DocGrid>,
 ) -> Result<(ParagraphBlock, TextDirection)> {
     let mut direction = TextDirection::Auto;
@@ -8872,6 +9509,7 @@ pub(crate) fn layout_paragraph_with_source_and_direction(
         num_state,
         diagnostics,
         source_node,
+        navigation_node,
         None,
         None,
         Some(&mut direction),
@@ -8907,6 +9545,7 @@ pub(crate) fn layout_paragraph_with_source_in_table(
         num_state,
         diagnostics,
         source_node,
+        source_node,
         table_properties,
         table_run_properties,
         Some(&mut direction),
@@ -8927,6 +9566,7 @@ fn layout_paragraph_with_source_and_table(
     num_state: &mut NumberingState,
     diagnostics: &mut Vec<Diagnostic>,
     source_node: Option<SourceNodeId>,
+    navigation_node: Option<SourceNodeId>,
     table_properties: Option<&rdocx_oxml::properties::CT_PPr>,
     table_run_properties: Option<&rdocx_oxml::properties::CT_RPr>,
     reflow_direction_out: Option<&mut TextDirection>,
@@ -8964,6 +9604,42 @@ fn layout_paragraph_with_source_and_table(
     // Merge direct paragraph properties
     if let Some(direct_ppr) = direct_ppr {
         merge_direct_ppr(&mut effective_ppr, direct_ppr);
+    }
+
+    let exclusions = navigation_node.and_then(|node| {
+        let snapshot = input.sequence_snapshot.as_ref()?;
+        snapshot
+            .navigation_exclusions
+            .get(snapshot.source_node(node)?)
+    });
+    let projected = project_paragraph_runs(para, input.revision_view);
+    let heading_text = projected.iter().enumerate().filter(|(index, _)| exclusions.is_none_or(|runs| runs.binary_search(index).is_err()))
+        .map(|(_, projected)| {
+            let mut run = projected.run.clone();
+            if exclusions.is_some() {
+                run.content.retain(|content| !matches!(content, RunContent::Field(field) if matches!(field.effective_instruction().name.as_str(), "TOC" | "INDEX" | "TOA" | "BIBLIOGRAPHY")));
+            }
+            run.text()
+        }).collect::<String>();
+    let cache_only = exclusions.is_some() && heading_text.is_empty();
+    let heading_level = effective_ppr
+        .outline_lvl
+        .or_else(|| detect_heading_level(para, styles).map(|level| level - 1))
+        .filter(|level| *level < 9 && !cache_only)
+        .map(|level| level + 1);
+    if let Some(source) = navigation_node {
+        num_state.record_navigation(
+            source,
+            crate::ParagraphNavigation {
+                level: heading_level,
+                text: heading_text.clone(),
+                style: (!cache_only)
+                    .then(|| para_style_id.map(str::to_owned))
+                    .flatten(),
+                suppressed_numbering: effective_ppr.num_id == Some(0),
+                accepted_runs: projected.len(),
+            },
+        );
     }
 
     // Convert paragraph properties to layout values
@@ -9094,43 +9770,48 @@ fn layout_paragraph_with_source_and_table(
                     .map(|c| Color::from_hex(c))
                     .unwrap_or(Color::BLACK);
 
-                multilingual_styles.insert(
-                    inline_items.len(),
-                    WordMultilingualStyle {
-                        requested_family: fm.copy_font_request_context(
-                            marker_font_family,
-                            &mut requested_context_bytes,
-                            &mut requested_context_entries,
-                        ),
-                        ..Default::default()
-                    },
-                );
-                inline_items.push(InlineItem::Marker(TextSegment {
-                    text: display_text,
-                    direction: TextDirection::Auto,
-                    source: None,
-                    font_id,
-                    font_size: marker_font_size,
-                    glyph_ids: shaped.glyph_ids,
-                    advances: shaped.advances,
-                    width: shaped.width,
-                    ascent: metrics.ascent,
-                    descent: metrics.descent,
-                    line_gap: 0.0,
-                    color,
-                    bold: marker_bold,
-                    italic: marker_italic,
-                    underline: None,
-                    strike: false,
-                    dstrike: false,
-                    highlight: None,
-                    baseline_offset: 0.0,
-                    hyperlink_url: None,
-                    field_kind: None,
-                    field_source: None,
-                    note: None,
-                    note_reference_source: None,
-                }));
+                // The level's run properties affect numbering ink, not the
+                // counter or paragraph heading. The suffix keeps its normal
+                // layout policy independently of hidden marker glyphs.
+                if marker_rpr.vanish != Some(true) {
+                    multilingual_styles.insert(
+                        inline_items.len(),
+                        WordMultilingualStyle {
+                            requested_family: fm.copy_font_request_context(
+                                marker_font_family,
+                                &mut requested_context_bytes,
+                                &mut requested_context_entries,
+                            ),
+                            ..Default::default()
+                        },
+                    );
+                    inline_items.push(InlineItem::Marker(TextSegment {
+                        text: display_text,
+                        direction: TextDirection::Auto,
+                        source: None,
+                        font_id,
+                        font_size: marker_font_size,
+                        glyph_ids: shaped.glyph_ids,
+                        advances: shaped.advances,
+                        width: shaped.width,
+                        ascent: metrics.ascent,
+                        descent: metrics.descent,
+                        line_gap: 0.0,
+                        color,
+                        bold: marker_bold,
+                        italic: marker_italic,
+                        underline: None,
+                        strike: false,
+                        dstrike: false,
+                        highlight: None,
+                        baseline_offset: 0.0,
+                        hyperlink_url: None,
+                        field_kind: None,
+                        field_source: None,
+                        note: None,
+                        note_reference_source: None,
+                    }));
+                }
 
                 match marker.suffix {
                     ST_LvlSuffix::Tab => inline_items.push(InlineItem::Tab),
@@ -10280,6 +10961,8 @@ fn layout_paragraph_with_source_and_table(
         page_break_before,
         widow_control,
     );
+    result.heading_level = heading_level;
+    result.heading_text = heading_level.map(|_| heading_text);
     result.change_bar = change_bar_color(para, input);
     result.list = list_num_id.map(|num_id| (num_id, list_ilvl.min(8) as u8));
     result.anchored = collect_anchored_drawings(
@@ -10602,6 +11285,16 @@ fn numbered_ref_text(
                 .filter(|_| source_is_main_story)
                 .and_then(|source| numbering.source(source)),
         )?,
+        (Some(_), None)
+            if numbering.bookmark_source(bookmark).is_some_and(|source| {
+                numbering
+                    .navigation
+                    .get(&source)
+                    .is_some_and(|facts| facts.suppressed_numbering)
+            }) =>
+        {
+            "0".into()
+        }
         (Some(_), None) => bookmark_text,
         (None, _) => String::new(),
     };
@@ -10624,10 +11317,11 @@ fn document_has_ref_projection(input: &LayoutInput) -> bool {
                         return false;
                     };
                     let instruction = field.effective_instruction();
-                    instruction.name == "REF"
-                        && ["n", "r", "w", "p"]
-                            .into_iter()
-                            .any(|name| field_has_switch(&instruction, name))
+                    instruction.name == "STYLEREF"
+                        || instruction.name == "REF"
+                            && ["n", "r", "w", "p"]
+                                .into_iter()
+                                .any(|name| field_has_switch(&instruction, name))
                 })
             })
     };
@@ -11334,6 +12028,9 @@ fn collect_anchored_drawings(
 
 /// Merge direct paragraph properties (only fields explicitly set in the XML).
 fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
+    if direct.outline_lvl.is_some() {
+        effective.outline_lvl = direct.outline_lvl;
+    }
     // Don't merge style_id — that was already used for resolution
     if direct.jc.is_some() {
         effective.jc = direct.jc;
@@ -12180,6 +12877,7 @@ fn layout_header_footer_variant_uncached(
                     num_state,
                     diagnostics,
                     source,
+                    sources.and_then(|registry| registry.id(&story, &path)),
                     None,
                 )?;
                 if !cache_source && let Some(registry) = sources {
@@ -15303,7 +16001,7 @@ mod tests {
             panic!("expected paragraph");
         };
         input.footnotes.as_mut().expect("footnote stream").footnotes[0].paragraphs =
-            vec![paragraph.clone()];
+            vec![paragraph.as_ref().clone()];
 
         let output = Engine::new_deterministic()
             .expect("bundled fonts load")
@@ -16017,6 +16715,7 @@ mod tests {
             &mut diagnostics,
             None,
             None,
+            None,
         )
         .expect("field-only paragraph lays out");
         assert_eq!(direction, TextDirection::RightToLeft);
@@ -16240,7 +16939,7 @@ mod tests {
         table.rows.push(row);
         let mut input = make_input_with_text("");
         input.automatic_hyphenation = true;
-        input.document.body.content = vec![BodyContent::Table(table)];
+        input.document.body.content = vec![BodyContent::Table(Box::new(table))];
 
         let text = output_text(&deterministic_layout(&input));
         assert!(text.iter().any(|item| item == "-"), "{text:?}");
@@ -16546,6 +17245,107 @@ mod tests {
         let changed = engine.layout(&input).expect("changed story geometry");
         let fresh = deterministic_layout(&input);
         assert_eq!(format!("{:?}", changed.pages), format!("{:?}", fresh.pages));
+    }
+
+    #[test]
+    fn vertical_table_width_variants_preserve_base_heading_navigation_and_numbering() {
+        use rdocx_oxml::{numbering::CT_Numbering, units::Twips};
+
+        let mut input = cacheable_header_footer_input("");
+        input.images.clear();
+        let section = input.document.body.sect_pr.as_mut().unwrap();
+        section.text_direction = Some("tbRl".to_owned());
+        section.footer_refs.clear();
+        input.footers.clear();
+        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
+            let mut part = header_footer_part(&format!("{suffix} header"));
+            part.paragraphs[0].properties = Some(CT_PPr {
+                line_spacing: Some(Twips(height * 20)),
+                line_rule: Some("exact".to_owned()),
+                ..Default::default()
+            });
+            input.headers.insert(format!("rId-{suffix}-header"), part);
+        }
+        let parsed = CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="{}"><w:body><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>First cell heading</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Second cell heading</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS,
+        ).as_bytes()).unwrap();
+        input.document.body.content = parsed.body.content;
+        let mut numbering = CT_Numbering::new();
+        let num_id = numbering.add_numbered_list();
+        input.numbering = Some(numbering);
+        let BodyContent::Table(table) = &mut input.document.body.content[0] else {
+            unreachable!()
+        };
+        for (cell, outline_lvl) in table.rows[0].cells.iter_mut().zip([0, 2]) {
+            cell.paragraphs_mut()[0].properties = Some(CT_PPr {
+                num_id: Some(num_id),
+                num_ilvl: Some(0),
+                outline_lvl: Some(outline_lvl),
+                ..Default::default()
+            });
+        }
+        let mut after = CT_P::new();
+        after.add_run("After table");
+        after.properties = Some(CT_PPr {
+            num_id: Some(num_id),
+            num_ilvl: Some(0),
+            ..Default::default()
+        });
+        input.document.body.add_paragraph(after);
+
+        let mut engine = Engine::new_deterministic().unwrap();
+        for _ in 0..2 {
+            let (layout, sources) = engine.layout_with_provenance(&input).unwrap();
+            assert_eq!(engine.last_table_variant_counts.len(), 1);
+            assert!(
+                engine.last_table_variant_counts[0] > 1,
+                "the table must have alternative story widths"
+            );
+            let navigation = sources
+                .iter()
+                .enumerate()
+                .filter_map(|(index, path)| {
+                    let node = SourceNodeId::new((index + 1) as u32).unwrap();
+                    let facts = engine.navigation_by_source.get(&node)?;
+                    (path.story == WordStory::Document).then_some((
+                        path.children.clone(),
+                        facts.level?,
+                        facts.text.as_str(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                navigation,
+                [
+                    (vec![0, 0, 0, 0], 1, "First cell heading"),
+                    (vec![0, 0, 1, 0], 3, "Second cell heading"),
+                ]
+            );
+            assert_eq!(
+                sources
+                    .iter()
+                    .zip(engine.numbering_by_source(sources.len()))
+                    .filter(|(path, _)| path.story == WordStory::Document)
+                    .filter_map(|(path, number)| {
+                        number.map(|number| (path.children.clone(), number.marker_text))
+                    })
+                    .collect::<Vec<_>>(),
+                [
+                    (vec![0, 0, 0, 0], "1.".to_owned()),
+                    (vec![0, 0, 1, 0], "2.".to_owned()),
+                    (vec![1], "3.".to_owned()),
+                ]
+            );
+            assert_eq!(
+                layout
+                    .outlines
+                    .iter()
+                    .map(|entry| (entry.level, entry.title.as_str()))
+                    .collect::<Vec<_>>(),
+                [(1, "1. First cell heading"), (3, "2. Second cell heading")]
+            );
+        }
     }
 
     #[test]
@@ -16956,12 +17756,12 @@ mod tests {
             .document
             .body
             .content
-            .insert(0, BodyContent::Paragraph(horizontal));
+            .insert(0, BodyContent::Paragraph(Box::new(horizontal)));
         input
             .document
             .body
             .content
-            .insert(1, BodyContent::Paragraph(section_end));
+            .insert(1, BodyContent::Paragraph(Box::new(section_end)));
         for part in input.headers.values_mut() {
             part.paragraphs[0].properties = Some(CT_PPr {
                 line_spacing: Some(rdocx_oxml::units::Twips(2400)),
@@ -17096,7 +17896,7 @@ mod tests {
             BodyContent::Paragraph({
                 let mut paragraph = CT_P::new();
                 paragraph.add_run("inserted body source");
-                paragraph
+                Box::new(paragraph)
             }),
         );
         let (warm, warm_sources) = engine
@@ -17153,7 +17953,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(0, BodyContent::Paragraph(first_section_end));
+            .insert(0, BodyContent::Paragraph(Box::new(first_section_end)));
         let mut inherited_engine = Engine::new_deterministic().expect("bundled fonts load");
         inherited_engine
             .layout_with_provenance(&inherited_input)
@@ -18436,7 +19236,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .insert(0, BodyContent::Paragraph(unsafe_paragraph));
+                .insert(0, BodyContent::Paragraph(Box::new(unsafe_paragraph)));
 
             let warm = engine.layout(&input).expect("warm unsafe-prefix layout");
             let cold = Engine::new_deterministic()
@@ -18796,7 +19596,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(1, BodyContent::Paragraph(inserted));
+            .insert(1, BodyContent::Paragraph(Box::new(inserted)));
         let (layout, sources) = engine
             .layout_with_provenance(&input)
             .expect("warm provenance layout");
@@ -18865,7 +19665,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(0, BodyContent::Paragraph(inserted));
+            .insert(0, BodyContent::Paragraph(Box::new(inserted)));
         let warm = engine
             .layout_with_provenance(&input)
             .expect("warm heading layout");
@@ -19030,7 +19830,7 @@ mod tests {
             ..CT_PPr::default()
         });
         let paragraph_entry = RestartBodyEntry::for_content(
-            &BodyContent::Paragraph(paragraph),
+            &BodyContent::Paragraph(Box::new(paragraph)),
             RevisionView::Accepted,
         )
         .expect("paragraph has restart identity");
@@ -19050,9 +19850,11 @@ mod tests {
             text_direction: Some("c".repeat(4_096)),
             ..rdocx_oxml::table::CT_TcPr::default()
         });
-        let table_entry =
-            RestartBodyEntry::for_content(&BodyContent::Table(table), RevisionView::Accepted)
-                .expect("table has restart identity");
+        let table_entry = RestartBodyEntry::for_content(
+            &BodyContent::Table(Box::new(table)),
+            RevisionView::Accepted,
+        )
+        .expect("table has restart identity");
         assert!(table_entry.bytes() >= 3 * 4_096);
     }
 
@@ -19069,7 +19871,7 @@ mod tests {
         });
         paragraph.runs.push(run);
         let retained = RestartBodyEntry::for_content(
-            &BodyContent::Paragraph(paragraph.clone()),
+            &BodyContent::Paragraph(Box::new(paragraph.clone())),
             RevisionView::Accepted,
         )
         .expect("paragraph has restart identity");
@@ -19096,7 +19898,7 @@ mod tests {
                 paragraph_fingerprint(&paragraph),
                 paragraph_fingerprint(&candidate)
             );
-            assert!(!retained.matches(&BodyContent::Paragraph(candidate)));
+            assert!(!retained.matches(&BodyContent::Paragraph(Box::new(candidate))));
         }
     }
 
@@ -19149,7 +19951,7 @@ mod tests {
         });
         paragraph.runs.push(run);
         let retained = RestartBodyEntry::for_content(
-            &BodyContent::Paragraph(paragraph.clone()),
+            &BodyContent::Paragraph(Box::new(paragraph.clone())),
             RevisionView::Accepted,
         )
         .expect("paragraph has restart identity");
@@ -19158,7 +19960,7 @@ mod tests {
             .as_mut()
             .expect("run properties exist")
             .language = Some("en-GB".to_owned());
-        let candidate = BodyContent::Paragraph(paragraph);
+        let candidate = BodyContent::Paragraph(Box::new(paragraph));
         let mut memo = RestartBodyIdentityMemo::new(1);
 
         let BodyContent::Paragraph(candidate_paragraph) = &candidate else {
@@ -19234,7 +20036,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(0, BodyContent::Paragraph(inserted));
+            .insert(0, BodyContent::Paragraph(Box::new(inserted)));
         let warm = engine
             .layout_with_provenance(&input)
             .expect("warm shared layout");
@@ -19392,7 +20194,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(0, BodyContent::Table(table));
+            .insert(0, BodyContent::Table(Box::new(table)));
         let mut table_engine = Engine::new_deterministic().expect("bundled fonts load");
         table_engine
             .layout_with_provenance(&table_input)
@@ -19616,7 +20418,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(1, BodyContent::Paragraph(note_paragraph));
+            .insert(1, BodyContent::Paragraph(Box::new(note_paragraph)));
         let warm_insert = engine.layout(&input).expect("warm insertion layout");
         let cold_insert = Engine::new_deterministic()
             .expect("bundled fonts load")
@@ -19681,7 +20483,11 @@ mod tests {
                 };
                 let mut input = make_input_with_text("before table");
                 assert!(table_is_cache_safe(&table, &input.styles));
-                input.document.body.content.push(BodyContent::Table(table));
+                input
+                    .document
+                    .body
+                    .content
+                    .push(BodyContent::Table(Box::new(table)));
                 let mut engine = Engine::new_deterministic().expect("bundled fonts load");
                 if provenance {
                     engine.layout_with_provenance(&input).unwrap();
@@ -19696,7 +20502,7 @@ mod tests {
                     .document
                     .body
                     .content
-                    .insert(0, BodyContent::Paragraph(inserted));
+                    .insert(0, BodyContent::Paragraph(Box::new(inserted)));
                 for expected_hits in 1..=2 {
                     let mut fresh = Engine::new_deterministic().expect("bundled fonts load");
                     let (warm, cold) = if provenance {
@@ -19724,10 +20530,10 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(safe_nested_table(
+            .push(BodyContent::Table(Box::new(safe_nested_table(
                 "cached outer cell",
                 "cached nested cell",
-            )));
+            ))));
         let mut engine = Engine::new_deterministic().expect("bundled fonts load");
         let cold = engine.layout(&input).expect("cold table layout");
         let warm = engine.layout(&input).expect("warm table layout");
@@ -19745,7 +20551,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(1, BodyContent::Paragraph(inserted));
+            .insert(1, BodyContent::Paragraph(Box::new(inserted)));
         let (provenance_layout, sources) = provenance_engine
             .layout_with_provenance(&provenance_input)
             .expect("warm sourced table layout");
@@ -19782,7 +20588,9 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Table(safe_table(&format!("table {index}"))));
+                .push(BodyContent::Table(Box::new(safe_table(&format!(
+                    "table {index}"
+                )))));
         }
         let mut bounded_engine = Engine::new_deterministic().expect("bundled fonts load");
         bounded_engine
@@ -19909,7 +20717,7 @@ mod tests {
     fn page_spanning_prose_restart_input(paragraph_count: usize) -> LayoutInput {
         let mut input = make_input_with_text("");
         input.document.body.content = (0..paragraph_count)
-            .map(|index| BodyContent::Paragraph(page_spanning_prose_paragraph(index)))
+            .map(|index| BodyContent::Paragraph(Box::new(page_spanning_prose_paragraph(index))))
             .collect();
         input.core_properties = Some(rdocx_oxml::core_properties::CoreProperties {
             title: Some("Issue 67 page-spanning prose".to_owned()),
@@ -20038,7 +20846,7 @@ mod tests {
 
         input.document.body.content.insert(
             160,
-            BodyContent::Paragraph(page_spanning_prose_paragraph(999)),
+            BodyContent::Paragraph(Box::new(page_spanning_prose_paragraph(999))),
         );
         let warm_insert = engine.layout(&input).expect("warm insertion");
         let fresh_insert = Engine::new_deterministic()
@@ -20353,7 +21161,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(640, BodyContent::Paragraph(inserted));
+            .insert(640, BodyContent::Paragraph(Box::new(inserted)));
         let warm_insert = engine.layout(&input).expect("warm insertion");
         assert!(
             engine.page_layout_invocation_count() <= 3,
@@ -20409,7 +21217,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(640, BodyContent::Paragraph(inserted));
+            .insert(640, BodyContent::Paragraph(Box::new(inserted)));
         let (warm_insert, warm_insert_sources) = engine
             .layout_with_provenance(&input)
             .expect("warm sourced insertion");
@@ -20452,7 +21260,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(640, BodyContent::Paragraph(inserted));
+            .insert(640, BodyContent::Paragraph(Box::new(inserted)));
         let (warm, warm_sources) = engine
             .layout_with_provenance(&input)
             .expect("warm sourced insertion");
@@ -20501,7 +21309,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(641, BodyContent::Paragraph(after_enter));
+            .insert(641, BodyContent::Paragraph(Box::new(after_enter)));
         let (warm_enter, warm_enter_sources) = engine
             .layout_with_provenance(&input)
             .expect("warm sourced Enter");
@@ -20811,7 +21619,7 @@ mod tests {
             let BodyContent::Paragraph(paragraph) = document.body.content.remove(0) else {
                 panic!("paragraph");
             };
-            paragraph
+            *paragraph
         };
         let mut input = related_story_restart_input(45);
         input.revision_view = RevisionView::Tracked;
@@ -21866,7 +22674,7 @@ mod tests {
             .document
             .body
             .content
-            .insert(60, BodyContent::Paragraph(inserted));
+            .insert(60, BodyContent::Paragraph(Box::new(inserted)));
         let warm_insert = engine.layout(&input).expect("warm insertion");
         let cold_insert = Engine::new_deterministic()
             .expect("bundled fonts load")
@@ -21891,7 +22699,7 @@ mod tests {
             BodyContent::Paragraph({
                 let mut paragraph = CT_P::new();
                 paragraph.add_run("inserted sourced line");
-                paragraph
+                Box::new(paragraph)
             }),
         );
         let (warm_insert, warm_insert_sources) = sourced_engine
@@ -21981,10 +22789,10 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(safe_nested_table(
+            .push(BodyContent::Table(Box::new(safe_nested_table(
                 "staged outer before failure",
                 "staged nested before failure",
-            )));
+            ))));
         let mut later = CT_P::new();
         later
             .add_run("late font failure")
@@ -22121,7 +22929,7 @@ mod tests {
         engine.publish_paragraph_cache_entry(ParagraphCacheEntry {
             fingerprint: paragraph_fingerprint(paragraph),
             key: ParagraphCacheKey {
-                paragraph: paragraph.clone(),
+                paragraph: paragraph.as_ref().clone(),
                 content_width_bits: PageGeometry::default().content_width().to_bits(),
                 revision_view: RevisionView::Accepted,
                 revision_style: crate::input::RevisionStyle::Plain,
@@ -22888,7 +23696,7 @@ mod tests {
                         let entries = engine
                             .paragraph_cache
                             .iter()
-                            .filter(|entry| entry.key.paragraph == *paragraph)
+                            .filter(|entry| entry.key.paragraph == **paragraph)
                             .collect::<Vec<_>>();
                         assert_eq!(
                             entries.len(),
@@ -23119,7 +23927,11 @@ mod tests {
         row.cells.push(cell);
         let mut table = CT_Tbl::new();
         table.rows.push(row);
-        input.document.body.content.push(BodyContent::Table(table));
+        input
+            .document
+            .body
+            .content
+            .push(BodyContent::Table(Box::new(table)));
         let mut engine = Engine::new_deterministic().unwrap();
         let cold = engine.layout(&input).unwrap();
         let families = |events: &Vec<FontTraceEvent>| {
@@ -25019,7 +25831,7 @@ mod tests {
         paragraph
             .runs
             .push(cross_reference_run("SEQ Figure", "COUNTER-OLD"));
-        input.document.body.content = vec![BodyContent::Paragraph(paragraph)];
+        input.document.body.content = vec![BodyContent::Paragraph(Box::new(paragraph))];
         let bytes = input.document.to_xml().unwrap();
         input.document = rdocx_oxml::document::CT_Document::from_xml(&bytes).unwrap();
         assert_eq!(input.document.to_xml().unwrap(), bytes);
@@ -26337,7 +27149,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(fields));
+            .push(BodyContent::Paragraph(Box::new(fields)));
 
         let mut numbered = CT_P::new();
         numbered.properties = Some(CT_PPr {
@@ -26352,7 +27164,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(numbered));
+            .push(BodyContent::Paragraph(Box::new(numbered)));
 
         let mut plain = CT_P::new();
         plain.add_run("plain target");
@@ -26362,7 +27174,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(plain));
+            .push(BodyContent::Paragraph(Box::new(plain)));
 
         let text = output_text(&deterministic_layout(&input));
         assert!(text.iter().any(|value| value == "1"), "{text:?}");
@@ -26409,7 +27221,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(target));
+                .push(BodyContent::Paragraph(Box::new(target)));
 
             let text = output_text(&deterministic_layout(&input));
             assert!(text.iter().any(|value| value == "1"), "{text:?}");
@@ -26459,7 +27271,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(target));
+            .push(BodyContent::Paragraph(Box::new(target)));
 
         let text = output_text(&deterministic_layout(&input));
         let joined = text.concat();
@@ -26494,7 +27306,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(target));
+                .push(BodyContent::Paragraph(Box::new(target)));
 
             let mut note_reference = CT_P::new();
             let mut reference_run = CT_R::new("");
@@ -26513,7 +27325,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(note_reference));
+                .push(BodyContent::Paragraph(Box::new(note_reference)));
 
             let mut note_paragraph = CT_P::new();
             note_paragraph.runs.push(cross_reference_run(
@@ -26565,6 +27377,8 @@ mod tests {
                 "2".to_owned(),
             ],
             num_id: 7,
+            definition_id: 1,
+            has_start_override: false,
             marker_rpr: CT_RPr::default(),
             suffix: ST_LvlSuffix::Tab,
         };
@@ -26695,7 +27509,11 @@ mod tests {
         row.cells.push(cell);
         let mut table = CT_Tbl::new();
         table.rows.push(row);
-        input.document.body.content.push(BodyContent::Table(table));
+        input
+            .document
+            .body
+            .content
+            .push(BodyContent::Table(Box::new(table)));
         input.document.body.add_paragraph(target_paragraph(
             &[(4, "destination", 0, 1)],
             "target",
@@ -26879,9 +27697,9 @@ mod tests {
         })];
         image_paragraph.runs.push(image_run);
         input.document.body.content = vec![
-            BodyContent::Table(table),
-            BodyContent::Paragraph(image_paragraph),
-            BodyContent::RawXml(br#"<w:custom/>"#.to_vec()),
+            BodyContent::Table(Box::new(table)),
+            BodyContent::Paragraph(Box::new(image_paragraph)),
+            BodyContent::RawXml(Box::new(br#"<w:custom/>"#.to_vec())),
         ];
         input.images.insert(
             "rIdImage".to_owned(),

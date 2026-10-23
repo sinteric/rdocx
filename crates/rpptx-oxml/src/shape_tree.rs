@@ -100,10 +100,28 @@ pub struct ShapeIdAllocator {
 
 impl ShapeIdAllocator {
     /// Scans typed and preserved shape-tree content for occupied ids.
+    ///
+    /// Typed ids and preserved raw blobs are enough for a tree built from
+    /// shapes. Serialising the whole tree is reserved for a child whose
+    /// preserved bytes are not already stored on that child.
     pub fn scan(tree: &CT_ShapeTree) -> Self {
         let mut occupied = HashSet::new();
         collect_non_visual_ids(&tree.children, &mut occupied);
-        if let Ok(xml) = tree.to_xml() {
+        if let Some(id) = tree.non_visual_id() {
+            occupied.insert(id);
+        }
+        let mut ancestor_scope = false;
+        occupy_group_preserved_ids(
+            &tree.non_visual_group_properties,
+            &tree.group_properties,
+            &tree.raw_children,
+            &mut occupied,
+            &mut ancestor_scope,
+        );
+        for child in &tree.children {
+            occupy_child_preserved_ids(child, &mut occupied, &mut ancestor_scope);
+        }
+        if ancestor_scope && let Ok(xml) = tree.to_xml() {
             collect_preserved_non_visual_ids(&xml, &mut occupied);
         }
         Self { occupied, next: 2 }
@@ -328,6 +346,158 @@ fn is_presentationml_namespace(namespace: &ResolveResult<'_>) -> bool {
         ResolveResult::Bound(Namespace(uri)) => *uri == P_NS.as_bytes(),
         ResolveResult::Unknown(prefix) => prefix == b"p",
         ResolveResult::Unbound => false,
+    }
+}
+
+fn cnvpr_count(bytes: &[u8]) -> usize {
+    bytes
+        .windows(5)
+        .filter(|window| *window == b"cNvPr")
+        .count()
+}
+
+/// A non-`p` `cNvPr` whose prefix is declared on an ancestor is only visible
+/// in the serialised tree. `p:cNvPr` stays local because an unbound `p` is
+/// PresentationML.
+fn preserved_blob_needs_ancestor_scope(blob: &[u8]) -> bool {
+    let mut search = blob;
+    while let Some(position) = search.windows(5).position(|window| window == b"cNvPr") {
+        let absolute = blob.len() - search.len() + position;
+        let prefixed = absolute > 0 && blob[absolute - 1] == b':';
+        let prefix_is_p = absolute >= 2 && &blob[absolute - 2..absolute] == b"p:";
+        if prefixed && !prefix_is_p {
+            let prefix_end = absolute - 1;
+            let prefix_start = blob[..prefix_end]
+                .iter()
+                .rposition(|byte| !byte.is_ascii_alphanumeric())
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            let prefix = &blob[prefix_start..prefix_end];
+            let mut declaration = b"xmlns:".to_vec();
+            declaration.extend_from_slice(prefix);
+            if !blob
+                .windows(declaration.len())
+                .any(|window| window == declaration.as_slice())
+            {
+                return true;
+            }
+        }
+        if position + 5 >= search.len() {
+            break;
+        }
+        search = &search[position + 5..];
+    }
+    false
+}
+
+fn occupy_raw_ids(
+    raw: &OrderedRawChildren,
+    occupied: &mut HashSet<u32>,
+    ancestor_scope: &mut bool,
+) {
+    for blob in raw.iter() {
+        occupy_blob_ids(blob, occupied, ancestor_scope);
+    }
+}
+
+fn occupy_blob_ids(blob: &[u8], occupied: &mut HashSet<u32>, ancestor_scope: &mut bool) {
+    if cnvpr_count(blob) == 0 {
+        return;
+    }
+    if preserved_blob_needs_ancestor_scope(blob) {
+        *ancestor_scope = true;
+        return;
+    }
+    collect_preserved_non_visual_ids(blob, occupied);
+}
+
+fn occupy_group_preserved_ids(
+    non_visual: &NonVisualGroupProperties,
+    properties: &GroupProperties,
+    raw_children: &OrderedRawChildren,
+    occupied: &mut HashSet<u32>,
+    ancestor_scope: &mut bool,
+) {
+    for blob in &non_visual.raw_children {
+        occupy_blob_ids(blob, occupied, ancestor_scope);
+    }
+    occupy_raw_ids(&properties.raw_children, occupied, ancestor_scope);
+    occupy_raw_ids(raw_children, occupied, ancestor_scope);
+}
+
+fn occupy_child_preserved_ids(
+    child: &ShapeTreeChild,
+    occupied: &mut HashSet<u32>,
+    ancestor_scope: &mut bool,
+) {
+    match child {
+        ShapeTreeChild::Shape(shape) => {
+            occupy_shape_preserved_ids(shape, occupied, ancestor_scope);
+        }
+        ShapeTreeChild::GroupShape(group) => {
+            occupy_group_preserved_ids(
+                &group.non_visual_group_properties,
+                &group.group_properties,
+                &group.raw_children,
+                occupied,
+                ancestor_scope,
+            );
+            for child in &group.children {
+                occupy_child_preserved_ids(child, occupied, ancestor_scope);
+            }
+        }
+        ShapeTreeChild::AlternateContent(alternate) => {
+            occupy_blob_ids(alternate.raw_xml(), occupied, ancestor_scope);
+        }
+        ShapeTreeChild::Picture(_)
+        | ShapeTreeChild::GraphicFrame(_)
+        | ShapeTreeChild::Connector(_) => {
+            if let Ok(xml) = child_xml(child) {
+                collect_preserved_non_visual_ids(&xml, occupied);
+            }
+        }
+    }
+}
+
+fn child_xml(child: &ShapeTreeChild) -> Result<Vec<u8>> {
+    let mut writer = Writer::new(Vec::new());
+    child.write_xml(&mut writer)?;
+    Ok(writer.into_inner())
+}
+
+fn occupy_shape_preserved_ids(
+    shape: &CT_Shape,
+    occupied: &mut HashSet<u32>,
+    ancestor_scope: &mut bool,
+) {
+    let raw = &shape.raw;
+    occupy_raw_ids(&raw.raw_children, occupied, ancestor_scope);
+    occupy_raw_ids(&raw.non_visual_children, occupied, ancestor_scope);
+    occupy_raw_ids(
+        &raw.application_properties_raw_children,
+        occupied,
+        ancestor_scope,
+    );
+    occupy_blob_ids(&raw.non_visual_drawing_properties, occupied, ancestor_scope);
+    occupy_blob_ids(&raw.non_visual_shape_properties, occupied, ancestor_scope);
+    if let Some(style) = &raw.style {
+        occupy_raw_ids(&style.raw_children, occupied, ancestor_scope);
+        if let Some(source) = &style.source_xml {
+            occupy_blob_ids(source, occupied, ancestor_scope);
+        }
+    }
+    occupy_raw_ids(
+        shape.shape_properties.raw_children(),
+        occupied,
+        ancestor_scope,
+    );
+    if let Some(text_body) = &shape.text_body {
+        occupy_raw_ids(text_body.raw_children(), occupied, ancestor_scope);
+    }
+    if shape.shape_properties.custom_geometry.is_some()
+        && let Ok(xml) = shape.to_xml()
+    {
+        collect_preserved_non_visual_ids(&xml, occupied);
     }
 }
 
@@ -1426,6 +1596,18 @@ impl CT_Shape {
             &namespaces,
         )?);
         Ok(())
+    }
+
+    /// Removes `p:style` when it is present.
+    ///
+    /// Returns false when the element is already absent. The remaining
+    /// children stay in schema order.
+    pub fn clear_style(&mut self) -> bool {
+        if self.raw.style.is_none() {
+            return false;
+        }
+        self.raw.style = None;
+        true
     }
 
     /// Returns whether `p:cNvSpPr/@txBox` marks this shape as a text box.
@@ -4144,6 +4326,30 @@ mod style_tests {
         let mut allocator = ShapeIdAllocator::scan(&tree);
 
         assert_eq!(allocator.allocate(), 4);
+        assert_eq!(allocator.allocate(), 5);
+    }
+
+    #[test]
+    fn shape_id_allocator_occupies_a_typed_tree_id() {
+        let xml = br#"<p:spTree xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:nvGrpSpPr><p:cNvPr id="4" name="Root"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree>"#;
+        let tree = CT_ShapeTree::from_xml(xml).unwrap();
+        let mut allocator = ShapeIdAllocator::scan(&tree);
+
+        assert_eq!(allocator.allocate(), 2);
+        assert_eq!(allocator.allocate(), 3);
+        assert_eq!(allocator.allocate(), 5);
+    }
+
+    #[test]
+    fn shape_id_allocator_uses_typed_ids_for_textboxes() {
+        let mut tree = CT_ShapeTree::new();
+        let first = CT_Shape::new_textbox(2, "TextBox 2", CT_Transform2D::default()).unwrap();
+        tree.append_child(ShapeTreeChild::Shape(first));
+        let second = CT_Shape::new_textbox(4, "TextBox 4", CT_Transform2D::default()).unwrap();
+        tree.append_child(ShapeTreeChild::Shape(second));
+        let mut allocator = ShapeIdAllocator::scan(&tree);
+
+        assert_eq!(allocator.allocate(), 3);
         assert_eq!(allocator.allocate(), 5);
     }
 

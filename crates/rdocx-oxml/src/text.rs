@@ -15782,6 +15782,29 @@ mod tests {
     }
 
     #[test]
+    fn checked_fragment_binds_w14_declared_on_the_same_root() {
+        let w_ns = crate::namespace::W_NS;
+        let r_ns = crate::namespace::R_NS;
+        let mc_ns = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        for source in [
+            format!(
+                r#"<w:p xmlns:mc="{mc_ns}" xmlns:r="{r_ns}" xmlns:w="{w_ns}" xmlns:wp="{wp_ns}" xmlns:w14="{W14_NS}" w14:paraId="388B6825"><w:r><w:t>held</w:t></w:r></w:p>"#
+            ),
+            format!(
+                r#"<w:p xmlns:mc="{mc_ns}" xmlns:r="{r_ns}" xmlns:w="{w_ns}" xmlns:wp="{wp_ns}" w14:paraId="388B6825" xmlns:w14="{W14_NS}"><w:r><w:t>held</w:t></w:r></w:p>"#
+            ),
+        ] {
+            let paragraph = CT_P::from_xml_fragment_checked(source.as_bytes())
+                .unwrap_or_else(|error| panic!("{error} in {source}"));
+            let mut output = Vec::new();
+            paragraph.to_xml(&mut Writer::new(&mut output)).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(r#"w14:paraId="388B6825""#), "{output}");
+        }
+    }
+
+    #[test]
     fn a_retained_root_attribute_keeps_the_declaration_its_own_prefix_needs() {
         let source = br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:i="http://schemas.microsoft.com/office/word/2010/wordml" i:paraId="11111111"/>"#;
         let paragraph = CT_P::from_xml_fragment(source).unwrap();

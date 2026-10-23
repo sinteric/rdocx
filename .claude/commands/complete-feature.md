@@ -48,7 +48,19 @@ mode" below.
 6. **Set `done`** in `docs/sprints/BACKLOG.md` and
    `docs/sprints/CURRENT_SPRINT.md`, and regenerate the AUTOGEN counts.
 
-7. **Set the design plan status** to `completed`.
+7. **Set the design plan status** to `completed`. Reconcile present-tense
+   readiness and unresolved acceptance text before the final source freeze.
+   Do not leave completed work described as still pending. Do not rewrite
+   historical evidence or promote an unperformed native check to passed.
+
+   After steps6 and7, check capability classification/owner, backlog status and
+   current sprint agreement against the final files. Run the affected metadata
+   policy tests now, including
+   `python3 -m unittest scripts.test_sprint_workflow.SprintWorkflowTests.test_every_incomplete_modern_docx_row_has_one_live_owner`.
+   A previous full run with in-progress statuses cannot prove done statuses.
+   Correct the actual records, never weaken the policy assertion. If capability
+   rows must change, make and review those HLD changes before the final freeze,
+   then refresh their affected evidence. Unrelated product gates stay reusable.
 
 8. **Delete** `.claude/scratch/F-XXX-progress.md` if present. It is in-flight
    memory and its job is over.
@@ -85,7 +97,7 @@ Instead of steps 4 to 6 and 9:
    # F-XXX ready for integration
 
    **F-ID**: F-XXX
-   **Owner**: claude | codex
+   **Owner**: <actual lowercase implementing host, such as claude, codex or grok>
    **Branch**: work/f-xxx-<agent>
    **Worktree**: <path>
    **Base**: <the sha the claim recorded>

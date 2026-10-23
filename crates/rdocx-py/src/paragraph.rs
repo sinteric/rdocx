@@ -176,6 +176,7 @@ impl ParagraphLocation {
         document: &rdocx::Document,
         location: &rdocx::ContentLocation,
     ) -> rdocx::Result<rdocx::ContentLocation> {
+        crate::document::note_fx260_word(document.content_count().max(1));
         let owner = location.story();
         let story = document
             .stories()?
@@ -197,6 +198,7 @@ impl ParagraphLocation {
         &self,
         document: &rdocx::Document,
     ) -> rdocx::Result<rdocx::ContentLocation> {
+        crate::document::note_fx260_word(document.content_count().max(1));
         match self {
             Self::Body(index) => document.paragraph_story_location(*index)?.ok_or_else(|| {
                 rdocx::Error::Other("paragraph has no checked physical owner".to_owned())
@@ -216,6 +218,7 @@ impl ParagraphLocation {
         document: &rdocx::Document,
         read: impl FnOnce(rdocx::ParagraphRef<'_>) -> T,
     ) -> rdocx::Result<T> {
+        crate::document::note_fx260_word(document.content_count().max(1));
         match self {
             Self::Body(index) => document
                 .paragraph(*index)
@@ -261,15 +264,11 @@ impl ParagraphLocation {
                 cell,
                 paragraph,
             } => {
-                let mut table = document
-                    .table_mut(*table)
-                    .ok_or_else(|| rdocx::Error::Other("table index out of range".to_owned()))?;
-                let mut cell = table
-                    .cell(*row, *cell)
-                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
-                edit(&mut cell.paragraph_mut(*paragraph).ok_or_else(|| {
-                    rdocx::Error::Other("cell paragraph index out of range".to_owned())
-                })?)
+                // The mutable ordinal accessor excludes controlled paragraphs.
+                // Resolve through the same checked physical route as the reader.
+                let location =
+                    document.cell_paragraph_story_location(*table, *row, *cell, *paragraph)?;
+                document.edit_story_paragraph(&location, edit)
             }
             Self::Related(location) => {
                 document.edit_story_paragraph(&Self::refreshed(document, location)?, edit)
@@ -432,7 +431,11 @@ impl PyParagraph {
         )?;
         {
             let document = self.document.borrow(py);
-            match location.native(&document.inner) {
+            match document
+                .indexed_paragraph_location(&location)
+                .map(Ok)
+                .unwrap_or_else(|| location.native(&document.inner))
+            {
                 Ok(location) => {
                     let (path, owner) = document.capture_owner(
                         &crate::document::WordOwnerLocation::Paragraph(location),
@@ -678,7 +681,7 @@ impl PyParagraph {
     }
 
     #[getter]
-    fn xml(&self, py: Python<'_>) -> PyResult<String> {
+    pub(crate) fn xml(&self, py: Python<'_>) -> PyResult<String> {
         self.validate(py)?;
         let document = self.document.borrow(py);
         let owner = self
@@ -734,7 +737,40 @@ impl PyParagraph {
         PyDocument::insert_paragraph(self.document.clone_ref(py), py, content, text, style)
     }
 
-    fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
+    pub(crate) fn replace_xml(&self, py: Python<'_>, xml: &str) -> PyResult<()> {
+        {
+            let mut document = self.document.borrow_mut(py);
+            self.path
+                .validate_scopes(
+                    &document.revisions,
+                    "paragraph",
+                    "Re-fetch the current paragraph.",
+                )
+                .map_err(|error| stale_to_pyerr(py, error))?;
+            let owner = self
+                .owner
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("paragraph XML owner route is unsupported"))?;
+            if let Some((selected, slot)) = document.plain_paragraph_owner(owner)
+                && document.inner.plain_direct_paragraph(slot)
+                && let Ok(parsed) = rdocx_oxml::CT_P::from_xml_fragment(xml.as_bytes())
+            {
+                let text = parsed.accepted_text();
+                let prepared = document.prepare_plain_paragraph_xml(selected, &parsed)?;
+                match document
+                    .inner
+                    .try_replace_plain_body_paragraph(slot, xml)
+                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?
+                {
+                    Some(false) => return Ok(()),
+                    Some(true) => {
+                        document.commit_plain_paragraph_xml(selected, prepared, text)?;
+                        return Ok(());
+                    }
+                    None => {}
+                }
+            }
+        }
         self.validate(py)?;
         let mut document = self.document.borrow_mut(py);
         let owner = self
@@ -878,6 +914,21 @@ impl PyParagraph {
 
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
+        {
+            let document = self.document.borrow(py);
+            self.path
+                .validate_scopes(
+                    &document.revisions,
+                    "paragraph",
+                    "Re-fetch it from its current physical owner.",
+                )
+                .map_err(|error| stale_to_pyerr(py, error))?;
+            if let Some(owner) = &self.owner
+                && let Some(text) = document.cached_paragraph_text(owner)
+            {
+                return Ok(text.to_owned());
+            }
+        }
         let location = self.validate(py)?;
         let document = self.document.borrow(py);
         location
@@ -1128,7 +1179,10 @@ impl PyParagraphCollection {
 #[pymethods]
 impl PyParagraphCollection {
     fn __len__(&self, py: Python<'_>) -> usize {
-        self.document.borrow(py).inner.paragraph_count()
+        self.document
+            .borrow(py)
+            .cached_body_paragraph_count()
+            .unwrap_or_else(|| self.document.borrow(py).inner.paragraph_count())
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -1178,7 +1232,11 @@ impl PyParagraphIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyParagraph>>> {
-        let len = self.document.borrow(py).inner.paragraph_count();
+        let len = self
+            .document
+            .borrow(py)
+            .cached_body_paragraph_count()
+            .unwrap_or_else(|| self.document.borrow(py).inner.paragraph_count());
         if self.index >= len {
             return Ok(None);
         }

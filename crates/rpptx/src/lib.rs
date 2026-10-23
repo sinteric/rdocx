@@ -14,6 +14,8 @@ pub use embedded::{
     EmbeddedContentInfo, EmbeddedContentKind, EmbeddedMutationPolicy, EmbeddedSignatureState,
 };
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
@@ -1760,29 +1762,28 @@ fn ppt_xml_frontiers(source: &[u8], names: &mut PptXmlNames) -> Result<PptXmlFro
                     // Complex MC is a retained delegated provider, not an
                     // ordinary typed shape branch. Its metadata is still
                     // captured below for exact source/namespace custody.
+                    let table = names.values[p.uri] == A_NS
+                        && names.values[p.local] == "graphicData"
+                        && names.values[uri] == A_NS
+                        && names.values[local] == "tbl";
+                    let alternate = (names.values[p.uri] == P_NS
+                        && matches!(names.values[p.local].as_str(), "spTree" | "grpSp")
+                        || names.values[p.uri] == PPT_MC_NS && names.values[p.local] == "Fallback")
+                        && names.values[uri] == PPT_MC_NS
+                        && names.values[local] == "AlternateContent";
+                    let fallback = names.values[p.uri] == PPT_MC_NS
+                        && names.values[p.local] == "AlternateContent"
+                        && names.values[uri] == PPT_MC_NS
+                        && names.values[local] == "Fallback";
+                    let fallback_shape = names.values[p.uri] == PPT_MC_NS
+                        && names.values[p.local] == "Fallback"
+                        && names.values[uri] == P_NS
+                        && matches!(
+                            names.values[local].as_str(),
+                            "sp" | "pic" | "graphicFrame" | "cxnSp" | "grpSp"
+                        );
                     modeled = p.modeled
-                        && (order.is_some()
-                            || names.values[p.uri] == A_NS
-                                && names.values[p.local] == "graphicData"
-                                && names.values[uri] == A_NS
-                                && names.values[local] == "tbl"
-                            || (names.values[p.uri] == P_NS
-                                && matches!(names.values[p.local].as_str(), "spTree" | "grpSp")
-                                || names.values[p.uri] == PPT_MC_NS
-                                    && names.values[p.local] == "Fallback")
-                                && names.values[uri] == PPT_MC_NS
-                                && names.values[local] == "AlternateContent"
-                            || names.values[p.uri] == PPT_MC_NS
-                                && names.values[p.local] == "AlternateContent"
-                                && names.values[uri] == PPT_MC_NS
-                                && names.values[local] == "Fallback"
-                            || names.values[p.uri] == PPT_MC_NS
-                                && names.values[p.local] == "Fallback"
-                                && names.values[uri] == P_NS
-                                && matches!(
-                                    names.values[local].as_str(),
-                                    "sp" | "pic" | "graphicFrame" | "cxnSp" | "grpSp"
-                                ));
+                        && (order.is_some() || table || alternate || fallback || fallback_shape);
                     if p.modeled && ppt_xml_frontier(&names.values[p.uri], &names.values[p.local]) {
                         if let Some((rank, repeated)) = order {
                             if p.rank
@@ -4372,6 +4373,7 @@ impl Presentation {
             }
         }
         for record in &self.slides {
+            note_fx260_slide(1);
             let slide_changed = self
                 .package
                 .get_part(&record.part_name)
@@ -6077,14 +6079,111 @@ impl Presentation {
         ppt_xml_owner_range(source, id, root, &steps)
     }
 
+    /// Replace one shape-owned element when its relationship facts do not
+    /// change. The edited child is validated on its own. A whole part, or a
+    /// relationship change, keeps the package transaction.
+    fn assign_local_owner_xml(
+        &mut self,
+        owner: PptXmlOwner<'_>,
+        before: &[u8],
+        xml: &str,
+    ) -> Result<bool> {
+        if matches!(owner, PptXmlOwner::Part(_)) {
+            return Ok(false);
+        }
+        if ppt_xml_relationship_facts(before)? != ppt_xml_relationship_facts(xml.as_bytes())? {
+            return Ok(false);
+        }
+        // Check the submitted bytes before typed projection can discard them.
+        // A fragment cannot establish inherited MC authority, so use the
+        // whole-part transaction when its local frontier cannot prove the edit.
+        if check_ppt_frontier_changes(before, xml.as_bytes()).is_err() {
+            return Ok(false);
+        }
+        if ppt_xml_known_owner_equivalent(before, xml.as_bytes())? {
+            return Ok(true);
+        }
+        // A retained package signature has to observe the forced part bytes.
+        // The local model write does not publish that part or the invalidation.
+        if self
+            .package
+            .package_rels
+            .get_by_type(rel_types::DIGITAL_SIGNATURE_ORIGIN)
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let part = owner.part();
+        let path = match owner {
+            PptXmlOwner::Shape(_, path)
+            | PptXmlOwner::Table(_, path)
+            | PptXmlOwner::Cell(_, path, _, _)
+            | PptXmlOwner::TextBody(_, path, _)
+            | PptXmlOwner::Paragraph(_, path, _, _)
+            | PptXmlOwner::Run(_, path, _, _, _) => path.to_vec(),
+            PptXmlOwner::Part(_) => return Ok(false),
+        };
+        let snapshot = child_at(&self.owner_data(part)?.shape_tree.children, &path)
+            .ok_or_else(|| invalid_shape_mutation("replace XML", "shape owner is absent"))?
+            .clone();
+        note_fx260_slide(1);
+        let part_name = self.owner_part_name(part)?.to_owned();
+        let assigned = (|| -> Result<()> {
+            match owner {
+                PptXmlOwner::Shape(_, shape_path) => {
+                    self.assign_xml_shape(part, shape_path, xml)?
+                }
+                PptXmlOwner::Table(_, shape_path) => {
+                    self.assign_xml_table(part, shape_path, xml)?
+                }
+                PptXmlOwner::Cell(_, shape_path, row, column) => {
+                    self.assign_xml_cell(part, shape_path, row, column, xml)?
+                }
+                PptXmlOwner::TextBody(_, shape_path, cell) => {
+                    self.assign_xml_body(part, shape_path, cell, xml)?
+                }
+                PptXmlOwner::Paragraph(_, shape_path, cell, index) => {
+                    self.assign_xml_paragraph(part, shape_path, cell, index, xml)?
+                }
+                PptXmlOwner::Run(_, shape_path, cell, paragraph, index) => {
+                    self.assign_xml_run(part, shape_path, cell, paragraph, index, xml)?
+                }
+                PptXmlOwner::Part(_) => {
+                    return Err(invalid_shape_mutation(
+                        "replace XML",
+                        "a whole part is not a local owner",
+                    ));
+                }
+            }
+            let child = child_at(&self.owner_data(part)?.shape_tree.children, &path)
+                .ok_or_else(|| invalid_shape_mutation("replace XML", "shape owner is absent"))?;
+            validate_shape_child(child, &part_name)?;
+            let after = self.checked_owner_xml(owner)?;
+            check_ppt_frontier_changes(before, &after)?;
+            Ok(())
+        })();
+        if let Err(error) = assigned {
+            if let Some(child) =
+                child_at_mut(&mut self.owner_data_mut(part)?.shape_tree.children, &path)
+            {
+                *child = snapshot;
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     fn replace_checked_owner_xml(&mut self, owner: PptXmlOwner<'_>, xml: &str) -> Result<()> {
         let before = self.checked_owner_xml(owner)?;
         if before == xml.as_bytes() {
             return Ok(());
         }
-        let before_part = self.checked_owner_xml(PptXmlOwner::Part(owner.part()))?;
         let (namespace, local) = owner.root(self)?;
         check_ppt_xml_input(xml.as_bytes(), namespace, local)?;
+        if self.assign_local_owner_xml(owner, &before, xml)? {
+            return Ok(());
+        }
+        let before_part = self.checked_owner_xml(PptXmlOwner::Part(owner.part()))?;
         self.check_xml_relationships(owner.part(), &before, xml.as_bytes())?;
         self.validate_xml_part_model(owner.part())?;
         let range = self.xml_physical_owner_range(owner, &before_part)?;
@@ -6094,6 +6193,7 @@ impl Presentation {
         if ppt_xml_known_owner_equivalent(&before, xml.as_bytes())? {
             return Ok(());
         }
+        note_fx260_slide(self.slides.len().max(1));
         let mut candidate = self.clone();
         match owner {
             PptXmlOwner::Part(ShapeOwner::Slide(index)) => {
@@ -11266,6 +11366,10 @@ impl Presentation {
     /// Replaces one owned fill in a staged candidate and prunes only image
     /// relationships that no qualified source owner still references.
     pub fn set_fill_at(&mut self, owner: &FillOwnerLocation, fill: Fill) -> Result<()> {
+        if self.local_shape_fill(owner, &fill)? {
+            return self.assign_local_shape_fill(owner, fill);
+        }
+        note_fx260_slide(self.slides.len().max(1));
         let mut candidate = self.clone();
         candidate.assign_fill_at(owner, fill)?;
         if candidate.owner_data(owner.owner())? == self.owner_data(owner.owner())? {
@@ -11275,6 +11379,68 @@ impl Presentation {
         candidate.release_unused_owner_images(owner.owner(), &previous)?;
         candidate.commit_owned_parts(None)?;
         *self = candidate;
+        Ok(())
+    }
+
+    /// A solid, gradient, pattern or no-fill on one shape does not change
+    /// image relationships. Assign it on that shape and validate only that
+    /// child. Blip fills and every other owner keep the package transaction.
+    fn local_shape_fill(&self, location: &FillOwnerLocation, fill: &Fill) -> Result<bool> {
+        if matches!(fill, Fill::Blip(_)) {
+            return Ok(false);
+        }
+        let (owner, path) = match location {
+            FillOwnerLocation::Shape {
+                slide_index,
+                shape_path,
+            } => (ShapeOwner::Slide(*slide_index), shape_path.as_slice()),
+            FillOwnerLocation::OwnedShape { owner, shape_path } => (*owner, shape_path.as_slice()),
+            _ => return Ok(false),
+        };
+        let child =
+            child_at(&self.owner_data(owner)?.shape_tree.children, path).ok_or_else(|| {
+                invalid_shape_mutation("set owned fill", "fill owner is absent or unsupported")
+            })?;
+        let current = shape_properties(child).and_then(|properties| properties.fill.as_ref());
+        Ok(!matches!(current, Some(Fill::Blip(_))))
+    }
+
+    fn assign_local_shape_fill(&mut self, location: &FillOwnerLocation, fill: Fill) -> Result<()> {
+        let owner = location.owner();
+        let path = match location {
+            FillOwnerLocation::Shape { shape_path, .. }
+            | FillOwnerLocation::OwnedShape { shape_path, .. } => shape_path.clone(),
+            _ => unreachable!("local shape fill rejected every other owner"),
+        };
+        let snapshot = child_at(&self.owner_data(owner)?.shape_tree.children, &path)
+            .ok_or_else(|| {
+                invalid_shape_mutation("set owned fill", "fill owner is absent or unsupported")
+            })?
+            .clone();
+        note_fx260_slide(1);
+        let assigned = self.assign_fill_at(location, fill);
+        if let Err(error) = assigned {
+            if let Some(child) =
+                child_at_mut(&mut self.owner_data_mut(owner)?.shape_tree.children, &path)
+            {
+                *child = snapshot;
+            }
+            return Err(error);
+        }
+        let part_name = self.owner_part_name(owner)?.to_owned();
+        let validated = child_at(&self.owner_data(owner)?.shape_tree.children, &path)
+            .ok_or_else(|| {
+                invalid_shape_mutation("set owned fill", "fill owner is absent or unsupported")
+            })
+            .and_then(|child| validate_shape_child(child, &part_name));
+        if let Err(error) = validated {
+            if let Some(child) =
+                child_at_mut(&mut self.owner_data_mut(owner)?.shape_tree.children, &path)
+            {
+                *child = snapshot;
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -12115,6 +12281,46 @@ impl Presentation {
             OPERATION,
             slide_index,
             (shape_id, paragraph_index, run_index),
+            RunClickHost::Shape,
+            address.map(ShapeClickTarget::Address),
+        )
+    }
+
+    /// Points one table-cell run's click hyperlink at an external `address`.
+    ///
+    /// The relationship is the same slide-scoped external hyperlink a text-box
+    /// run uses. An empty address, a control character, or a missing cell run
+    /// is rejected before the slide or its relationships are published.
+    pub fn set_cell_run_hyperlink(
+        &mut self,
+        slide_index: usize,
+        shape_id: u32,
+        cell: (usize, usize),
+        paragraph_index: usize,
+        run_index: usize,
+        address: Option<&str>,
+    ) -> Result<()> {
+        const OPERATION: &str = "set cell run hyperlink";
+        self.require_slide_index(slide_index)?;
+        if address.is_some_and(|address| {
+            address.is_empty()
+                || address.chars().any(|character| {
+                    character.is_control() || matches!(character, '\u{FFFE}' | '\u{FFFF}')
+                })
+        }) {
+            return Err(invalid_shape_mutation(
+                OPERATION,
+                "a hyperlink address must be non-empty text without control characters",
+            ));
+        }
+        self.set_run_click(
+            OPERATION,
+            slide_index,
+            (shape_id, paragraph_index, run_index),
+            RunClickHost::Cell {
+                row: cell.0,
+                column: cell.1,
+            },
             address.map(ShapeClickTarget::Address),
         )
     }
@@ -12136,6 +12342,7 @@ impl Presentation {
             "set run target slide",
             slide_index,
             (shape_id, paragraph_index, run_index),
+            RunClickHost::Shape,
             target_slide_index.map(ShapeClickTarget::Slide),
         )
     }
@@ -12201,6 +12408,7 @@ impl Presentation {
         operation: &'static str,
         slide_index: usize,
         (shape_id, paragraph_index, run_index): (u32, usize, usize),
+        host: RunClickHost,
         target: Option<ShapeClickTarget<'_>>,
     ) -> Result<()> {
         let record = &self.slides[slide_index];
@@ -12227,16 +12435,22 @@ impl Presentation {
             .unwrap_or_default();
         let had_click = {
             let missing = || {
-                invalid_shape_mutation(
-                    operation,
-                    format!(
+                let detail = match host {
+                    RunClickHost::Shape => format!(
                         "shape id {shape_id} has no ordinary shape run {run_index} in paragraph {paragraph_index}"
                     ),
-                )
+                    RunClickHost::Cell { row, column } => format!(
+                        "shape id {shape_id} has no table cell run {run_index} in paragraph {paragraph_index} at row {row} column {column}"
+                    ),
+                };
+                invalid_shape_mutation(operation, detail)
             };
-            let body = find_shape_mut(&mut slide.common_slide_data.shape_tree.children, shape_id)
-                .and_then(|shape| shape.text_body.as_mut())
-                .ok_or_else(missing)?;
+            let body = click_text_body_mut(
+                &mut slide.common_slide_data.shape_tree.children,
+                shape_id,
+                host,
+            )
+            .ok_or_else(missing)?;
             let mut paragraph = TextFrame { body }
                 .into_paragraph_mut(paragraph_index)
                 .ok_or_else(missing)?;
@@ -14985,17 +15199,42 @@ fn find_shape(children: &[ShapeTreeChild], shape_id: u32) -> Option<&CT_Shape> {
     })
 }
 
-fn find_shape_mut(children: &mut [ShapeTreeChild], shape_id: u32) -> Option<&mut CT_Shape> {
+#[derive(Clone, Copy)]
+enum RunClickHost {
+    Shape,
+    Cell { row: usize, column: usize },
+}
+
+fn click_text_body_mut(
+    children: &mut [ShapeTreeChild],
+    shape_id: u32,
+    host: RunClickHost,
+) -> Option<&mut CT_TextBody> {
     for child in children {
         let id = child.non_visual_id();
-        match child {
-            ShapeTreeChild::Shape(shape) if id == Some(shape_id) => return Some(shape),
-            ShapeTreeChild::GroupShape(group) => {
-                if let Some(shape) = find_shape_mut(&mut group.children, shape_id) {
-                    return Some(shape);
+        if id == Some(shape_id) {
+            match host {
+                RunClickHost::Shape => {
+                    if let ShapeTreeChild::Shape(shape) = child {
+                        return shape.text_body.as_mut();
+                    }
+                }
+                RunClickHost::Cell { row, column } => {
+                    if let ShapeTreeChild::GraphicFrame(frame) = child {
+                        return frame
+                            .graphic_data
+                            .table_mut()
+                            .and_then(|table| table.rows.get_mut(row))
+                            .and_then(|row| row.cells.get_mut(column))
+                            .and_then(|cell| cell.text_body.as_mut());
+                    }
                 }
             }
-            _ => {}
+        }
+        if let ShapeTreeChild::GroupShape(group) = child
+            && let Some(body) = click_text_body_mut(&mut group.children, shape_id, host)
+        {
+            return Some(body);
         }
     }
     None
@@ -21299,16 +21538,34 @@ impl<'a> SlideMut<'a> {
                 operation: "set notes text",
                 message: "notes slide has no body placeholder".to_owned(),
             })?;
-        body.set_text(text);
-        // The general DrawingML setter treats CRLF as a paragraph separator.
-        // Notes authoring retains the caller's exact line endings instead.
+        let formatting_run = body.paragraphs().iter().find_map(|paragraph| {
+            paragraph.runs.iter().find_map(|run| match run {
+                TextRun::Run(run) => Some(run.clone()),
+                TextRun::Break(_) | TextRun::Field(_) => None,
+            })
+        });
+        // An empty first line would drop the formatting run before later
+        // paragraphs copy it. A space keeps that copy, and the line loop
+        // writes the caller's text afterwards.
+        let seeded = (formatting_run.is_some() && (text.is_empty() || text.starts_with('\n')))
+            .then(|| {
+                text.split('\n')
+                    .map(|line| if line.is_empty() { " " } else { line })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        body.set_text(seeded.as_deref().unwrap_or(text));
+        // The general DrawingML setter treats CRLF as a paragraph separator
+        // and drops every run when a line is empty. Notes authoring retains
+        // the caller's exact line endings and the first regular run.
         for (index, line) in text.split('\n').enumerate() {
-            body.paragraph_mut(index)
-                .ok_or_else(|| Error::InvalidSlideMutation {
-                    operation: "set notes text",
-                    message: "notes paragraph count changed during staging".to_owned(),
-                })?
-                .set_text(line);
+            let paragraph =
+                body.paragraph_mut(index)
+                    .ok_or_else(|| Error::InvalidSlideMutation {
+                        operation: "set notes text",
+                        message: "notes paragraph count changed during staging".to_owned(),
+                    })?;
+            assign_notes_line(paragraph, line, formatting_run.as_ref());
         }
         candidate
             .to_xml()
@@ -21438,6 +21695,12 @@ impl<'a> SlideMut<'a> {
         &mut self,
         build: impl FnOnce(u32) -> Result<ShapeTreeChild>,
     ) -> Result<ShapeMut<'_>> {
+        let owner = ShapeOwner::Slide(self.index);
+        if self.presentation.local_append_eligible(owner, &[])? {
+            let index = self.presentation.append_locally(owner, &[], build)?;
+            return Ok(owned_shape_mut(self.presentation, owner, vec![index]));
+        }
+        note_fx260_slide(self.presentation.slides.len().max(1));
         let mut candidate = self.presentation.clone();
         let tree = &mut candidate.slides[self.index]
             .slide
@@ -21446,7 +21709,7 @@ impl<'a> SlideMut<'a> {
         let index = append_new_member(tree, &[], build)?;
         candidate.refresh_connector_attachments(
             ShapeOwner::Slide(self.index),
-            self.presentation,
+            &self.presentation.owner_data(owner)?.shape_tree.children,
             &HashSet::new(),
         )?;
         candidate.slides[self.index]
@@ -21566,7 +21829,15 @@ impl ShapesMut<'_> {
             width,
             height,
         )?;
-        candidate.refresh_connector_attachments(self.owner, self.presentation, &HashSet::new())?;
+        candidate.refresh_connector_attachments(
+            self.owner,
+            &self
+                .presentation
+                .owner_data(self.owner)?
+                .shape_tree
+                .children,
+            &HashSet::new(),
+        )?;
         candidate.validate_owned_part(self.owner)?;
         let mut path = self.group.clone();
         path.push(count);
@@ -21578,10 +21849,30 @@ impl ShapesMut<'_> {
         &mut self,
         build: impl FnOnce(u32) -> Result<ShapeTreeChild>,
     ) -> Result<ShapeMut<'_>> {
+        if self
+            .presentation
+            .local_append_eligible(self.owner, &self.group)?
+        {
+            let index = self
+                .presentation
+                .append_locally(self.owner, &self.group, build)?;
+            let mut path = self.group.clone();
+            path.push(index);
+            return Ok(owned_shape_mut(self.presentation, self.owner, path));
+        }
+        note_fx260_slide(self.presentation.slides.len().max(1));
         let mut candidate = self.presentation.clone();
         let tree = &mut candidate.owner_data_mut(self.owner)?.shape_tree;
         let index = append_new_member(tree, &self.group, build)?;
-        candidate.refresh_connector_attachments(self.owner, self.presentation, &HashSet::new())?;
+        candidate.refresh_connector_attachments(
+            self.owner,
+            &self
+                .presentation
+                .owner_data(self.owner)?
+                .shape_tree
+                .children,
+            &HashSet::new(),
+        )?;
         candidate.validate_owned_part(self.owner)?;
         let mut path = self.group.clone();
         path.push(index);
@@ -21693,6 +21984,42 @@ fn table_member(
     )
     .map_err(|error| invalid_table_mutation("add table", error.to_string()))?;
     Ok(ShapeTreeChild::GraphicFrame(Box::new(frame)))
+}
+
+impl Presentation {
+    /// An empty group with no connector can take one new child without
+    /// reading any other slide. A group refit or an existing connector keeps
+    /// the package transaction.
+    fn local_append_eligible(&self, owner: ShapeOwner, group: &[usize]) -> Result<bool> {
+        if !group.is_empty() {
+            return Ok(false);
+        }
+        Ok(!tree_has_connector(
+            &self.owner_data(owner)?.shape_tree.children,
+        ))
+    }
+
+    fn append_locally(
+        &mut self,
+        owner: ShapeOwner,
+        group: &[usize],
+        build: impl FnOnce(u32) -> Result<ShapeTreeChild>,
+    ) -> Result<usize> {
+        note_fx260_slide(1);
+        let index = {
+            let tree = &mut self.owner_data_mut(owner)?.shape_tree;
+            append_new_member(tree, group, build)?
+        };
+        let part_name = self.owner_part_name(owner)?.to_owned();
+        let validated = child_at(&self.owner_data(owner)?.shape_tree.children, &[index])
+            .ok_or_else(|| invalid_shape_mutation("append shape", "new shape is absent"))
+            .and_then(|child| validate_shape_child(child, &part_name));
+        if let Err(error) = validated {
+            self.owner_data_mut(owner)?.shape_tree.children.pop();
+            return Err(error);
+        }
+        Ok(index)
+    }
 }
 
 /// Appends a new member built with an id that is unused across the slide.
@@ -22306,6 +22633,7 @@ impl<'a> ShapeMut<'a> {
 
     /// Changes the direct alt text on this physical owner.
     pub fn set_alt_text(&mut self, text: Option<&str>) -> Result<()> {
+        note_fx260_slide(1);
         let result = match self.leaf_mut() {
             ShapeTreeChild::Shape(shape) => shape.set_alt_text(text),
             ShapeTreeChild::Picture(picture) => picture.set_alt_text(text),
@@ -22718,6 +23046,23 @@ impl<'a> ShapeMut<'a> {
     }
     pub fn set_auto_shape_type(&mut self, preset: &str) -> Result<()> {
         self.apply_geometry(GeometryEdit::Preset(preset.to_owned()))
+    }
+
+    /// Removes `p:style` from a shape or connector.
+    ///
+    /// Returns false when the element is already absent. A picture, graphic
+    /// frame, group, or alternate content is refused and the package is left
+    /// unchanged.
+    pub fn clear_style(&mut self) -> Result<bool> {
+        let shape_kind = self.kind();
+        match self.leaf_mut() {
+            ShapeTreeChild::Shape(shape) => Ok(shape.clear_style()),
+            ShapeTreeChild::Connector(connector) => Ok(connector.clear_style()),
+            _ => Err(Error::UnsupportedShapeMutation {
+                operation: "remove_style",
+                shape_kind,
+            }),
+        }
     }
     /// Sets both direct DrawingML flip flags and stages incoming glue with the owner.
     pub fn set_flips(&mut self, horizontal: bool, vertical: bool) -> Result<()> {
@@ -24606,6 +24951,39 @@ fn collect_text(children: &[ShapeTreeChild], output: &mut Vec<String>) {
         }
         collect_text(shape.child_slice(), output);
     }
+}
+
+/// Writes one notes line and keeps the body's first regular run.
+///
+/// An empty line stores that run with empty text, so its formatting and
+/// unmodelled content stay. A line with text uses the same run. Without one,
+/// the general paragraph assignment applies, including its empty-text drop.
+fn assign_notes_line(
+    paragraph: &mut CT_TextParagraph,
+    line: &str,
+    formatting: Option<&CT_RegularTextRun>,
+) {
+    let has_regular_run = paragraph
+        .runs
+        .iter()
+        .any(|run| matches!(run, TextRun::Run(_)));
+    if (line.is_empty() || !has_regular_run)
+        && let Some(source) = formatting
+    {
+        let mut run = source.clone();
+        run.set_text("");
+        if !paragraph.runs.is_empty() {
+            paragraph.set_text("");
+        }
+        paragraph.add_run("");
+        if let Some(slot) = paragraph.runs.first_mut() {
+            *slot = TextRun::Run(run);
+        }
+        if line.is_empty() {
+            return;
+        }
+    }
+    paragraph.set_text(line);
 }
 
 fn first_notes_body_mut(children: &mut [ShapeTreeChild]) -> Option<&mut CT_TextBody> {
@@ -28842,6 +29220,9 @@ fn field_paragraph(template: Option<&CT_TextBody>, mut field: CT_TextField) -> C
         field.run_properties = properties;
     }
     paragraph.set_text("");
+    if paragraph.runs.is_empty() {
+        paragraph.add_run("");
+    }
     if let Some(first) = paragraph.runs.first_mut() {
         *first = TextRun::Field(Box::new(field));
     }
@@ -39338,6 +39719,77 @@ fn path_of_id(children: &[ShapeTreeChild], shape_id: u32) -> Option<Vec<usize>> 
     None
 }
 
+#[cfg(test)]
+thread_local! {
+    static FX260_SLIDE_SCANS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn note_fx260_slide(count: usize) {
+    #[cfg(test)]
+    FX260_SLIDE_SCANS.with(|cell| cell.set(cell.get().saturating_add(count)));
+    #[cfg(not(test))]
+    let _ = count;
+}
+
+#[cfg(test)]
+fn fx260_slide_scans() -> usize {
+    FX260_SLIDE_SCANS.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+fn reset_fx260_slide_scans() {
+    FX260_SLIDE_SCANS.with(|cell| cell.set(0));
+}
+
+fn tree_has_connector(children: &[ShapeTreeChild]) -> bool {
+    children.iter().any(|child| match child {
+        ShapeTreeChild::Connector(_) => true,
+        ShapeTreeChild::GroupShape(group) => tree_has_connector(&group.children),
+        _ => false,
+    })
+}
+
+fn malformed_shape_child(part_name: &str, error: impl ToString) -> Error {
+    Error::MalformedPart {
+        part_name: part_name.to_owned(),
+        message: error.to_string(),
+    }
+}
+
+fn validate_shape_child(child: &ShapeTreeChild, part_name: &str) -> Result<()> {
+    match child {
+        ShapeTreeChild::Shape(shape) => shape
+            .to_xml()
+            .map(|_| ())
+            .map_err(|error| malformed_shape_child(part_name, error))?,
+        ShapeTreeChild::Picture(picture) => picture
+            .to_xml()
+            .map(|_| ())
+            .map_err(|error| malformed_shape_child(part_name, error))?,
+        ShapeTreeChild::GraphicFrame(frame) => frame
+            .to_xml()
+            .map(|_| ())
+            .map_err(|error| malformed_shape_child(part_name, error))?,
+        ShapeTreeChild::GroupShape(group) => group
+            .to_xml()
+            .map(|_| ())
+            .map_err(|error| malformed_shape_child(part_name, error))?,
+        ShapeTreeChild::Connector(connector) => connector
+            .to_xml()
+            .map(|_| ())
+            .map_err(|error| malformed_shape_child(part_name, error))?,
+        ShapeTreeChild::AlternateContent(alternate) => {
+            if alternate.raw_xml().is_empty() {
+                return Err(invalid_shape_mutation(
+                    "validate shape",
+                    "alternate content is empty",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn child_at<'t>(children: &'t [ShapeTreeChild], path: &[usize]) -> Option<&'t ShapeTreeChild> {
     let (last, groups) = path.split_last()?;
     let mut level = children;
@@ -39628,7 +40080,7 @@ impl Presentation {
     fn refresh_connector_attachments(
         &mut self,
         owner: ShapeOwner,
-        previous: &Presentation,
+        previous_children: &[ShapeTreeChild],
         removed: &HashSet<u32>,
     ) -> Result<()> {
         self.owner_data(owner)?;
@@ -39646,8 +40098,7 @@ impl Presentation {
             if removed.contains(&id) {
                 continue;
             }
-            let before =
-                geometry_target_signature(&previous.owner_data(owner)?.shape_tree.children, id);
+            let before = geometry_target_signature(previous_children, id);
             // Never adopt a formerly dangling reference by incidental ID allocation.
             if before.is_empty() {
                 continue;
@@ -39655,7 +40106,7 @@ impl Presentation {
             let after = geometry_target_signature(&self.owner_data(owner)?.shape_tree.children, id);
             let connector_id = child_at(&self.owner_data(owner)?.shape_tree.children, &path)
                 .and_then(ShapeTreeChild::non_visual_id);
-            let before_children = &previous.owner_data(owner)?.shape_tree.children;
+            let before_children = previous_children;
             let after_children = &self.owner_data(owner)?.shape_tree.children;
             let connector_changed = connector_id.is_some_and(|connector_id| {
                 geometry_target_signature(before_children, connector_id)
@@ -39734,18 +40185,51 @@ impl Presentation {
         {
             return Err(invalid_shape_mutation("set size", "negative extent"));
         }
-        let mut candidate = self.clone();
-        #[cfg(feature = "render")]
-        candidate.materialize_owner_geometry(owner, path)?;
-        let child = child_at_mut(
-            &mut candidate.owner_data_mut(owner)?.shape_tree.children,
-            path,
-        )
-        .ok_or_else(|| invalid_shape_mutation("shape geometry", "missing physical owner"))?;
-        apply_leaf_geometry(child, edit)?;
-        candidate.refresh_connector_attachments(owner, self, &HashSet::new())?;
-        candidate.validate_owned_part(owner)?;
-        *self = candidate;
+        let has_connector = tree_has_connector(&self.owner_data(owner)?.shape_tree.children);
+        if has_connector {
+            note_fx260_slide(self.slides.len().max(1));
+            let previous = self.owner_data(owner)?.shape_tree.children.clone();
+            let mut candidate = self.clone();
+            #[cfg(feature = "render")]
+            candidate.materialize_owner_geometry(owner, path)?;
+            let child = child_at_mut(
+                &mut candidate.owner_data_mut(owner)?.shape_tree.children,
+                path,
+            )
+            .ok_or_else(|| invalid_shape_mutation("shape geometry", "missing physical owner"))?;
+            apply_leaf_geometry(child, edit)?;
+            candidate.refresh_connector_attachments(owner, &previous, &HashSet::new())?;
+            candidate.validate_owned_part(owner)?;
+            *self = candidate;
+            return Ok(());
+        }
+        note_fx260_slide(1);
+        let snapshot = child_at(&self.owner_data(owner)?.shape_tree.children, path)
+            .ok_or_else(|| invalid_shape_mutation("shape geometry", "missing physical owner"))?
+            .clone();
+        let part_name = self.owner_part_name(owner)?.to_owned();
+        let edited = (|| {
+            #[cfg(feature = "render")]
+            self.materialize_owner_geometry(owner, path)?;
+            let child = child_at_mut(&mut self.owner_data_mut(owner)?.shape_tree.children, path)
+                .ok_or_else(|| {
+                    invalid_shape_mutation("shape geometry", "missing physical owner")
+                })?;
+            apply_leaf_geometry(child, edit)?;
+            let child =
+                child_at(&self.owner_data(owner)?.shape_tree.children, path).ok_or_else(|| {
+                    invalid_shape_mutation("shape geometry", "missing physical owner")
+                })?;
+            validate_shape_child(child, &part_name)
+        })();
+        if let Err(error) = edited {
+            if let Some(child) =
+                child_at_mut(&mut self.owner_data_mut(owner)?.shape_tree.children, path)
+            {
+                *child = snapshot;
+            }
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -39798,7 +40282,15 @@ impl ShapesMut<'_> {
             .leaf()
             .non_visual_id()
             .ok_or_else(|| invalid_shape_mutation("group shapes", "missing new group ID"))?;
-        candidate.refresh_connector_attachments(self.owner, self.presentation, &HashSet::new())?;
+        candidate.refresh_connector_attachments(
+            self.owner,
+            &self
+                .presentation
+                .owner_data(self.owner)?
+                .shape_tree
+                .children,
+            &HashSet::new(),
+        )?;
         let path = path_of_id(&candidate.owner_data(self.owner)?.shape_tree.children, id)
             .ok_or_else(|| invalid_shape_mutation("group shapes", "new group missing"))?;
         candidate.validate_owned_part(self.owner)?;
@@ -39821,7 +40313,11 @@ impl ShapesMut<'_> {
             .ungroup_in_candidate(index)?;
         candidate.refresh_connector_attachments(
             self.owner,
-            self.presentation,
+            &self
+                .presentation
+                .owner_data(self.owner)?
+                .shape_tree
+                .children,
             &HashSet::from([id]),
         )?;
         candidate.validate_owned_part(self.owner)?;
@@ -39839,7 +40335,15 @@ impl ShapesMut<'_> {
             .shapes_mut_at(self.owner, &self.group)
             .map_err(|_| invalid_shape_mutation("align shapes", "missing parent"))?
             .align_in_candidate(indices, alignment, reference)?;
-        candidate.refresh_connector_attachments(self.owner, self.presentation, &HashSet::new())?;
+        candidate.refresh_connector_attachments(
+            self.owner,
+            &self
+                .presentation
+                .owner_data(self.owner)?
+                .shape_tree
+                .children,
+            &HashSet::new(),
+        )?;
         candidate.validate_owned_part(self.owner)?;
         *self.presentation = candidate;
         Ok(())
@@ -39855,7 +40359,15 @@ impl ShapesMut<'_> {
             .shapes_mut_at(self.owner, &self.group)
             .map_err(|_| invalid_shape_mutation("distribute shapes", "missing parent"))?
             .distribute_in_candidate(indices, direction, reference)?;
-        candidate.refresh_connector_attachments(self.owner, self.presentation, &HashSet::new())?;
+        candidate.refresh_connector_attachments(
+            self.owner,
+            &self
+                .presentation
+                .owner_data(self.owner)?
+                .shape_tree
+                .children,
+            &HashSet::new(),
+        )?;
         candidate.validate_owned_part(self.owner)?;
         *self.presentation = candidate;
         Ok(())
@@ -40387,4 +40899,61 @@ fn fx254_xml_scope_storage_is_linear() {
     assert!(scan.islands.is_empty());
     assert!(names.route_edges.len() < 270);
     assert!(scan.meaning.len() < 270);
+}
+
+#[test]
+fn issue389_local_edits_do_not_scale_with_unrelated_package() {
+    for (slides, boxes) in [(1usize, 0usize), (40usize, 40usize)] {
+        let mut deck = Presentation::new().unwrap();
+        for _ in 0..slides {
+            deck.add_slide(6).unwrap();
+        }
+        for slide in 0..slides {
+            for _ in 0..boxes {
+                deck.shapes_mut(slide, &[])
+                    .unwrap()
+                    .add_textbox(Emu(0), Emu(0), Emu(100), Emu(100))
+                    .unwrap();
+            }
+        }
+        reset_fx260_slide_scans();
+        deck.shapes_mut(0, &[])
+            .unwrap()
+            .add_textbox(Emu(0), Emu(0), Emu(100), Emu(100))
+            .unwrap();
+        assert_eq!(fx260_slide_scans(), 1, "add slides={slides} boxes={boxes}");
+        let index = boxes;
+        reset_fx260_slide_scans();
+        deck.shape_mut_at(ShapeOwner::Slide(0), &[index])
+            .unwrap()
+            .set_alt_text(Some("alt"))
+            .unwrap();
+        assert_eq!(fx260_slide_scans(), 1, "alt slides={slides}");
+        reset_fx260_slide_scans();
+        deck.shape_mut_at(ShapeOwner::Slide(0), &[index])
+            .unwrap()
+            .set_position(Emu(200), Emu(10))
+            .unwrap();
+        assert_eq!(fx260_slide_scans(), 1, "left slides={slides}");
+        reset_fx260_slide_scans();
+        let mut fill = SolidFill::default();
+        fill.color = Some(ColorChoice::srgb(RgbColor::new(0xFF, 0, 0)));
+        deck.set_fill_at(
+            &FillOwnerLocation::Shape {
+                slide_index: 0,
+                shape_path: vec![index],
+            },
+            Fill::Solid(fill),
+        )
+        .unwrap();
+        assert_eq!(fx260_slide_scans(), 1, "fill slides={slides}");
+        let before = deck.shape_xml_at(ShapeOwner::Slide(0), &[index]).unwrap();
+        let xml = String::from_utf8(before).unwrap();
+        assert!(xml.contains("TextBox "), "{xml}");
+        let changed = xml.replacen("TextBox ", "TextBax ", 1);
+        reset_fx260_slide_scans();
+        deck.replace_shape_xml_at(ShapeOwner::Slide(0), &[index], &changed)
+            .unwrap();
+        assert_eq!(fx260_slide_scans(), 1, "xml slides={slides}");
+    }
 }

@@ -991,6 +991,13 @@ element when needed, and retains every unrelated custom XML byte exactly.
 Display and custom-part changes are staged together and committed only after
 all selected bindings serialize and reparse successfully.
 
+Public store creation uses that same graph. `add_custom_xml_store` reserves
+`/customXml/item1.xml` and `/customXml/itemProps1.xml` when those names are
+free, and otherwise the next free name in each family. The properties root is
+`ds:datastoreItem` with attribute `ds:itemID`, then child `ds:schemaRefs`, then
+one `ds:schemaRef` per supplied URI. The item id is the braced uppercase form
+from the existing allocator. Schema URIs are stored and not fetched.
+
 ## Part naming
 
 **Numeric suffixes are allocated after the greatest positive parsed suffix,
@@ -1731,6 +1738,13 @@ document identities before insertion. Any value-kind, marker, relationship,
 identity, callback, allocation, serialization, or reopen failure discards the
 entire prospective result.
 
+Versioned template expansion uses that same staged fragment transaction for a
+repeated range in any checked physical owner. Each copy receives fresh
+bookmark, control, drawing, note, comment and relationship identities before
+publication. Drawing ids reserved for those copies stay occupied across the
+prepare that refreshes note and comment companions, so the next copy cannot
+reuse them. The live package is published once after every owner succeeds.
+
 Cross-document block fragments carry their source package so retained XML stays
 authoritative across every supported owner. Local namespace declarations and
 unrelated destination XML survive insertion. The closure starts at selected
@@ -2112,6 +2126,14 @@ Word16.114 build26101123 can also empty the Italic part of a regular-plus-italic
 family on save. The corresponding native PDFs use Regular outlines with an
 affine slant before save and after normal reopen. This native normalization
 is not permission for the library to drop an authored face or its source bytes.
+
+A Word embedded face whose content type is a plain sfnt type is copied as stored, including when the font key is null. The accepted plain types are `application/x-font-ttf`, `application/x-font-otf`, `application/x-font-truetype` and `application/x-font-opentype`. Every other accepted face is deobfuscated with its font key. An unsupported content type names the part and the content type and supplies no face bytes.
+
+Picture removal drops a media part and its relationship only when the candidate package proves that owned part unreachable. Shared targets, a pop followed by reinsert, and caller-embedded unused media stay. The same proof is the range-removal rule. A private unreduced control-owner document stays unqualified. The reduced reachability checks do not close that case.
+
+`validate` names a header or footer relationship whose target is not a header or footer part, including the part name and content type. A valid header or footer story still saves.
+
+`Document::part_names` returns the package paths a save would write, each with a leading slash, in lexicographic order. The order includes parts with no relationship and does not move when a part is rewritten. `Document::part_xml` returns the UTF-8 text of one staged part. A missing, binary, or non-UTF-8 part returns an error that names the part and its content type. A UTF-8 BOM may be stripped. UTF-16 is not decoded. The read has no mutable handle and no WASM surface.
 
 ## Presentation semantic export resources
 

@@ -1792,7 +1792,22 @@ fn replace_source_xml(
     apply_source_edits(&collection.xml, edits)
 }
 
-fn create_collection(candidate: &mut Document) -> Result<String> {
+pub(crate) struct StagedCustomXmlStore {
+    pub(crate) part_name: String,
+    pub(crate) item_id: String,
+}
+
+/// Allocate one custom XML item, its properties part, both relationships and
+/// both content-type overrides. Bibliography and the public store method share
+/// this sequence so an empty schema list keeps the bibliography properties bytes.
+pub(crate) fn stage_custom_xml_store(
+    candidate: &mut Document,
+    item_xml: &[u8],
+    schema_uris: &[&str],
+) -> Result<StagedCustomXmlStore> {
+    if schema_uris.iter().any(|uri| uri.is_empty()) {
+        return Err(Error::Other("custom XML schema URI is empty".to_owned()));
+    }
     candidate
         .identifiers
         .observe_package_graph(&candidate.package)?;
@@ -1829,7 +1844,9 @@ fn create_collection(candidate: &mut Document) -> Result<String> {
         .map(|index| format!("{{00000000-0000-4000-8000-{index:012X}}}"))
         .find(|value| !occupied.contains(&crate::content_control::normalize_store_item_id(value)))
         .ok_or_else(|| bibliography_error("custom XML store identity space exhausted"))?;
-    candidate.package.set_part(&properties, format!("<ds:datastoreItem xmlns:ds=\"http://schemas.openxmlformats.org/officeDocument/2006/customXml\" ds:itemID=\"{identity}\"><ds:schemaRefs/></ds:datastoreItem>").into_bytes());
+    candidate
+        .package
+        .set_part(&properties, datastore_properties(&identity, schema_uris));
     candidate
         .package
         .content_types
@@ -1839,11 +1856,44 @@ fn create_collection(candidate: &mut Document) -> Result<String> {
         CUSTOM_XML_PROPS_REL,
         &properties,
     )?;
-    candidate.package.set_part(
-        &part,
-        format!("<b:Sources xmlns:b=\"{BIB_NS}\"></b:Sources>").into_bytes(),
-    );
-    Ok(part)
+    candidate.package.set_part(&part, item_xml.to_vec());
+    Ok(StagedCustomXmlStore {
+        part_name: part,
+        item_id: identity,
+    })
+}
+
+fn datastore_properties(identity: &str, schema_uris: &[&str]) -> Vec<u8> {
+    let refs = if schema_uris.is_empty() {
+        "<ds:schemaRefs/>".to_owned()
+    } else {
+        let mut body = String::from("<ds:schemaRefs>");
+        for uri in schema_uris {
+            body.push_str("<ds:schemaRef ds:uri=\"");
+            body.push_str(&xml_attribute(uri));
+            body.push_str("\"/>");
+        }
+        body.push_str("</ds:schemaRefs>");
+        body
+    };
+    format!("<ds:datastoreItem xmlns:ds=\"http://schemas.openxmlformats.org/officeDocument/2006/customXml\" ds:itemID=\"{identity}\">{refs}</ds:datastoreItem>")
+        .into_bytes()
+}
+
+fn xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
+}
+
+fn create_collection(candidate: &mut Document) -> Result<String> {
+    Ok(stage_custom_xml_store(
+        candidate,
+        format!("<b:Sources xmlns:b=\"{BIB_NS}\"></b:Sources>").as_bytes(),
+        &[],
+    )?
+    .part_name)
 }
 
 fn publish_source_collection(document: &mut Document, candidate: Document) -> Result<()> {
@@ -2916,7 +2966,7 @@ impl BibliographyUpdateState {
                                     complex_paragraph_mark.then_some(true);
                             }
                         }
-                        rdocx_oxml::document::BodyContent::Paragraph(paragraph)
+                        rdocx_oxml::document::BodyContent::Paragraph(Box::new(paragraph))
                     },
                 )
                 .collect(),
@@ -7905,9 +7955,9 @@ fn ieee_bibliography_table(
         ..Default::default()
     });
     Ok(vec![
-        BodyContent::Paragraph(first),
-        BodyContent::Table(table),
-        BodyContent::Paragraph(trailing),
+        BodyContent::Paragraph(Box::new(first)),
+        BodyContent::Table(Box::new(table)),
+        BodyContent::Paragraph(Box::new(trailing)),
     ])
 }
 

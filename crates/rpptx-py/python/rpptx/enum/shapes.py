@@ -6,9 +6,9 @@ from enum import IntEnum
 class MSO_SHAPE(IntEnum):
     """Preset shapes `add_shape` can author, with python-pptx values.
 
-    python-pptx also defines `UP_ARROW`, which is absent here because the
-    ECMA preset table rpptx generates from lists `upDownArrow` twice and no
-    `upArrow`.
+    `UP_ARROW` is python-pptx value 35. The generated table includes the
+    published `upArrow` geometry because the ECMA source lists `upDownArrow`
+    twice and omits `upArrow`.
     """
 
     ACTION_BUTTON_BACK_OR_PREVIOUS = 129
@@ -185,6 +185,7 @@ class MSO_SHAPE(IntEnum):
     SWOOSH_ARROW = 178
     TEAR = 160
     TRAPEZOID = 3
+    UP_ARROW = 35
     UP_ARROW_CALLOUT = 55
     UP_DOWN_ARROW = 38
     UP_DOWN_ARROW_CALLOUT = 58
@@ -386,6 +387,7 @@ _PRESETS: dict[int, str] = {
     178: "swooshArrow",
     160: "teardrop",
     3: "trapezoid",
+    35: "upArrow",
     55: "upArrowCallout",
     38: "upDownArrow",
     58: "upDownArrowCallout",

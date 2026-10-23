@@ -95,7 +95,7 @@ fn body_blocks(body: &CT_Body, preserve_field_owners: bool) -> Vec<Block<'_>> {
                             join_accepted_paragraphs(prefix, paragraph, preserve_field_owners);
                         (Cow::Owned(joined), boundaries)
                     }
-                    None => (Cow::Borrowed(paragraph), Vec::new()),
+                    None => (Cow::Borrowed(paragraph.as_ref()), Vec::new()),
                 };
                 if body.accepted_paragraph_joins_next(index) {
                     carried = Some(if preserve_field_owners {
@@ -109,7 +109,7 @@ fn body_blocks(body: &CT_Body, preserve_field_owners: bool) -> Vec<Block<'_>> {
                     blocks.push(Block::Paragraph(Box::new(paragraph), boundaries));
                 }
             }
-            BodyContent::Table(table) => blocks.push(Block::Table(table)),
+            BodyContent::Table(table) => blocks.push(Block::Table(table.as_ref())),
             BodyContent::ContentControl(control) => push_control_blocks(control, &mut blocks),
             BodyContent::RawXml(_) => {}
         }
@@ -386,7 +386,7 @@ mod tests {
         cell.content = vec![rdocx_oxml::table::CellContent::Paragraph(p)];
         row.cells.push(cell);
         tbl.rows.push(row);
-        doc.body.content.push(BodyContent::Table(tbl));
+        doc.body.content.push(BodyContent::Table(Box::new(tbl)));
 
         let input = HtmlInput {
             document: doc,

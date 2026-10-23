@@ -17,7 +17,7 @@ schema order, and retains unmodelled XML alongside typed edits.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-oxml | 535,507 compressed bytes, 3,300,433 member bytes, 32 members | 0.16.2 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-16 |
+| Crates.io archive: rdocx-oxml | 540,028 compressed bytes, 3,323,818 member bytes, 32 members | 0.16.3 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-oxml` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-22 |
 
 ## Use it when
 
@@ -37,12 +37,12 @@ use rdocx_oxml::{BodyContent, CT_Document, CT_P};
 let mut document = CT_Document::new();
 let mut paragraph = CT_P::new();
 paragraph.add_run("Low-level WordprocessingML");
-document.body.content.push(BodyContent::Paragraph(paragraph));
+document.body.content.push(BodyContent::Paragraph(Box::new(paragraph)));
 
 assert_eq!(document.body.paragraphs().count(), 1);
 ```
 
 ```toml
 [dependencies]
-rdocx-oxml = "0.16.2"
+rdocx-oxml = "0.16.3"
 ```

@@ -31,10 +31,23 @@ the stub-creation half of the command.
    silently drifts from its specification.
 
 4. **Check the dependencies** are `done` in `docs/sprints/BACKLOG.md`.
+   An approved provider design is insufficient. Inspect the plan's dependency
+   readiness record and any required dependency-prefix checkpoint evidence.
 
-5. **Create the test stubs** from the plan's `## Test plan`. Each is a real test
-   function that **fails for the right reason**, not `todo!()`. A stub that
+5. **Check readiness and create the test stubs** from the plan's `## Test plan`. Each is a real test
+   function that **fails for the right reason**, not `todo!()`. Confirm the plan's
+   consumer map, A-ID acceptance rows and test matrix are concrete first. A
+   new or revised plan must also satisfy `/design`'s validation checklist,
+   including applicable behavior contracts and answered blocking decisions. A
+   repaired contradiction must have an actual discriminator across its affected
+   consumers or modes. Include empty cases and valid/refusal controls where
+   applicable. Record the expected assertion before running old source. A stub that
    passes vacuously is worse than no stub.
+
+   Prepare related cases sharing a test binary together when practical, then
+   retain their individual outcomes from one focused baseline batch. A new API's
+   absence at compile time is not a semantic RED. Use existing public providers
+   to expose the underlying failure and keep additive API checks distinct.
 
 6. **Update the trackers.** Set `in-progress` in both
    `docs/sprints/BACKLOG.md` and `docs/sprints/CURRENT_SPRINT.md`, and

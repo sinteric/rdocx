@@ -1,5 +1,43 @@
 # 03, Architecture
 
+## Numbering-aware navigation sources
+
+Navigation reads the production paragraph cascade and its resolved numbering
+from one immutable Word layout result. Accepted body, cell and nested-control
+headings retain physical WordSourcePath identity, including unplaced eligible
+headings. Result-local IDs are not interchangeable across snapshots.
+
+The facade's existing generated-table scanner supplies accepted-run exclusion
+facts for owned TOC, figure, authority and bibliography result caches. Ordinary
+CITATION is not an outer generated owner. Private facts travel on the existing
+WordSequenceSnapshot with exact current document and physical main-part stamps.
+Fresh sequence evaluation regenerates values and IDs, transferring only
+validated exclusions. Stale facts refuse instead of changing another source.
+Genuine text beside a same-paragraph result remains eligible. This bridge adds
+no public input fields, second counter, XML parser or navigation registry.
+The scanner's disjoint physical order bounds each paragraph's owner window.
+Per-run end-position search narrows that window to one candidate for the existing
+ownership predicate, including many disjoint owners inside one paragraph.
+
+An ambiguous generated-owner scan becomes a private stamped failure fact on
+WordSequenceSnapshot through the narrow doc-hidden
+`set_navigation_failure(&mut self, &LayoutInput, String) -> Result<()>` bridge.
+Fresh sequence regeneration preserves only the exact-current-document and
+physical-part-qualified failure. Ordinary rendering keeps existing stored cache
+paint and counter behavior and reports an existing layout Diagnostic. The new
+numbered outline refuses through `WordLayoutResult::navigation_failure() ->
+Option<&str>`, and newly supported STYLEREF retains cache with an ordered
+diagnostic. Explicit ambiguous rebuilds retain their existing atomic refusal.
+This is not an empty successful source discovery or a new ordinary REF/SEQ
+policy. Snapshot equality includes the private status and invalidates caches.
+
+TOC selectors reuse the existing source-qualified navigation tuple. Explicit
+custom-style selection remains independent. Heading-style selection without
+u keeps its established rule, while u requires the qualified shared heading
+eligibility, including effective inherited or direct outline9 suppression.
+An unavailable owner is an explicit refusal, not a fabricated suppression fact.
+No additional cascade, flag, counter or per-field source scan is introduced.
+
 ## Owned publication and causal paths
 
 `oxml-py-support` owns captured path authority, owner scopes and prepared
@@ -39,6 +77,89 @@ an actual no-op leaves source, scope generations and live handles unchanged.
 First retirement records the exact public operation label for later stale
 errors. The native facades retain ownership of relationships, geometry and
 package authoring, while bindings reuse that publication protocol.
+
+A plain direct body paragraph replacement or removal edits that one child.
+A package that retains a shadowed serializer prefix does not take that local
+path. The staged transaction then fails closed and leaves the bytes unchanged.
+The prefix is recorded when the package is opened or saved, so the call does
+not read the other body children. Admission binds `w`, `r`, `mc` and `wp`,
+the prefixes `w:document` always declares. Stored `xmlns` records are
+attribute names and do not replace those prefixes. A paragraph that is not
+plain, a relationship change, or a removal whose media ownership is not
+proved keeps the staged package transaction. `Document::remove_content_range`
+also keeps that transaction. It removes a half-open range of direct body
+children and does not recurse into tables. Modelled body children and
+preserved raw children are stored in boxes, so a direct removal shifts
+pointers.
+
+Python Word owner lookup uses derived indexes over the current inventory.
+Plain paragraph XML prepares only the selected content/property scopes and
+its exact run owners before native mutation. An empty plain paragraph can
+acquire direct runs locally, with newborn scopes, storage and route buckets
+prepared before admission. New run owners append without shifting earlier
+physical owners. Other run-topology changes retain staged reconciliation.
+A plain tail removal can keep earlier entries when the suffix contains sections
+or appended runs whose parents precede the removed owner. It updates those
+suffix indices. Non-contiguous descendants of the removed owner retain the
+conservative path. This is not a bound independent of prior local edits.
+Every captured physical Word owner includes a removal epoch, so that shortcut
+retires held handles without allocating successors for every paragraph. Fresh
+handles capture the new epoch. Other removals retain conservative reconciliation.
+
+Word read projections are prepared with that same immutable current-owner
+inventory. The facade supplies batch body and cell-paragraph locations matching
+its existing single lookups. Missing or unsupported projections retain those
+lookups. Route hashes index candidate owners, with exact route comparison and
+first-match selection after hashing. Hash equality alone grants no authority.
+Accepted paragraph text and table row/cell paragraph counts are derived read
+facts, never serialization sources. Full replacement and property relocation
+prepare fresh facts. Local plain XML prepares its new accepted text before
+mutation, and installs it only on successful publication. Tail removal retires
+captured epochs and removes its projections without scanning unrelated owners.
+Shared paragraph XML admission compares physical section properties for both
+Start and Empty events, using a namespace-complete temporary semantic parse.
+It refuses changed or introduced section boundaries on local and staged paths.
+An admitted opaque Empty section that the paired parser cannot model remains
+protected by exact bytes and expanded namespace meaning. Only an unchanged
+instance may remain. Submitted and stored XML are not rewritten by comparison. Retained nested
+modeled namespace owners require staged identity reconciliation, even for
+benign aliases. A failed proof refuses before source publication.
+
+Run tab and break edits prepare accepted paragraph text from the native candidate,
+validate its current run-to-paragraph owner and publish source and fact together.
+They preserve existing run, font and paragraph scopes. Cell edits resolve the
+same physical paragraph location as immutable reads, including controlled
+paragraphs, rather than using the direct-only mutable cell ordinal accessor.
+Reads validate current scopes before using facts. Mutations retain native
+fingerprint refresh and admission. There is no lazy first-handle package scan
+or second owner registry.
+
+PowerPoint edits one child for `add_textbox` on a connector-free slide, for
+alt text, for non-connector geometry, for a non-blip shape fill, and for a
+shape XML replacement whose relationship facts and owner signature stay the
+same. A connector, a blip fill, a relationship change, a group refit, a
+retained package signature, or a whole-part replacement keeps the staged
+package transaction. These local edits do not read unrelated slides.
+Shape-id allocation reads typed ids and preserved raw blobs. The whole tree
+is serialized only when a preserved prefix other than `p` is not declared in
+that blob.
+
+Python PowerPoint also indexes current owner generations, routes and shape-id
+multiplicity. Those indexes are derived, not a second ownership registry.
+Appending a simple root textbox prepares three newborn owners and extends
+the current inventory without cloning existing entries. Exact owned XML is a
+no-op. Slide shape XML can use local publication only when a typed scalar
+change witnesses actual mutation and its physical owner topology is unchanged.
+Graphic frames also require unchanged graphicData. The shared address projector
+enumerates the selected shape's descendants before native mutation, including
+table grids and regular runs. Fields and breaks are not regular run owners.
+Unproved XML, template owners and topology changes use a native candidate, with
+all post-edit reads and owner preparation completed before publication.
+Scalar property edits likewise require a pre-native change/no-op proof or use
+a candidate. Non-blip shape fill prepares its property revision before native
+mutation. Replacing the inventory rebuilds its indexes, while local publications
+update only affected entries. No fallible discovery or staged fallback follows
+a successful live native edit.
 
 Word binding admission refuses PDF save paths, duplicate stored tab positions,
 page breaks in actual physical headers and malformed authored language values
@@ -1086,11 +1207,27 @@ and keeps its revision-save identities. Numbered paragraphs in a
 loop retain their source `numId` and level, which keeps one continuous list
 without allocating definitions. Numbering references are validated before
 evaluation. Loop variables form lexical scopes, and dotted lookup searches the
-innermost scope before the root value. Structural controls are limited to the
-main body and its tables. Headers, footers, footnotes, endnotes, text boxes, and
-chart labels retain scalar-only replacement through the existing Word
-placeholder mapper. A successful render commits the staged document and package
-together and invalidates both layout caches once.
+innermost scope before the root value. Both grammars defer explicit item paths
+and unknown implicit item properties while preflighting an empty loop. Known
+outer or root properties still validate their complete path and intermediate
+container kinds. Structural paths and scalar leaves use the same deferred
+scope policy. Grammar 1 is selected by `render_template_versioned` and by the native
+formatter. `render_template` keeps the legacy property-key grammar. Structural
+controls pair inside one physical owner. That owner may be the main body, a
+table cell, a header, a footer, one normal footnote or endnote, or one checked
+text box. Markers do not pair across owners, notes, cells, field boundaries or
+alternate text-box representations. A shared header or footer is evaluated once
+per physical part. Note separators and continuation separators are excluded.
+Qualified equivalent text-box representations form one logical program and are
+evaluated once. Chart labels stay scalar. Template preparation may ask the
+existing story-item scan for owner-scoped field intervals. Ordinary callers do
+not. Structural programs inside or crossing those intervals refuse before
+callbacks, and the paragraph-local field projection stays unchanged. Repeated
+ranges reuse the staged fragment transaction so copied bookmarks, controls,
+drawings, notes, comments and relationship operands stay unique. Original
+callback locations remain the provenance. Fresh physical ranges are the edit
+authority. A successful render commits the staged document and package together
+and invalidates both layout caches once.
 
 The content-control model owns one recursive `CT_Sdt` grammar at block, row,
 cell, paragraph, and run placement boundaries. It reports tag, alias, numeric
@@ -1603,7 +1740,11 @@ concrete `oxml-core` types. Property creation, replacement, selective custom
 property removal, and whole-part removal all run on a staged document clone so
 the part, package relationship, content type, and typed model publish together.
 An empty custom-properties part is pruned only when the current facade created
-it. Settings mutations use the same staged boundary and keep the existing
+it. Python lists those custom properties on the existing class in part order.
+Iteration yields each property, length is the count, items yield the name and
+the property, and name lookup raises `KeyError` when the name is absent. An
+absent part has length 0. There is no `keys` method and no second collection
+type. Settings mutations use the same staged boundary and keep the existing
 relationship-resolved target. Web settings mutations reuse that boundary and
 allocate a collision-safe part only on the first authored value, and the part,
 its relationship and its content-type override are pruned together when the
@@ -1636,11 +1777,7 @@ Word writes a text box twice in a run's
 `mc:Fallback`. That text box is one text-box story, read from the first
 Choice that holds a text box, the one layout draws. Any other Choice and the
 Fallback stay opaque, and the Choice drawing adds no drawing item to the story
-that holds it. A story edit of that text box changes that Choice only. A
-reader of the VML Fallback, such as Word 2007 or a converter like mammoth.js,
-keeps seeing the text the box had before the edit. A later replacement edits
-every copy, see `10-bindings-spec.md`, which aligns the replaced text of the
-Fallback and not the rest of the edit.
+that holds it. A paragraph replacement in a qualified alternate text box updates every admitted copy of that paragraph in one transaction, or changes none. Matching topology and accepted text are required. An asymmetric pair refuses before publication. A text box outside alternate content changes only its own paragraph. The Python handle that published the edit retires, so a later read of that handle fails. Document-wide text replacement still edits every copy, see `10-bindings-spec.md`.
 
 `StoryItemRef::links` returns modeled hyperlinks in item source order. Display
 text comes from the existing story text projection, while relationship targets
@@ -1709,6 +1846,114 @@ owner. Clones allocate fresh document identities and drop the `w14:paraId` and
 `w14:textId` of their paragraphs and table rows, while relationship-bearing
 fragments require the unchanged owner scope. Every operation serializes and
 reopens a staged candidate before publishing it.
+
+`Document::insert_content_control` writes one rich-text or plain-text shell at
+a `ContentLocation`. `ContentControlPlacement` is block, row, cell, paragraph,
+or inline, and it must match the destination parent. A block story or a cell
+accepts a block or paragraph control. A table accepts a row control. A row
+accepts a cell control. A paragraph accepts an inline control. A mismatch
+returns `Error::Other` and publishes nothing. Kind is `SdtType::RichText` or
+`SdtType::PlainText`. Any other kind names F-286 and publishes nothing. The id
+is the smallest unused positive `i32` across story parts. Tag and alias reject
+non-XML characters. Lock, appearance, and placeholder edits rewrite only
+`w:sdtPr`. `None` clears that field. Unmodelled property children and
+foreign-namespace `showingPlcHdr` lookalikes stay. Child order on a created
+shell is `w:sdtPr`, then `w:sdtEndPr` when present, then `w:sdtContent`. The
+default inline shell is one empty run. The default block or paragraph shell is
+one empty paragraph, and a plain-text paragraph in that shell contains one
+empty run. The default row shell is one schema-valid row. The default cell
+shell is one schema-valid cell whose block content is one empty paragraph.
+Direct block children use `move_content`, `clone_content`, and
+`remove_content_at`. Row, cell, paragraph, and inline controls use that same
+staged transaction through location-aware wrappers. Clone drops `w14:paraId`
+and `w14:textId` and allocates a new sdt id. Move keeps the id and stays inside
+one story. Both refuse before publication when the destination parent cannot
+hold the control content. A nested content control is transparent, so move,
+clone and unwrap apply that same parent grammar to its content. Admitted
+`w:customXml` wrappers also inherit that grammar. Their optional
+`w:customXmlPr` stays metadata, while their actual row, cell, block or inline
+payload must fit the destination. Alternating custom-XML and control wrappers
+do not reset the context. Repeating conversion uses this same policy. Character
+references, predefined entities and CDATA at that boundary count as their
+decoded text. Remove deletes the shell and its content. Unwrap leaves the content
+only when the parent can hold it, and refuses a cell that would lose its last
+paragraph. Story-item classification seeds each owner with the ancestor prefix
+bindings already collected for that part, including a document-level `w14`
+binding, so a control whose paragraph carries `w14:paraId` stays typed. That
+scan does not start a second per-offset namespace walk. Imported recognized type markers retain their
+original qualified name and existing namespace bindings during modeled
+serialization. This includes empty and nonempty markers and inherited or local
+bindings. A foreign binding on a canonical prefix cannot change the marker's
+expanded name or the meaning of retained opaque children. Newly authored or
+replaced kinds use their canonical names and declared bindings. Placement
+checks therefore see the same qualified type before and after staging.
+
+`Document::set_content_control_type` replaces the type element on a shell from
+`insert_content_control`. The payload is rich text, plain text, date,
+checkbox, combo box, drop-down list, picture, group, repeating section, or
+repeating item. Date writes `w:dateFormat`, then `w:storeMappedDataAs` with
+`text`, then `w:calendar` with `gregorian`, and omits `w:lid`. The format is
+`yyyy-MM-dd` or `dd/MM/yyyy`. Checkbox writes `w14:checked` `0`, then
+`w14:checkedState` `2612` in `MS Gothic`, then `w14:uncheckedState` `2610` in
+`MS Gothic`. List items keep caller order. An empty list, a repeated value, or
+a non-XML character refuses. Picture requires an image relationship the part
+already owns and a drawing in the shell that embeds it. Repeating section
+content must already be one repeating item, or one block sequence that the
+call wraps in one nested repeating item. Empty content refuses. Admission
+uses the same decoded-text rule at each transparent nested block boundary. A
+repeating item requires a containing repeating section and block, row or cell
+placement. Containment is distinct from immediate parenthood. Repeating
+section conversion also requires a physical level capable of holding such
+items, independently of whether empty payload fits a block grammar. Qualified
+custom-XML ancestors inherit that physical level. Relocation checks the outer
+and retained boundary types as well as payload grammar and preserves item
+containment. Moving the last direct item refuses. Type changes and unwrap
+refuse orphaned items or non-item children in a section. An inner section can
+retire when an outer section retains ownership. An item can unwrap into an
+item-only sequence that leaves at least one direct item. Removing a section
+deletes its content and does not orphan retained items. Citation,
+equation, bibliography, and document-part kinds stay refused at creation and
+have no payload. Tag, alias, id, lock, appearance, placeholder, and unmodelled
+property children stay. `Document::repeat_content_control` clones the first
+repeating item, assigns a new sdt id, drops `w14:paraId` and `w14:textId`, and
+appends the clone. Zero items refuse. `remove_content_control` deletes one
+item of several and refuses the last item in its section. Combo and drop-down
+fill share the existing list table, so an unknown or ambiguous value refuses.
+A refusal returns `Error::Other` and publishes nothing. Python exposes
+`ContentControlTypePayload` and the same two methods. WASM and CLI gain no
+method. Layout and render keep the existing content walk. Native Word
+qualification compares documented equivalent operations. The API intentionally
+clones the first item rather than Word's addressed-item default, and refuses
+last-item removal rather than Word's whole-section deletion. Authentic producer
+version and input identities remain mandatory for the comparison.
+
+`Document::add_custom_xml_store` stages one custom XML item, its properties
+part, both relationships, and both content-type overrides through the
+bibliography store sequence. The call returns the braced item id. An occupied
+conventional name is not overwritten. Item bytes must be one well-formed
+XML element. DTD declarations are explicitly unsupported and refuse before
+allocation in every position. XML declarations are allowed only first and
+must satisfy the XML 1.0 declaration grammar. Input bytes are UTF-8. A declared
+encoding must be UTF-8, or US-ASCII for an entirely ASCII input. Other encodings
+refuse rather than being interpreted as UTF-8 under a contradictory label.
+Processing-instruction targets
+must be legal XML Names and cannot be case-insensitive `xml`. Every parser
+event has an explicit admission rule. That check includes XML names, attribute values, entity
+references, unique attribute names and comment well-formedness. One reference decoder feeds the XML
+1.0 character rule. A reference, CDATA section or nonspace text outside the
+root is a fragment. Valid item bytes stay verbatim,
+including an unbound prefix. An empty schema list writes an empty `ds:schemaRefs`. Each schema URI
+is stored in caller order and is not fetched. `Document::set_content_control_binding`
+writes `w:dataBinding` with `w:prefixMappings` when a mapping is present, then
+`w:xpath`, then `w:storeItemID`. `None` and an empty mapping omit
+`w:prefixMappings`. The store must resolve to one part, and the path must
+select one simple element through the existing absolute child-path subset. A
+refusal returns `Error::Other` and publishes nothing.
+`set_content_control_value_by_tag` and `bind_content_controls` still update the
+display and the store together. A failed sibling rolls both back. Unknown
+sibling bytes stay byte-identical. Bibliography keeps its own item bytes and
+still returns the part name from its private caller. The helper stays in
+`rdocx`. Python exposes both methods. WASM and CLI gain no method.
 
 `DocumentFragment` owns a package-authoritative half-open block selection from
 any supported story owner. Existing two-segment paragraph paths inside block
@@ -2017,6 +2262,7 @@ paragraph, as `w15:commentEx` keys it, each line of a comment text is one
 paragraph. Resolution applies to the thread root, and removal deletes the
 selected comment plus descendant replies without
 deleting unrelated runs or producer XML.
+`CommentRef::resolved` is `Option<bool>`. `None` means the comment has no `commentsExtended` entry. A present entry without `w15:done` is `Some(false)`, including a comment this library just wrote. `Some(true)` means the entry is done. Python exposes the same three states as `bool` or `None`. The CLI lists a comment as resolved only when the value is `Some(true)`.
 Whole-story header/footer setters stage the complete text, raw XML or image
 operation and reconcile removed comment ownership. A clone of that candidate
 prepares and reopens the complete output once before the original candidate

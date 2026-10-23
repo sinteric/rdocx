@@ -32,6 +32,11 @@ impl OrderedRawChildren {
         self.children.is_empty()
     }
 
+    /// Returns every preserved child in recording order.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.children.iter().map(|child| child.xml.as_slice())
+    }
+
     /// Keeps only the raw children whose XML satisfies `keep`.
     pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
         self.children.retain(|child| keep(&child.xml));

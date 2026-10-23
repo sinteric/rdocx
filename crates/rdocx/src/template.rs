@@ -1,323 +1,560 @@
 //! Structured template parsing and JSON evaluation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
-use rdocx_oxml::document::{BodyContent, CT_Document};
 use rdocx_oxml::namespace::matches_local_name;
 use rdocx_oxml::placeholder;
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
-use rdocx_oxml::text::{CT_P, RunContent, drop_w14_paragraph_identities};
+use rdocx_oxml::text::{CT_P, RunContent};
 use serde_json::Value;
 
 use crate::document::Document;
 use crate::error::{Error, Result};
 
-#[derive(Debug)]
-struct Replacement {
-    literal: String,
-    value: String,
-    occurrences: usize,
+/// The explicitly selected stable template grammar.
+pub const TEMPLATE_GRAMMAR_VERSION: u32 = 1;
+
+/// Original physical paragraph and expanded scalar occurrence supplied to a formatter.
+pub struct TemplateFormatContext<'a> {
+    pub location: &'a crate::ContentLocation,
+    pub path: &'a str,
+    pub occurrence: usize,
+}
+
+// Source kind, source part, old id, destination part, new id.
+type NoteCopy = (crate::StoryKind, String, i32, String, i32);
+
+// Part name, original bytes, rendered bytes.
+type PartRewrite = (String, Vec<u8>, Vec<u8>);
+
+// Prepared grammar state for one operation, derived by the existing physical
+// story inventory. Ranges remain original source coordinates, never authority
+// for a later document or for an imported item's changed byte offsets.
+#[derive(Clone)]
+pub(crate) struct TemplateProgram {
+    pub story: crate::StoryId,
+    pub part: String,
+    pub ranges: Vec<std::ops::Range<usize>>,
+    pub raw: Vec<u8>,
+    pub scope: BTreeMap<String, String>,
+    pub required_paragraph: bool,
+    pub table_rows: bool,
+    pub items: Vec<TemplateProgramItem>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemplateItemKind {
+    Source(crate::StoryItemKind),
+    TableRow,
+}
+
+#[derive(Clone)]
+pub(crate) struct TemplateProgramItem {
+    pub location: crate::ContentLocation,
+    pub range: std::ops::Range<usize>,
+    pub kind: TemplateItemKind,
+    pub field_owned: bool,
+    pub marker_unsafe: bool,
+    pub raw: Vec<u8>,
+    pub scope: BTreeMap<String, String>,
+    pub children: Vec<TemplateProgram>,
+}
+
+#[derive(Debug, Clone)]
+enum PathStep {
+    Key(String),
+    Index(usize),
 }
 
 #[derive(Debug)]
-struct PendingReplacement {
-    sentinel: String,
-    value: String,
-    occurrences: usize,
+enum Filter {
+    Trim,
+    Upper,
+    Lower,
+    Default(String),
+    Join(String),
 }
 
 #[derive(Debug)]
-struct SentinelPool {
-    next: usize,
-    forbidden: Vec<String>,
-    pending: Vec<PendingReplacement>,
+struct Expression {
+    spelling: String,
+    path: Vec<PathStep>,
+    filters: Vec<Filter>,
 }
 
-impl SentinelPool {
-    fn new(sources: &[String]) -> Self {
-        Self {
-            next: 0,
-            forbidden: sources.to_vec(),
-            pending: Vec::new(),
-        }
-    }
+#[derive(Debug)]
+enum ScalarValue {
+    Expression(Expression),
+    Literal(&'static str),
+}
 
-    fn stage(&mut self, value: &str, occurrences: usize) -> String {
-        loop {
-            let sentinel = format!("\u{e000}rdocx-template-{}\u{e001}", self.next);
-            self.next += 1;
-            let collides = self
-                .forbidden
-                .iter()
-                .any(|source| source.contains(&sentinel))
-                || self
-                    .pending
-                    .iter()
-                    .any(|replacement| replacement.value.contains(&sentinel))
-                || value.contains(&sentinel);
-            if !collides {
-                self.forbidden.push(sentinel.clone());
-                self.pending.push(PendingReplacement {
-                    sentinel: sentinel.clone(),
-                    value: value.to_owned(),
-                    occurrences,
+#[derive(Debug)]
+struct ScalarToken {
+    range: std::ops::Range<usize>,
+    value: ScalarValue,
+}
+
+fn scalar_tokens(source: &str, versioned: bool) -> Result<Vec<ScalarToken>> {
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < source.len() {
+        if versioned {
+            let escape = [
+                ("{{{{", "{{"),
+                ("{%{%", "{%"),
+                ("}}}}", "}}"),
+                ("%}%}", "%}"),
+            ]
+            .into_iter()
+            .find(|(literal, _)| source[cursor..].starts_with(literal));
+            if let Some((literal, value)) = escape {
+                tokens.push(ScalarToken {
+                    range: cursor..cursor + literal.len(),
+                    value: ScalarValue::Literal(value),
                 });
-                return sentinel;
+                cursor += literal.len();
+                continue;
             }
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Scope {
-    name: String,
-    value: Value,
-    deferred: bool,
-}
-
-enum ResolvedValue<'a> {
-    Value(&'a Value),
-    Deferred,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EndKind {
-    For,
-    If,
-}
-
-impl EndKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::For => "endfor",
-            Self::If => "endif",
+        if source[cursor..].starts_with("{{") {
+            let start = cursor;
+            cursor += 2;
+            let inner_start = cursor;
+            let mut quoted = false;
+            let mut escaped = false;
+            loop {
+                let Some(character) = source[cursor..].chars().next() else {
+                    return Err(template_error("unclosed scalar tag"));
+                };
+                if versioned && quoted {
+                    if escaped {
+                        escaped = false;
+                    } else if character == '\\' {
+                        escaped = true;
+                    } else if character == '"' {
+                        quoted = false;
+                    }
+                } else if versioned && character == '"' {
+                    quoted = true;
+                } else if source[cursor..].starts_with("}}") {
+                    let inner = &source[inner_start..cursor];
+                    let expression = if versioned {
+                        parse_expression(inner)?
+                    } else {
+                        Expression {
+                            spelling: inner.trim().into(),
+                            path: parse_path(inner)?
+                                .into_iter()
+                                .map(|key| PathStep::Key(key.into()))
+                                .collect(),
+                            filters: Vec::new(),
+                        }
+                    };
+                    cursor += 2;
+                    tokens.push(ScalarToken {
+                        range: start..cursor,
+                        value: ScalarValue::Expression(expression),
+                    });
+                    break;
+                } else if source[cursor..].starts_with("{{")
+                    || source[cursor..].starts_with("{%")
+                    || source[cursor..].starts_with("%}")
+                {
+                    return Err(template_error("nested or mismatched scalar tag"));
+                }
+                cursor += character.len_utf8();
+            }
+        } else if ["{%", "}}", "%}"]
+            .iter()
+            .any(|marker| source[cursor..].starts_with(marker))
+        {
+            return Err(template_error(
+                "structural or unmatched delimiter in scalar text",
+            ));
+        } else {
+            cursor += source[cursor..]
+                .chars()
+                .next()
+                .expect("cursor is before end")
+                .len_utf8();
         }
     }
+    Ok(tokens)
 }
 
-#[derive(Debug)]
-enum Control {
-    For { name: String, path: Vec<String> },
-    If { path: Vec<String> },
-    End(EndKind),
+struct ParsedProgram<'source> {
+    source: &'source TemplateProgram,
+    blocks: Vec<Block<usize>>,
+    scalars: Vec<Vec<(usize, ScalarToken)>>,
+    children: Vec<Vec<ParsedProgram<'source>>>,
 }
 
-#[derive(Debug)]
-enum Block<T> {
+#[derive(Clone)]
+struct ProgramExecution {
+    blocks: Vec<ExecutedBlock>,
+}
+
+#[derive(Clone)]
+enum ExecutedBlock {
     Item {
-        source_index: usize,
-        value: T,
+        index: usize,
+        scalars: Vec<(
+            usize,
+            std::ops::Range<usize>,
+            String,
+            Option<rdocx_oxml::properties::CT_RPr>,
+        )>,
+        children: Vec<ProgramExecution>,
     },
-    For {
-        name: String,
-        path: Vec<String>,
-        body: Vec<Block<T>>,
-    },
-    If {
-        path: Vec<String>,
-        body: Vec<Block<T>>,
+    Repeat {
+        source_range: std::ops::Range<usize>,
+        copies: Vec<Vec<ExecutedBlock>>,
     },
 }
 
-#[derive(Debug)]
-struct Evaluated<T> {
-    source_index: usize,
-    value: T,
+struct TemplateEvaluation<'data, 'formatter> {
+    data: &'data Value,
+    versioned: bool,
+    occurrence: usize,
+    // The callback lifetime stays on this field. A type alias would force 'static.
+    #[allow(clippy::type_complexity)]
+    formatter: Option<
+        &'formatter mut dyn FnMut(
+            &TemplateFormatContext<'_>,
+            &mut crate::MailMergeFormattedText,
+        ) -> Result<()>,
+    >,
 }
 
-#[derive(Debug, Clone)]
-struct TableRowItem {
-    row: CT_Row,
-    controls: Vec<(usize, CT_Sdt)>,
-}
-
-pub(crate) fn render(document: &mut Document, data: &Value) -> Result<usize> {
-    let original_sources = document.clone_for_staging().template_sources()?;
-    let mut sentinels = SentinelPool::new(&original_sources);
-    let mut candidate = document.clone_for_staging();
-    validate_repeated_numbering(&candidate)?;
-    let (body_count, structural_change) = render_body(&mut candidate, data, &mut sentinels)?;
-
-    let remaining_sources = candidate.template_sources()?;
-    let external_replacements = resolve_replacements(&remaining_sources, data, &[])?;
-    let external_count = external_replacements
-        .iter()
-        .map(|replacement| replacement.occurrences)
-        .sum::<usize>();
-    let mut first_pass = Vec::with_capacity(external_replacements.len());
-    for replacement in &external_replacements {
-        let sentinel = sentinels.stage(&replacement.value, replacement.occurrences);
-        first_pass.push((replacement.literal.as_str(), sentinel));
+fn program_marker(sources: &[String], versioned: bool) -> Result<Option<Control>> {
+    if !versioned {
+        return marker_from_sources(sources);
     }
-    let pairs = first_pass
+    let controls = sources
         .iter()
-        .map(|(literal, sentinel)| (*literal, sentinel.as_str()))
+        .filter(|source| {
+            source.trim_start().starts_with("{%") && !source.trim_start().starts_with("{%{%")
+        })
         .collect::<Vec<_>>();
-    let replaced = candidate.apply_template_pairs(&pairs)?;
-    if replaced != external_count {
-        return Err(Error::Other(format!(
-            "template changed while staging: discovered {external_count} tags but replaced {replaced}"
-        )));
+    if controls.is_empty() {
+        return Ok(None);
     }
-
-    let expected = body_count + external_count;
-    let restoration = sentinels
-        .pending
-        .iter()
-        .map(|replacement| (replacement.sentinel.as_str(), replacement.value.as_str()))
-        .collect::<Vec<_>>();
-    let restored = candidate.apply_template_pairs(&restoration)?;
-    let expected_restored = sentinels
-        .pending
-        .iter()
-        .map(|replacement| replacement.occurrences)
-        .sum::<usize>();
-    if restored != expected_restored || expected != expected_restored {
-        return Err(Error::Other(format!(
-            "template staging lost replacements: expected {expected_restored} sentinels but found {restored}"
-        )));
-    }
-
-    if !structural_change && expected == 0 {
-        return Ok(0);
-    }
-    candidate.document.to_xml()?;
-    document.commit_template(candidate);
-    Ok(expected)
-}
-
-fn validate_repeated_numbering(document: &Document) -> Result<()> {
-    let blocks = parse_blocks(&document.document.body.content, body_marker)?;
-    validate_body_numbering_blocks(&blocks, document, false)
-}
-
-fn validate_body_numbering_blocks(
-    blocks: &[Block<BodyContent>],
-    document: &Document,
-    repeated: bool,
-) -> Result<()> {
-    for block in blocks {
-        match block {
-            Block::Item { value, .. } => {
-                validate_body_content_numbering(value, document, repeated)?;
-            }
-            Block::For { body, .. } => {
-                validate_body_numbering_blocks(body, document, true)?;
-            }
-            Block::If { body, .. } => {
-                validate_body_numbering_blocks(body, document, repeated)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_body_content_numbering(
-    content: &BodyContent,
-    document: &Document,
-    repeated: bool,
-) -> Result<()> {
-    match content {
-        BodyContent::Paragraph(paragraph) => {
-            validate_paragraph_numbering(paragraph, document, repeated)
-        }
-        BodyContent::Table(table) => validate_table_numbering(table, document, repeated),
-        BodyContent::ContentControl(control) => {
-            validate_control_numbering(control, document, repeated)
-        }
-        BodyContent::RawXml(_) => Ok(()),
-    }
-}
-
-fn validate_table_numbering(table: &CT_Tbl, document: &Document, repeated: bool) -> Result<()> {
-    let blocks = parse_blocks(&table.rows, row_marker)?;
-    validate_row_numbering_blocks(&blocks, &table.content_controls, document, repeated)?;
-    for (_, _, control) in table
-        .content_controls
-        .iter()
-        .filter(|(at, _, _)| *at == table.rows.len())
+    if controls.len() != 1
+        || sources
+            .iter()
+            .filter(|source| !source.trim().is_empty())
+            .count()
+            != 1
     {
-        validate_control_numbering(control, document, repeated)?;
+        return Err(template_error(
+            "a control marker must occupy one sibling paragraph or row",
+        ));
     }
-    Ok(())
+    let text = controls[0].trim();
+    let inner = text
+        .strip_prefix("{%")
+        .and_then(|text| text.strip_suffix("%}"))
+        .ok_or_else(|| template_error("malformed control marker"))?
+        .trim();
+    if inner == "endfor" {
+        return Ok(Some(Control::End(EndKind::For)));
+    }
+    if inner == "endif" {
+        return Ok(Some(Control::End(EndKind::If)));
+    }
+    let (name, path, is_loop) = if let Some(path) = inner.strip_prefix("if ") {
+        ("", path, false)
+    } else if let Some(rest) = inner.strip_prefix("for ") {
+        let (name, path) = rest
+            .split_once(" in ")
+            .ok_or_else(|| template_error("for requires a variable and path"))?;
+        validate_scope_name(name.trim())?;
+        (name.trim(), path, true)
+    } else {
+        return Err(template_error("unsupported control marker"));
+    };
+    let expression = parse_expression(path)?;
+    if !expression.filters.is_empty() {
+        return Err(template_error(
+            "structural controls require a path without scalar filters",
+        ));
+    }
+    Ok(Some(if is_loop {
+        Control::For {
+            name: name.into(),
+            path: vec![expression.spelling],
+        }
+    } else {
+        Control::If {
+            path: vec![expression.spelling],
+        }
+    }))
 }
 
-fn validate_row_numbering_blocks(
-    blocks: &[Block<CT_Row>],
-    controls: &[(usize, usize, CT_Sdt)],
-    document: &Document,
-    repeated: bool,
-) -> Result<()> {
-    for block in blocks {
-        match block {
-            Block::Item {
-                source_index,
-                value,
-            } => {
-                validate_row_numbering(value, document, repeated)?;
-                for (_, _, control) in controls.iter().filter(|(at, _, _)| at == source_index) {
-                    validate_control_numbering(control, document, repeated)?;
+fn parse_program(
+    source: &TemplateProgram,
+    versioned: bool,
+    inherited_field: bool,
+) -> Result<ParsedProgram<'_>> {
+    let mut markers = Vec::new();
+    let mut scalars = Vec::new();
+    let mut children = Vec::new();
+    for item in &source.items {
+        let mut tokens = Vec::new();
+        let marker = if item.kind == TemplateItemKind::Source(crate::StoryItemKind::Paragraph) {
+            let closed =
+                crate::document::close_content_fragment_namespaces(&item.raw, &item.scope)?;
+            let paragraph = CT_P::from_xml_fragment(&closed)?;
+            let texts = placeholder::replaceable_texts(&paragraph);
+            let marker = program_marker(&texts, versioned)?;
+            if marker.is_some() && (item.field_owned || inherited_field) {
+                return Err(template_error(
+                    "structural marker overlaps a physical field owner",
+                ));
+            }
+            if marker.is_none() {
+                for (stretch, text) in texts.iter().enumerate() {
+                    tokens.extend(
+                        scalar_tokens(text, versioned)?
+                            .into_iter()
+                            .map(|token| (stretch, token)),
+                    );
                 }
             }
-            Block::For { body, .. } => {
-                validate_row_numbering_blocks(body, controls, document, true)?;
+            marker
+        } else if item.kind == TemplateItemKind::TableRow {
+            let mut wrapped =
+                format!(r#"<w:tbl xmlns:w="{}">"#, rdocx_oxml::namespace::W_NS).into_bytes();
+            wrapped.extend(crate::document::close_content_fragment_namespaces(
+                &item.raw,
+                &item.scope,
+            )?);
+            wrapped.extend_from_slice(b"</w:tbl>");
+            let table = CT_Tbl::from_xml_fragment_checked(&wrapped)?;
+            let row = table
+                .rows
+                .first()
+                .ok_or_else(|| template_error("prepared row source disappeared"))?;
+            let mut direct = Vec::new();
+            collect_row_marker_sources(row, &mut direct);
+            let mut all = Vec::new();
+            collect_row(row, &mut all);
+            // A balanced paragraph program inside one cell remains that
+            // cell's grammar. Only a whole-row dedicated marker owns rows.
+            let marker = if direct.iter().filter(|text| !text.trim().is_empty()).count() == 1
+                && program_marker(&direct, versioned)?.is_some()
+            {
+                program_marker(&all, versioned)?
+            } else {
+                None
+            };
+            // Start-tag attributes such as `w14:paraId` share `extra_xml`
+            // with unmodelled children. They are not preserved siblings.
+            let preserved_siblings = row
+                .extra_xml
+                .iter()
+                .any(|(position, raw)| !CT_Row::raw_is_root_attributes(*position, raw));
+            if marker.is_some()
+                && (item.marker_unsafe
+                    || item.field_owned
+                    || inherited_field
+                    || preserved_siblings
+                    || !row.content_controls.is_empty())
+            {
+                return Err(template_error(
+                    "a marker row cannot carry preserved siblings or ambiguous field ownership",
+                ));
             }
-            Block::If { body, .. } => {
-                validate_row_numbering_blocks(body, controls, document, repeated)?;
+            marker
+        } else {
+            None
+        };
+        markers.push(marker.clone());
+        scalars.push(tokens);
+        children.push(
+            item.children
+                .iter()
+                .map(|child| {
+                    if marker.is_some() && item.kind == TemplateItemKind::TableRow {
+                        Ok(ParsedProgram {
+                            source: child,
+                            blocks: Vec::new(),
+                            scalars: Vec::new(),
+                            children: Vec::new(),
+                        })
+                    } else {
+                        parse_program(child, versioned, inherited_field || item.field_owned)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
+    let indices = (0..source.items.len()).collect::<Vec<_>>();
+    let blocks = parse_blocks(&indices, |index| Ok(markers[*index].clone()))?;
+    Ok(ParsedProgram {
+        source,
+        blocks,
+        scalars,
+        children,
+    })
+}
+
+fn deferred_expression(expression: &Expression, root: &Value, scopes: &[Scope]) -> bool {
+    let Some(PathStep::Key(key)) = expression.path.first() else {
+        return false;
+    };
+    if let Some(scope) = scopes.iter().rev().find(|scope| scope.name == *key) {
+        return scope.deferred;
+    }
+    // An empty item cannot supply implicit properties yet. Known outer/root
+    // properties must still be evaluated, including invalid intermediate kinds.
+    scopes.iter().any(|scope| scope.deferred)
+        && !root
+            .as_object()
+            .is_some_and(|value| value.contains_key(key))
+        && !scopes.iter().any(|scope| {
+            !scope.deferred
+                && scope
+                    .value
+                    .as_object()
+                    .is_some_and(|value| value.contains_key(key))
+        })
+}
+
+fn program_path_value<'a>(
+    path: &[String],
+    evaluation: &'a TemplateEvaluation<'_, '_>,
+    scopes: &'a [Scope],
+) -> Result<ResolvedValue<'a>> {
+    if !evaluation.versioned {
+        return resolve_value(evaluation.data, scopes, path);
+    }
+    let expression = parse_expression(&path[0])?;
+    if deferred_expression(&expression, evaluation.data, scopes) {
+        return Ok(ResolvedValue::Deferred);
+    }
+    expression_value(&expression, evaluation.data, scopes)?
+        .map(ResolvedValue::Value)
+        .ok_or_else(|| template_error("missing structural template path"))
+}
+
+fn evaluate_program_blocks(
+    program: &ParsedProgram<'_>,
+    blocks: &[Block<usize>],
+    scopes: &mut Vec<Scope>,
+    evaluation: &mut TemplateEvaluation<'_, '_>,
+    emit: bool,
+) -> Result<Vec<ExecutedBlock>> {
+    let mut output = Vec::new();
+    for block in blocks {
+        match block {
+            Block::Item { value: index, .. } => {
+                let mut scalars = Vec::new();
+                for (stretch, token) in &program.scalars[*index] {
+                    let (text, properties) = match &token.value {
+                        ScalarValue::Literal(text) => ((*text).to_owned(), None),
+                        ScalarValue::Expression(expression) => {
+                            if deferred_expression(expression, evaluation.data, scopes) {
+                                continue;
+                            }
+                            let text = if evaluation.versioned {
+                                expression_text(expression, evaluation.data, scopes)?
+                            } else {
+                                let path = expression
+                                    .path
+                                    .iter()
+                                    .map(|step| match step {
+                                        PathStep::Key(key) => key.clone(),
+                                        PathStep::Index(_) => {
+                                            unreachable!("legacy path has only keys")
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                match resolve_value(evaluation.data, scopes, &path)? {
+                                    ResolvedValue::Value(value) => scalar_text(value, &path)?,
+                                    ResolvedValue::Deferred => continue,
+                                }
+                            };
+                            oxml_core::xml::reject_non_xml_characters(
+                                "template replacement",
+                                &text,
+                            )?;
+                            (text, None)
+                        }
+                    };
+                    if emit {
+                        scalars.push((*stretch, token.range.clone(), text, properties));
+                    }
+                }
+                let children = program.children[*index]
+                    .iter()
+                    .map(|child| {
+                        evaluate_program_blocks(child, &child.blocks, scopes, evaluation, emit)
+                            .map(|blocks| ProgramExecution { blocks })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if emit {
+                    output.push(ExecutedBlock::Item {
+                        index: *index,
+                        scalars,
+                        children,
+                    });
+                }
+            }
+            Block::For {
+                name,
+                path,
+                source_range,
+                body,
+            } => {
+                let values = match program_path_value(path, evaluation, scopes)? {
+                    ResolvedValue::Value(Value::Array(values)) => values.clone(),
+                    ResolvedValue::Deferred => Vec::new(),
+                    _ => return Err(template_error("loop path must resolve to an array")),
+                };
+                if values.is_empty() {
+                    scopes.push(Scope {
+                        name: name.clone(),
+                        value: Value::Null,
+                        deferred: true,
+                    });
+                    evaluate_program_blocks(program, body, scopes, evaluation, false)?;
+                    scopes.pop();
+                }
+                let mut copies = Vec::new();
+                for value in values {
+                    scopes.push(Scope {
+                        name: name.clone(),
+                        value,
+                        deferred: false,
+                    });
+                    let blocks = evaluate_program_blocks(program, body, scopes, evaluation, emit)?;
+                    scopes.pop();
+                    if emit {
+                        copies.push(blocks);
+                    }
+                }
+                if emit {
+                    output.push(ExecutedBlock::Repeat {
+                        source_range: source_range.clone(),
+                        copies,
+                    });
+                }
+            }
+            Block::If { path, body } => {
+                let enabled = matches!(program_path_value(path, evaluation, scopes)?, ResolvedValue::Value(value) if is_truthy(value));
+                let blocks =
+                    evaluate_program_blocks(program, body, scopes, evaluation, emit && enabled)?;
+                if emit && enabled {
+                    output.extend(blocks);
+                }
             }
         }
     }
-    Ok(())
-}
-
-fn validate_row_numbering(row: &CT_Row, document: &Document, repeated: bool) -> Result<()> {
-    for cell in &row.cells {
-        validate_cell_numbering(cell, document, repeated)?;
-    }
-    for (_, _, control) in &row.content_controls {
-        validate_control_numbering(control, document, repeated)?;
-    }
-    Ok(())
-}
-
-fn validate_cell_numbering(cell: &CT_Tc, document: &Document, repeated: bool) -> Result<()> {
-    for content in &cell.content {
-        match content {
-            CellContent::Paragraph(paragraph) => {
-                validate_paragraph_numbering(paragraph, document, repeated)?;
-            }
-            CellContent::Table(table) => {
-                validate_table_numbering(table, document, repeated)?;
-            }
-            CellContent::ContentControl(control) => {
-                validate_control_numbering(control, document, repeated)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_control_numbering(control: &CT_Sdt, document: &Document, repeated: bool) -> Result<()> {
-    for content in &control.content {
-        match content {
-            SdtContent::Paragraph(paragraph) => {
-                validate_paragraph_numbering(paragraph, document, repeated)?;
-            }
-            SdtContent::Table(table) => {
-                validate_table_numbering(table, document, repeated)?;
-            }
-            SdtContent::Row(row) => validate_row_numbering(row, document, repeated)?,
-            SdtContent::Cell(cell) => validate_cell_numbering(cell, document, repeated)?,
-            SdtContent::ContentControl(nested) => {
-                validate_control_numbering(nested, document, repeated)?;
-            }
-            SdtContent::Run(_) | SdtContent::RawXml(_) => {}
-        }
-    }
-    Ok(())
+    Ok(output)
 }
 
 fn validate_paragraph_numbering(
@@ -354,342 +591,1235 @@ fn validate_paragraph_numbering(
     Ok(())
 }
 
-fn render_body(
-    document: &mut Document,
-    data: &Value,
-    sentinels: &mut SentinelPool,
-) -> Result<(usize, bool)> {
-    let blocks = parse_blocks(&document.document.body.content, body_marker)?;
-    let mut structural_change = blocks_have_controls(&blocks);
-    let mut scopes = Vec::new();
-    let mut render_item = |content: &mut BodyContent,
-                           root: &Value,
-                           scopes: &[Scope],
-                           sentinels: &mut SentinelPool,
-                           repeated: bool| {
-        let count = render_body_item(content, root, scopes, sentinels, &mut structural_change)?;
-        if repeated {
-            drop_copied_body_identities(content)?;
+fn validate_program_numbering(
+    program: &ParsedProgram<'_>,
+    blocks: &[Block<usize>],
+    document: &Document,
+    repeated: bool,
+) -> Result<()> {
+    for block in blocks {
+        match block {
+            Block::Item { value: index, .. } => {
+                let item = &program.source.items[*index];
+                if repeated
+                    && item.kind == TemplateItemKind::Source(crate::StoryItemKind::Paragraph)
+                {
+                    let closed =
+                        crate::document::close_content_fragment_namespaces(&item.raw, &item.scope)?;
+                    validate_paragraph_numbering(
+                        &CT_P::from_xml_fragment(&closed)?,
+                        document,
+                        true,
+                    )?;
+                }
+                for child in &program.children[*index] {
+                    validate_program_numbering(child, &child.blocks, document, repeated)?;
+                }
+            }
+            Block::For { body, .. } => validate_program_numbering(program, body, document, true)?,
+            Block::If { body, .. } => {
+                validate_program_numbering(program, body, document, repeated)?
+            }
         }
-        Ok(count)
+    }
+    Ok(())
+}
+
+fn flattened_execution_items(blocks: &[ExecutedBlock]) -> Vec<&ExecutedBlock> {
+    let mut items = Vec::new();
+    for block in blocks {
+        match block {
+            ExecutedBlock::Item { .. } => items.push(block),
+            ExecutedBlock::Repeat { copies, .. } => {
+                for copy in copies {
+                    items.extend(flattened_execution_items(copy));
+                }
+            }
+        }
+    }
+    items
+}
+
+fn format_program_execution(
+    program: &ParsedProgram<'_>,
+    blocks: &mut [ExecutedBlock],
+    current: &TemplateProgram,
+    position: &mut usize,
+    evaluation: &mut TemplateEvaluation<'_, '_>,
+) -> Result<()> {
+    for block in blocks {
+        match block {
+            ExecutedBlock::Repeat { copies, .. } => {
+                for copy in copies {
+                    format_program_execution(program, copy, current, position, evaluation)?;
+                }
+            }
+            ExecutedBlock::Item {
+                index,
+                scalars,
+                children,
+            } => {
+                let actual = current
+                    .items
+                    .get(*position)
+                    .ok_or_else(|| template_error("expanded template source is missing"))?;
+                *position += 1;
+                if actual.kind != program.source.items[*index].kind
+                    || scalars.len() != program.scalars[*index].len()
+                    || children.len() != actual.children.len()
+                {
+                    return Err(template_error(
+                        "expanded template source correspondence changed",
+                    ));
+                }
+                for (prepared, (_, token)) in scalars.iter_mut().zip(&program.scalars[*index]) {
+                    let ScalarValue::Expression(expression) = &token.value else {
+                        continue;
+                    };
+                    let mut formatted = crate::MailMergeFormattedText {
+                        text: prepared.2.clone(),
+                        run_properties: prepared.3.clone(),
+                    };
+                    if let Some(callback) = evaluation.formatter.as_deref_mut() {
+                        callback(
+                            &TemplateFormatContext {
+                                location: &program.source.items[*index].location,
+                                path: &expression.spelling,
+                                occurrence: evaluation.occurrence,
+                            },
+                            &mut formatted,
+                        )?;
+                    }
+                    evaluation.occurrence += 1;
+                    oxml_core::xml::reject_non_xml_characters(
+                        "template replacement",
+                        &formatted.text,
+                    )?;
+                    if formatted.run_properties.is_some() {
+                        let mut paragraph = CT_P::new();
+                        let mut run = rdocx_oxml::text::CT_R::new(&formatted.text);
+                        run.properties = formatted.run_properties.clone();
+                        paragraph.runs.push(run);
+                        let mut writer = quick_xml::Writer::new(Vec::new());
+                        paragraph.to_xml(&mut writer)?;
+                        let closed = crate::document::close_content_fragment_namespaces(
+                            &writer.into_inner(),
+                            &program.source.items[*index].scope,
+                        )?;
+                        CT_P::from_xml_fragment_checked(&closed)?;
+                    }
+                    prepared.2 = formatted.text;
+                    prepared.3 = formatted.run_properties;
+                }
+                for ((source, execution), child) in program.children[*index]
+                    .iter()
+                    .zip(children)
+                    .zip(&actual.children)
+                {
+                    let mut child_position = 0;
+                    format_program_execution(
+                        source,
+                        &mut execution.blocks,
+                        child,
+                        &mut child_position,
+                        evaluation,
+                    )?;
+                    if child_position != child.items.len()
+                        && !(child_position == 0 && child.required_paragraph)
+                    {
+                        return Err(template_error(
+                            "expanded child template source has extra items",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn replay_program_blocks(
+    program: &ParsedProgram<'_>,
+    blocks: &[ExecutedBlock],
+    current: &TemplateProgram,
+    offset: usize,
+    candidate: &mut Document,
+    mut note_copies: Option<&mut Vec<NoteCopy>>,
+    pending_drawings: &mut HashSet<u32>,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let structural = note_copies.is_some();
+    let mut position = 0;
+    let blocks = if structural {
+        blocks.iter().collect::<Vec<_>>()
+    } else {
+        flattened_execution_items(blocks)
     };
-    let (evaluated, count) = evaluate_blocks(
-        &blocks,
-        data,
-        &mut scopes,
-        sentinels,
-        false,
-        &mut render_item,
+    for block in blocks {
+        match block {
+            ExecutedBlock::Item {
+                index,
+                scalars,
+                children,
+            } => {
+                let local = if structural {
+                    index.checked_sub(offset).ok_or_else(|| {
+                        template_error("imported template item escaped its original range")
+                    })?
+                } else {
+                    let index = position;
+                    position += 1;
+                    index
+                };
+                let item = current
+                    .items
+                    .get(local)
+                    .ok_or_else(|| template_error("imported template item is missing"))?;
+                if item.kind != program.source.items[*index].kind
+                    || children.len() != program.children[*index].len()
+                    || children.len() != item.children.len()
+                {
+                    return Err(template_error("import changed template source topology"));
+                }
+                let mut raw = item.raw.clone();
+                let mut nested = Vec::new();
+                for ((source, execution), actual) in program.children[*index]
+                    .iter()
+                    .zip(children)
+                    .zip(&item.children)
+                {
+                    if source.source.story.kind() != actual.story.kind()
+                        || source.source.ranges.len() != actual.ranges.len()
+                    {
+                        return Err(template_error("import changed template child ownership"));
+                    }
+                    for (alias, range) in actual.ranges.iter().enumerate() {
+                        let relative =
+                            range.start.checked_sub(item.range.start).ok_or_else(|| {
+                                template_error("template child begins outside its item")
+                            })?
+                                ..range.end.checked_sub(item.range.start).ok_or_else(|| {
+                                    template_error("template child ends outside its item")
+                                })?;
+                        let alias_source;
+                        let original_alias;
+                        let selected = if alias == 0 {
+                            original_alias = None;
+                            actual
+                        } else {
+                            let source_bytes = raw.get(relative.clone()).ok_or_else(|| {
+                                template_error("paired template child source is stale")
+                            })?;
+                            original_alias = Some(source_bytes.to_vec());
+                            alias_source = Document::template_fragment_program(
+                                &current.part,
+                                source_bytes,
+                                &item.scope,
+                                actual.story.kind(),
+                            )?;
+                            &alias_source
+                        };
+                        let mut replacement = replay_program(
+                            source,
+                            &execution.blocks,
+                            selected,
+                            0,
+                            candidate,
+                            note_copies.as_deref_mut(),
+                            pending_drawings,
+                            false,
+                        )?;
+                        if let Some(original_alias) = original_alias.as_deref() {
+                            // Parsing the copy declares inherited namespaces on
+                            // its root. The stored copy keeps the root it had.
+                            replacement = restore_paired_copy_root(original_alias, &replacement)?;
+                        }
+                        nested.push((relative, replacement));
+                    }
+                }
+                nested.sort_by_key(|(range, _)| range.start);
+                if nested
+                    .windows(2)
+                    .any(|pair| pair[0].0.end > pair[1].0.start)
+                {
+                    return Err(template_error("template child sources overlap"));
+                }
+                for (range, replacement) in nested.into_iter().rev() {
+                    raw.splice(range, replacement);
+                }
+                if !structural && !scalars.is_empty() {
+                    let closed =
+                        crate::document::close_content_fragment_namespaces(&raw, &item.scope)?;
+                    let mut paragraph = CT_P::from_xml_fragment(&closed)?;
+                    placeholder::replace_prepared_occurrences(&mut paragraph, scalars)?;
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    paragraph.to_xml(&mut writer)?;
+                    raw = writer.into_inner();
+                }
+                let gap_start = if local == 0 {
+                    item.range.start
+                } else {
+                    current.items[local - 1].range.end
+                };
+                let owner_start = current.ranges[0].start;
+                output.extend_from_slice(
+                    current
+                        .raw
+                        .get(gap_start - owner_start..item.range.start - owner_start)
+                        .ok_or_else(|| template_error("template source gap is stale"))?,
+                );
+                output.extend(raw);
+            }
+            ExecutedBlock::Repeat {
+                source_range,
+                copies,
+            } => {
+                if source_range.is_empty() {
+                    continue;
+                }
+                let first = source_range
+                    .start
+                    .checked_sub(offset)
+                    .ok_or_else(|| template_error("repeated source escaped imported range"))?;
+                let end = source_range
+                    .end
+                    .checked_sub(offset)
+                    .ok_or_else(|| template_error("repeated source escaped imported range"))?;
+                let selected = current
+                    .items
+                    .get(first..end)
+                    .ok_or_else(|| template_error("repeated source items are missing"))?;
+                let mut fragment = Vec::new();
+                for (position, item) in selected.iter().enumerate() {
+                    if position > 0 {
+                        let start = selected[position - 1].range.end - current.ranges[0].start;
+                        let end = item.range.start - current.ranges[0].start;
+                        fragment.extend_from_slice(&current.raw[start..end]);
+                    }
+                    fragment.extend(crate::document::close_content_fragment_namespaces(
+                        &item.raw,
+                        &item.scope,
+                    )?);
+                }
+                for copy in copies {
+                    if copy.is_empty() {
+                        continue;
+                    }
+                    let imported = candidate.template_import_repeated_blocks(
+                        current,
+                        fragment.clone(),
+                        note_copies.as_deref_mut().expect("structural import"),
+                        pending_drawings,
+                    )?;
+                    if imported.items.len() != source_range.len()
+                        || imported
+                            .items
+                            .iter()
+                            .zip(selected)
+                            .any(|(a, b)| a.kind != b.kind)
+                    {
+                        return Err(template_error(
+                            "whole-range importer changed direct item correspondence",
+                        ));
+                    }
+                    let rendered = replay_program(
+                        program,
+                        copy,
+                        &imported,
+                        source_range.start,
+                        candidate,
+                        note_copies.as_deref_mut(),
+                        pending_drawings,
+                        false,
+                    )?;
+                    if current.table_rows {
+                        let first = imported
+                            .items
+                            .first()
+                            .ok_or_else(|| template_error("imported row range is empty"))?;
+                        let last = imported.items.last().unwrap();
+                        let start = first.range.start - imported.ranges[0].start;
+                        let suffix =
+                            imported.raw.len() - (last.range.end - imported.ranges[0].start);
+                        output.extend_from_slice(&rendered[start..rendered.len() - suffix]);
+                        continue;
+                    }
+                    let mut wrapped =
+                        format!(r#"<w:document xmlns:w="{}">"#, rdocx_oxml::namespace::W_NS)
+                            .into_bytes();
+                    wrapped.extend(rendered);
+                    wrapped.extend_from_slice(b"</w:document>");
+                    output.extend(crate::document::package_authoritative_body_fragment(
+                        &wrapped,
+                        false,
+                        &BTreeMap::new(),
+                    )?);
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+/// Drop namespace declarations added so a paired copy could be parsed alone.
+/// The copy's original root start tag stays, and the rendered interior stays.
+fn restore_paired_copy_root(original: &[u8], rendered: &[u8]) -> Result<Vec<u8>> {
+    let original_end = fragment_root_start_tag_end(original)?;
+    let rendered_end = fragment_root_start_tag_end(rendered)?;
+    let mut output = Vec::with_capacity(original_end + rendered.len().saturating_sub(rendered_end));
+    output.extend_from_slice(&original[..original_end]);
+    output.extend_from_slice(&rendered[rendered_end..]);
+    Ok(output)
+}
+
+fn fragment_root_start_tag_end(xml: &[u8]) -> Result<usize> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(_) | Event::Empty(_)) => return Ok(reader.buffer_position() as usize),
+            Ok(Event::Eof) => {
+                return Err(template_error("paired template copy has no root element"));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(template_xml_error(error)),
+        }
+        buffer.clear();
+    }
+}
+
+fn replay_program(
+    program: &ParsedProgram<'_>,
+    blocks: &[ExecutedBlock],
+    current: &TemplateProgram,
+    offset: usize,
+    candidate: &mut Document,
+    note_copies: Option<&mut Vec<NoteCopy>>,
+    pending_drawings: &mut HashSet<u32>,
+    refresh_root: bool,
+) -> Result<Vec<u8>> {
+    if current.items.is_empty()
+        || (note_copies.is_none()
+            && current.required_paragraph
+            && flattened_execution_items(blocks).is_empty())
+    {
+        return Ok(current.raw.clone());
+    }
+    let output = replay_program_blocks(
+        program,
+        blocks,
+        current,
+        offset,
+        candidate,
+        note_copies,
+        pending_drawings,
     )?;
-    document.document.body.content = evaluated
-        .into_iter()
-        .map(|evaluated| evaluated.value)
-        .collect();
-    Ok((count, structural_change))
+    // Allocation canonicalizes bookmarks and relationships before publication.
+    // Splice the prepared expansion into that fresh owner, preserving the
+    // original callback locations already paired onto the root program.
+    let base = if refresh_root {
+        canonical_root_base(candidate, current, pending_drawings)?
+    } else {
+        current.clone()
+    };
+    let start = base.items.first().expect("nonempty source").range.start - base.ranges[0].start;
+    let end = base.items.last().expect("nonempty source").range.end - base.ranges[0].start;
+    let mut raw = base.raw.clone();
+    raw.splice(start..end, output);
+    if current.required_paragraph {
+        candidate.template_require_cell_paragraph(&mut raw, &current.scope)?;
+    }
+    Ok(raw)
 }
 
-fn render_body_item(
-    content: &mut BodyContent,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-    structural_change: &mut bool,
-) -> Result<usize> {
-    match content {
-        BodyContent::Paragraph(paragraph) => {
-            stage_paragraph_scalars(paragraph, root, scopes, sentinels)
+// Chart text has no authentic Word paragraph location. Prepare built-ins from
+// original text operands, and refuse formatter mode before any callback.
+fn prepare_chart_edits(
+    document: &Document,
+    data: &Value,
+    versioned: bool,
+    has_formatter: bool,
+) -> Result<(Vec<PartRewrite>, usize)> {
+    let mut edits = Vec::new();
+    let mut count = 0;
+    for (part, original) in document.template_chart_parts() {
+        let mut reader = Reader::from_reader(original.as_slice());
+        let mut replacements = Vec::new();
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(element))
+                    if matches_local_name(element.name().as_ref(), b"t")
+                        || matches_local_name(element.name().as_ref(), b"v") =>
+                {
+                    let start = reader.buffer_position() as usize;
+                    let text = oxml_core::xml_text::read_element_text(&mut reader, element.name());
+                    let end = reader.buffer_position() as usize;
+                    let closing = original[start..end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .ok_or_else(|| template_error("chart text closing source is missing"))?
+                        + start;
+                    let tokens = scalar_tokens(&text, versioned)?;
+                    if tokens.is_empty() {
+                        continue;
+                    }
+                    let mut rendered = text;
+                    for token in tokens.into_iter().rev() {
+                        let value = match token.value {
+                            ScalarValue::Literal(value) => value.to_owned(),
+                            ScalarValue::Expression(expression) => {
+                                if has_formatter {
+                                    return Err(template_error(&format!(
+                                        "chart scalar in {part} has no original Word paragraph context for a formatter; use render_template_versioned"
+                                    )));
+                                }
+                                count += 1;
+                                if versioned {
+                                    expression_text(&expression, data, &[])?
+                                } else {
+                                    let path = expression
+                                        .path
+                                        .iter()
+                                        .map(|step| match step {
+                                            PathStep::Key(key) => key.clone(),
+                                            PathStep::Index(_) => unreachable!(),
+                                        })
+                                        .collect::<Vec<_>>();
+                                    match resolve_value(data, &[], &path)? {
+                                        ResolvedValue::Value(value) => scalar_text(value, &path)?,
+                                        ResolvedValue::Deferred => unreachable!(),
+                                    }
+                                }
+                            }
+                        };
+                        oxml_core::xml::reject_non_xml_characters(
+                            "chart template replacement",
+                            &value,
+                        )?;
+                        rendered.replace_range(token.range, &value);
+                    }
+                    replacements.push((
+                        start..closing,
+                        quick_xml::escape::escape(&rendered)
+                            .into_owned()
+                            .into_bytes(),
+                    ));
+                }
+                Ok(Event::Eof) => break,
+                Ok(_) => {}
+                Err(error) => return Err(template_xml_error(error)),
+            }
         }
-        BodyContent::Table(table) => {
-            render_table(table, root, scopes, sentinels, structural_change)
+        let mut rendered = original.clone();
+        for (range, value) in replacements.into_iter().rev() {
+            rendered.splice(range, value);
         }
-        BodyContent::ContentControl(control) => {
-            stage_control_scalars(control, root, scopes, sentinels)
+        if rendered != original {
+            edits.push((part, original, rendered));
         }
-        BodyContent::RawXml(_) => Ok(0),
     }
+    Ok((edits, count))
 }
 
-fn render_table(
-    table: &mut CT_Tbl,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-    structural_change: &mut bool,
-) -> Result<usize> {
-    let old_len = table.rows.len();
-    let old_controls = std::mem::take(&mut table.content_controls);
-    let mut controls_by_row = vec![Vec::new(); old_len];
-    let mut trailing_controls = Vec::new();
-    for (at, before, control) in old_controls {
-        if at < old_len {
-            controls_by_row[at].push((before, control));
-        } else if at == old_len {
-            trailing_controls.push((before, control));
-        }
-    }
-    let items = std::mem::take(&mut table.rows)
+fn canonical_root_base(
+    candidate: &mut Document,
+    current: &TemplateProgram,
+    pending_drawings: &HashSet<u32>,
+) -> Result<TemplateProgram> {
+    // Dependency allocation changes identifier occupancy. Canonicalize before
+    // reading the owner that publication will check again.
+    candidate.prepare_staged_package()?;
+    // That prepare keeps only drawings already in the package. Repeated copies
+    // still live in the unpublished replacement, so their ids stay reserved.
+    candidate.retain_pending_drawing_ids(pending_drawings);
+    let mut fresh = candidate
+        .template_programs()?
         .into_iter()
-        .zip(controls_by_row)
-        .map(|(row, controls)| TableRowItem { row, controls })
-        .collect::<Vec<_>>();
-    for (index, item) in items.iter().enumerate() {
-        if row_marker(&item.row)?.is_some()
-            && (table.extra_xml.iter().any(|(at, _)| *at == index) || !item.controls.is_empty())
-        {
+        .find(|program| {
+            program.part == current.part
+                && program.story.kind() == current.story.kind()
+                && program.story.owner_index() == current.story.owner_index()
+        })
+        .ok_or_else(|| template_error("template physical owner disappeared during staging"))?;
+    retain_original_template_locations(current, &mut fresh)?;
+    Ok(fresh)
+}
+
+fn retain_original_template_locations(
+    original: &TemplateProgram,
+    current: &mut TemplateProgram,
+) -> Result<()> {
+    if original.part != current.part
+        || original.story.kind() != current.story.kind()
+        || original.ranges.len() != current.ranges.len()
+        || original.table_rows != current.table_rows
+        || original.items.len() != current.items.len()
+    {
+        return Err(template_error(
+            "source normalization changed template owner correspondence",
+        ));
+    }
+    for (before, after) in original.items.iter().zip(&mut current.items) {
+        if before.kind != after.kind || before.children.len() != after.children.len() {
             return Err(template_error(
-                "a marker row cannot carry table-level preserved siblings",
+                "source normalization changed template item correspondence",
             ));
         }
-    }
-
-    let blocks = parse_blocks(&items, |item| row_marker(&item.row))?;
-    *structural_change |= blocks_have_controls(&blocks);
-    let old_extra = std::mem::take(&mut table.extra_xml);
-    let mut local_scopes = scopes.to_vec();
-    let mut render_item = |item: &mut TableRowItem,
-                           root: &Value,
-                           scopes: &[Scope],
-                           sentinels: &mut SentinelPool,
-                           repeated: bool| {
-        let mut count =
-            render_nested_tables_in_row(&mut item.row, root, scopes, sentinels, structural_change)?;
-        count += stage_row_scalars(&mut item.row, root, scopes, sentinels)?;
-        for (_, control) in &mut item.controls {
-            count += render_nested_tables_in_control(
-                control,
-                root,
-                scopes,
-                sentinels,
-                structural_change,
-            )?;
-            count += stage_control_scalars(control, root, scopes, sentinels)?;
+        after.location = before.location.clone();
+        for (before, after) in before.children.iter().zip(&mut after.children) {
+            retain_original_template_locations(before, after)?;
         }
-        if repeated {
-            drop_copied_row_identities(&mut item.row)?;
-            for (_, control) in &mut item.controls {
-                drop_copied_control_identities(control)?;
+    }
+    Ok(())
+}
+
+fn prepare_unowned_textbox_edits(
+    document: &Document,
+    programs: &[TemplateProgram],
+    data: &Value,
+    versioned: bool,
+    has_formatter: bool,
+) -> Result<(Vec<PartRewrite>, usize)> {
+    fn exclusions(
+        program: &TemplateProgram,
+        parts: &mut BTreeMap<String, Vec<std::ops::Range<usize>>>,
+    ) {
+        let physical_textbox = program.story.kind() == crate::StoryKind::TextBox
+            && matches!(Reader::from_reader(program.raw.as_slice()).read_event(), Ok(Event::Start(ref start) | Event::Empty(ref start)) if matches_local_name(start.name().as_ref(),b"txbxContent"));
+        if physical_textbox {
+            parts
+                .entry(program.part.clone())
+                .or_default()
+                .extend(program.ranges.iter().cloned());
+        }
+        for item in &program.items {
+            for child in &item.children {
+                exclusions(child, parts);
             }
         }
-        Ok(count)
-    };
-    let (evaluated, mut count) = evaluate_blocks(
-        &blocks,
-        root,
-        &mut local_scopes,
-        sentinels,
-        false,
-        &mut render_item,
-    )?;
-
-    let mut extra_xml = Vec::new();
-    let mut content_controls = Vec::new();
-    let new_len = evaluated.len();
-    let mut rows = Vec::with_capacity(new_len);
-    for (new_index, evaluated) in evaluated.into_iter().enumerate() {
-        extra_xml.extend(
-            old_extra
-                .iter()
-                .filter(|(at, _)| *at == evaluated.source_index)
-                .map(|(_, raw)| (new_index, raw.clone())),
-        );
-        for (before, control) in evaluated.value.controls {
-            content_controls.push((new_index, before, control));
-        }
-        rows.push(evaluated.value.row);
     }
-    extra_xml.extend(
-        old_extra
+    let mut excluded = BTreeMap::new();
+    for program in programs {
+        exclusions(program, &mut excluded);
+    }
+    let mut edits = Vec::new();
+    let mut count = 0;
+    for (part, original) in document.template_raw_parts()? {
+        let ranges = excluded.entry(part.clone()).or_default();
+        // Word writes one text box twice, and a box can contain another.
+        // Those physical ranges overlap. The raw walker accepts only a
+        // sorted list whose members do not overlap, so each overlap becomes
+        // one covering range. A range that merely touches the previous end
+        // stays separate.
+        ranges.retain(|range| range.start < range.end);
+        ranges.sort_by_key(|range| (range.start, std::cmp::Reverse(range.end)));
+        let mut covered: Vec<std::ops::Range<usize>> = Vec::new();
+        for range in ranges.iter().cloned() {
+            if let Some(last) = covered.last_mut()
+                && range.start < last.end
+            {
+                last.end = last.end.max(range.end);
+            } else {
+                covered.push(range);
+            }
+        }
+        *ranges = covered;
+        let (_, _, sources) =
+            placeholder::replace_original_literals_in_xml_part(&original, ranges, &[])?;
+        let mut operands = BTreeMap::<String, String>::new();
+        for source in sources {
+            for token in scalar_tokens(&source, versioned)? {
+                let value = match token.value {
+                    ScalarValue::Literal(value) => value.to_owned(),
+                    ScalarValue::Expression(expression) => {
+                        if has_formatter {
+                            return Err(template_error(&format!(
+                                "raw textbox scalar in {part} has no checked original Word paragraph context for a formatter; use render_template_versioned"
+                            )));
+                        }
+                        count += 1;
+                        if versioned {
+                            expression_text(&expression, data, &[])?
+                        } else {
+                            let path = expression
+                                .path
+                                .iter()
+                                .map(|step| match step {
+                                    PathStep::Key(key) => key.clone(),
+                                    PathStep::Index(_) => unreachable!(),
+                                })
+                                .collect::<Vec<_>>();
+                            match resolve_value(data, &[], &path)? {
+                                ResolvedValue::Value(value) => scalar_text(value, &path)?,
+                                ResolvedValue::Deferred => unreachable!(),
+                            }
+                        }
+                    }
+                };
+                oxml_core::xml::reject_non_xml_characters(
+                    "raw textbox template replacement",
+                    &value,
+                )?;
+                operands.insert(source[token.range].to_owned(), value);
+            }
+        }
+        if operands.is_empty() {
+            continue;
+        }
+        let operands = operands
             .iter()
-            .filter(|(at, _)| *at == old_len)
-            .map(|(_, raw)| (new_len, raw.clone())),
-    );
-    for (before, mut control) in trailing_controls {
-        count += render_nested_tables_in_control(
-            &mut control,
-            root,
-            scopes,
-            sentinels,
-            structural_change,
-        )?;
-        count += stage_control_scalars(&mut control, root, scopes, sentinels)?;
-        content_controls.push((new_len, before, control));
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let (rendered, _, _) =
+            placeholder::replace_original_literals_in_xml_part(&original, ranges, &operands)?;
+        if rendered != original {
+            edits.push((part, original, rendered));
+        }
     }
-    table.rows = rows;
-    table.extra_xml = extra_xml;
-    table.content_controls = content_controls;
-    Ok(count)
+    Ok((edits, count))
 }
 
-fn render_nested_tables_in_row(
-    row: &mut CT_Row,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-    structural_change: &mut bool,
+#[allow(clippy::type_complexity)] // Same non-static formatter contract as the evaluation field.
+pub(crate) fn render_grammar(
+    document: &mut Document,
+    data: &Value,
+    versioned: bool,
+    formatter: Option<
+        &mut dyn FnMut(
+            &TemplateFormatContext<'_>,
+            &mut crate::MailMergeFormattedText,
+        ) -> Result<()>,
+    >,
 ) -> Result<usize> {
-    let mut count = 0;
-    for cell in &mut row.cells {
-        count += render_nested_tables_in_cell(cell, root, scopes, sentinels, structural_change)?;
+    let mut candidate = document.clone_for_staging();
+    let originals = candidate.template_programs()?;
+    candidate.prepare_staged_package()?;
+    let mut sources = candidate.template_programs()?;
+    if originals.len() != sources.len() {
+        return Err(template_error(
+            "source normalization changed template root correspondence",
+        ));
     }
-    Ok(count)
-}
-
-fn render_nested_tables_in_cell(
-    cell: &mut CT_Tc,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-    structural_change: &mut bool,
-) -> Result<usize> {
-    let mut count = 0;
-    for content in &mut cell.content {
-        match content {
-            CellContent::Table(table) => {
-                count += render_table(table, root, scopes, sentinels, structural_change)?;
-            }
-            CellContent::ContentControl(control) => {
-                count += render_nested_tables_in_control(
-                    control,
-                    root,
-                    scopes,
-                    sentinels,
-                    structural_change,
-                )?;
-            }
-            CellContent::Paragraph(_) => {}
+    for (original, current) in originals.iter().zip(&mut sources) {
+        retain_original_template_locations(original, current)?;
+    }
+    let (raw_textboxes, raw_count) =
+        prepare_unowned_textbox_edits(&candidate, &sources, data, versioned, formatter.is_some())?;
+    for (part, original, rendered) in &raw_textboxes {
+        candidate.template_publish_scalar_part(part, original, rendered.clone())?;
+    }
+    // Reacquire fresh edit ranges after original-only raw scalar edits. Retain
+    // original callback locations through the same checked item correspondence.
+    if !raw_textboxes.is_empty() {
+        let mut refreshed = candidate.template_programs()?;
+        if originals.len() != refreshed.len() {
+            return Err(template_error(
+                "raw scalar publication changed checked template roots",
+            ));
         }
-    }
-    Ok(count)
-}
-
-fn render_nested_tables_in_control(
-    control: &mut CT_Sdt,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-    structural_change: &mut bool,
-) -> Result<usize> {
-    let mut count = 0;
-    for content in &mut control.content {
-        match content {
-            SdtContent::Table(table) => {
-                count += render_table(table, root, scopes, sentinels, structural_change)?;
-            }
-            SdtContent::Row(row) => {
-                count +=
-                    render_nested_tables_in_row(row, root, scopes, sentinels, structural_change)?;
-            }
-            SdtContent::Cell(cell) => {
-                count +=
-                    render_nested_tables_in_cell(cell, root, scopes, sentinels, structural_change)?;
-            }
-            SdtContent::ContentControl(nested) => {
-                count += render_nested_tables_in_control(
-                    nested,
-                    root,
-                    scopes,
-                    sentinels,
-                    structural_change,
-                )?;
-            }
-            SdtContent::Paragraph(_) | SdtContent::Run(_) | SdtContent::RawXml(_) => {}
+        for (original, current) in originals.iter().zip(&mut refreshed) {
+            retain_original_template_locations(original, current)?;
         }
+        sources = refreshed;
     }
-    Ok(count)
-}
-
-/// Drop the w14 identities of every paragraph and table row in one loop copy.
-/// Copies must not share them, and Word assigns new ones to an element that
-/// has none. Text-box paragraphs stay in the raw XML of their drawing.
-fn drop_copied_body_identities(content: &mut BodyContent) -> Result<()> {
-    match content {
-        BodyContent::Paragraph(paragraph) => drop_copied_paragraph_identities(paragraph),
-        BodyContent::Table(table) => drop_copied_table_identities(table),
-        BodyContent::ContentControl(control) => drop_copied_control_identities(control),
-        BodyContent::RawXml(_) => Ok(()),
-    }
-}
-
-fn drop_copied_paragraph_identities(paragraph: &mut CT_P) -> Result<()> {
-    drop_w14_paragraph_identities(&mut paragraph.extra_xml)?;
-    for (_, _, _, control) in &mut paragraph.content_controls {
-        drop_copied_control_identities(control)?;
-    }
-    Ok(())
-}
-
-fn drop_copied_table_identities(table: &mut CT_Tbl) -> Result<()> {
-    for row in &mut table.rows {
-        drop_copied_row_identities(row)?;
-    }
-    for (_, _, control) in &mut table.content_controls {
-        drop_copied_control_identities(control)?;
-    }
-    Ok(())
-}
-
-fn drop_copied_row_identities(row: &mut CT_Row) -> Result<()> {
-    drop_w14_paragraph_identities(&mut row.extra_xml)?;
-    for cell in &mut row.cells {
-        drop_copied_cell_identities(cell)?;
-    }
-    for (_, _, control) in &mut row.content_controls {
-        drop_copied_control_identities(control)?;
-    }
-    Ok(())
-}
-
-fn drop_copied_cell_identities(cell: &mut CT_Tc) -> Result<()> {
-    for content in &mut cell.content {
-        match content {
-            CellContent::Paragraph(paragraph) => drop_copied_paragraph_identities(paragraph)?,
-            CellContent::Table(table) => drop_copied_table_identities(table)?,
-            CellContent::ContentControl(control) => drop_copied_control_identities(control)?,
-        }
-    }
-    Ok(())
-}
-
-fn drop_copied_control_identities(control: &mut CT_Sdt) -> Result<()> {
-    for content in &mut control.content {
-        match content {
-            SdtContent::Paragraph(paragraph) => drop_copied_paragraph_identities(paragraph)?,
-            SdtContent::Table(table) => drop_copied_table_identities(table)?,
-            SdtContent::Row(row) => drop_copied_row_identities(row)?,
-            SdtContent::Cell(cell) => drop_copied_cell_identities(cell)?,
-            SdtContent::ContentControl(nested) => drop_copied_control_identities(nested)?,
-            SdtContent::Run(_) | SdtContent::RawXml(_) => {}
-        }
-    }
-    Ok(())
-}
-
-fn body_marker(content: &BodyContent) -> Result<Option<Control>> {
-    match content {
-        BodyContent::Paragraph(paragraph) => {
-            marker_from_sources(&placeholder::replaceable_texts(paragraph))
-        }
-        BodyContent::Table(_) | BodyContent::RawXml(_) => Ok(None),
-        BodyContent::ContentControl(control) => {
-            reject_unsupported_control_sources(&control_sources(control))?;
-            Ok(None)
-        }
-    }
-}
-
-fn row_marker(row: &CT_Row) -> Result<Option<Control>> {
-    let mut direct_sources = Vec::new();
-    collect_row_marker_sources(row, &mut direct_sources);
-    if !direct_sources
+    let (charts, chart_count) =
+        prepare_chart_edits(&candidate, data, versioned, formatter.is_some())?;
+    let programs = sources
         .iter()
-        .any(|source| source.contains("{%") || source.contains("%}"))
-    {
-        return Ok(None);
+        .map(|source| parse_program(source, versioned, false))
+        .collect::<Result<Vec<_>>>()?;
+    for program in &programs {
+        validate_program_numbering(program, &program.blocks, &candidate, false)?;
     }
+    let mut evaluation = TemplateEvaluation {
+        data,
+        versioned,
+        occurrence: 0,
+        formatter: None,
+    };
+    let mut executions = Vec::new();
+    for program in &programs {
+        executions.push(ProgramExecution {
+            blocks: evaluate_program_blocks(
+                program,
+                &program.blocks,
+                &mut Vec::new(),
+                &mut evaluation,
+                true,
+            )?,
+        });
+    }
+    // Structure is prepared without touching scalar operands. Import allocation
+    // facts connect copied physical notes to already evaluated original programs.
+    let key = |source: &TemplateProgram| {
+        (
+            source.story.kind(),
+            source.part.clone(),
+            source.story.owner_index(),
+        )
+    };
+    let mut bindings = programs
+        .iter()
+        .enumerate()
+        .zip(&executions)
+        .map(|((index, program), execution)| (key(program.source), (index, execution.clone())))
+        .collect::<HashMap<_, _>>();
+    let mut note_origins = HashMap::new();
+    for (kind, part, id, owner) in candidate.template_note_identities()? {
+        let (index, _) = bindings
+            .get(&(kind, part.clone(), owner))
+            .ok_or_else(|| template_error("original note has no prepared template owner"))?;
+        note_origins.insert((kind, part, id), *index);
+    }
+    let mut allocations = Vec::new();
+    let mut pending_drawings = HashSet::new();
+    let mut structural_edits = Vec::new();
+    for (program, execution) in programs.iter().zip(&executions) {
+        let rendered = replay_program(
+            program,
+            &execution.blocks,
+            program.source,
+            0,
+            &mut candidate,
+            Some(&mut allocations),
+            &mut pending_drawings,
+            true,
+        )?;
+        let fresh = canonical_root_base(&mut candidate, program.source, &pending_drawings)?;
+        structural_edits.push((fresh, rendered));
+    }
+    let mut allocated = 0;
+    while allocated < allocations.len() {
+        let end = allocations.len();
+        let current_sources = candidate
+            .template_programs()?
+            .into_iter()
+            .map(|source| (key(&source), source))
+            .collect::<HashMap<_, _>>();
+        let identities = candidate
+            .template_note_identities()?
+            .into_iter()
+            .map(|(kind, part, id, owner)| ((kind, part, id), owner))
+            .collect::<HashMap<_, _>>();
+        // Register the complete allocation batch first. Nested references use
+        // this same actual old-to-new map, never numeric or hash-map order.
+        for (kind, source_part, old_id, destination_part, new_id) in &allocations[allocated..end] {
+            let origin = *note_origins
+                .get(&(*kind, source_part.clone(), *old_id))
+                .ok_or_else(|| template_error("copied note has no original prepared provenance"))?;
+            note_origins.insert((*kind, destination_part.clone(), *new_id), origin);
+        }
+        // Detach this batch. Replaying a copied note appends further allocations.
+        let batch = allocations[allocated..end].to_vec();
+        for (kind, _, _, destination_part, new_id) in batch {
+            let origin = note_origins[&(kind, destination_part.clone(), new_id)];
+            let owner = identities
+                .get(&(kind, destination_part.clone(), new_id))
+                .ok_or_else(|| template_error("allocated note has no checked physical owner"))?;
+            let current = current_sources
+                .get(&(kind, destination_part.clone(), *owner))
+                .ok_or_else(|| template_error("allocated note source is missing"))?;
+            let execution = executions[origin].clone();
+            let rendered = replay_program(
+                &programs[origin],
+                &execution.blocks,
+                current,
+                0,
+                &mut candidate,
+                Some(&mut allocations),
+                &mut pending_drawings,
+                true,
+            )?;
+            if bindings.insert(key(current), (origin, execution)).is_some() {
+                return Err(template_error("allocated note source was prepared twice"));
+            }
+            let fresh = canonical_root_base(&mut candidate, current, &pending_drawings)?;
+            structural_edits.push((fresh, rendered));
+        }
+        allocated = end;
+    }
+    let mut changed = !charts.is_empty() || !raw_textboxes.is_empty();
+    for (source, rendered) in structural_edits {
+        let source = canonical_root_base(&mut candidate, &source, &pending_drawings)?;
+        changed |= rendered != source.raw;
+        candidate.template_publish_program(&source, rendered)?;
+    }
+    evaluation.formatter = formatter;
+    let expanded = candidate.template_programs()?;
+    for current in expanded {
+        let (origin, mut execution) = bindings
+            .remove(&key(&current))
+            .ok_or_else(|| template_error("expanded owner has no prepared source provenance"))?;
+        let mut position = 0;
+        format_program_execution(
+            &programs[origin],
+            &mut execution.blocks,
+            &current,
+            &mut position,
+            &mut evaluation,
+        )?;
+        if position != current.items.len() && !(position == 0 && current.required_paragraph) {
+            return Err(template_error("expanded owner has unbound source items"));
+        }
+        let rendered = replay_program(
+            &programs[origin],
+            &execution.blocks,
+            &current,
+            0,
+            &mut candidate,
+            None,
+            &mut pending_drawings,
+            false,
+        )?;
+        changed |= rendered != current.raw;
+        candidate.template_publish_program(&current, rendered)?;
+    }
+    if !bindings.is_empty() {
+        return Err(template_error("prepared template owner disappeared"));
+    }
+    let count = evaluation.occurrence + chart_count + raw_count;
+    if !changed {
+        return Ok(count);
+    }
+    for (part, original, rendered) in charts {
+        candidate.template_publish_scalar_part(&part, &original, rendered)?;
+    }
+    let prepared = candidate.prepare_and_reopen_staged()?;
+    document.commit_template(prepared);
+    Ok(count)
+}
 
-    let mut all_sources = Vec::new();
-    collect_row(row, &mut all_sources);
-    marker_from_sources(&all_sources)
+fn json_string_at(source: &str, cursor: &mut usize) -> Result<String> {
+    let start = *cursor;
+    if source.as_bytes().get(start) != Some(&b'"') {
+        return Err(template_error(
+            "filter arguments and quoted keys require JSON strings",
+        ));
+    }
+    *cursor += 1;
+    let mut escaped = false;
+    while let Some(&byte) = source.as_bytes().get(*cursor) {
+        *cursor += 1;
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return serde_json::from_str(&source[start..*cursor])
+                .map_err(|_| template_error("invalid JSON string in template"));
+        }
+    }
+    Err(template_error("unclosed JSON string in template"))
+}
+
+fn skip_space(source: &str, cursor: &mut usize) {
+    while let Some(character) = source[*cursor..].chars().next() {
+        if !character.is_whitespace() {
+            break;
+        }
+        *cursor += character.len_utf8();
+    }
+}
+
+fn parse_expression(source: &str) -> Result<Expression> {
+    let source = source.trim();
+    let mut cursor = 0;
+    let mut path = Vec::new();
+    let mut need_key = true;
+    loop {
+        if source.as_bytes().get(cursor) == Some(&b'[') && !need_key {
+            cursor += 1;
+            skip_space(source, &mut cursor);
+            let step = if source.as_bytes().get(cursor) == Some(&b'"') {
+                PathStep::Key(json_string_at(source, &mut cursor)?)
+            } else {
+                let start = cursor;
+                while source
+                    .as_bytes()
+                    .get(cursor)
+                    .is_some_and(u8::is_ascii_digit)
+                {
+                    cursor += 1;
+                }
+                if start == cursor {
+                    return Err(template_error(
+                        "brackets require an array index or quoted object key",
+                    ));
+                }
+                PathStep::Index(
+                    source[start..cursor]
+                        .parse()
+                        .map_err(|_| template_error("array index exceeds supported range"))?,
+                )
+            };
+            skip_space(source, &mut cursor);
+            if source.as_bytes().get(cursor) != Some(&b']') {
+                return Err(template_error("unclosed path bracket"));
+            }
+            cursor += 1;
+            path.push(step);
+        } else if need_key && source.as_bytes().get(cursor) == Some(&b'[') && path.is_empty() {
+            // A quoted root key admits punctuation without an invented root name.
+            need_key = false;
+            continue;
+        } else if need_key {
+            let start = cursor;
+            while let Some(character) = source[cursor..].chars().next() {
+                if character.is_whitespace()
+                    || matches!(
+                        character,
+                        '.' | '[' | ']' | '|' | '"' | '\'' | '{' | '}' | '%' | '(' | ')' | '\0'
+                    )
+                {
+                    break;
+                }
+                cursor += character.len_utf8();
+            }
+            if cursor == start {
+                return Err(template_error("expected a template property name"));
+            }
+            path.push(PathStep::Key(source[start..cursor].into()));
+            need_key = false;
+        } else if source.as_bytes().get(cursor) == Some(&b'.') {
+            cursor += 1;
+            need_key = true;
+        } else {
+            break;
+        }
+    }
+    if need_key || path.is_empty() {
+        return Err(template_error("incomplete template path"));
+    }
+    let spelling = source[..cursor].to_owned();
+    let mut filters = Vec::new();
+    loop {
+        skip_space(source, &mut cursor);
+        if cursor == source.len() {
+            break;
+        }
+        if source.as_bytes().get(cursor) != Some(&b'|') {
+            return Err(template_error("unexpected text after template path"));
+        }
+        cursor += 1;
+        skip_space(source, &mut cursor);
+        let start = cursor;
+        while source
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            cursor += 1;
+        }
+        let name = &source[start..cursor];
+        skip_space(source, &mut cursor);
+        let filter = match name {
+            "trim" => Filter::Trim,
+            "upper" => Filter::Upper,
+            "lower" => Filter::Lower,
+            "default" | "join" => {
+                if source.as_bytes().get(cursor) != Some(&b'(') {
+                    return Err(template_error("filter requires one JSON string argument"));
+                }
+                cursor += 1;
+                skip_space(source, &mut cursor);
+                let argument = json_string_at(source, &mut cursor)?;
+                skip_space(source, &mut cursor);
+                if source.as_bytes().get(cursor) != Some(&b')') {
+                    return Err(template_error(
+                        "filter requires exactly one JSON string argument",
+                    ));
+                }
+                cursor += 1;
+                if name == "default" {
+                    Filter::Default(argument)
+                } else {
+                    Filter::Join(argument)
+                }
+            }
+            _ => return Err(template_error("unknown template filter")),
+        };
+        filters.push(filter);
+    }
+    Ok(Expression {
+        spelling,
+        path,
+        filters,
+    })
+}
+
+fn traverse_expression<'a>(mut value: &'a Value, path: &[PathStep]) -> Result<Option<&'a Value>> {
+    for step in path {
+        let next = match step {
+            PathStep::Key(key) => value
+                .as_object()
+                .ok_or_else(|| template_error("template path crosses a non-object value"))?
+                .get(key),
+            PathStep::Index(index) => value
+                .as_array()
+                .ok_or_else(|| template_error("template path crosses a non-array value"))?
+                .get(*index),
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        value = next;
+    }
+    Ok(Some(value))
+}
+
+fn expression_value<'a>(
+    expression: &Expression,
+    root: &'a Value,
+    scopes: &'a [Scope],
+) -> Result<Option<&'a Value>> {
+    if let Some(PathStep::Key(first)) = expression.path.first() {
+        for scope in scopes.iter().rev() {
+            if &scope.name == first {
+                return traverse_expression(&scope.value, &expression.path[1..]);
+            }
+        }
+        for scope in scopes.iter().rev() {
+            if scope
+                .value
+                .as_object()
+                .is_some_and(|object| object.contains_key(first))
+            {
+                return traverse_expression(&scope.value, &expression.path);
+            }
+        }
+    }
+    traverse_expression(root, &expression.path)
+}
+
+fn expression_text(expression: &Expression, root: &Value, scopes: &[Scope]) -> Result<String> {
+    let mut value = expression_value(expression, root, scopes)?.cloned();
+    for filter in &expression.filters {
+        match filter {
+            Filter::Default(fallback) => {
+                if value.as_ref().is_none_or(Value::is_null) {
+                    value = Some(Value::String(fallback.clone()));
+                }
+            }
+            Filter::Join(separator) => {
+                let Some(Value::Array(values)) = value.as_ref() else {
+                    return Err(template_error("join requires an array of scalar values"));
+                };
+                let text = values
+                    .iter()
+                    .map(|value| scalar_text(value, &[]))
+                    .collect::<Result<Vec<_>>>()?
+                    .join(separator);
+                value = Some(Value::String(text));
+            }
+            Filter::Trim | Filter::Upper | Filter::Lower => {
+                let text = value
+                    .as_ref()
+                    .ok_or_else(|| template_error("missing template path"))?;
+                let text = scalar_text(text, &[])?;
+                value = Some(Value::String(match filter {
+                    Filter::Trim => text.trim().to_owned(),
+                    Filter::Upper => text.to_uppercase(),
+                    Filter::Lower => text.to_lowercase(),
+                    _ => unreachable!(),
+                }));
+            }
+        }
+    }
+    scalar_text(
+        value
+            .as_ref()
+            .ok_or_else(|| template_error("missing template path"))?,
+        &[],
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn versioned_template_expression_paths_and_filters_are_typed() {
+    let data = serde_json::json!({"person":{"name":"  Straße  ","values":[1,false,null,"é"]},"a}}|b":"literal", "zero":0, "empty":"", "wrong":3});
+    for (source, expected) in [
+        ("person.name | trim | upper", "STRASSE"),
+        (r#"["a}}|b"]"#, "literal"),
+        ("person.values[1]", "false"),
+        (r#"person.values | join("/")"#, "1/false//é"),
+        (r#"absent | default("fallback")"#, "fallback"),
+        (r#"zero | default("fallback")"#, "0"),
+        (r#"empty | default("fallback")"#, ""),
+    ] {
+        assert_eq!(
+            expression_text(&parse_expression(source).unwrap(), &data, &[]).unwrap(),
+            expected,
+            "{source}"
+        );
+    }
+    for source in [
+        r#"wrong.child | default("fallback")"#,
+        r#"person[0] | default("fallback")"#,
+        r#"person.values | join(1)"#,
+        "person.name | trim()",
+        "person.name | unknown",
+        "person.values[-1]",
+        "person..name",
+    ] {
+        assert!(
+            parse_expression(source)
+                .and_then(|expression| expression_text(&expression, &data, &[]))
+                .is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Scope {
+    name: String,
+    value: Value,
+    deferred: bool,
+}
+
+enum ResolvedValue<'a> {
+    Value(&'a Value),
+    Deferred,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndKind {
+    For,
+    If,
+}
+
+impl EndKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::For => "endfor",
+            Self::If => "endif",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Control {
+    For { name: String, path: Vec<String> },
+    If { path: Vec<String> },
+    End(EndKind),
+}
+
+#[derive(Debug)]
+enum Block<T> {
+    Item {
+        value: T,
+    },
+    For {
+        name: String,
+        path: Vec<String>,
+        source_range: std::ops::Range<usize>,
+        body: Vec<Block<T>>,
+    },
+    If {
+        path: Vec<String>,
+        body: Vec<Block<T>>,
+    },
 }
 
 fn marker_from_sources(sources: &[String]) -> Result<Option<Control>> {
@@ -710,18 +1840,6 @@ fn marker_from_sources(sources: &[String]) -> Result<Option<Control>> {
         ));
     }
     parse_control(nonempty[0]).map(Some)
-}
-
-fn reject_unsupported_control_sources(sources: &[String]) -> Result<()> {
-    if sources
-        .iter()
-        .any(|source| source.contains("{%") || source.contains("%}"))
-    {
-        return Err(template_error(
-            "structural controls are supported only in main-body paragraphs and table rows",
-        ));
-    }
-    Ok(())
 }
 
 fn parse_control(source: &str) -> Result<Control> {
@@ -792,14 +1910,18 @@ fn parse_block_level<T: Clone, F: Fn(&T) -> Result<Option<Control>>>(
         match marker(&items[index])? {
             None => {
                 blocks.push(Block::Item {
-                    source_index: index,
                     value: items[index].clone(),
                 });
                 index += 1;
             }
             Some(Control::For { name, path }) => {
                 let (body, next) = parse_block_level(items, index + 1, Some(EndKind::For), marker)?;
-                blocks.push(Block::For { name, path, body });
+                blocks.push(Block::For {
+                    name,
+                    path,
+                    source_range: index + 1..next - 1,
+                    body,
+                });
                 index = next;
             }
             Some(Control::If { path }) => {
@@ -834,105 +1956,6 @@ fn parse_block_level<T: Clone, F: Fn(&T) -> Result<Option<Control>>>(
     Ok((blocks, index))
 }
 
-fn blocks_have_controls<T>(blocks: &[Block<T>]) -> bool {
-    blocks
-        .iter()
-        .any(|block| !matches!(block, Block::Item { .. }))
-}
-
-/// Evaluate the blocks of one level. `repeated` is set inside a loop, whose
-/// body is written once per item, so every item it renders is a copy.
-fn evaluate_blocks<T: Clone, F>(
-    blocks: &[Block<T>],
-    root: &Value,
-    scopes: &mut Vec<Scope>,
-    sentinels: &mut SentinelPool,
-    repeated: bool,
-    render_item: &mut F,
-) -> Result<(Vec<Evaluated<T>>, usize)>
-where
-    F: FnMut(&mut T, &Value, &[Scope], &mut SentinelPool, bool) -> Result<usize>,
-{
-    let mut output = Vec::new();
-    let mut count = 0;
-    for block in blocks {
-        match block {
-            Block::Item {
-                source_index,
-                value,
-            } => {
-                let mut value = value.clone();
-                count += render_item(&mut value, root, scopes, sentinels, repeated)?;
-                output.push(Evaluated {
-                    source_index: *source_index,
-                    value,
-                });
-            }
-            Block::For { name, path, body } => {
-                let values = match resolve_value(root, scopes, path)? {
-                    ResolvedValue::Value(Value::Array(values)) => values.clone(),
-                    ResolvedValue::Deferred => Vec::new(),
-                    _ => {
-                        return Err(template_error(&format!(
-                            "loop path `{}` does not resolve to an array",
-                            path.join(".")
-                        )));
-                    }
-                };
-                if values.is_empty() {
-                    scopes.push(Scope {
-                        name: name.clone(),
-                        value: Value::Null,
-                        deferred: true,
-                    });
-                    let mut validation_sentinels = SentinelPool::new(&[]);
-                    evaluate_blocks(
-                        body,
-                        root,
-                        scopes,
-                        &mut validation_sentinels,
-                        true,
-                        render_item,
-                    )?;
-                    scopes.pop();
-                }
-                for value in values {
-                    scopes.push(Scope {
-                        name: name.clone(),
-                        value,
-                        deferred: false,
-                    });
-                    let evaluated =
-                        evaluate_blocks(body, root, scopes, sentinels, true, render_item)?;
-                    scopes.pop();
-                    output.extend(evaluated.0);
-                    count += evaluated.1;
-                }
-            }
-            Block::If { path, body } => match resolve_value(root, scopes, path)? {
-                ResolvedValue::Value(value) if is_truthy(value) => {
-                    let evaluated =
-                        evaluate_blocks(body, root, scopes, sentinels, repeated, render_item)?;
-                    output.extend(evaluated.0);
-                    count += evaluated.1;
-                }
-                ResolvedValue::Value(_) | ResolvedValue::Deferred => {
-                    let mut validation_sentinels = SentinelPool::new(&[]);
-                    evaluate_blocks(
-                        body,
-                        root,
-                        scopes,
-                        &mut validation_sentinels,
-                        repeated,
-                        render_item,
-                    )?;
-                }
-            },
-        }
-    }
-    Ok((output, count))
-}
-
 fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -942,185 +1965,6 @@ fn is_truthy(value: &Value) -> bool {
         Value::Array(value) => !value.is_empty(),
         Value::Object(value) => !value.is_empty(),
     }
-}
-
-fn resolve_replacements(
-    sources: &[String],
-    data: &Value,
-    scopes: &[Scope],
-) -> Result<Vec<Replacement>> {
-    let mut resolved = BTreeMap::<String, (String, usize)>::new();
-    for source in sources {
-        scan_source(source, data, scopes, &mut resolved)?;
-    }
-    Ok(resolved
-        .into_iter()
-        .map(|(literal, (value, occurrences))| Replacement {
-            literal,
-            value,
-            occurrences,
-        })
-        .collect())
-}
-
-fn scan_source(
-    source: &str,
-    data: &Value,
-    scopes: &[Scope],
-    resolved: &mut BTreeMap<String, (String, usize)>,
-) -> Result<()> {
-    let mut cursor = 0;
-    while cursor < source.len() {
-        let marker =
-            next_marker(&source[cursor..]).map(|(offset, marker)| (cursor + offset, marker));
-        let Some((start, marker)) = marker else {
-            break;
-        };
-        match marker {
-            "{{" => {
-                let content_start = start + 2;
-                let Some(relative_end) = source[content_start..].find("}}") else {
-                    return Err(template_error("unclosed scalar tag"));
-                };
-                let end = content_start + relative_end;
-                let inner = &source[content_start..end];
-                if inner.contains("{{") || inner.contains("{%") || inner.contains("%}") {
-                    return Err(template_error("nested or mismatched scalar tag"));
-                }
-                let path = parse_path(inner)?
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                let value = match resolve_value(data, scopes, &path)? {
-                    ResolvedValue::Value(value) => scalar_text(value, &path)?,
-                    ResolvedValue::Deferred => {
-                        cursor = end + 2;
-                        continue;
-                    }
-                };
-                let literal = source[start..end + 2].to_owned();
-                let entry = resolved
-                    .entry(literal)
-                    .or_insert_with(|| (value.clone(), 0));
-                if entry.0 != value {
-                    return Err(template_error(
-                        "one scalar literal resolved to different values in one scope",
-                    ));
-                }
-                entry.1 += 1;
-                cursor = end + 2;
-            }
-            "{%" => {
-                let content_start = start + 2;
-                let Some(relative_end) = source[content_start..].find("%}") else {
-                    return Err(template_error("unclosed control tag"));
-                };
-                let end = content_start + relative_end;
-                let inner = source[content_start..end].trim();
-                if inner.is_empty()
-                    || inner.contains("{{")
-                    || inner.contains("{%")
-                    || inner.contains("}}")
-                {
-                    return Err(template_error("malformed control tag"));
-                }
-                cursor = end + 2;
-            }
-            "}}" | "%}" => return Err(template_error("closing template delimiter without opener")),
-            _ => unreachable!("next_marker returns known markers"),
-        }
-    }
-    Ok(())
-}
-
-fn stage_paragraph_scalars(
-    paragraph: &mut CT_P,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-) -> Result<usize> {
-    let replacements =
-        resolve_replacements(&placeholder::replaceable_texts(paragraph), root, scopes)?;
-    let mut count = 0;
-    for replacement in replacements {
-        let sentinel = sentinels.stage(&replacement.value, replacement.occurrences);
-        let replaced =
-            placeholder::replace_in_paragraph(paragraph, &replacement.literal, &sentinel);
-        if replaced != replacement.occurrences {
-            return Err(Error::Other(format!(
-                "template changed while staging: discovered {} tags but replaced {replaced}",
-                replacement.occurrences
-            )));
-        }
-        count += replaced;
-    }
-    Ok(count)
-}
-
-fn stage_row_scalars(
-    row: &mut CT_Row,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-) -> Result<usize> {
-    let mut sources = Vec::new();
-    collect_row(row, &mut sources);
-    let replacements = resolve_replacements(&sources, root, scopes)?;
-    if replacements.is_empty() {
-        return Ok(0);
-    }
-    let mut table = CT_Tbl::new();
-    table.rows.push(std::mem::take(row));
-    let mut count = 0;
-    for replacement in replacements {
-        let sentinel = sentinels.stage(&replacement.value, replacement.occurrences);
-        let replaced = placeholder::replace_in_table(&mut table, &replacement.literal, &sentinel);
-        if replaced != replacement.occurrences {
-            return Err(Error::Other(format!(
-                "template changed while staging: discovered {} tags but replaced {replaced}",
-                replacement.occurrences
-            )));
-        }
-        count += replaced;
-    }
-    let Some(rendered) = table.rows.pop() else {
-        return Err(Error::Other("template staging lost a table row".to_owned()));
-    };
-    *row = rendered;
-    Ok(count)
-}
-
-fn stage_control_scalars(
-    control: &mut CT_Sdt,
-    root: &Value,
-    scopes: &[Scope],
-    sentinels: &mut SentinelPool,
-) -> Result<usize> {
-    let replacements = resolve_replacements(&control_sources(control), root, scopes)?;
-    if replacements.is_empty() {
-        return Ok(0);
-    }
-    let mut table = CT_Tbl::new();
-    table.content_controls.push((0, 0, control.clone()));
-    let mut count = 0;
-    for replacement in replacements {
-        let sentinel = sentinels.stage(&replacement.value, replacement.occurrences);
-        let replaced = placeholder::replace_in_table(&mut table, &replacement.literal, &sentinel);
-        if replaced != replacement.occurrences {
-            return Err(Error::Other(format!(
-                "template changed while staging: discovered {} tags but replaced {replaced}",
-                replacement.occurrences
-            )));
-        }
-        count += replaced;
-    }
-    let Some((_, _, rendered)) = table.content_controls.pop() else {
-        return Err(Error::Other(
-            "template staging lost a content control".to_owned(),
-        ));
-    };
-    *control = rendered;
-    Ok(count)
 }
 
 fn resolve_value<'a>(
@@ -1215,13 +2059,6 @@ fn scalar_text(value: &Value, path: &[String]) -> Result<String> {
     }
 }
 
-fn next_marker(source: &str) -> Option<(usize, &'static str)> {
-    ["{{", "{%", "}}", "%}"]
-        .into_iter()
-        .filter_map(|marker| source.find(marker).map(|offset| (offset, marker)))
-        .min_by_key(|(offset, _)| *offset)
-}
-
 fn parse_path(inner: &str) -> Result<Vec<&str>> {
     let path = inner.trim();
     if path.is_empty() {
@@ -1243,21 +2080,6 @@ fn template_error(message: &str) -> Error {
     Error::Other(format!("invalid template: {message}"))
 }
 
-pub(crate) fn body_sources(document: &CT_Document) -> Vec<String> {
-    let mut sources = Vec::new();
-    for content in &document.body.content {
-        match content {
-            BodyContent::Paragraph(paragraph) => {
-                sources.extend(placeholder::replaceable_texts(paragraph));
-            }
-            BodyContent::Table(table) => collect_table(table, &mut sources),
-            BodyContent::ContentControl(control) => collect_control(control, &mut sources),
-            BodyContent::RawXml(_) => {}
-        }
-    }
-    sources
-}
-
 fn collect_table(table: &CT_Tbl, sources: &mut Vec<String>) {
     for (_, _, control) in &table.content_controls {
         collect_control(control, sources);
@@ -1265,12 +2087,6 @@ fn collect_table(table: &CT_Tbl, sources: &mut Vec<String>) {
     for row in &table.rows {
         collect_row(row, sources);
     }
-}
-
-fn control_sources(control: &CT_Sdt) -> Vec<String> {
-    let mut sources = Vec::new();
-    collect_control(control, &mut sources);
-    sources
 }
 
 fn collect_control(control: &CT_Sdt, sources: &mut Vec<String>) {
@@ -1358,6 +2174,7 @@ fn collect_cell(cell: &CT_Tc, sources: &mut Vec<String>) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn chart_sources(xml: &[u8]) -> Result<Vec<String>> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -1387,4 +2204,34 @@ pub(crate) fn chart_sources(xml: &[u8]) -> Result<Vec<String>> {
 
 fn template_xml_error(error: quick_xml::Error) -> Error {
     Error::Other(format!("invalid template XML: {error}"))
+}
+
+#[cfg(test)]
+#[test]
+fn versioned_template_delimiters_are_quoted_and_escaped_once() {
+    let source = r#"A{{ ["x}}|y"] | default("{%literal%}") }}B {{{{name}}}} C {%{% if q %}%}"#;
+    let tokens = scalar_tokens(source, true).unwrap();
+    let data = serde_json::json!({"x}}|y":"{{inserted}}\u{e000}rdocx-template-0\u{e001}"});
+    let mut output = source.to_owned();
+    for token in tokens.into_iter().rev() {
+        let value = match token.value {
+            ScalarValue::Expression(expression) => {
+                expression_text(&expression, &data, &[]).unwrap()
+            }
+            ScalarValue::Literal(text) => text.to_owned(),
+        };
+        output.replace_range(token.range, &value);
+    }
+    assert_eq!(
+        output,
+        "A{{inserted}}\u{e000}rdocx-template-0\u{e001}B {{name}} C {% if q %}"
+    );
+    for source in [
+        "{{ missing",
+        "{{ x | default(\"unterminated) }}",
+        "{{ x {% }}",
+        "bad }}",
+    ] {
+        assert!(scalar_tokens(source, true).is_err(), "{source}");
+    }
 }

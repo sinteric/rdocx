@@ -47,6 +47,148 @@ pub fn replace_in_paragraph(para: &mut CT_P, placeholder: &str, replacement: &st
     })
 }
 
+/// Apply prepared edits to original replaceable stretches atomically.
+///
+/// Each tuple supplies a stretch index, nonempty UTF8 byte range, literal text
+/// and an optional run-property override for the replacement alone.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)] // Existing types cross the facade/model boundary without a new carrier.
+pub fn replace_prepared_occurrences(
+    paragraph: &mut CT_P,
+    occurrences: &[(
+        usize,
+        std::ops::Range<usize>,
+        String,
+        Option<crate::properties::CT_RPr>,
+    )],
+) -> crate::Result<()> {
+    let invalid = || crate::OxmlError::InvalidValue("invalid prepared template occurrence".into());
+    let stretches = replaceable_texts(paragraph);
+    let mut offsets = Vec::with_capacity(stretches.len());
+    let mut total = 0;
+    for stretch in &stretches {
+        offsets.push(total);
+        total += stretch.len();
+    }
+    let mut edits = Vec::with_capacity(occurrences.len());
+    for (stretch, range, replacement, properties) in occurrences {
+        let source = stretches.get(*stretch).ok_or_else(invalid)?;
+        if range.start >= range.end
+            || source.get(range.clone()).is_none()
+            || replacement
+                .chars()
+                .any(|character| !oxml_core::xml::is_xml_1_0_character(character))
+        {
+            return Err(invalid());
+        }
+        let mut probe = CT_P::new();
+        let mut run = CT_R::new(replacement);
+        run.properties = properties.clone();
+        probe.runs.push(run);
+        validate_prepared_paragraph(&probe)?;
+        edits.push((
+            offsets[*stretch] + range.start..offsets[*stretch] + range.end,
+            replacement,
+            properties,
+        ));
+    }
+    edits.sort_by_key(|(range, _, _)| range.start);
+    if edits.windows(2).any(|pair| pair[0].0.end > pair[1].0.start) {
+        return Err(invalid());
+    }
+    let mut candidate = paragraph.clone();
+    // Original offsets remain valid to the left of edits already applied.
+    for (range, replacement, properties) in edits.into_iter().rev() {
+        if properties.is_some() {
+            split_prepared_boundary(&mut candidate, range.end)?;
+            split_prepared_boundary(&mut candidate, range.start)?;
+            let mut walk = text_runs(&candidate);
+            let (text, map) = build_char_map(&candidate, &walk.wrappers, &walk.runs);
+            let first = map
+                .get(text[..range.start].chars().count())
+                .ok_or_else(invalid)?;
+            edit_run(
+                &mut candidate,
+                &mut walk.wrappers,
+                &walk.runs[first.run_index],
+                |run| {
+                    run.properties = properties.clone();
+                },
+            );
+            remove_emptied_runs(&mut candidate, walk.wrappers, &walk.runs, Vec::new());
+        }
+        let mut applied = false;
+        let count = replace_matches(&mut candidate, &mut |text, from| {
+            if applied || from > range.start || text.get(range.clone()).is_none() {
+                return None;
+            }
+            applied = true;
+            Some((range.start, range.end, replacement.clone()))
+        });
+        if count != 1 {
+            return Err(invalid());
+        }
+    }
+    validate_prepared_paragraph(&candidate)?;
+    *paragraph = candidate;
+    Ok(())
+}
+
+fn validate_prepared_paragraph(paragraph: &CT_P) -> crate::Result<()> {
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    paragraph.to_xml(&mut writer)?;
+    let xml = writer.into_inner();
+    let text = std::str::from_utf8(&xml)?;
+    oxml_core::xml::reject_non_xml_characters("prepared template XML", text)?;
+    // Opaque source may rely on inherited namespace bindings. Use the existing
+    // preservation validator here, then the facade validates the final owning
+    // part under its real namespace authority before publishing the document.
+    crate::text::validate_word_owner_fragment(&xml, b"p", false)
+}
+
+fn split_prepared_boundary(paragraph: &mut CT_P, byte: usize) -> crate::Result<()> {
+    let mut walk = text_runs(paragraph);
+    let (text, map) = build_char_map(paragraph, &walk.wrappers, &walk.runs);
+    let index = text
+        .get(..byte)
+        .ok_or_else(|| crate::OxmlError::InvalidValue("invalid prepared template boundary".into()))?
+        .chars()
+        .count();
+    let Some(mapping) = map.get(index) else {
+        return Ok(());
+    };
+    let source = &walk.runs[mapping.run_index];
+    let owner = match source.wrapper {
+        Some(index) => {
+            walk.wrappers[index].changed = true;
+            &mut walk.wrappers[index].content
+        }
+        None => &mut *paragraph,
+    };
+    let run = owner
+        .accepted_run(&source.path)
+        .ok_or_else(|| crate::OxmlError::InvalidValue("stale prepared run".into()))?;
+    let offset = run.content[..mapping.content_index]
+        .iter()
+        .filter_map(|content| match content {
+            RunContent::Text(text) => Some(text.text.chars().count()),
+            _ => None,
+        })
+        .sum::<usize>()
+        + match &run.content[mapping.content_index] {
+            RunContent::Text(text) => text.text[..mapping.byte_offset].chars().count(),
+            _ => 0,
+        };
+    let accepted = owner
+        .accepted_run_paths()
+        .iter()
+        .position(|path| path == &source.path)
+        .ok_or_else(|| crate::OxmlError::InvalidValue("stale prepared run boundary".into()))?;
+    owner.split_accepted_run(&source.path, accepted, offset)?;
+    remove_emptied_runs(paragraph, walk.wrappers, &walk.runs, Vec::new());
+    Ok(())
+}
+
 /// The texts a replacement in `para` matches against, one per stretch of
 /// runs. The direct runs between two inline content controls, tracked
 /// insertions or wrappers form one stretch, and so do the runs of one
@@ -1263,6 +1405,112 @@ pub fn xml_part_replaceable_texts(xml: &[u8]) -> crate::error::Result<Vec<String
     Ok(texts)
 }
 
+/// Stage original literal matches in the established raw textbox boundary.
+/// Physical exclusions identify separately checked textbox owners in this input.
+/// Empty operands discover original logical source texts without editing.
+#[doc(hidden)]
+pub fn replace_original_literals_in_xml_part(
+    xml: &[u8],
+    excluded: &[std::ops::Range<usize>],
+    replacements: &[(&str, &str)],
+) -> crate::Result<(Vec<u8>, usize, Vec<String>)> {
+    use crate::OxmlError;
+    if excluded
+        .iter()
+        .any(|range| range.start >= range.end || range.end > xml.len())
+        || excluded.windows(2).any(|pair| pair[0].end > pair[1].start)
+    {
+        return Err(OxmlError::InvalidValue(
+            "invalid original textbox exclusions".into(),
+        ));
+    }
+    let prefixes = [
+        "w".to_owned(),
+        format!("\0r\0{}", crate::namespace::R_NS),
+        format!("\0mc\0{}", crate::namespace::MC_NS),
+    ];
+    let mut texts = Vec::new();
+    rewrite_text_boxes_within(
+        xml,
+        &prefixes,
+        false,
+        &mut |paragraph| {
+            texts.extend(replaceable_texts(paragraph));
+            0
+        },
+        excluded,
+        0,
+        &mut false,
+    )?;
+    if replacements.is_empty() {
+        return Ok((xml.to_vec(), 0, texts));
+    }
+    let mut operands = std::collections::BTreeMap::new();
+    for &(literal, value) in replacements {
+        if literal.is_empty()
+            || operands
+                .insert(literal, value)
+                .is_some_and(|old| old != value)
+        {
+            return Err(OxmlError::InvalidValue(
+                "ambiguous original textbox literal operands".into(),
+            ));
+        }
+    }
+    let mut alternatives = operands.keys().copied().collect::<Vec<_>>();
+    alternatives.sort_by_key(|literal| std::cmp::Reverse(literal.len()));
+    let matcher = regex::Regex::new(
+        &alternatives
+            .into_iter()
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+    .map_err(|error| OxmlError::InvalidValue(error.to_string()))?;
+    let mut failure = None;
+    let (rewritten, count) = rewrite_text_boxes_within(
+        xml,
+        &prefixes,
+        true,
+        &mut |paragraph| {
+            if failure.is_some() {
+                return 0;
+            }
+            let occurrences = replaceable_texts(paragraph)
+                .iter()
+                .enumerate()
+                .flat_map(|(stretch, text)| {
+                    matcher
+                        .find_iter(text)
+                        .map(|matched| {
+                            (
+                                stretch,
+                                matched.range(),
+                                operands[matched.as_str()].to_owned(),
+                                None,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            match replace_prepared_occurrences(paragraph, &occurrences) {
+                Ok(()) => occurrences.len(),
+                Err(error) => {
+                    failure = Some(error);
+                    0
+                }
+            }
+        },
+        excluded,
+        0,
+        &mut false,
+    )?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok((rewritten, count, texts))
+}
+
 /// Walk `xml`, handing each paragraph of a `w:txbxContent` element to `edit`,
 /// those of its tables and block content controls included, and
 /// re-serialising a child in place when `edit` counts a change in it. Every
@@ -1285,7 +1533,7 @@ fn rewrite_text_boxes(
         format!("\0r\0{R_NS}"),
         format!("\0mc\0{MC_NS}"),
     ];
-    rewrite_text_boxes_within(xml, &part_prefixes, edit_copies, edit)
+    rewrite_text_boxes_within(xml, &part_prefixes, edit_copies, edit, &[], 0, &mut false)
 }
 
 /// [`rewrite_text_boxes`] over `xml`, an element cut out of a part where the
@@ -1295,6 +1543,9 @@ fn rewrite_text_boxes_within(
     inherited: &[String],
     edit_copies: bool,
     edit: &mut dyn FnMut(&mut CT_P) -> usize,
+    excluded: &[std::ops::Range<usize>],
+    source_offset: usize,
+    found_text_box: &mut bool,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
     use crate::error::OxmlError;
     use crate::namespace::matches_local_name;
@@ -1312,9 +1563,24 @@ fn rewrite_text_boxes_within(
     let mut scopes: Vec<Vec<String>> = Vec::new();
 
     loop {
+        let before = reader.buffer_position() as usize;
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) => break,
             Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"txbxContent") => {
+                *found_text_box = true;
+                if let Ok(index) =
+                    excluded.binary_search_by_key(&(source_offset + before), |range| range.start)
+                {
+                    let raw = capture_element(&mut reader, e)?;
+                    if source_offset + reader.buffer_position() as usize != excluded[index].end {
+                        return Err(OxmlError::InvalidValue(
+                            "stale original textbox exclusion".into(),
+                        ));
+                    }
+                    writer.get_mut().extend_from_slice(&raw);
+                    buf.clear();
+                    continue;
+                }
                 let word_prefixes =
                     word_prefixes_at(e, scopes.last().map_or(inherited, Vec::as_slice))?;
                 // We found a txbxContent element. Parse and edit each paragraph
@@ -1386,7 +1652,15 @@ fn rewrite_text_boxes_within(
             {
                 let scope = scopes.last().map_or(inherited, Vec::as_slice);
                 let raw = capture_element(&mut reader, e)?;
-                let (rewritten, count) = rewrite_alternate_content(&raw, scope, edit_copies, edit)?;
+                let (rewritten, count) = rewrite_alternate_content(
+                    &raw,
+                    scope,
+                    edit_copies,
+                    edit,
+                    excluded,
+                    source_offset + before,
+                    found_text_box,
+                )?;
                 writer.get_mut().extend_from_slice(&rewritten);
                 total_count += count;
             }
@@ -1567,6 +1841,9 @@ fn rewrite_alternate_content(
     inherited: &[String],
     edit_copies: bool,
     edit: &mut dyn FnMut(&mut CT_P) -> usize,
+    excluded: &[std::ops::Range<usize>],
+    source_offset: usize,
+    found_text_box: &mut bool,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
     use crate::namespace::matches_local_name;
     use crate::raw_xml::capture_element;
@@ -1587,13 +1864,23 @@ fn rewrite_alternate_content(
     let mut counted_choice = false;
     let mut total_count = 0;
     loop {
+        let before = reader.buffer_position() as usize;
         match reader.read_event_into(&mut buf)? {
             Event::Eof => break,
             Event::Start(ref branch_start) => {
                 let branch = capture_element(&mut reader, branch_start)?;
                 if counted_choice {
                     let copy = if edit_copies {
-                        rewrite_text_boxes_within(&branch, &prefixes, edit_copies, edit)?.0
+                        rewrite_text_boxes_within(
+                            &branch,
+                            &prefixes,
+                            edit_copies,
+                            edit,
+                            excluded,
+                            source_offset + before,
+                            found_text_box,
+                        )?
+                        .0
                     } else {
                         branch
                     };
@@ -1607,11 +1894,12 @@ fn rewrite_alternate_content(
                         &branch,
                         &prefixes,
                         edit_copies,
-                        &mut |paragraph| {
-                            holds_text_box = true;
-                            edit(paragraph)
-                        },
+                        edit,
+                        excluded,
+                        source_offset + before,
+                        &mut holds_text_box,
                     )?;
+                    *found_text_box |= holds_text_box;
                     counted_choice = holds_text_box
                         && matches_local_name(branch_start.name().as_ref(), b"Choice");
                     writer.get_mut().extend_from_slice(&rewritten);
@@ -1790,6 +2078,85 @@ mod tests {
             p.add_run(text);
         }
         p
+    }
+
+    #[test]
+    fn prepared_template_occurrences_preserve_literal_data_and_local_formatting() {
+        let mut paragraph = make_para(&["pre{{x}}mid{{x}}suf"]);
+        paragraph.runs[0].properties = Some(CT_RPr {
+            bold: Some(true),
+            ..Default::default()
+        });
+        replace_prepared_occurrences(
+            &mut paragraph,
+            &[
+                (
+                    0,
+                    3..8,
+                    "{{x}}\u{e000}rdocx-template-0\u{e001}".into(),
+                    Some(CT_RPr {
+                        italic: Some(true),
+                        ..Default::default()
+                    }),
+                ),
+                (0, 11..16, "Y".into(), None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            paragraph.text(),
+            "pre{{x}}\u{e000}rdocx-template-0\u{e001}midYsuf"
+        );
+        assert_eq!(paragraph.runs[0].text(), "pre");
+        assert_eq!(
+            paragraph.runs[0].properties.as_ref().unwrap().bold,
+            Some(true)
+        );
+        assert_eq!(
+            paragraph.runs[1].properties.as_ref().unwrap().italic,
+            Some(true)
+        );
+        assert_eq!(paragraph.runs[1].properties.as_ref().unwrap().bold, None);
+        assert_eq!(paragraph.runs[2].text(), "midYsuf");
+        assert_eq!(
+            paragraph.runs[2].properties.as_ref().unwrap().bold,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn prepared_template_occurrences_preserve_inherited_opaque_namespaces() {
+        let source = br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:rPr><f:opaque f:value="kept&#32;exact"/></w:rPr><w:t>{{x}}</w:t></w:r></w:p>"#;
+        let mut paragraph = CT_P::from_xml_fragment(source).unwrap();
+        let properties = paragraph.runs[0].properties.clone();
+        replace_prepared_occurrences(&mut paragraph, &[(0, 0..5, "literal".into(), None)]).unwrap();
+        assert_eq!(paragraph.text(), "literal");
+        assert_eq!(paragraph.runs[0].properties, properties);
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        paragraph.to_xml(&mut writer).unwrap();
+        assert!(
+            String::from_utf8(writer.into_inner())
+                .unwrap()
+                .contains(r#"<f:opaque f:value="kept&#32;exact"/>"#)
+        );
+    }
+
+    #[test]
+    fn prepared_template_occurrences_validate_every_edit_before_publication() {
+        let original = make_para(&["é{{", "x}} suffix"]);
+        for edits in [
+            vec![(0, 1..4, "X".into(), None)],
+            vec![(0, 2..7, "X".into(), None), (0, 4..8, "Y".into(), None)],
+            vec![(1, 0..1, "X".into(), None)],
+            vec![(0, 2..7, "X".into(), None), (0, 8..9, "\0".into(), None)],
+        ] {
+            let mut paragraph = original.clone();
+            assert!(replace_prepared_occurrences(&mut paragraph, &edits).is_err());
+            assert_eq!(paragraph, original);
+        }
+        let mut paragraph = original;
+        replace_prepared_occurrences(&mut paragraph, &[(0, 2..7, "value".into(), None)]).unwrap();
+        assert_eq!(paragraph.text(), "évalue suffix");
     }
 
     #[test]
@@ -2845,6 +3212,37 @@ mod tests {
             );
             assert!(replace_in_xml_part(xml.as_bytes(), "{{name}}", "Alice").is_err());
         }
+    }
+
+    #[test]
+    fn original_textbox_literals_are_simultaneous_and_exclusions_are_physical() {
+        let known = "<w:txbxContent><w:p><w:r><w:t>{{name}}</w:t></w:r></w:p></w:txbxContent>";
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{known}<w:custom><w:txbxContent><w:p><w:r><w:t>{{{{{{{{name}}}}}}}} / {{{{name}}}} / {{{{other}}}}</w:t></w:r></w:p></w:txbxContent></w:custom></w:body></w:document>"#
+        );
+        let start = xml.find(known).unwrap();
+        let known_range = start..start + known.len();
+        let excluded = [known_range];
+        let (rewritten, count, texts) = replace_original_literals_in_xml_part(
+            xml.as_bytes(),
+            &excluded,
+            &[
+                ("{{{{", "{{"),
+                ("}}}}", "}}"),
+                ("{{name}}", "{{other}}"),
+                ("{{other}}", "DATA"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(texts, ["{{{{name}}}} / {{name}} / {{other}}"]);
+        assert_eq!(count, 4);
+        let rewritten = String::from_utf8(rewritten).unwrap();
+        assert!(rewritten.contains(known));
+        assert!(rewritten.contains("{{name}} / {{other}} / DATA"));
+        let past_the_part = start..xml.len() + 1;
+        assert!(
+            replace_original_literals_in_xml_part(xml.as_bytes(), &[past_the_part], &[]).is_err()
+        );
     }
 
     #[test]

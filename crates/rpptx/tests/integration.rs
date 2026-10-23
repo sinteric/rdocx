@@ -21400,10 +21400,10 @@ fn rpptx_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(workspace.contains("\"crates/rpptx\""));
     assert!(workspace.contains(
-        "rpptx = { path = \"crates/rpptx\", version = \"0.14.2\", default-features = false }"
+        "rpptx = { path = \"crates/rpptx\", version = \"0.14.3\", default-features = false }"
     ));
     assert!(manifest.contains("name = \"rpptx\""));
-    assert!(manifest.contains("version = \"0.14.2\""));
+    assert!(manifest.contains("version = \"0.14.3\""));
     assert!(manifest.contains("publish = true"));
     assert!(manifest.contains("default = [\"default-template\", \"render\", \"system-fonts\"]"));
     assert!(manifest.contains("default-template = [\"dep:scraper\"]"));
@@ -27615,7 +27615,17 @@ fn auto_shape_type_reads_and_replaces_the_preset_keeping_the_shape() {
             }) if shape_kind == kind
         ));
     }
-    for (index, preset) in [(1, "rect"), (0, "upArrow"), (0, "")] {
+    slide
+        .shape_mut(0)
+        .unwrap()
+        .set_auto_shape_type("upArrow")
+        .unwrap();
+    slide
+        .shape_mut(0)
+        .unwrap()
+        .set_auto_shape_type("ellipse")
+        .unwrap();
+    for (index, preset) in [(1, "rect"), (0, "")] {
         assert!(matches!(
             slide.shape_mut(index).unwrap().set_auto_shape_type(preset),
             Err(Error::InvalidShapeMutation {

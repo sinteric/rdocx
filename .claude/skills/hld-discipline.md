@@ -68,6 +68,22 @@ For each file the plan listed:
    state. A "what changed" heading is the first sign the set is rotting into a
    history.
 
+## Completion and capability consistency
+
+Before final freeze, reconcile each affected capability with implemented intent
+and its named evidence. Completed bounded capabilities have no active repair
+owner. An incomplete capability needs a pending/in-progress owner that actually
+owns its remaining acceptance, or an explicit permanent disposition the matrix
+allows. Never mark a capability complete merely to silence a policy test.
+After completion edits, rerun affected classification/owner/status assertions
+against the final records. A pre-completion green result does not prove the
+new status combination. Metadata adoption checks the final owner invariant,
+while other affected policy tests remain the caller's responsibility.
+
+Keep active plan prose consistent with its readiness state. Historical attempts,
+failed checks and native limitations remain attributed to their actual source.
+Do not rewrite completed historical plans merely to add a new template section.
+
 ## When the implementation contradicts an unlisted section
 
 Stop. This is a refused situation in `/complete-feature`, not a paperwork

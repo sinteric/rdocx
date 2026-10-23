@@ -233,6 +233,7 @@ impl NoteRegistry {
                                         num_state,
                                         diagnostics,
                                         source,
+                                        source,
                                         None,
                                     )?;
                                 if let Some(registry) = sources {

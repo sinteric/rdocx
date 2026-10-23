@@ -149,6 +149,20 @@ impl CT_ConnectionShape {
         Ok(())
     }
 
+    /// Removes `p:style` when either the preserved bytes or the typed view exist.
+    ///
+    /// Returns false when both are already absent. The writer emits the
+    /// preserved bytes, so clearing both drops the element without moving
+    /// the surrounding children.
+    pub fn clear_style(&mut self) -> bool {
+        if self.raw.style.is_none() && self.raw.typed_style.is_none() {
+            return false;
+        }
+        self.raw.style = None;
+        self.raw.typed_style = None;
+        true
+    }
+
     /// Sets the `idx` of the typed style's `a:effectRef`, the theme effect
     /// style the connector draws. Index 0 references no theme effect.
     ///

@@ -23,6 +23,77 @@ SOURCE_URL = (
     "https://ecma-international.org/wp-content/uploads/"
     "ECMA-376-1_5th_edition_december_2016.zip"
 )
+# Tom Jebo, Microsoft Open Specifications, 2025-05-16.
+# https://learn.microsoft.com/en-au/answers/questions/2275994/uparrow-is-missing-in-presetshapedefinitions-xml
+PUBLISHED_UP_ARROW = """<upArrow>
+  <avLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+    <gd name="adj1" fmla="val 50000" />
+    <gd name="adj2" fmla="val 50000" />
+  </avLst>
+  <gdLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+    <gd name='maxAdj2' fmla='*/ 100000 h ss'/>
+    <gd name='a1' fmla='pin 0 adj1 100000'/>
+    <gd name='a2' fmla='pin 0 adj2 maxAdj2'/>
+    <gd name='dy2' fmla='*/ ss a2 100000'/>
+    <gd name='y2' fmla='+- t dy2 0'/>
+    <gd name='dx1' fmla='*/ w a1 200000'/>
+    <gd name='x1' fmla='+- hc 0 dx1'/>
+    <gd name='x2' fmla='+- hc dx1 0'/>
+    <gd name='dy1' fmla='*/ x1 dy2 wd2'/>
+    <gd name='y1' fmla='+- y2  0 dy1'/>
+  </gdLst>
+  <ahLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+    <ahXY gdRefX='adj1' minX='0' maxX='100000'>
+      <pos x='x1' y='b'/>
+    </ahXY>
+    <ahXY gdRefY='adj2' minY='0' maxY='maxAdj2'>
+      <pos x='l' y='y2'/>
+    </ahXY>
+  </ahLst>
+  <cxnLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+    <cxn ang='3cd4'>
+      <pos x='hc' y='t'/>
+    </cxn>
+    <cxn ang='cd2'>
+      <pos x='l' y='y2'/>
+    </cxn>
+    <cxn ang='cd4'>
+      <pos x='hc' y='b'/>
+    </cxn>
+    <cxn ang='0'>
+      <pos x='r' y='y2'/>
+    </cxn>
+  </cxnLst>
+  <rect l="x1" t="y1" r="x2" b="b"
+    xmlns="http://schemas.openxmlformats.org/drawingml/2006/main" />
+  <pathLst xmlns="http://schemas.openxmlformats.org/drawingml/2006/main">
+    <path>
+      <moveTo>
+        <pt x='l' y='y2'/>
+      </moveTo>
+      <lnTo>
+        <pt x='hc' y='t'/>
+      </lnTo>
+      <lnTo>
+        <pt x='r' y='y2'/>
+      </lnTo>
+      <lnTo>
+        <pt x='x2' y='y2'/>
+      </lnTo>
+      <lnTo>
+        <pt x='x2' y='b'/>
+      </lnTo>
+      <lnTo>
+        <pt x='x1' y='b'/>
+      </lnTo>
+      <lnTo>
+        <pt x='x1' y='y2'/>
+      </lnTo>
+      <close/>
+    </path>
+  </pathLst>
+</upArrow>
+"""
 
 TOOL_DIR = Path(__file__).resolve().parent
 WORKSPACE = TOOL_DIR.parents[1]
@@ -124,7 +195,26 @@ def load_definitions() -> dict[str, bytes]:
             short_empty_elements=True,
         )
 
-    expected_unique = EXPECTED_DEFINITION_COUNT - 1
+    # The pinned ECMA source repeats upDownArrow and omits upArrow. The
+    # published Microsoft Open Specifications definition supplies that preset.
+    # Its adjustment defaults are adj1 and adj2, both val 50000.
+    if "upArrow" not in definitions:
+        if "upDownArrow" not in definitions:
+            fail("published upArrow recovery requires the duplicated upDownArrow source")
+        published = ET.fromstring(PUBLISHED_UP_ARROW)
+        if local_name(published.tag) != "upArrow":
+            fail("published upArrow fragment has the wrong root")
+        custom_geometry = ET.Element(f"{{{DRAWINGML_NS}}}custGeom")
+        for child in list(published):
+            custom_geometry.append(copy.deepcopy(child))
+        remove_formatting_whitespace(custom_geometry)
+        definitions["upArrow"] = ET.tostring(
+            custom_geometry,
+            encoding="utf-8",
+            short_empty_elements=True,
+        )
+
+    expected_unique = EXPECTED_DEFINITION_COUNT
     if len(definitions) != expected_unique:
         fail(
             "unique source name count mismatch: "
@@ -254,7 +344,7 @@ def main() -> int:
     print(
         "source_has_187_direct_definitions: ok "
         f"({EXPECTED_DEFINITION_COUNT} direct definitions, "
-        f"{len(definitions)} unique names)"
+        f"{len(definitions)} generated names)"
     )
     if args.corpus is not None:
         decks, uses, unique = scan_corpus(args.corpus, definitions)

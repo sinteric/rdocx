@@ -2473,9 +2473,9 @@ fn push_control_blocks(control: &CT_Sdt, blocks: &mut Vec<BodyContent>) {
     for item in &control.content {
         match item {
             SdtContent::Paragraph(paragraph) => {
-                blocks.push(BodyContent::Paragraph(paragraph.clone()))
+                blocks.push(BodyContent::Paragraph(Box::new(paragraph.clone())))
             }
-            SdtContent::Table(table) => blocks.push(BodyContent::Table(table.clone())),
+            SdtContent::Table(table) => blocks.push(BodyContent::Table(Box::new(table.clone()))),
             SdtContent::ContentControl(nested) => push_control_blocks(nested, blocks),
             SdtContent::Row(_)
             | SdtContent::Cell(_)
@@ -2487,10 +2487,12 @@ fn push_control_blocks(control: &CT_Sdt, blocks: &mut Vec<BodyContent>) {
 
 fn render_body_projection(content: &BodyContent) -> Option<BodyContent> {
     match content {
-        BodyContent::Paragraph(paragraph) => Some(BodyContent::Paragraph(
+        BodyContent::Paragraph(paragraph) => Some(BodyContent::Paragraph(Box::new(
             render_paragraph_projection(paragraph),
-        )),
-        BodyContent::Table(table) => Some(BodyContent::Table(render_table_projection(table))),
+        ))),
+        BodyContent::Table(table) => {
+            Some(BodyContent::Table(Box::new(render_table_projection(table))))
+        }
         BodyContent::ContentControl(_) | BodyContent::RawXml(_) => None,
     }
 }
@@ -2868,7 +2870,8 @@ fn selected_epub_list_values(
             if let Some(num_id) = properties.num_id.filter(|value| *value != 0) {
                 let level = properties.num_ilvl.unwrap_or(0);
                 rdocx_layout::style_resolver::generate_marker(num_id, level, numbering, &mut state);
-                if matches!(block, BodyContent::Paragraph(root) if std::ptr::eq(root, paragraph)) {
+                if matches!(block, BodyContent::Paragraph(root) if std::ptr::eq(root.as_ref(), paragraph))
+                {
                     values.insert(index, state.current(num_id, level));
                 }
             }
@@ -4468,7 +4471,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::RawXml(b"<w:custom/>".to_vec()));
+            .push(BodyContent::RawXml(Box::new(b"<w:custom/>".to_vec())));
         document.add_paragraph("after");
         let source_before = document.document.to_xml().unwrap();
 
@@ -4549,7 +4552,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         let error = described.to_epub_bytes().err().unwrap().to_string();
         assert!(error.contains("document text exceeds the EPUB source limit"));
 
@@ -4565,7 +4568,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         let error = formatted.to_epub_bytes().err().unwrap().to_string();
         assert!(error.contains("document text exceeds the EPUB source limit"));
     }
@@ -4590,7 +4593,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         let error = document.to_epub_bytes().err().unwrap().to_string();
         assert!(error.contains("hyperlink span is outside"), "{error}");
@@ -4613,7 +4616,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(oversized_paragraph));
+            .push(BodyContent::Paragraph(Box::new(oversized_paragraph)));
         let error = oversized_media.to_epub_bytes().err().unwrap().to_string();
         assert!(error.contains("document images exceed the EPUB media limit"));
 
@@ -4634,7 +4637,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         let error = repeated_image.to_epub_bytes().err().unwrap().to_string();
         assert!(error.contains("too many image occurrences"));
     }
@@ -4680,7 +4683,10 @@ mod tests {
             ..Default::default()
         });
         table.rows.push(CT_Row::new());
-        grid.document.body.content.push(BodyContent::Table(table));
+        grid.document
+            .body
+            .content
+            .push(BodyContent::Table(Box::new(table)));
         let result = grid.to_epub_bytes().unwrap();
         assert!(
             result
@@ -5029,7 +5035,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
 
         let result = document.to_epub_bytes().unwrap();
         assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -5117,7 +5123,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
         let mut field_paragraph = CT_P::new();
         let mut field_run = CT_R::new("");
         field_run.content = vec![RunContent::Field(Field::new(
@@ -5129,7 +5135,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(field_paragraph));
+            .push(BodyContent::Paragraph(Box::new(field_paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         let entries = archive_entries(&result.bytes);
@@ -5164,7 +5170,7 @@ mod tests {
                 .document
                 .body
                 .content
-                .push(BodyContent::Paragraph(paragraph));
+                .push(BodyContent::Paragraph(Box::new(paragraph)));
         }
         document.numbering = Some(CT_Numbering {
             abstract_nums: vec![abstract_numbering],
@@ -5292,7 +5298,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
         let mut field_paragraph = CT_P::new();
         let mut field_run = CT_R::new("");
         field_run.content = vec![RunContent::Field(Field::new("PAGE", "cached"))];
@@ -5301,7 +5307,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(field_paragraph));
+            .push(BodyContent::Paragraph(Box::new(field_paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         let messages = result
@@ -5475,7 +5481,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
 
         let result = document.to_epub_bytes().unwrap();
         for path in [
@@ -5521,7 +5527,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         assert_eq!(
@@ -5637,7 +5643,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         assert_eq!(
@@ -5699,7 +5705,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         let body = entry_text(&archive_entries(&result.bytes), "EPUB/document.xhtml");
@@ -5744,7 +5750,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         let body = entry_text(&archive_entries(&result.bytes), "EPUB/document.xhtml");
@@ -5827,7 +5833,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(paragraph));
+            .push(BodyContent::Paragraph(Box::new(paragraph)));
 
         let result = document.to_epub_bytes().unwrap();
         assert_eq!(
@@ -6062,7 +6068,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(page_break_paragraph));
+            .push(BodyContent::Paragraph(Box::new(page_break_paragraph)));
         document.add_paragraph("Nested").set_style("Heading2");
         document.add_picture(PNG_1X1, "pixel.png", Length::pt(1.0), Length::pt(1.0));
         let BodyContent::Paragraph(image_paragraph) =
@@ -6105,7 +6111,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Table(table));
+            .push(BodyContent::Table(Box::new(table)));
         document
             .add_style(
                 StyleBuilder::paragraph("OracleDeep", "Oracle deep").paragraph_properties(CT_PPr {
@@ -6210,7 +6216,7 @@ mod tests {
             .document
             .body
             .content
-            .push(BodyContent::Paragraph(lossy));
+            .push(BodyContent::Paragraph(Box::new(lossy)));
         let aliased = CT_Document::from_xml(
             br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:root-foreign"><w:body><w:p xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:y="urn:foreign"><y:ins/><x:ins x:id="9" x:author="oracle"><x:r><x:t>aliased revision</x:t></x:r></x:ins></w:p></w:body></w:document>"#,
         )

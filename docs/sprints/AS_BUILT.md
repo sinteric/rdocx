@@ -20620,3 +20620,397 @@ negative/unsupported evidence. A future genuine multi-face solution needs new
 bounded evidence and its own approved scope, not a rewrite of these results.
 F-X219 alone remains unfinished and carried to S96. No S96 work, publication or
 version change is included in this completion.
+
+### F-283, Complete numbering-aware navigation fields
+
+**Sprint.** S95.2
+**Completed.** 2026-10-18
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Numbered REF, STYLEREF, PAGEREF, captions, TOC and the
+source-qualified outline now share one resolved numbering result. `\w` keeps
+each level's literal text, drops one trailing full stop, and `\w` with `\t`
+stays the literal-free full context. An unnumbered STYLEREF caller returns the
+current level for `\r`. An unnumbered REF caller keeps the full context.
+Cross-instance `\r` shares a prefix only when both concrete instances use the
+same abstract definition and neither has a start override. A restart that
+writes a start override stays on the full context. Visible markers, saved
+caches and the numbered outline use the same counters.
+
+**Non-obvious choices.** `ResolvedNumbering` gained two doc-hidden fields,
+`definition_id` and `has_start_override`. They are instance metadata for the
+share rule, in the same class as the existing hidden `relative_to` method.
+`has_start_override` is true when any level override on that instance carries
+a start, so `restart_numbering` does not look like a continuation. Same-instance
+callers still omit only the shared prefix. No source still returns the full
+numeric suffix, which keeps the pinned unnumbered REF result `1.1.Clause 1`.
+
+**Deviations from the design plan.** The open question said to stop if native
+evidence required a new public field or a different compatibility policy. The
+captured Word 16.114 PDFs required the share rule above. The two fields are
+doc-hidden and are named in HLD 10. They add no Python, WASM or CLI surface.
+The design draft was not rewritten. This entry is the deviation record.
+
+**Spec sections touched.** HLD 08 states the literal, relative and restart
+rules and the hidden-marker counters, REF 1 and STYLEREF 2. HLD 10 lists
+`definition_id`, `has_start_override` and hidden `relative_to`. HLD 03 and
+HLD 14 keep the navigation boundary. No spec section was left contradicting
+the producer.
+
+**Tests.** `relative_numbering_omits_only_shared_source_context`,
+`ref_n_r_and_w_apply_level_relative_and_full_context_rules`,
+`styleref_modes_reuse_numbering_literals_and_context`,
+`relative_ref_uses_physical_caller_context`,
+`numbered_ref_delimiters_match_all_pinned_word_controls_and_reopen` and
+`all_caption_references_match_authenticated_before_and_after_word`.
+`cargo test -p rdocx-layout --all-targets` passed 353 tests.
+`cargo test -p rdocx --all-targets` passed the lib, integration and regression
+binaries, including 2446 regression tests. Word 16.114 build 16.114.26101123
+field update, save, PDF and disk reopen supplied the oracle. Microscope pass 2
+is 0 defects and 0 smells. The shared full gate is the S95.2 verification at
+b240cb3509a9641fe265ebfc605c987a3f35e143.
+
+**Hash harness.** 49 documents and seven pixel cases unchanged. No baseline
+recording.
+
+**Notes for future sessions.** Do not treat an unnumbered REF `\r` as the
+current level. That path stays full context. Do not reject constant numbering
+cycles. Cyclic note expansion stays unimplemented. F-X192 is not a dependency
+and stays carried to S96.
+
+### F-284, Stable container-wide template grammar
+
+**Sprint.** S95.2
+**Completed.** 2026-10-18
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Grammar version 1 is opt-in through
+`render_template_versioned` and the native formatter. Legacy `render_template`
+keeps the previous grammar. One payload renders across body, table cell,
+header, footer, footnote, endnote and text box. Block content controls
+contribute their direct paragraphs. Nested controls stay opaque. Paired text-box
+copies keep the original root start tag, so both copies still render. Python
+uses the same grammar. `TEMPLATE_GRAMMAR_VERSION` and `TemplateFormatContext`
+are public Rust exports in the stories family. No Python callback, WASM method
+or CLI surface was added.
+
+**Non-obvious choices.** The main document part is read from `document.to_xml`
+only for `doc_part_name`. Headers, footers, notes and charts stay on the
+package part. Alias 0 replays the actual paired child. Alias 1 and later rebuild
+through the fragment program and then restore the original root start tag.
+Same-document import still runs `source_owned_numbering_remap` twice. Repeated
+drawing ids stay unique. Deletion `w:delText` stays unreplaced.
+
+**Deviations from the design plan.** None. The integrated fixes for block
+controls and paired root tags stay inside the approved transaction and the
+approved grammar.
+
+**Spec sections touched.** HLD 02 classifies the template facade as stories.
+HLD 03, HLD 04, HLD 10 and HLD 12 describe the grammar, the staged fragment
+transaction and the Python method. HLD 14 keeps the container gate.
+
+**Tests.** Named installed tests
+`test_f284_versioned_paths_filters_escapes_and_legacy_selection`,
+`test_f284_container_expansion_uses_existing_native_transaction`,
+`test_f284_version_and_data_refusals_preserve_bytes_and_held_owners`,
+`test_f284_wrong_intermediate_default_and_inserted_text_are_literal`,
+`test_fx203_installed_template_and_checked_insertion_have_real_results` and
+`test_fx203_template_json_conversion_is_typed_and_atomically_preflighted`.
+The current-source wheel then passed the full `crates/rdocx-py/tests` suite,
+strict mypy and stubtest. Word 16.114 build 16.114.26101123 and LibreOffice
+26.2.5.2 opened, saved and reopened the mixed container. The Word and
+LibreOffice PDFs contain the fourteen declared strings and do not contain the
+filtered token. Microscope pass 1 is 0 defects and 0 smells. The shared full
+gate is the S95.2 verification at b240cb3509a9641fe265ebfc605c987a3f35e143.
+
+**Hash harness.** 49 documents and seven pixel cases unchanged. Template
+rendering stays opt-in. No baseline recording.
+
+**Notes for future sessions.** Do not weaken `template_publish_program`
+equality or `reject_new_repeated_drawing_ids`. Do not make `mod template`
+public. The microscope nitpick that an internal `invalid template:` message
+becomes `ValueError` stays a nitpick. The document remains unpublished.
+F-X192 is carried and is not part of this grammar.
+
+### F-X259, Repair reviewed consistency defects and strengthen acceptance gates
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** M, estimated 2 to 3 days, actual not recorded
+
+**What was built.** Relative numbering and empty template scopes now agree across consumers. Explicit TOC heading ranges bound outline-derived entries through native, Python and CLI rebuild. Current capability ownership and adoption checks stay consistent.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** Actual old-source RED and corrected GREEN cover evaluated/layout/cached values, empty scopes and Issue400. Clean focused feature reviews include the TOC/cache and independent-producer contracts. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** The S95.11/S95.2 evaluation exposed cross-consumer numbering, empty implicit scopes and completion status drift. S95.3 nested-placement/XML event repairs added contract closure, all-publisher validation, actual child/artifact/semantic checks and repeated-repair escalation. Issue398 then exposed fact-changing publishers and read/write physical-owner mismatch. Canonical commands/skills and26generated adapters now carry these instructions. Process changes and product fixes retain separate historical commits.
+
+### F-X260, Restore live handles and bound structural edit cost
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Word property edits preserve resolvable held owners. PowerPoint appends preserve earlier paragraph/run handles without refreshing old collections. Half-open direct body range removal is atomic. Read-only handle creation and bounded publication avoid unrelated package walks while selecting the same physical owners as edits.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** Actual RED/GREEN and clean issue398 pass5 cover stale cache publishers, nested controlled owners, paired text boxes and opaque section admission. Deterministic work counters and all ten actual shipping release ratios pass below3. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** Owner identity alone does not prove fresh facts. Include Run.add_tab/add_break and other publishers that leave scopes live. Preserve admitted opaque section bytes instead of rejecting previously readable input or reparsing unrelated owners.
+
+### F-X261, Resolve Word package preservation and inspection contributions
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Custom properties support ordered iteration and lookup. Style roots, shared/reinserted media, plain fonts and paired text boxes preserve their qualified source. Comments expose optional resolved state. Part inspection is read-only, lexicographically named and sees unsaved edits. Default paragraph format keeps exact Length/multiple semantics.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** The reduced row regressions, constructed header-image sequence, installed Word suite and genuine font producer outputs pass. Independent feature review has zero defects/smells. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** The private unreduced Issue390 document remains unavailable and unqualified. Reduced controls and successful reinsert cases do not authorize whole-issue closure. Missing, binary and UTF16 part XML remain explicit refusals.
+
+### F-X262, Resolve PowerPoint authoring and table-render contributions
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Slide placeholders sort by idx while layout/master retain tree order. Percentage ties follow pinned python-pptx. Bullet sizes distinguish points and percent. Clear/empty-text, slide-scoped cell hyperlinks and kind-checked style removal follow the approved APIs. Reproducible upArrow geometry and painted table growth preserve stored dimensions.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** Original claim-Base RED was newly executed for alpha rounding, placeholder order and point bullet size. Clear was an absent additive API. Empty-text append already passed at Base. The same current controls pass. Complete1028installed tests, presets, pinned viewer and corpus checks qualify the final source. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** The functional PR394 parent was eventually authenticated and read. Earlier HTTP401 and GREEN-only observations remain historical. No behavior or baseline was changed during this evidence reconciliation. The421-slide SSIM result remains advisory and below target.
+
+### F-285, Content control creation and lifecycle
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Rich/plain shells can be inserted at qualified block, row, cell, paragraph and inline positions, edited, removed and unwrapped through checked APIs. Move retains ids, clone assigns fresh ids. Python exposes the checked location methods and keeps immutable snapshots.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** Original provider prefix was integrated before typed/store work. Current native and installed public regressions cover nested placement, equivalent decoded references, source/destination context and unchanged package bytes on refusal. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** A transparent nested control does not establish its payload fits the destination. Carry parent context to actual content through every publisher. New additive methods had no semantic old-source failure and are not described as such.
+
+### F-286, Rich repeating and typed content controls
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Ten payload kinds author supported rich/plain, date, checkbox, picture, list, group and repeating controls while retaining metadata. Repetition appends a fresh-id clone of the first item. Last-item removal refuses atomically.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** Authentic Word for Mac16.114(26101123) originals, input/output hashes and native operation sources qualify replacements and equivalent formatted repetition. Two external installed controls pass. Word opened/saved12separate library-authored consumer cases. Independent native pass2 reports zero findings and accepts the bounded Q24 evidence. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** Q24 explicitly retains first-item cloning and last-item refusal, unlike Word default addressed-item cloning and whole-section deletion. Native-equivalent operations and default differences are distinct. Native consumer acceptance is not original oracle authorship or whole-page render parity. Citation/equation/bibliography/document-part authoring stays refused.
+
+### F-287, Custom XML stores and data binding authoring
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 4 to 5 days, actual not recorded
+
+**What was built.** Custom XML authoring stages item, properties, relationships and content types atomically and returns the braced item id. Existing absolute-child-path binding resolves and updates the addressed store. Unknown item bytes stay verbatim and schema URIs are stored without fetching.
+
+**Non-obvious choices.** Existing physical owners and publication transactions remain authoritative. Completion consumes actual source-qualified observations, not newly relabeled executions.
+
+**Deviations from the design plan.** Documented additive API absence, historical failed evidence and accepted boundaries remain explicit in the plan. No unrelated public expansion is claimed.
+
+**Spec sections touched.** The exact plan HLD impact is reconciled. Native/policy classification and completion evidence preserve the documented boundaries.
+
+**Tests.** Actual native and Python RED/GREEN event/name/value/reference/separator/encoding controls pass. Clean B4 focused pass8 and store/binding round trips qualify the repaired XML boundary. Independent native pass2 also accepts the bounded capability classification. Shared applicable evidence includes6732native passes with73ignored,1061Word/1028PowerPoint installed passes, bothWASM, minimal layout, lint/docs,22verified archives and README inventories, and independent fonts. New-version preparation and final eight-story sprint acceptance remain due under F-X263.
+
+**Hash harness.**49hashes and seven deterministic pixel buffers unchanged. No baseline rerecorded.
+
+**Notes for future sessions.** Q23 explicitly refuses all DTD declarations. XML tokenization, lexical validation, namespace conformance and schema validity are distinct. Supported opaque colon names remain. Store removal, general XPath and independent package-data rendering are outside this additive surface.
+
+
+### F-X263, Prepare Word 0.16.3 and PowerPoint 0.14.3 patch releases
+
+**Sprint.** S95.3
+**Completed.** 2026-10-22
+**Size.** L, estimated 3 to 5 additional days, actual not recorded
+
+**What was built.** Exact seven-crate Word0.16.3 and fifteen-crate shared/PowerPoint0.14.3 carriers, matching Python distributions, current examples, authenticated contribution inventories and reviewed family notes. Separate WASM versions and historical notes remain. Publication is a later approval and external operation.
+
+**Non-obvious choices.** Runtime/stub/export/default checks exposed missing Word exports/range declarations, an unusable factory constructor annotation, visible schema-default mismatch and a stale PPT typed return union after runtime suites passed. Minimal declaration/default metadata corrections retain the approved mutation contracts. Notes disclose boxed BodyContent variants, CommentRef resolution and other actual source compatibility boundaries despite patch numbering.
+
+**Deviations from the design plan.** No new runtime API. Existing binding declaration corrections implement the approved contract. Earlier failed builds, typing probes and incomplete API job inventory remain historical failures, separate from successful artifacts.
+
+**Spec sections touched.** docs/hld/10-bindings-spec.md and docs/hld/15-build-and-toolchain.md, exact approved impact.
+
+**Tests.** Target-specific original-source RED and fixed-source GREEN pass. Actual local union has6732native passes/73ignored,1063Word and1028PowerPoint installed passes, priorities on3.9/3.12, strict typing/stubs, bothWASM, minimal layout, lint/docs/README,192policy tests with2skips and dependency policy. Genuine clean082aafa9 locked publish dryrun verifies22archives, largest4900980bytes, all below10MiB. Independent feature microscope pass1 has zero findings. Actual build-only hosted39792212063 at c93daae4 has27deciding jobs successful/fourpublicationSKIP,26unique authenticated payloads and exact Python/CLI inventories. Fresh downloaded-wheel installs pass172priority calls across3.9/3.12 and both strict typing/stub suites. Completion metadata checks follow status edits. Source correspondence retains real producer identities.
+
+**Hash harness.**49semantic/render hashes and seven deterministic pixel buffers unchanged. No baseline recorded.
+
+**Notes for future sessions.** Process-only94816e4e sharpens existing implementation, microscope and binding reference instructions after the release typing/default gap. Concrete typed factory/property calls, public export/stub agreement and observable omission defaults are now explicit. This trigger is separate from product repairs. Earlier provider evidence and native limits remain bounded. All eight implementation stories complete, while independent final sprint review, closure and separately approved publication remain due.
+
+
+## S95.3 B2 post-completion amendment checkpoint
+
+Pass4 found a valid context-dependent customXml wrapper could bypass the existing
+destination grammar through relocation or repeating conversion. Codex repaired
+that shared invariant without adding an API or a second feature completion.
+The original delivery entries and eight-story totals remain historical.
+The new matrix covers48incompatible/compatible relocation, unwrap and repeating
+scenarios over four slots and alternating wrappers, including exact metadata
+bytes after reopen. Actual old-hosted semantic RED and final native3958f3a4
+GREEN are distinct from failed installation, fixture and environment attempts.
+InstalledWord1064, native1123composed passes, bothWASM, scoped clippy, typing,
+190policy passes/two skips, hash49/pixels7 and README inventories qualify the
+local amendment. Independent focused microscope has zero findings and18extra
+boundary probes. Updated verified archive/hosted qualification and sprint pass5
+remain due. No new effort/velocity or publication credit is recorded here.
+
+Process-only4ebd83bd refines implementation and microscope commands after this
+pass4 trigger. Admitted wrappers with context-dependent payloads require inherited
+destination grammar, separate metadata and compatible positive controls. Both
+generated adapters match. Instructions and product remediation remain separate.
+
+The later independent typed-context investigation found compatible empty
+payloads could retain an invalid physical repeating type. The same amendment
+now protects physical placement and section/item ownership during relocation,
+type retirement and unwrap, while preserving compatible enclosing ownership.
+Actual nativee07f191d passes fullWord1065, installed priorities/typing, native
+integration412composed cases, scoped lint and bothWASM. The fixture failure
+remains historical. Current archive/hosted and final review remain pending.
+Process-only3277ed28 refines design, implementation and microscope instructions
+to separate physical type, payload grammar and owner constraints, including
+inverse transitions. Primary-source containment is not immediate parenthood.
+This adds no second delivery, effort or velocity credit.
+
+Independent F-286 repeating-context microscope pass1 accepts this amendment
+with zero defects, smells and nitpicks, plus five additional installed probes.
+Actual49hashes, seven deterministic pixels and README inventories pass. The
+clean verified archive, updated hosted qualification and final sprint pass5
+remain due. No publication approval or sprint closure is implied.
+
+Final qualification of the same B2 amendment, 2026-10-22.
+
+The B2 customXml and typed-context amendments are accepted after both clean
+independent focused microscopes and actual current artifact qualification.
+Clean35238e5b verifies the affected rdocx archive. The other21genuine verified
+archives retain unchanged inputs and their082aafa9producer. Exact7Word0.16.3
+and15shared-PowerPoint0.14.3archives remain below10MiB. Actual build-only
+[39820083897](https://github.com/tensorbee/rdocx/actions/runs/39820083897)
+executes35238e5b with27successful deciding jobs and four publication skips.
+All26unique payloads are authenticated. Fresh installed downloaded wheels pass
+172priority calls, both strict3.12typing/stub checks and four additional
+placement-matrix calls over3.9/3.12. Prior hosted runs retain their identities.
+
+Current local Word1065passes and applicable unchanged PowerPoint1028passes
+qualify installed products. Native acceptance composes6733passes/73ignored,
+including710library,412integration and twodoctests for affected rdocx. The
+411-case successful subset and separately corrected new fixture case remain
+distinct from the failed aggregate attempt. Current lint, bothWASM, README,
+49hashes and seven deterministic pixels pass. Actual policy is190passes and
+two existing skips, plus four applicable final-state checks. No prior failure
+is relabeled. Source correspondence authenticates322unchanged inputs and
+three requalified inputs in the325-file manifest. Native Word, independent
+fonts, strict cost ratios and bounded corpus observations retain their actual
+producers. The advisory SSIM target remains missed and private Issue390 stays
+unqualified/open. Original delivery records and eight-story totals remain
+historical, with no second completion, effort or velocity credit.
+
+Only independent final sprint pass5 and closure remain before the separate
+exact-clean-main publication preflight and approval. No release is authorized
+by this qualification. Earlier checkpoint sections preserve what was pending
+at those times.
+
+Final namespace qualification of the same B2 amendment, 2026-10-22.
+
+The same B2 invariant is repaired through both imported TypeElement parser
+paths. Modeled staging preserves the original qualified type and its namespace
+scope. Newly authored or changed kinds retain canonical authoring. The clean
+independent namespace-identity microscope has zero defects, smells or nitpicks,
+including 120 additional alias/shadow controls. The process refinement requires
+checking transformations before guards, expanded namespace identity and actual
+modeled serialization, with compatible edits and atomic refusals.
+
+Actual source-qualified native acceptance composes 6,734 passes with 73 ignored.
+Of these, 4,801 passes are freshly executed for the changed OXML serializer and
+its Word dependents. They include 739 OXML units and one doctest, 710 Word
+library, 412 integration, 2,457 regression and two Word doctests, plus 480
+other Word-dependent cases. Unchanged producers qualify the other 1,933 cases.
+The actual fresh installed local Word wheel passes all 1,066 tests, both
+42-case priorities, strict typing/stubs and three matrices on Python 3.9/3.12.
+The unchanged PowerPoint whole-suite observation remains 1,028 passes. Current
+lint, both WASM graphs, all 49 hashes and seven deterministic pixel buffers,
+22 README inventories and 190 policy passes with two existing skips pass.
+Final metadata-dependent policies are checked after these record edits.
+
+Clean source 01d800f9 genuinely verifies both changed rdocx-oxml and rdocx
+archives. The other 20 archives retain their unchanged inputs and actual
+082aafa9 verification producer. The exact seven Word 0.16.3 and fifteen shared
+OOXML/PowerPoint 0.14.3 archives remain below 10 MiB. Actual build-only
+[CI run 39830343186](https://github.com/tensorbee/rdocx/actions/runs/39830343186)
+executes 01d800f9 with 27 deciding successes and four publication skips.
+Its 26 unique raw payloads are authenticated. Fresh downloaded-wheel installs
+pass 172 priority calls, both strict typing/stub suites and six additional
+matrix calls over Python 3.9/3.12. Source correspondence authenticates 320
+unchanged and five requalified inputs in the original 325-file manifest.
+
+The old-native semantic REDs, first OXML aggregate's stale lexical assertion,
+sandbox network failure and all earlier failed attempts remain historical.
+The corrected OXML suite has 739 passes. Current native and installed results
+are real executions, without relabeling previous artifacts at a later SHA.
+Native Word, genuine independent font producers, seven strict edit ratios,
+three strict read ratios and bounded corpus evidence retain their actual
+producers and applicable inputs. The SSIM advisory target remains missed.
+The private unreduced Issue 390 input remains unqualified and open.
+
+All eight original delivery records remain complete with no carries or new
+story, effort or velocity credit for this amendment. Earlier checkpoint
+paragraphs describe their actual producers and the pending state at that time.
+At this qualification checkpoint, final sprint pass 6 and closure are pending.
+Their actual outcomes follow in the numbered review and sprint tag. Q26 preserves
+passes 1 through 5 and permits pass 7 only if needed. Publication requires
+separate approval at the exact clean main merge SHA after closure.

@@ -727,13 +727,17 @@ pub(crate) fn admit_word_reader(
 }
 
 /// Content that can appear in a document body (paragraphs and tables).
+///
+/// Each child is boxed. A direct-body removal then shifts pointers instead of
+/// copying the child value, which is what keeps that removal from growing with
+/// the rest of the body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BodyContent {
-    Paragraph(CT_P),
-    Table(CT_Tbl),
-    ContentControl(CT_Sdt),
+    Paragraph(Box<CT_P>),
+    Table(Box<CT_Tbl>),
+    ContentControl(Box<CT_Sdt>),
     /// Raw XML for unknown elements and controls that cannot be typed safely.
-    RawXml(Vec<u8>),
+    RawXml(Box<Vec<u8>>),
 }
 
 /// Column definition for multi-column layouts.
@@ -3403,7 +3407,7 @@ impl CT_Body {
         let mut paragraphs = Vec::new();
         for content in &self.content {
             match content {
-                BodyContent::Paragraph(paragraph) => paragraphs.push(paragraph),
+                BodyContent::Paragraph(paragraph) => paragraphs.push(paragraph.as_ref()),
                 BodyContent::ContentControl(sdt) => {
                     sdt.collect_paragraphs(SdtOwner::Body, &mut paragraphs)
                 }
@@ -3465,7 +3469,7 @@ impl CT_Body {
     /// Get a mutable iterator over only the paragraphs.
     pub fn paragraphs_mut(&mut self) -> impl Iterator<Item = &mut CT_P> {
         self.content.iter_mut().filter_map(|c| match c {
-            BodyContent::Paragraph(p) => Some(p),
+            BodyContent::Paragraph(p) => Some(p.as_mut()),
             _ => None,
         })
     }
@@ -3475,7 +3479,7 @@ impl CT_Body {
         let mut tables = Vec::new();
         for content in &self.content {
             match content {
-                BodyContent::Table(table) => tables.push(table),
+                BodyContent::Table(table) => tables.push(table.as_ref()),
                 BodyContent::ContentControl(sdt) => sdt.collect_tables(SdtOwner::Body, &mut tables),
                 BodyContent::Paragraph(_) | BodyContent::RawXml(_) => {}
             }
@@ -3486,19 +3490,19 @@ impl CT_Body {
     /// Get a mutable iterator over only the tables.
     pub fn tables_mut(&mut self) -> impl Iterator<Item = &mut CT_Tbl> {
         self.content.iter_mut().filter_map(|c| match c {
-            BodyContent::Table(t) => Some(t),
+            BodyContent::Table(t) => Some(t.as_mut()),
             _ => None,
         })
     }
 
     /// Add a paragraph to the body.
     pub fn add_paragraph(&mut self, p: CT_P) {
-        self.content.push(BodyContent::Paragraph(p));
+        self.content.push(BodyContent::Paragraph(Box::new(p)));
     }
 
     /// Add a table to the body.
     pub fn add_table(&mut self, tbl: CT_Tbl) {
-        self.content.push(BodyContent::Table(tbl));
+        self.content.push(BodyContent::Table(Box::new(tbl)));
     }
 
     /// Get the number of body content elements (paragraphs + tables).
@@ -3510,14 +3514,16 @@ impl CT_Body {
     ///
     /// Panics if `index > content_count()`.
     pub fn insert_paragraph(&mut self, index: usize, p: CT_P) {
-        self.content.insert(index, BodyContent::Paragraph(p));
+        self.content
+            .insert(index, BodyContent::Paragraph(Box::new(p)));
     }
 
     /// Insert a table at the given index.
     ///
     /// Panics if `index > content_count()`.
     pub fn insert_table(&mut self, index: usize, tbl: CT_Tbl) {
-        self.content.insert(index, BodyContent::Table(tbl));
+        self.content
+            .insert(index, BodyContent::Table(Box::new(tbl)));
     }
 
     /// Find the index of the first paragraph whose text contains the given substring.
@@ -3621,9 +3627,9 @@ impl CT_Body {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     if is_word_element(name.as_ref(), b"p", &prefixes) {
-                        content.push(BodyContent::Paragraph(
+                        content.push(BodyContent::Paragraph(Box::new(
                             CT_P::from_xml_with_prefixes_and_root(reader, &prefixes, Some(e))?,
-                        ));
+                        )));
                     } else if is_word_element(name.as_ref(), b"tbl", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let table_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
@@ -3635,16 +3641,16 @@ impl CT_Body {
                             Some(e),
                         )?;
                         table.retain_root_attributes(e, &prefixes)?;
-                        content.push(BodyContent::Table(table));
+                        content.push(BodyContent::Table(Box::new(table)));
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
                         if let Some(sdt) = CT_Sdt::from_body_raw(&raw, &prefixes) {
-                            content.push(BodyContent::ContentControl(sdt));
+                            content.push(BodyContent::ContentControl(Box::new(sdt)));
                         } else {
-                            content.push(BodyContent::RawXml(raw));
+                            content.push(BodyContent::RawXml(Box::new(raw)));
                         }
                     } else if is_word_element(name.as_ref(), b"sectPr", &prefixes) {
                         if sect_pr.is_none() {
@@ -3659,48 +3665,50 @@ impl CT_Body {
                                     Some(e),
                                 )?);
                         } else {
-                            content.push(BodyContent::RawXml(
+                            content.push(BodyContent::RawXml(Box::new(
                                 crate::text::raw_with_external_bindings(
                                     &capture_element(reader, e)?,
                                     owner_bindings,
                                 )?,
-                            ));
+                            )));
                         }
                     } else {
                         // Capture unknown elements as raw XML
-                        content.push(BodyContent::RawXml(
+                        content.push(BodyContent::RawXml(Box::new(
                             crate::text::raw_with_external_bindings(
                                 &capture_element(reader, e)?,
                                 owner_bindings,
                             )?,
-                        ));
+                        )));
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     if is_word_element(name.as_ref(), b"p", &prefixes) {
-                        content.push(BodyContent::Paragraph(CT_P::from_empty_root(e, &prefixes)?));
+                        content.push(BodyContent::Paragraph(Box::new(CT_P::from_empty_root(
+                            e, &prefixes,
+                        )?)));
                     } else if is_word_element(name.as_ref(), b"tbl", &prefixes) {
-                        content.push(BodyContent::Table(CT_Tbl::new()));
+                        content.push(BodyContent::Table(Box::default()));
                     } else if is_word_element(name.as_ref(), b"sectPr", &prefixes) {
                         if sect_pr.is_none() {
                             sect_pr = Some(CT_SectPr::from_empty_root(e, &prefixes)?);
                         } else {
-                            content.push(BodyContent::RawXml(
+                            content.push(BodyContent::RawXml(Box::new(
                                 crate::text::raw_with_external_bindings(
                                     &capture_empty_element(e)?,
                                     owner_bindings,
                                 )?,
-                            ));
+                            )));
                         }
                     } else {
-                        content.push(BodyContent::RawXml(
+                        content.push(BodyContent::RawXml(Box::new(
                             crate::text::raw_with_external_bindings(
                                 &capture_empty_element(e)?,
                                 owner_bindings,
                             )?,
-                        ));
+                        )));
                     }
                 }
                 Ok(Event::End(ref e))
@@ -4074,7 +4082,7 @@ mod tests {
             .content
             .iter()
             .filter_map(|item| match item {
-                super::BodyContent::ContentControl(control) => Some(control),
+                super::BodyContent::ContentControl(control) => Some(control.as_ref()),
                 _ => None,
             })
             .collect();
@@ -4769,7 +4777,7 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        model.body.content = vec![super::BodyContent::Table(table)];
+        model.body.content = vec![super::BodyContent::Table(Box::new(table))];
         let clone = model.clone();
         let saved = clone.to_xml().unwrap();
         let reopened = super::CT_Document::from_xml(&saved).unwrap();
@@ -4788,7 +4796,7 @@ mod tests {
         let mut table = crate::table::CT_Tbl::new();
         let mut row = crate::table::CT_Row::new();
         let mut cell = crate::table::CT_Tc::new();
-        cell.content = vec![crate::table::CellContent::Table(inner)];
+        cell.content = vec![crate::table::CellContent::Table(*inner)];
         row.cells = vec![cell];
         table.rows = vec![row];
         assert!(super::admit_word_model(super::WordOwner::Table(&table)).is_err());
@@ -4856,14 +4864,14 @@ mod tests {
         let super::BodyContent::ContentControl(template) = &accepted.body.content[0] else {
             panic!("expected template");
         };
-        let template = template.clone();
+        let template = template.as_ref().clone();
         let mut inner = template.clone();
         for _ in 1..256 {
             let mut outer = template.clone();
             outer.content = vec![crate::content_control::SdtContent::ContentControl(inner)];
             inner = outer;
         }
-        accepted.body.content = vec![super::BodyContent::ContentControl(inner)];
+        accepted.body.content = vec![super::BodyContent::ContentControl(Box::new(inner))];
         println!("authored256 constructed iteratively");
         accepted.validate_resource_limits().unwrap();
         println!("authored256 borrowed admission passed");
@@ -4875,7 +4883,7 @@ mod tests {
         let super::BodyContent::ContentControl(inner) = accepted.body.content.remove(0) else {
             panic!("expected inner control");
         };
-        control.content = vec![crate::content_control::SdtContent::ContentControl(inner)];
+        control.content = vec![crate::content_control::SdtContent::ContentControl(*inner)];
         assert!(outer.validate_resource_limits().is_err());
         assert!(outer.to_xml().is_err());
         let mut bytes = vec![1, 2, 3];
@@ -5411,11 +5419,11 @@ mod tests {
         let BodyContent::RawXml(raw) = &parsed.body.content[2] else {
             panic!("foreign paragraph must remain raw");
         };
-        assert_eq!(raw, br#"<ext:p ext:flag="keep"/>"#);
+        assert_eq!(raw.as_slice(), br#"<ext:p ext:flag="keep"/>"#);
         let BodyContent::RawXml(raw) = &parsed.body.content[3] else {
             panic!("foreign body must remain raw");
         };
-        assert_eq!(raw, br#"<ext:body/>"#);
+        assert_eq!(raw.as_slice(), br#"<ext:body/>"#);
         assert!(parsed.body.sect_pr.is_some());
         assert_eq!(parsed.body.content.len(), 4);
 

@@ -114,6 +114,10 @@ defended.
 
 | S95.11 | M24, X | 4 | 3 | 1 | 12 to 16 | 2 | F-X250/F-X254 repairs and F-X223 bounded native investigation completed. User accepted documenting Word's native limit, broader genuine multi-face use remains unqualified and fourteen observer refusals remain unsupported. F-X219 full-range opacity remains unfinished and is carried to S96, which has not started. Retained three-story estimate10 to13 developer-days. Actual source-bound verification at 05ba6cc8461a896fa751ca7dc1fe209a8fa70045 joins H3/H5/836/H7 observations, with6616 unique native passes/73ignored,11doctests,955Word/1007PPT installed plus typing/stubs,27 distinct Issue385 bodies,49hashes/7pixels and22verified package union. Actual developer effort not recorded. Close actuals count worked dates2026-10-16and17. No release or new version |
 
+| S95.2 | M24, X | 3 | 2 | 1 | 12 to 15 | 2 | F-283 numbering-aware navigation and F-284 versioned template grammar completed. F-X192 stays unfinished and is carried to S96, which has not started. Retained two-story estimate is 8 to 10 developer-days. Original three-story estimate was 12 to 15. Actual days are the worked dates 2026-10-17 and 2026-10-18, not person-effort. Full verification at b240cb3509a9641fe265ebfc605c987a3f35e143 passed with 49 unchanged hashes, seven pixel cases, 22 package inventories under 10 MiB, both WASM targets, installed Python typing and stubs, and pinned Word 16.114 plus LibreOffice 26.2.5.2 oracles. Actual developer effort not recorded. Issues 264 and 281 stay open. No release prepared. M24 continues through S99. |
+
+| S95.3 | M24, X | 8 | 8 | 0 | 34 to 49 | 3 | Eight contracts complete, no carries. Actual days are worked dates 2026-10-18, 19 and 22, not person-effort. Current source-qualified native 6,734/73 ignored, installed Word 1,066 and applicable PPT 1,028, 49 hashes/seven pixels, 22 verified archives and current hosted 39830343186 with 27 successes/four publication skips, 26 payloads, 172 priorities and six matrix calls pass. Historical failures remain. Final review and closure outcomes follow the actual reports and sprint tag. M24 continues to S99. No publication |
+
 ## Completed features
 
 | F-ID | Sprint | Size | Est. days | Actual days | Completed | Notes |
@@ -592,6 +596,19 @@ defended.
 | F-X254 | S95.11 | L | 4 to 5 | not recorded | 2026-10-17 | Atomic PowerPoint value/XML/CLI refusals, ten unchanged reporter cases, native PowerPoint save/reopen and independent XML, affected native/CLI GREEN, explicit user-approved ValidationIssue enum exhaustive-match compatibility boundary. Shared 05ba6cc8461a896fa751ca7dc1fe209a8fa70045 verification and current H7 CLI genuine archive proof, no release |
 | F-X223 | S95.11 | M | 2 to 3 | not recorded | 2026-10-17 | User accepted documented Word limit after27 actual phases,13 finite observations/14unsupported refusals. Genuine properBold in3phases, pairedItalic Regular outlines with shear, native normalization and sensitivities retained. Bounded investigation complete, broader genuine paired/four-face consumption unqualified. No speculative writer repair or F-X223 carry |
 
+| F-283 | S95.2 | L | 4 to 5 | not recorded | 2026-10-18 | Numbered REF and STYLEREF follow the captured Word 16.114 context rules, including literal full context, unnumbered STYLEREF level results, and cross-instance sharing only for one definition without a start override. Clean microscope pass 2. 49 hashes unchanged |
+| F-284 | S95.2 | L | 4 to 5 | not recorded | 2026-10-18 | Opt-in grammar 1 renders one payload across body, table, header, footer, note, and text box, with legacy calls unchanged. Clean microscope pass 1. Word 16.114 and LibreOffice 26.2.5.2 preserved the declared text. 49 hashes unchanged |
+
+| F-X259 | S95.3 | M | 2 to 3 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+| F-X260 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+| F-X261 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+| F-X262 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+| F-285 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+| F-286 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+| F-287 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
+
+| F-X263 | S95.3 | L | 3 to 5 additional | not recorded | 2026-10-22 | Exact patch families prepared, clean microscope, genuinely verified22archives and actual hosted27success/fourpublicationSKIP/26payloads. Downloaded priority172calls and strict typing/stubs pass. No publication |
+
 ## Velocity
 
 Recalculated at each sprint close. The backlog assumes about 2 stories per week
@@ -703,6 +720,10 @@ five working days.
 | S94 | 5 | 1 | 25.00 |
 | S95 | 9 | 1 | 45.00 |
 | S95.11 | 3 | 2 | 7.50 |
+| S95.2 | 2 | 2 | 5.00 |
+| S95.3 | 8 | 3 | 13.33 |
+
+S95.2 records two worked dates, 2026-10-17 and 2026-10-18. Its 5.00 stories per week counts two completed stories over those dates. It is calendar throughput, not person effort. F-X192 remains carried and is not counted as completed.
 
 S90 velocity measures calendar throughput for a parallel team. It does not
 measure person effort or establish a sustainable single-developer forecast.
@@ -724,6 +745,8 @@ S94 records one worked date, 2026-10-16. Its 25.00 stories per week measures par
 
 S95 records one worked date,2026-10-16. Its45.00 stories per week measures parallel calendar throughput, not person-effort or a sustainable single-developer forecast. The last three windows,S93,S94andS95,total21stories over4worked-date units,or26.25stories per week. Shared dates are not person-days, and per-feature actual effort remains unrecorded. The80.00percent increase from S94 exceeds the30percent close-report escalation threshold. The rolling rate is16.67percent above the preceding22.50 rate. Retain the approved22to31 developer-day estimate for seven medium and two large stories. The user explicitly expanded S95 to include Issue386 before release preparation. Preserve the dependent S95.11 and later roadmap boundaries and their effort estimates. This summary does not claim sprint review, main merge, sprint close, tags or publication have occurred.
 
+S95.3 records three worked dates,2026-10-18,19and22. Eight stories over three date units give13.33stories/week,166.67percent above S95.2 and beyond the30percent escalation threshold. S95.11/S95.2/S95.3 total13completed stories over7worked-date units, or9.29stories/week. Shared calendar dates are not person-days. Feature effort is not recorded. Preserve the34to49developer-day expanded estimate, later sprint boundaries and explicit dependency gates. Final review and close remain due.
+
 ## Escalation record
 
 Logged when an escalation trigger from `.claude/WORKFLOW.md` fires, with what
@@ -731,6 +754,7 @@ was done about it. Empty is the expected state.
 
 | Date | Trigger | F-ID or sprint | Response |
 |------|---------|----------------|----------|
+| 2026-10-22 | Sprint throughput variance exceeds30percent | S95.3 | Record13.33stories/week,166.67percent above S95.2, as calendar throughput across three worked dates. Retain34to49estimated developer-days and later dependency/capacity boundaries. Do not infer person effort or a sustainable forecast |
 | 2026-10-17 | Sprint throughput variance exceeds30percent | S95.11 | Record7.50stories/week,83.33percent below S95, as parallel calendar throughput across two worked dates. Preserve S95.2/S95.3/S95.4 dependency boundaries and developer estimates. No person-effort or elapsed-time forecast is inferred |
 | 2026-10-16 | Sprint throughput variance exceeds30percent | S95 | Record45.00stories/week,80.00percent above S94,as parallel calendar throughput. The last three windows yield26.25stories/week. Preserve22to31developer-day effort estimates and the explicit user-approved expansion to nine stories. Retain S95.11 and later dependency boundaries without converting throughput into elapsed delivery promises. Formal review,close and publication remain separate |
 | 2026-10-16 | Sprint throughput variance exceeds30percent | S93 | Record17.50stories/week,41.67percent below S92, as parallel calendar throughput. The last three windows yield21.25stories/week, above the2story/week planning assumption. Preserve effort estimates and require the existing S95 capacity split before opening that sprint |

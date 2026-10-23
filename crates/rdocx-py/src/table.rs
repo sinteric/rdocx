@@ -70,6 +70,7 @@ impl TableLocation {
         &self,
         document: &rdocx::Document,
     ) -> rdocx::Result<rdocx::ContentLocation> {
+        crate::document::note_fx260_word(document.content_count().max(1));
         match self {
             Self::Related(location) => Self::refreshed(document, location),
             Self::Body(index) => {
@@ -96,6 +97,7 @@ impl TableLocation {
         document: &rdocx::Document,
         location: &rdocx::ContentLocation,
     ) -> rdocx::Result<rdocx::ContentLocation> {
+        crate::document::note_fx260_word(document.content_count().max(1));
         let owner = location.story();
         let story = document
             .stories()?
@@ -117,6 +119,7 @@ impl TableLocation {
         document: &rdocx::Document,
         read: impl FnOnce(rdocx::TableRef<'_>) -> T,
     ) -> rdocx::Result<T> {
+        crate::document::note_fx260_word(document.content_count().max(1));
         match self {
             Self::Body(index) => document
                 .table(*index)
@@ -369,7 +372,7 @@ impl PyTableCollection {
 #[pymethods]
 impl PyTableCollection {
     fn __len__(&self, py: Python<'_>) -> usize {
-        self.document.borrow(py).inner.table_count()
+        self.document.borrow(py).cached_body_table_count()
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -471,7 +474,11 @@ impl PyTable {
         let index = table_index(&self.path)?;
         {
             let document = self.document.borrow(py);
-            match TableLocation::new(index, &self.related).native(&document.inner) {
+            match document
+                .indexed_table_location(index, &self.related)
+                .map(Ok)
+                .unwrap_or_else(|| TableLocation::new(index, &self.related).native(&document.inner))
+            {
                 Ok(location) => {
                     let (path, owner) = document.capture_owner(
                         &crate::document::WordOwnerLocation::Table(location),
@@ -525,10 +532,11 @@ impl PyTable {
                     "Re-fetch it from its current physical owner.",
                 )
                 .map_err(|error| stale_to_pyerr(py, error))?;
-            return self
-                .document
-                .borrow(py)
-                .current_table_owner(owner)
+            let document = self.document.borrow(py);
+            return document
+                .indexed_table_owner_location(owner)
+                .map(Ok)
+                .unwrap_or_else(|| document.current_table_owner(owner))
                 .map(Some);
         }
         Ok(self.related.clone())
@@ -593,7 +601,7 @@ impl PyTable {
         let result = TableLocation::new(index, &current_related.clone())
             .edit(&mut candidate, edit)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.inner = candidate;
+        document.adopt_property_edit(py, candidate, "Table property edit")?;
         Ok(result)
     }
 
@@ -662,16 +670,12 @@ impl PyTable {
         let path = match &self.owner {
             Some(owner) => {
                 let document = self.document.borrow(py);
-                document
-                    .capture_owner(
-                        &crate::document::WordOwnerLocation::Table(
-                            document.current_table_owner(owner)?,
-                        ),
-                        self.path.segs.clone(),
-                        crate::document::WordView::Grid,
-                        self.furniture_scope.as_ref(),
-                    )?
-                    .0
+                document.capture_current_view(
+                    owner,
+                    self.path.segs.clone(),
+                    crate::document::WordView::Grid,
+                    self.furniture_scope.as_ref(),
+                )?
             }
             None => self.path.clone(),
         };
@@ -1115,8 +1119,10 @@ impl PyTable {
                 crate::document::WordPublication::Conservative,
             )?;
             document.commit_word_revision(prepared)?;
+            document.inner = candidate;
+        } else {
+            document.adopt_property_edit(py, candidate, "Table.set_cell_grid_span")?;
         }
-        document.inner = candidate;
         Ok(())
     }
 
@@ -1361,10 +1367,11 @@ impl PyRowCollection {
             )
             .map_err(|error| stale_to_pyerr(py, error))?;
         if let (Some(owner), Some(_)) = (&self.table_owner, &self.related) {
-            return self
-                .document
-                .borrow(py)
-                .current_table_owner(owner)
+            let document = self.document.borrow(py);
+            return document
+                .indexed_table_owner_location(owner)
+                .map(Ok)
+                .unwrap_or_else(|| document.current_table_owner(owner))
                 .map(Some);
         }
         Ok(self.related.clone())
@@ -1383,6 +1390,11 @@ impl PyRowCollection {
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let index = self.validate(py)?;
+        if let Some(owner) = &self.table_owner
+            && let Some(rows) = self.document.borrow(py).cached_table_rows(owner)
+        {
+            return Ok(rows.len());
+        }
         TableLocation::new(index, &self.current_related(py)?)
             .read(&self.document.borrow(py).inner, |table| table.row_count())
             .map_err(|error| rdocx_to_pyerr(py, error))
@@ -1509,7 +1521,11 @@ impl PyRow {
         let index = table_index(&self.path)?;
         {
             let document = self.document.borrow(py);
-            match TableLocation::new(index, &self.related).native(&document.inner) {
+            match document
+                .indexed_table_location(index, &self.related)
+                .map(Ok)
+                .unwrap_or_else(|| TableLocation::new(index, &self.related).native(&document.inner))
+            {
                 Ok(location) => {
                     let (path, owner) = document.capture_owner(
                         &crate::document::WordOwnerLocation::Table(location),
@@ -1562,10 +1578,11 @@ impl PyRow {
             )
             .map_err(|error| stale_to_pyerr(py, error))?;
         if let (Some(owner), Some(_)) = (&self.table_owner, &self.related) {
-            return self
-                .document
-                .borrow(py)
-                .current_table_owner(owner)
+            let document = self.document.borrow(py);
+            return document
+                .indexed_table_owner_location(owner)
+                .map(Ok)
+                .unwrap_or_else(|| document.current_table_owner(owner))
                 .map(Some);
         }
         Ok(self.related.clone())
@@ -1614,7 +1631,7 @@ impl PyRow {
                 edit(&mut row)
             })
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.inner = candidate;
+        document.adopt_property_edit(py, candidate, "Row property edit")?;
         Ok(())
     }
 }
@@ -1740,10 +1757,11 @@ impl PyCellCollection {
             )
             .map_err(|error| stale_to_pyerr(py, error))?;
         if let (Some(owner), Some(_)) = (&self.table_owner, &self.related) {
-            return self
-                .document
-                .borrow(py)
-                .current_table_owner(owner)
+            let document = self.document.borrow(py);
+            return document
+                .indexed_table_owner_location(owner)
+                .map(Ok)
+                .unwrap_or_else(|| document.current_table_owner(owner))
                 .map(Some);
         }
         Ok(self.related.clone())
@@ -1762,6 +1780,14 @@ impl PyCellCollection {
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let (table, row) = self.validate(py)?;
+        if let Some(owner) = &self.table_owner
+            && let Some(rows) = self.document.borrow(py).cached_table_rows(owner)
+        {
+            return rows
+                .get(row)
+                .map(Vec::len)
+                .ok_or_else(|| PyIndexError::new_err("row index out of range"));
+        }
         TableLocation::new(table, &self.current_related(py)?)
             .read(&self.document.borrow(py).inner, |table| {
                 table.row(row).map(|row| row.cell_count())
@@ -1910,19 +1936,29 @@ impl PyCell {
         let cell = cell_index(&self.path)?;
         {
             let document = self.document.borrow(py);
-            match TableLocation::new(table, &self.related).native(&document.inner) {
+            match document
+                .indexed_table_location(table, &self.related)
+                .map(Ok)
+                .unwrap_or_else(|| TableLocation::new(table, &self.related).native(&document.inner))
+            {
                 Ok(table) => {
-                    let story = document
-                        .inner
-                        .story_table_cell(&table, row, cell)
-                        .map_err(|error| rdocx_to_pyerr(py, error))?;
+                    let location = match document.indexed_cell_location(&table, row, cell) {
+                        Some(location) => location,
+                        None => {
+                            let story = document
+                                .inner
+                                .story_table_cell(&table, row, cell)
+                                .map_err(|error| rdocx_to_pyerr(py, error))?;
+                            crate::document::WordOwnerLocation::Cell {
+                                table,
+                                row,
+                                cell,
+                                story,
+                            }
+                        }
+                    };
                     let (path, owner) = document.capture_owner(
-                        &crate::document::WordOwnerLocation::Cell {
-                            table,
-                            row,
-                            cell,
-                            story,
-                        },
+                        &location,
                         self.path.segs.clone(),
                         crate::document::WordView::Owner,
                         self.furniture_scope.as_ref(),
@@ -1947,9 +1983,11 @@ impl PyCell {
             )
             .map_err(|error| stale_to_pyerr(py, error))?;
         if let (Some(owner), Some(_)) = (&self.owner, &self.related) {
-            return self
-                .document
-                .borrow(py)
+            let document = self.document.borrow(py);
+            if let Some(table) = document.indexed_cell_parent_location(owner) {
+                return Ok(Some(table));
+            }
+            return document
                 .current_cell_owner(owner)
                 .map(|(table, _, _)| Some(table));
         }
@@ -2003,7 +2041,7 @@ impl PyCell {
                 edit(&mut cell)
             })
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.inner = candidate;
+        document.adopt_property_edit(py, candidate, "Cell property edit")?;
         Ok(())
     }
 }
@@ -2291,29 +2329,43 @@ impl PyCell {
     #[getter]
     fn tables<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let (table, row, cell) = self.validate(py)?;
-        let current_related = self.current_related(py)?;
-        let document = self.document.borrow(py);
-        let story = self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
-        let mut tables = Vec::new();
-        for item in document
-            .inner
-            .story_items(&story)
-            .map_err(|error| rdocx_to_pyerr(py, error))?
-        {
-            if item.kind() == rdocx::StoryItemKind::Table {
-                let location = item.location().clone();
-                let path = document
-                    .revisions
-                    .capture(smallvec![PathSeg::Body(location.index_path()[0])]);
-                tables.push(Py::new(
-                    py,
-                    PyTable::for_story(self.document.clone_ref(py), path, location)
-                        .bind_current(py, self.furniture_scope.clone())?,
-                )?);
+        let cached = self
+            .owner
+            .as_ref()
+            .and_then(|owner| self.document.borrow(py).cached_cell_tables(owner));
+        let locations = match cached {
+            Some(locations) => locations,
+            None => {
+                let current_related = self.current_related(py)?;
+                let document = self.document.borrow(py);
+                let story =
+                    self.physical_story(py, &document.inner, &current_related, table, row, cell)?;
+                document
+                    .inner
+                    .story_items(&story)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?
+                    .into_iter()
+                    .filter(|item| item.kind() == rdocx::StoryItemKind::Table)
+                    .map(|item| item.location().clone())
+                    .collect()
             }
+        };
+        let mut tables = Vec::new();
+        for location in locations {
+            let path = self
+                .document
+                .borrow(py)
+                .revisions
+                .capture(smallvec![PathSeg::Body(location.index_path()[0])]);
+            tables.push(Py::new(
+                py,
+                PyTable::for_story(self.document.clone_ref(py), path, location)
+                    .bind_current(py, self.furniture_scope.clone())?,
+            )?);
         }
         PyTuple::new(py, tables)
     }
+
     fn add_table(&self, py: Python<'_>, rows: usize, cols: usize) -> PyResult<Py<PyTable>> {
         let (table, row, cell) = self.validate(py)?;
         let current_related = self.current_related(py)?;
@@ -2416,24 +2468,12 @@ impl PyCell {
         let path = match &self.owner {
             Some(owner) => {
                 let document = self.document.borrow(py);
-                let (table, row, cell) = document.current_cell_owner(owner)?;
-                let story = document
-                    .inner
-                    .story_table_cell(&table, row, cell)
-                    .map_err(|error| rdocx_to_pyerr(py, error))?;
-                document
-                    .capture_owner(
-                        &crate::document::WordOwnerLocation::Cell {
-                            table,
-                            row,
-                            cell,
-                            story,
-                        },
-                        self.path.segs.clone(),
-                        crate::document::WordView::Content,
-                        self.furniture_scope.as_ref(),
-                    )?
-                    .0
+                document.capture_current_view(
+                    owner,
+                    self.path.segs.clone(),
+                    crate::document::WordView::Content,
+                    self.furniture_scope.as_ref(),
+                )?
             }
             None => self.path.clone(),
         };
@@ -2651,9 +2691,11 @@ impl PyCellParagraphCollection {
             )
             .map_err(|error| stale_to_pyerr(py, error))?;
         if let (Some(owner), Some(_)) = (&self.cell_owner, &self.related) {
-            return self
-                .document
-                .borrow(py)
+            let document = self.document.borrow(py);
+            if let Some(table) = document.indexed_cell_parent_location(owner) {
+                return Ok(Some(table));
+            }
+            return document
                 .current_cell_owner(owner)
                 .map(|(table, _, _)| Some(table));
         }
@@ -2677,6 +2719,11 @@ impl PyCellParagraphCollection {
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let (table, row, cell) = self.validate(py)?;
+        if let Some(owner) = &self.cell_owner
+            && let Some(count) = self.document.borrow(py).cached_cell_paragraph_count(owner)
+        {
+            return Ok(count);
+        }
         TableLocation::new(table, &self.current_related(py)?)
             .read(&self.document.borrow(py).inner, |table| {
                 table.cell(row, cell).map(|cell| cell.paragraph_count())
@@ -2689,6 +2736,21 @@ impl PyCellParagraphCollection {
         let mut segments = self.cell_path.segs.clone();
         segments.push(PathSeg::Para(index));
         let path = self.document.borrow(py).revisions.capture(segments);
+        let cached = self
+            .cell_owner
+            .as_ref()
+            .and_then(|owner| self.document.borrow(py).cached_cell_paragraph(owner, index));
+        if let Some(location) = cached {
+            let paragraph = if self.related.is_some() {
+                PyParagraph::for_story(self.document.clone_ref(py), path, location)
+            } else {
+                PyParagraph::new(self.document.clone_ref(py), path)
+            };
+            return Py::new(
+                py,
+                paragraph.bind_current(py, self.furniture_scope.clone())?,
+            );
+        }
         let related = match &self.current_related(py)? {
             Some(location) => {
                 let (_, row, cell) = self.validate(py)?;

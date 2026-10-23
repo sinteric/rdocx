@@ -2,7 +2,7 @@
 description: Claim an F-ID for parallel work. Creates its isolated branch and worktree, and records the claim in one commit.
 ---
 
-# /claim-feature F-XXX {claude|codex} <worktree-path>
+# /claim-feature F-XXX <agent> <worktree-path>
 
 Assign one story to one worker so two sessions cannot write the same tree. Run
 this **only from the canonical sprint worktree**, never from a worker's.
@@ -32,7 +32,9 @@ without altering sprint state, branches or worktrees.
    sections. A whole-document spec citation is a failure here, the same as it is
    in `/start-feature`.
 
-5. **The owner is exactly `claude` or `codex`.**
+5. **The owner is the actual lowercase implementing host identity**, such as
+   `claude`, `codex` or `grok`, using only lowercase letters, digits and hyphens.
+   Do not impersonate another model to fit an old example.
 
 6. **The worktree path is given explicitly and does not exist.** Do not infer a
    path and do not delete one. Put it outside the repository, as a sibling
@@ -89,5 +91,6 @@ exact command the worker runs first:
   attempt is not reused. Completed workers are removed by `/close-sprint` after
   the integrated sprint is pushed. Any other stale worker requires an explicit
   recovery decision.
-- **Claiming an F-ID whose dependencies are not `done`.** `/design` already
-  refused that. If the state changed since, stop.
+- **Claiming an F-ID whose dependencies are not `done`.** An approved design
+  may rely on approved provider contracts. A claim requires actual dependency
+  completion, including any required dependency-prefix checkpoint.
