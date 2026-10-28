@@ -2432,7 +2432,20 @@ struct XmlElem {
     val: Option<String>,
 }
 
+#[cfg_attr(test, track_caller)]
 fn index_elements(xml: &[u8]) -> Result<Vec<XmlElem>> {
+    // Keep different index builds separate. A large linear parent index must
+    // not conceal a smaller quadratic child index in the same operation.
+    #[cfg(test)]
+    let a9_index_pass = format!(
+        "control.index_elements.events:{}",
+        std::panic::Location::caller().line()
+    );
+    #[cfg(test)]
+    let a9_close_pass = format!(
+        "control.index_elements.close:{}",
+        std::panic::Location::caller().line()
+    );
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -2441,14 +2454,27 @@ fn index_elements(xml: &[u8]) -> Result<Vec<XmlElem>> {
     let mut next_id = 0usize;
     loop {
         let before = reader.buffer_position() as usize;
-        let (namespace, event) = reader
-            .read_resolved_event_into(&mut buffer)
-            .map_err(|error| Error::Other(format!("content control XML is invalid: {error}")))?;
+        let (namespace, event) = match reader.read_resolved_event_into(&mut buffer) {
+            Ok(event) => event,
+            Err(error) => {
+                #[cfg(test)]
+                crate::document::a9_lookup_read(
+                    &a9_index_pass,
+                    before,
+                    reader.buffer_position() as usize,
+                );
+                return Err(Error::Other(format!(
+                    "content control XML is invalid: {error}"
+                )));
+            }
+        };
         let word = is_word(&namespace);
         let w14 = is_w14(&namespace);
         let w15 = is_w15(&namespace);
         drop(namespace);
         let after = reader.buffer_position() as usize;
+        #[cfg(test)]
+        crate::document::a9_lookup_read(&a9_index_pass, before, after);
         match event {
             Event::Start(element) => {
                 let id = next_id;
@@ -2491,7 +2517,11 @@ fn index_elements(xml: &[u8]) -> Result<Vec<XmlElem>> {
                         "content control XML has an unmatched end element".to_owned(),
                     ));
                 };
-                let Some(elem) = elems.iter_mut().find(|elem| elem.id == id) else {
+                // IDs are assigned exactly once at the append position for
+                // both start and empty elements. Closing never reorders them.
+                #[cfg(test)]
+                crate::document::a9_lookup_candidate(&a9_close_pass);
+                let Some(elem) = elems.get_mut(id).filter(|elem| elem.id == id) else {
                     return Err(Error::Other(
                         "content control XML lost an open element".to_owned(),
                     ));
@@ -2511,6 +2541,31 @@ fn index_elements(xml: &[u8]) -> Result<Vec<XmlElem>> {
         ));
     }
     Ok(elems)
+}
+
+#[test]
+fn control_index_preserves_nested_and_empty_ranges() {
+    let xml = br#"<a:root xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><a:p/><a:sdt><a:sdtPr/><a:sdtContent><x:p xmlns:x="urn:foreign"><a:r/></x:p></a:sdtContent></a:sdt></a:root>"#;
+    let elems = index_elements(xml).unwrap();
+    assert_eq!(elems.len(), 7);
+    let parents = [None, Some(0), Some(0), Some(2), Some(2), Some(4), Some(5)];
+    for (index, elem) in elems.iter().enumerate() {
+        assert_eq!(elem.id, index);
+        assert_eq!(elem.parent, parents[index]);
+        assert_eq!(elem.word, index != 5);
+        let bytes = &xml[elem.range.clone()];
+        assert!(bytes.starts_with(b"<"));
+        assert!(bytes.ends_with(b">"));
+        if let Some(end) = elem.inner_end {
+            assert!(elem.open_end <= end);
+            assert!(xml[end..elem.range.end].starts_with(b"</"));
+        } else {
+            assert!(bytes.ends_with(b"/>"));
+        }
+    }
+    assert_eq!(&xml[elems[2].range.clone()], br#"<a:sdt><a:sdtPr/><a:sdtContent><x:p xmlns:x="urn:foreign"><a:r/></x:p></a:sdtContent></a:sdt>"#);
+    assert!(index_elements(b"<root><item></root>").is_err());
+    assert!(index_elements(b"<root><item/>").is_err());
 }
 
 fn is_word(namespace: &ResolveResult<'_>) -> bool {
@@ -2548,6 +2603,10 @@ fn word_val(reader: &NsReader<&[u8]>, element: &BytesStart<'_>) -> Result<Option
 fn element_at<'a>(elems: &'a [XmlElem], range: &Range<usize>) -> Result<&'a XmlElem> {
     elems
         .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.element_at.candidate.1");
+        })
         .find(|elem| elem.range.start == range.start)
         .ok_or_else(|| Error::Other("content control bytes are missing".to_owned()))
 }
@@ -2919,13 +2978,27 @@ fn parent_can_hold(xml: &[u8], sdt_range: &Range<usize>, inner: &[u8]) -> Result
 }
 
 fn parent_slot(elems: &[XmlElem], id: usize) -> ParentSlot {
-    let Some(elem) = elems.iter().find(|elem| elem.id == id) else {
+    let Some(elem) = elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.parent_slot.candidate.1");
+        })
+        .find(|elem| elem.id == id)
+    else {
         return ParentSlot::Other;
     };
     let Some(parent_id) = elem.parent else {
         return ParentSlot::Other;
     };
-    let Some(parent) = elems.iter().find(|elem| elem.id == parent_id) else {
+    let Some(parent) = elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.parent_slot.candidate.2");
+        })
+        .find(|elem| elem.id == parent_id)
+    else {
         return ParentSlot::Other;
     };
     element_slot(elems, parent)
@@ -2970,8 +3043,19 @@ fn transparent_children_match(
 ) -> Result<bool> {
     let custom_parent = elems
         .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.transparent_children_match.candidate.1");
+        })
         .any(|elem| elem.id == parent_id && elem.word && elem.local == b"customXml");
-    for child in elems.iter().filter(|elem| elem.parent == Some(parent_id)) {
+    for child in elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.transparent_children_match.candidate.2");
+        })
+        .filter(|elem| elem.parent == Some(parent_id))
+    {
         if custom_parent && child.word && child.local == b"customXmlPr" {
             continue;
         }
@@ -3005,7 +3089,14 @@ fn sdt_payload_matches(
         return Ok(false);
     }
     let mut contents = Vec::new();
-    for child in elems.iter().filter(|elem| elem.parent == Some(sdt.id)) {
+    for child in elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.sdt_payload_matches.candidate.1");
+        })
+        .filter(|elem| elem.parent == Some(sdt.id))
+    {
         match (child.word, child.local.as_slice()) {
             (true, b"sdtPr" | b"sdtEndPr") => {}
             (true, b"sdtContent") => contents.push(child),
@@ -3625,6 +3716,10 @@ fn is_type_child(elem: &XmlElem) -> bool {
 fn sdt_content_elem<'a>(elems: &'a [XmlElem], sdt: &XmlElem) -> Option<&'a XmlElem> {
     elems
         .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.sdt_content_elem.candidate.1");
+        })
         .find(|elem| elem.parent == Some(sdt.id) && elem.word && elem.local == b"sdtContent")
 }
 
@@ -3637,21 +3732,31 @@ fn sdt_has_direct_type(
 ) -> bool {
     let Some(properties) = elems
         .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.sdt_has_direct_type.candidate.1");
+        })
         .find(|elem| elem.parent == Some(sdt.id) && elem.word && elem.local == b"sdtPr")
     else {
         return false;
     };
-    elems.iter().any(|elem| {
-        elem.parent == Some(properties.id)
-            && elem.local.as_slice() == local
-            && if w15 {
-                elem.w15
-            } else if w14 {
-                elem.w14
-            } else {
-                elem.word
-            }
-    })
+    elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.sdt_has_direct_type.candidate.2");
+        })
+        .any(|elem| {
+            elem.parent == Some(properties.id)
+                && elem.local.as_slice() == local
+                && if w15 {
+                    elem.w15
+                } else if w14 {
+                    elem.w14
+                } else {
+                    elem.word
+                }
+        })
 }
 
 fn sdt_is_repeating_section(elems: &[XmlElem], sdt: &XmlElem) -> bool {
@@ -3663,9 +3768,23 @@ fn sdt_is_repeating_item(elems: &[XmlElem], sdt: &XmlElem) -> bool {
 }
 
 fn ancestor_repeating_section(elems: &[XmlElem], sdt_id: usize) -> Option<&XmlElem> {
-    let mut current = elems.iter().find(|elem| elem.id == sdt_id)?;
+    let mut current = elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.ancestor_repeating_section.candidate.1");
+        })
+        .find(|elem| elem.id == sdt_id)?;
     while let Some(parent_id) = current.parent {
-        let parent = elems.iter().find(|elem| elem.id == parent_id)?;
+        let parent = elems
+            .iter()
+            .inspect(|_| {
+                #[cfg(test)]
+                crate::document::a9_lookup_candidate(
+                    "control.ancestor_repeating_section.candidate.2",
+                );
+            })
+            .find(|elem| elem.id == parent_id)?;
         if parent.word && parent.local == b"sdt" && sdt_is_repeating_section(elems, parent) {
             return Some(parent);
         }
@@ -3680,6 +3799,10 @@ fn direct_repeating_items<'a>(elems: &'a [XmlElem], section: &XmlElem) -> Vec<&'
     };
     elems
         .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate("control.direct_repeating_items.candidate.1");
+        })
         .filter(|elem| {
             elem.parent == Some(content.id)
                 && elem.word
@@ -3803,13 +3926,21 @@ fn control_matches_context(
 fn story_inside_repeating_section(document: &Document, story: &crate::StoryId) -> Result<bool> {
     let (xml, range) = document.story_owner_span(story)?;
     let elems = index_elements(&xml)?;
-    Ok(elems.iter().any(|section| {
-        section.word
-            && section.local == b"sdt"
-            && section.range.start < range.start
-            && range.end < section.range.end
-            && sdt_is_repeating_section(&elems, section)
-    }))
+    Ok(elems
+        .iter()
+        .inspect(|_| {
+            #[cfg(test)]
+            crate::document::a9_lookup_candidate(
+                "control.story_inside_repeating_section.candidate.1",
+            );
+        })
+        .any(|section| {
+            section.word
+                && section.local == b"sdt"
+                && section.range.start < range.start
+                && range.end < section.range.end
+                && sdt_is_repeating_section(&elems, section)
+        }))
 }
 
 fn unwrap_keeps_repeating_context(xml: &[u8], range: &Range<usize>) -> Result<bool> {
@@ -3860,4 +3991,2428 @@ fn freshen_control(document: &mut Document, sdt_bytes: &[u8]) -> Result<Vec<u8>>
         .find(|elem| elem.word && elem.local == b"sdt")
         .ok_or_else(|| Error::Other("content control clone did not keep its shell".to_owned()))?;
     Ok(updated[sdt.range.clone()].to_vec())
+}
+
+/// One form field selected by a content-control tag or a legacy field identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormFieldTarget {
+    /// Case-sensitive content-control tag.
+    ContentControlTag(String),
+    /// Legacy form field addressed by its pre-batch source part and ordinal.
+    Legacy { source_part: String, ordinal: usize },
+}
+
+/// A typed value written into a modern or legacy form field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormFieldValue {
+    /// Rich, plain, date, combo, or modern drop-down text.
+    Text(String),
+    /// Checkbox state. `false` is a present value.
+    Checked(bool),
+    /// Legacy drop-down index. Modern lists do not accept this.
+    SelectedIndex(usize),
+}
+
+/// The value a reset rule writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormResetValue {
+    /// Typed value, clearing placeholder state.
+    Value(FormFieldValue),
+    /// Prompt display for a modern text, date, or list control.
+    Placeholder { text: String },
+}
+
+/// One transient validation and reset rule. It is not stored on the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormFieldRule {
+    pub target: FormFieldTarget,
+    pub required: bool,
+    pub reset: FormResetValue,
+}
+
+/// One value to publish for a target that a rule already names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormFieldAssignment {
+    pub target: FormFieldTarget,
+    pub value: FormFieldValue,
+}
+
+/// One current-state problem for one physical control or legacy field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormValidationIssue {
+    pub target: FormFieldTarget,
+    pub source_part: String,
+    pub ordinal: usize,
+    pub message: String,
+}
+
+impl Document {
+    /// Report one issue per selected physical field. An empty rule list discovers nothing.
+    pub fn validate_form(&self, rules: &[FormFieldRule]) -> Result<Vec<FormValidationIssue>> {
+        let staged = flushed_form_document(self)?;
+        let mut state = read_form_state(&staged)?;
+        let selections = select_rules(&staged, &mut state, rules)?;
+        Ok(current_issues(&state, rules, &selections))
+    }
+
+    /// Publish assignment values atomically. Other required fields may stay empty.
+    pub fn fill_form(
+        &mut self,
+        rules: &[FormFieldRule],
+        assignments: &[FormFieldAssignment],
+    ) -> Result<Vec<usize>> {
+        let mut candidate = flushed_form_document(self)?;
+        let mut state = read_form_state(&candidate)?;
+        let selections = select_rules(&candidate, &mut state, rules)?;
+        let plan = plan_fill(&candidate, &state, assignments, &selections)?;
+        apply_form_plan(&mut candidate, &state, &plan)?;
+        publish_form_document(self, candidate)?;
+        Ok(plan.counts)
+    }
+
+    /// Restore every rule's reset value atomically. Required fields may become empty.
+    pub fn reset_form(&mut self, rules: &[FormFieldRule]) -> Result<Vec<usize>> {
+        let mut candidate = flushed_form_document(self)?;
+        let mut state = read_form_state(&candidate)?;
+        let selections = select_rules(&candidate, &mut state, rules)?;
+        let plan = plan_reset(&candidate, &state, rules, &selections)?;
+        apply_form_plan(&mut candidate, &state, &plan)?;
+        publish_form_document(self, candidate)?;
+        Ok(plan.counts)
+    }
+
+    /// Publish forms-mode protection only when `validate_form` reports no issues.
+    pub fn protect_form(
+        &mut self,
+        rules: &[FormFieldRule],
+        protection: crate::DocumentProtection,
+    ) -> Result<()> {
+        if protection.mode != crate::ProtectionMode::Forms {
+            return Err(form_fault("form protection requires forms mode"));
+        }
+        let issues = self.validate_form(rules)?;
+        if !issues.is_empty() {
+            return Err(form_fault("form protection requires a valid form"));
+        }
+        self.set_document_protection(protection)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlKind {
+    Rich,
+    Plain,
+    Date,
+    Combo,
+    DropDown,
+    CheckBox,
+    Structural,
+    Inconsistent,
+}
+
+#[derive(Clone)]
+struct BindingRef {
+    store_item_id: String,
+    xpath: String,
+    prefix_mappings: Option<String>,
+}
+
+#[derive(Clone)]
+struct ListChoice {
+    value: Option<String>,
+    display: Option<String>,
+}
+
+#[derive(Clone)]
+struct DateFacts {
+    format: Option<String>,
+    store: Option<String>,
+    calendar: Option<String>,
+    full_date: Option<String>,
+    duplicate: bool,
+}
+
+struct PhysicalControl {
+    part: String,
+    start: usize,
+    end: usize,
+    ordinal: usize,
+    tag: Option<String>,
+    kind: ControlKind,
+    placeholder: bool,
+    placeholder_broken: bool,
+    display: String,
+    binding: Option<BindingRef>,
+    bound_text: Option<String>,
+    checked: Option<bool>,
+    checked_broken: bool,
+    glyph_broken: bool,
+    checked_glyph: Option<String>,
+    unchecked_glyph: Option<String>,
+    checked_font: Option<String>,
+    unchecked_font: Option<String>,
+    checked_fault: Option<String>,
+    unchecked_fault: Option<String>,
+    date: Option<DateFacts>,
+    list_items: Vec<ListChoice>,
+    duplicate_tag: bool,
+}
+
+struct LegacyField {
+    part: String,
+    ordinal: usize,
+    kind: crate::LegacyFormFieldKind,
+    value: crate::LegacyFormFieldValue,
+    default_value: Option<crate::LegacyFormFieldValue>,
+    choices: Vec<String>,
+}
+
+struct LegacyAnchor {
+    part: String,
+    ordinal: usize,
+    start: usize,
+    end: usize,
+}
+
+struct FormState {
+    doc_part: String,
+    controls: Vec<PhysicalControl>,
+    legacy: Vec<LegacyField>,
+    anchors: Vec<LegacyAnchor>,
+}
+
+#[derive(Clone, Copy)]
+enum Owner {
+    Control(usize),
+    Legacy(usize),
+}
+
+struct Selection {
+    target: FormFieldTarget,
+    owners: Vec<Owner>,
+}
+
+#[derive(Clone)]
+enum FullDateEdit {
+    Keep,
+    Set(String),
+    Clear,
+}
+
+#[derive(Clone)]
+enum LastValueEdit {
+    Keep,
+    Set(String),
+    Clear,
+}
+
+#[derive(Clone)]
+struct ControlPatch {
+    placeholder: Option<bool>,
+    full_date: FullDateEdit,
+    last_value: LastValueEdit,
+    checked: Option<bool>,
+    display: Option<String>,
+    font: Option<String>,
+}
+
+struct LogicalPatch {
+    part: String,
+    ordinal: usize,
+    patch: ControlPatch,
+}
+
+struct LegacyWrite {
+    part: String,
+    ordinal: usize,
+    value: crate::LegacyFormFieldValue,
+}
+
+struct BindingWrite {
+    binding: BindingRef,
+    value: String,
+}
+
+struct FormPlan {
+    counts: Vec<usize>,
+    legacy: Vec<LegacyWrite>,
+    patches: Vec<LogicalPatch>,
+    bindings: Vec<BindingWrite>,
+    watched_legacy: Vec<(String, usize)>,
+}
+
+struct QualAttr {
+    local: String,
+    word: bool,
+    w14: bool,
+    value: String,
+}
+
+fn form_fault(message: impl Into<String>) -> Error {
+    Error::Other(message.into())
+}
+
+fn flushed_form_document(document: &Document) -> Result<Document> {
+    let mut staged = document.clone_for_staging();
+    staged.flush_to_package()?;
+    Ok(staged)
+}
+
+fn publish_form_document(document: &mut Document, candidate: Document) -> Result<()> {
+    let mut original = document.clone_for_staging();
+    let mut staged = candidate.clone_for_staging();
+    if original.to_bytes()? == staged.to_bytes()? {
+        return Ok(());
+    }
+    let reopened = candidate.prepare_and_reopen_staged()?;
+    document.commit_staged_mutation(reopened);
+    Ok(())
+}
+
+fn read_form_state(document: &Document) -> Result<FormState> {
+    let (control_ranges, _carriers, text_boxes) = document.accepted_form_regions()?;
+    let mut parts = Vec::new();
+    for (part, _) in control_ranges
+        .iter()
+        .chain(_carriers.iter())
+        .chain(text_boxes.iter())
+    {
+        if !parts.iter().any(|seen: &String| seen == part) {
+            parts.push(part.clone());
+        }
+    }
+    let mut loaded = Vec::new();
+    for part in &parts {
+        let xml = document
+            .package
+            .get_part(part)
+            .ok_or_else(|| form_fault(format!("form story part {part} is missing")))?
+            .to_vec();
+        let elems = index_elements(&xml)?;
+        loaded.push((part.clone(), xml, elems));
+    }
+    let mut grouped: Vec<(String, Vec<std::ops::Range<usize>>)> = Vec::new();
+    for (part, range) in &control_ranges {
+        if let Some((_, ranges)) = grouped.iter_mut().find(|(name, _)| name == part) {
+            ranges.push(range.clone());
+        } else {
+            grouped.push((part.clone(), vec![range.clone()]));
+        }
+    }
+    for (_, ranges) in &mut grouped {
+        ranges.sort_by(|left, right| left.start.cmp(&right.start).then(left.end.cmp(&right.end)));
+        ranges.dedup();
+    }
+    let mut controls = Vec::new();
+    for (part, ranges) in &grouped {
+        let (_, xml, elems) = loaded
+            .iter()
+            .find(|(name, _, _)| name == part)
+            .ok_or_else(|| form_fault(format!("form story part {part} is missing")))?;
+        for (ordinal, range) in ranges.iter().enumerate() {
+            let elem = elems
+                .iter()
+                .find(|elem| elem.word && elem.local == b"sdt" && elem.range.start == range.start)
+                .ok_or_else(|| form_fault("stale form target"))?;
+            controls.push(read_physical_control(xml, elems, elem, part, ordinal)?);
+        }
+    }
+    let anchors = read_legacy_anchors(document)?;
+    let legacy = document
+        .legacy_form_fields_with_defaults()?
+        .into_iter()
+        .map(|(field, default_value)| LegacyField {
+            part: field.source_part,
+            ordinal: field.ordinal,
+            kind: field.kind,
+            value: field.value,
+            default_value,
+            choices: field.choices,
+        })
+        .collect();
+    Ok(FormState {
+        doc_part: document.doc_part_name.clone(),
+        controls,
+        legacy,
+        anchors,
+    })
+}
+
+fn read_physical_control(
+    xml: &[u8],
+    elems: &[XmlElem],
+    sdt: &XmlElem,
+    part: &str,
+    ordinal: usize,
+) -> Result<PhysicalControl> {
+    let properties = direct_child(elems, sdt.id, true, false, b"sdtPr");
+    let mut tags = Vec::new();
+    let mut types = Vec::new();
+    let mut placeholder = false;
+    let mut placeholder_broken = false;
+    let mut binding = None;
+    let mut saw_binding = false;
+    if let Some(properties) = properties {
+        for child in direct_children(elems, properties.id) {
+            if child.word && child.local == b"tag" {
+                tags.push(child.val.clone());
+            } else if child.word && child.local == b"showingPlcHdr" {
+                match parse_on_off(child.val.as_deref()) {
+                    Some(flag) => placeholder = flag,
+                    None => placeholder_broken = true,
+                }
+            } else if child.word && child.local == b"dataBinding" {
+                if saw_binding {
+                    binding = None;
+                } else {
+                    saw_binding = true;
+                    binding = Some(read_binding(xml, child)?);
+                }
+            } else if is_type_child(child) {
+                types.push(child);
+            }
+        }
+    }
+    let kind = match types.as_slice() {
+        [] => ControlKind::Rich,
+        [one] => control_kind(one),
+        _ => ControlKind::Inconsistent,
+    };
+    let type_elem = if types.len() == 1 {
+        Some(types[0])
+    } else {
+        None
+    };
+    let checkbox = match type_elem {
+        Some(elem) if kind == ControlKind::CheckBox => read_checkbox(xml, elems, elem)?,
+        _ => CheckboxRead {
+            checked: None,
+            checked_broken: false,
+            glyph_broken: false,
+            checked_glyph: None,
+            unchecked_glyph: None,
+            checked_font: None,
+            unchecked_font: None,
+            checked_fault: None,
+            unchecked_fault: None,
+        },
+    };
+    let date = match type_elem {
+        Some(elem) if kind == ControlKind::Date => Some(read_date(xml, elems, elem)?),
+        _ => None,
+    };
+    let list_items = match type_elem {
+        Some(elem) if matches!(kind, ControlKind::Combo | ControlKind::DropDown) => {
+            read_list_items(xml, elems, elem)?
+        }
+        _ => Vec::new(),
+    };
+    Ok(PhysicalControl {
+        part: part.to_owned(),
+        start: sdt.range.start,
+        end: sdt.range.end,
+        ordinal,
+        tag: tags.first().and_then(Clone::clone),
+        kind,
+        placeholder,
+        placeholder_broken,
+        display: direct_display(xml, elems, sdt)?,
+        duplicate_tag: tags.len() > 1 || (saw_binding && binding.is_none()),
+        binding,
+        bound_text: None,
+        checked: checkbox.checked,
+        checked_broken: checkbox.checked_broken,
+        glyph_broken: checkbox.glyph_broken,
+        checked_glyph: checkbox.checked_glyph,
+        unchecked_glyph: checkbox.unchecked_glyph,
+        checked_font: checkbox.checked_font,
+        unchecked_font: checkbox.unchecked_font,
+        checked_fault: checkbox.checked_fault,
+        unchecked_fault: checkbox.unchecked_fault,
+        date,
+        list_items,
+    })
+}
+
+fn control_kind(elem: &XmlElem) -> ControlKind {
+    if elem.word {
+        return match elem.local.as_slice() {
+            b"richText" => ControlKind::Rich,
+            b"text" => ControlKind::Plain,
+            b"date" => ControlKind::Date,
+            b"comboBox" => ControlKind::Combo,
+            b"dropDownList" => ControlKind::DropDown,
+            b"picture" | b"group" | b"citation" | b"bibliography" | b"equation"
+            | b"docPartList" | b"docPartObj" => ControlKind::Structural,
+            _ => ControlKind::Inconsistent,
+        };
+    }
+    if elem.w14 && elem.local.as_slice() == b"checkbox" {
+        return ControlKind::CheckBox;
+    }
+    if elem.w15
+        && matches!(
+            elem.local.as_slice(),
+            b"repeatingSection" | b"repeatingSectionItem"
+        )
+    {
+        return ControlKind::Structural;
+    }
+    ControlKind::Inconsistent
+}
+
+fn read_binding(xml: &[u8], elem: &XmlElem) -> Result<BindingRef> {
+    let attributes = attributes_of(xml, elem.range.start)?;
+    let word = |local: &str| {
+        attributes
+            .iter()
+            .find(|attr| attr.word && attr.local == local)
+            .map(|attr| attr.value.clone())
+    };
+    Ok(BindingRef {
+        store_item_id: word("storeItemID").unwrap_or_default(),
+        xpath: word("xpath").unwrap_or_default(),
+        prefix_mappings: word("prefixMappings"),
+    })
+}
+
+struct CheckboxRead {
+    checked: Option<bool>,
+    checked_broken: bool,
+    glyph_broken: bool,
+    checked_glyph: Option<String>,
+    unchecked_glyph: Option<String>,
+    checked_font: Option<String>,
+    unchecked_font: Option<String>,
+    checked_fault: Option<String>,
+    unchecked_fault: Option<String>,
+}
+
+fn read_checkbox(xml: &[u8], elems: &[XmlElem], checkbox: &XmlElem) -> Result<CheckboxRead> {
+    let checked_elem = direct_child(elems, checkbox.id, false, true, b"checked");
+    let (checked, broken) = if let Some(elem) = checked_elem {
+        match w14_val(xml, elem)? {
+            Some(flag) => (Some(flag), false),
+            None => (Some(false), true),
+        }
+    } else {
+        (Some(false), false)
+    };
+    let checked_state = checkbox_policy(xml, checkbox, true);
+    let unchecked_state = checkbox_policy(xml, checkbox, false);
+    let (checked_glyph, checked_font, checked_fault) = checkbox_state_parts(checked_state);
+    let (unchecked_glyph, unchecked_font, unchecked_fault) = checkbox_state_parts(unchecked_state);
+    Ok(CheckboxRead {
+        checked,
+        checked_broken: broken,
+        glyph_broken: checked_fault.is_some() || unchecked_fault.is_some(),
+        checked_glyph,
+        unchecked_glyph,
+        checked_font,
+        unchecked_font,
+        checked_fault,
+        unchecked_fault,
+    })
+}
+
+fn checkbox_state_parts(
+    state: Result<(char, String)>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match state {
+        Ok((glyph, font)) => (Some(glyph.to_string()), Some(font), None),
+        Err(error) => (None, None, Some(error.to_string())),
+    }
+}
+
+fn checkbox_policy(xml: &[u8], checkbox: &XmlElem, checked: bool) -> Result<(char, String)> {
+    let element = std::str::from_utf8(&xml[checkbox.range.clone()])
+        .map_err(|error| form_fault(format!("checkbox type payload is invalid: {error}")))?;
+    let declarations = in_scope_xmlns(xml, checkbox.range.start)?;
+    let (_attributes, prefix, declare) =
+        qualified_attributes(xml, checkbox.range.start, AttrNs::Word)?;
+    let mut markup = format!("<{prefix}:sdt");
+    if let Some(uri) = declare {
+        let marker = format!(" xmlns:{prefix}=\"");
+        if !declarations.contains(&marker) {
+            markup.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+        }
+    }
+    markup.push_str(&declarations);
+    markup.push_str(&format!(
+        "><{prefix}:sdtPr>{element}</{prefix}:sdtPr><{prefix}:sdtContent/></{prefix}:sdt>"
+    ));
+    let parsed = parse_control(&markup)?;
+    parsed
+        .properties
+        .ok_or_else(|| form_fault("checkbox type payload is missing"))?
+        .checkbox_state(checked)
+        .map_err(Error::from)
+}
+
+fn in_scope_xmlns(xml: &[u8], start: usize) -> Result<String> {
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (_namespace, _event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| form_fault(format!("content control XML is invalid: {error}")))?;
+        if before == start {
+            let mut declarations = String::new();
+            for (declaration, namespace) in reader.resolver().bindings() {
+                let uri = String::from_utf8_lossy(namespace.0);
+                let escaped = xml_attr(&uri);
+                match declaration {
+                    quick_xml::name::PrefixDeclaration::Default => {
+                        declarations.push_str(&format!(" xmlns=\"{escaped}\""));
+                    }
+                    quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                        let prefix = String::from_utf8_lossy(prefix);
+                        if prefix == "xml" {
+                            continue;
+                        }
+                        declarations.push_str(&format!(" xmlns:{prefix}=\"{escaped}\""));
+                    }
+                }
+            }
+            return Ok(declarations);
+        }
+        if before > start {
+            return Err(form_fault("content control attribute position was missed"));
+        }
+        buffer.clear();
+    }
+}
+
+fn read_date(xml: &[u8], elems: &[XmlElem], date: &XmlElem) -> Result<DateFacts> {
+    let attributes = attributes_of(xml, date.range.start)?;
+    let full_date = attributes
+        .iter()
+        .find(|attr| attr.word && attr.local == "fullDate")
+        .map(|attr| attr.value.clone());
+    let mut format = None;
+    let mut store = None;
+    let mut calendar = None;
+    let mut duplicate = false;
+    for child in direct_children(elems, date.id) {
+        if !child.word {
+            continue;
+        }
+        let slot = match child.local.as_slice() {
+            b"dateFormat" => &mut format,
+            b"storeMappedDataAs" => &mut store,
+            b"calendar" => &mut calendar,
+            _ => continue,
+        };
+        if slot.is_some() {
+            duplicate = true;
+        }
+        *slot = child.val.clone();
+    }
+    Ok(DateFacts {
+        format,
+        store,
+        calendar,
+        full_date,
+        duplicate,
+    })
+}
+
+fn read_list_items(xml: &[u8], elems: &[XmlElem], list: &XmlElem) -> Result<Vec<ListChoice>> {
+    let mut items = Vec::new();
+    for child in direct_children(elems, list.id) {
+        if !(child.word && child.local == b"listItem") {
+            continue;
+        }
+        let attributes = attributes_of(xml, child.range.start)?;
+        let attr = |local: &str| {
+            attributes
+                .iter()
+                .find(|attr| attr.word && attr.local == local)
+                .map(|attr| attr.value.clone())
+        };
+        items.push(ListChoice {
+            value: attr("value"),
+            display: attr("displayText"),
+        });
+    }
+    Ok(items)
+}
+
+fn read_legacy_anchors(document: &Document) -> Result<Vec<LegacyAnchor>> {
+    Ok(document
+        .legacy_form_physical_anchors()?
+        .into_iter()
+        .map(|anchor| LegacyAnchor {
+            part: anchor.part,
+            ordinal: anchor.ordinal,
+            start: anchor.start,
+            end: anchor.end,
+        })
+        .collect())
+}
+
+fn direct_display(xml: &[u8], elems: &[XmlElem], sdt: &XmlElem) -> Result<String> {
+    let mut parts = Vec::new();
+    for elem in elems {
+        let Some(piece) = display_piece(xml, elem)? else {
+            continue;
+        };
+        if !accepted_display_text(elems, sdt, elem) {
+            continue;
+        }
+        parts.push((elem.range.start, piece));
+    }
+    parts.sort_by_key(|part| part.0);
+    Ok(parts.into_iter().map(|part| part.1).collect())
+}
+
+fn display_piece(xml: &[u8], elem: &XmlElem) -> Result<Option<String>> {
+    if !elem.word {
+        return Ok(None);
+    }
+    match elem.local.as_slice() {
+        b"t" => Ok(Some(element_text(xml, elem)?)),
+        b"tab" => Ok(Some("\t".to_owned())),
+        b"br" | b"cr" => Ok(Some("\n".to_owned())),
+        _ => Ok(None),
+    }
+}
+
+fn accepted_display_text(elems: &[XmlElem], sdt: &XmlElem, text: &XmlElem) -> bool {
+    accepted_owning_content(elems, sdt, text.parent, true)
+}
+
+fn accepted_display_paragraph(elems: &[XmlElem], sdt: &XmlElem, paragraph: &XmlElem) -> bool {
+    accepted_owning_content(elems, sdt, Some(paragraph.id), false)
+}
+
+fn accepted_owning_content(
+    elems: &[XmlElem],
+    sdt: &XmlElem,
+    mut parent: Option<usize>,
+    require_run: bool,
+) -> bool {
+    if nearest_sdt_id(elems, parent) != Some(sdt.id) {
+        return false;
+    }
+    if descendant_text_box(elems, sdt.id, parent) {
+        return false;
+    }
+    let mut saw_run = false;
+    let mut saw_content = false;
+    while let Some(id) = parent {
+        if id == sdt.id {
+            return saw_content && (!require_run || saw_run);
+        }
+        let Some(current) = elems.iter().find(|elem| elem.id == id) else {
+            return false;
+        };
+        // Drawing discovery omits fldSimple because that walk does not expose a
+        // drawing inside a simple field. Owned display still includes the cache.
+        if !(current.word && accepted_display_container(current.local.as_slice())) {
+            return false;
+        }
+        if current.local == b"r" {
+            saw_run = true;
+        }
+        if current.local == b"sdtContent" {
+            if current.parent != Some(sdt.id) {
+                return false;
+            }
+            saw_content = true;
+        }
+        parent = current.parent;
+    }
+    false
+}
+
+fn accepted_display_container(local: &[u8]) -> bool {
+    local == b"fldSimple" || crate::field::word_accepted_form_container(local)
+}
+
+fn element_text(xml: &[u8], elem: &XmlElem) -> Result<String> {
+    let Some(inner_end) = elem.inner_end else {
+        return Ok(String::new());
+    };
+    let raw = xml
+        .get(elem.open_end..inner_end)
+        .ok_or_else(|| form_fault("content control text is out of bounds"))?;
+    let text = std::str::from_utf8(raw)
+        .map_err(|error| form_fault(format!("content control text is invalid: {error}")))?;
+    quick_xml::escape::unescape(text)
+        .map(|value| value.into_owned())
+        .map_err(|error| form_fault(format!("content control text is invalid: {error}")))
+}
+
+fn attributes_of(xml: &[u8], start: usize) -> Result<Vec<QualAttr>> {
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (_namespace, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| form_fault(format!("content control XML is invalid: {error}")))?;
+        if before == start {
+            let (Event::Start(element) | Event::Empty(element)) = event else {
+                return Ok(Vec::new());
+            };
+            let mut attributes = Vec::new();
+            for attribute in element.attributes() {
+                let attribute = attribute.map_err(|error| {
+                    form_fault(format!("content control attribute is invalid: {error}"))
+                })?;
+                let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                let value = attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                    .map_err(|error| {
+                        form_fault(format!(
+                            "content control attribute value is invalid: {error}"
+                        ))
+                    })?;
+                attributes.push(QualAttr {
+                    local: String::from_utf8_lossy(local.as_ref()).into_owned(),
+                    word: is_word(&namespace),
+                    w14: is_w14(&namespace),
+                    value: value.into_owned(),
+                });
+            }
+            return Ok(attributes);
+        }
+        if before > start {
+            return Err(form_fault("content control attribute position was missed"));
+        }
+        buffer.clear();
+    }
+}
+
+fn parse_on_off(value: Option<&str>) -> Option<bool> {
+    match value.map(|item| item.to_ascii_lowercase()).as_deref() {
+        None | Some("true" | "1" | "on") => Some(true),
+        Some("false" | "0" | "off") => Some(false),
+        _ => None,
+    }
+}
+
+fn w14_val(xml: &[u8], elem: &XmlElem) -> Result<Option<bool>> {
+    let text = w14_text(xml, elem, "val")?;
+    Ok(match text {
+        None => Some(true),
+        Some(value) => parse_on_off(Some(&value)),
+    })
+}
+
+fn w14_text(xml: &[u8], elem: &XmlElem, local: &str) -> Result<Option<String>> {
+    Ok(attributes_of(xml, elem.range.start)?
+        .into_iter()
+        .find(|attr| attr.w14 && attr.local == local)
+        .map(|attr| attr.value))
+}
+
+fn direct_children(elems: &[XmlElem], parent: usize) -> impl Iterator<Item = &XmlElem> {
+    elems.iter().filter(move |elem| elem.parent == Some(parent))
+}
+
+fn direct_child<'a>(
+    elems: &'a [XmlElem],
+    parent: usize,
+    word: bool,
+    w14: bool,
+    local: &[u8],
+) -> Option<&'a XmlElem> {
+    direct_children(elems, parent).find(|elem| {
+        elem.local.as_slice() == local && if w14 { elem.w14 } else { !word || elem.word }
+    })
+}
+
+fn nearest_sdt_id(elems: &[XmlElem], mut parent: Option<usize>) -> Option<usize> {
+    while let Some(id) = parent {
+        let current = elems.iter().find(|elem| elem.id == id)?;
+        if current.word && current.local == b"sdt" {
+            return Some(current.id);
+        }
+        parent = current.parent;
+    }
+    None
+}
+
+fn descendant_text_box(elems: &[XmlElem], sdt_id: usize, mut parent: Option<usize>) -> bool {
+    while let Some(id) = parent {
+        if id == sdt_id {
+            return false;
+        }
+        let elem = &elems[id];
+        if elem.word && elem.local == b"txbxContent" {
+            return true;
+        }
+        parent = elem.parent;
+    }
+    false
+}
+
+fn ancestor_local(elems: &[XmlElem], mut parent: Option<usize>, local: &[u8]) -> bool {
+    while let Some(id) = parent {
+        let Some(current) = elems.iter().find(|elem| elem.id == id) else {
+            return false;
+        };
+        if current.local.as_slice() == local {
+            return true;
+        }
+        parent = current.parent;
+    }
+    false
+}
+
+fn select_rules(
+    document: &Document,
+    state: &mut FormState,
+    rules: &[FormFieldRule],
+) -> Result<Vec<Selection>> {
+    if rules.iter().any(|rule| {
+        rules
+            .iter()
+            .filter(|other| other.target == rule.target)
+            .count()
+            > 1
+    }) {
+        return Err(form_fault("duplicate form target"));
+    }
+    let mut selections = Vec::new();
+    for rule in rules {
+        let owners = resolve_target(state, &rule.target)?;
+        check_reset(state, &owners, &rule.reset)?;
+        selections.push(Selection {
+            target: rule.target.clone(),
+            owners,
+        });
+    }
+    ensure_disjoint(state, &selections)?;
+    resolve_bindings(document, state, &selections)?;
+    let mut reset_bindings = Vec::new();
+    for (rule, selection) in rules.iter().zip(&selections) {
+        for owner in &selection.owners {
+            if let Owner::Control(index) = owner
+                && let Some(value) = reset_binding_value(&state.controls[*index], &rule.reset)?
+            {
+                let binding = state.controls[*index]
+                    .binding
+                    .clone()
+                    .ok_or_else(|| form_fault("form binding is incomplete"))?;
+                reset_bindings.push(BindingWrite { binding, value });
+            }
+        }
+    }
+    preview_bindings(document, &state.doc_part, &reset_bindings)?;
+    Ok(selections)
+}
+
+fn reset_binding_value(
+    control: &PhysicalControl,
+    reset: &FormResetValue,
+) -> Result<Option<String>> {
+    if control.binding.is_none() {
+        return Ok(None);
+    }
+    match reset {
+        FormResetValue::Placeholder { .. } => Ok(Some(String::new())),
+        FormResetValue::Value(FormFieldValue::Checked(checked)) => Ok(Some(checked.to_string())),
+        FormResetValue::Value(FormFieldValue::Text(text)) => {
+            if control.kind == ControlKind::Date && date_metadata_unsupported(control) {
+                return Ok(Some(text.clone()));
+            }
+            let (_, bound, _) = prepare_control_text(control, text)?;
+            Ok(Some(bound))
+        }
+        FormResetValue::Value(FormFieldValue::SelectedIndex(_)) => {
+            Err(form_fault("form value kind is not valid for the target"))
+        }
+    }
+}
+
+fn resolve_target(state: &FormState, target: &FormFieldTarget) -> Result<Vec<Owner>> {
+    match target {
+        FormFieldTarget::ContentControlTag(tag) => {
+            let matches = state
+                .controls
+                .iter()
+                .enumerate()
+                .filter(|(_, control)| control.tag.as_deref() == Some(tag.as_str()))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if matches.is_empty() {
+                return Err(form_fault("unknown form target"));
+            }
+            let selected = matches;
+            for index in &selected {
+                classify_control(&state.controls[*index])?;
+            }
+            let kind = state.controls[selected[0]].kind;
+            if selected
+                .iter()
+                .any(|index| state.controls[*index].kind != kind)
+            {
+                return Err(form_fault("form target kinds differ"));
+            }
+            Ok(selected.into_iter().map(Owner::Control).collect())
+        }
+        FormFieldTarget::Legacy {
+            source_part,
+            ordinal,
+        } => {
+            let index = state
+                .legacy
+                .iter()
+                .position(|field| field.part == *source_part && field.ordinal == *ordinal)
+                .ok_or_else(|| form_fault("unknown form target"))?;
+            Ok(vec![Owner::Legacy(index)])
+        }
+    }
+}
+
+fn classify_control(control: &PhysicalControl) -> Result<()> {
+    if control.duplicate_tag {
+        return Err(form_fault("content control identity is duplicated"));
+    }
+    match control.kind {
+        ControlKind::Structural => Err(form_fault(
+            "structural form target does not accept a scalar value",
+        )),
+        ControlKind::Inconsistent => Err(form_fault("content control type is inconsistent")),
+        _ => Ok(()),
+    }
+}
+
+fn check_reset(state: &FormState, owners: &[Owner], reset: &FormResetValue) -> Result<()> {
+    match reset {
+        FormResetValue::Placeholder { text } => {
+            reject_control_text("form placeholder", Some(text))?;
+            if owners.iter().any(|owner| !placeholder_owner(state, owner)) {
+                return Err(form_fault("placeholder reset is not valid for the target"));
+            }
+            Ok(())
+        }
+        FormResetValue::Value(value) => check_value(state, owners, value, true),
+    }
+}
+
+fn placeholder_owner(state: &FormState, owner: &Owner) -> bool {
+    match owner {
+        Owner::Legacy(_) => false,
+        Owner::Control(index) => matches!(
+            state.controls[*index].kind,
+            ControlKind::Rich
+                | ControlKind::Plain
+                | ControlKind::Date
+                | ControlKind::Combo
+                | ControlKind::DropDown
+        ),
+    }
+}
+
+fn check_value(
+    state: &FormState,
+    owners: &[Owner],
+    value: &FormFieldValue,
+    legacy_default: bool,
+) -> Result<()> {
+    for owner in owners {
+        match owner {
+            Owner::Control(index) => check_control_value(&state.controls[*index], value)?,
+            Owner::Legacy(index) => {
+                check_legacy_value(&state.legacy[*index], value, legacy_default)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_control_value(control: &PhysicalControl, value: &FormFieldValue) -> Result<()> {
+    match control.kind {
+        ControlKind::CheckBox => match value {
+            FormFieldValue::Checked(_) => Ok(()),
+            _ => Err(form_fault("form value kind is not valid for the target")),
+        },
+        ControlKind::Rich | ControlKind::Plain => match value {
+            FormFieldValue::Text(text) => {
+                reject_control_text("form value", Some(text))?;
+                Ok(())
+            }
+            _ => Err(form_fault("form value kind is not valid for the target")),
+        },
+        ControlKind::Date | ControlKind::Combo | ControlKind::DropDown => match value {
+            FormFieldValue::Text(text) => {
+                reject_control_text("form value", Some(text))?;
+                if control.kind != ControlKind::Date || !date_metadata_unsupported(control) {
+                    prepare_control_text(control, text)?;
+                }
+                Ok(())
+            }
+            FormFieldValue::SelectedIndex(_) => {
+                Err(form_fault("form value kind is not valid for the target"))
+            }
+            FormFieldValue::Checked(_) => {
+                Err(form_fault("form value kind is not valid for the target"))
+            }
+        },
+        ControlKind::Structural => Err(form_fault(
+            "structural form target does not accept a scalar value",
+        )),
+        ControlKind::Inconsistent => Err(form_fault("content control type is inconsistent")),
+    }
+}
+
+fn check_legacy_value(
+    field: &LegacyField,
+    value: &FormFieldValue,
+    require_default: bool,
+) -> Result<()> {
+    let legacy = match (field.kind, value) {
+        (crate::LegacyFormFieldKind::TextInput, FormFieldValue::Text(text)) => {
+            reject_control_text("form value", Some(text))?;
+            crate::LegacyFormFieldValue::Text(text.clone())
+        }
+        (crate::LegacyFormFieldKind::CheckBox, FormFieldValue::Checked(checked)) => {
+            crate::LegacyFormFieldValue::Checked(*checked)
+        }
+        (crate::LegacyFormFieldKind::DropDownList, FormFieldValue::SelectedIndex(index)) => {
+            if *index >= field.choices.len() {
+                return Err(form_fault("selected index is outside the legacy list"));
+            }
+            crate::LegacyFormFieldValue::SelectedIndex(*index)
+        }
+        _ => return Err(form_fault("form value kind is not valid for the target")),
+    };
+    if require_default && legacy != expected_legacy_reset(field) {
+        return Err(form_fault("legacy reset value is not the explicit default"));
+    }
+    Ok(())
+}
+
+fn expected_legacy_reset(field: &LegacyField) -> crate::LegacyFormFieldValue {
+    if let Some(value) = &field.default_value {
+        return value.clone();
+    }
+    match field.kind {
+        crate::LegacyFormFieldKind::TextInput => crate::LegacyFormFieldValue::Text(String::new()),
+        crate::LegacyFormFieldKind::CheckBox => crate::LegacyFormFieldValue::Checked(false),
+        crate::LegacyFormFieldKind::DropDownList => crate::LegacyFormFieldValue::SelectedIndex(0),
+    }
+}
+
+fn ensure_disjoint(state: &FormState, selections: &[Selection]) -> Result<()> {
+    let mut controls = Vec::new();
+    let mut legacy = Vec::new();
+    for selection in selections {
+        for owner in &selection.owners {
+            match owner {
+                Owner::Control(index) => {
+                    if controls.contains(index) {
+                        return Err(form_fault("duplicate form target"));
+                    }
+                    if controls.iter().any(|previous| {
+                        controls_overlap(&state.controls[*index], &state.controls[*previous])
+                    }) {
+                        return Err(form_fault("overlapping form targets"));
+                    }
+                    controls.push(*index);
+                }
+                Owner::Legacy(index) => {
+                    if legacy.contains(index) {
+                        return Err(form_fault("duplicate form target"));
+                    }
+                    legacy.push(*index);
+                }
+            }
+        }
+    }
+    for legacy_index in legacy {
+        let field = &state.legacy[legacy_index];
+        if controls.iter().any(|index| {
+            control_contains_anchor(
+                &state.controls[*index],
+                state,
+                field.part.as_str(),
+                field.ordinal,
+            )
+        }) {
+            return Err(form_fault("overlapping form targets"));
+        }
+    }
+    Ok(())
+}
+
+fn controls_overlap(left: &PhysicalControl, right: &PhysicalControl) -> bool {
+    left.part == right.part && left.start < right.end && right.start < left.end
+}
+
+fn control_contains_anchor(
+    control: &PhysicalControl,
+    state: &FormState,
+    part: &str,
+    ordinal: usize,
+) -> bool {
+    state.anchors.iter().any(|anchor| {
+        anchor.part == part
+            && anchor.ordinal == ordinal
+            && control.part == anchor.part
+            && anchor.start >= control.start
+            && anchor.end <= control.end
+    })
+}
+
+fn resolve_bindings(
+    document: &Document,
+    state: &mut FormState,
+    selections: &[Selection],
+) -> Result<()> {
+    let mut indexes = Vec::new();
+    for selection in selections {
+        for owner in &selection.owners {
+            if let Owner::Control(index) = owner {
+                indexes.push(*index);
+            }
+        }
+    }
+    indexes.sort_unstable();
+    indexes.dedup();
+    for index in indexes {
+        let Some(binding) = state.controls[index].binding.clone() else {
+            continue;
+        };
+        if binding.store_item_id.is_empty() || binding.xpath.is_empty() {
+            return Err(form_fault("form binding is incomplete"));
+        }
+        let text = read_bound_scalar(document, &state.doc_part, &binding)?;
+        state.controls[index].bound_text = Some(text);
+    }
+    Ok(())
+}
+
+fn read_bound_scalar(document: &Document, doc_part: &str, binding: &BindingRef) -> Result<String> {
+    let (_, selection, xml) = locate_binding(document, doc_part, binding)?;
+    if selection.empty {
+        return Ok(String::new());
+    }
+    let raw = xml
+        .get(selection.replace_start..selection.replace_end)
+        .ok_or_else(|| form_fault("content-control custom XML selection is out of bounds"))?;
+    let text = std::str::from_utf8(raw).map_err(|error| {
+        form_fault(format!(
+            "content-control custom XML text is invalid: {error}"
+        ))
+    })?;
+    quick_xml::escape::unescape(text)
+        .map(|value| value.into_owned())
+        .map_err(|error| {
+            form_fault(format!(
+                "content-control custom XML text is invalid: {error}"
+            ))
+        })
+}
+
+fn locate_binding<'a>(
+    document: &'a Document,
+    doc_part: &str,
+    binding: &BindingRef,
+) -> Result<(String, XmlSelection, &'a [u8])> {
+    let mappings = parse_prefix_mappings(binding.prefix_mappings.as_deref().unwrap_or(""))?;
+    let steps = parse_xpath(&binding.xpath, &mappings)?;
+    let part = resolve_custom_xml_part(&document.package, doc_part, &binding.store_item_id)?;
+    let xml = document
+        .package
+        .get_part(&part)
+        .ok_or_else(|| form_fault(format!("custom XML part {part} is missing")))?;
+    let selection = select_xml_element(xml, &steps)?;
+    Ok((part, selection, xml))
+}
+
+fn current_issues(
+    state: &FormState,
+    rules: &[FormFieldRule],
+    selections: &[Selection],
+) -> Vec<FormValidationIssue> {
+    let mut issues = Vec::new();
+    for (rule, selection) in rules.iter().zip(selections) {
+        for owner in &selection.owners {
+            if let Some(message) = owner_issue(state, owner, rule.required) {
+                let (source_part, ordinal) = owner_coordinates(state, owner);
+                issues.push(FormValidationIssue {
+                    target: rule.target.clone(),
+                    source_part,
+                    ordinal,
+                    message: message.to_owned(),
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn owner_coordinates(state: &FormState, owner: &Owner) -> (String, usize) {
+    match owner {
+        Owner::Control(index) => (
+            state.controls[*index].part.clone(),
+            state.controls[*index].ordinal,
+        ),
+        Owner::Legacy(index) => (
+            state.legacy[*index].part.clone(),
+            state.legacy[*index].ordinal,
+        ),
+    }
+}
+
+fn owner_issue(state: &FormState, owner: &Owner, required: bool) -> Option<&'static str> {
+    match owner {
+        Owner::Legacy(index) => legacy_issue(&state.legacy[*index], required),
+        Owner::Control(index) => control_issue(&state.controls[*index], required),
+    }
+}
+
+fn legacy_issue(field: &LegacyField, required: bool) -> Option<&'static str> {
+    let empty = matches!(&field.value, crate::LegacyFormFieldValue::Text(text) if is_xml_whitespace(text.as_bytes()));
+    if required && empty {
+        Some("required value is empty")
+    } else {
+        None
+    }
+}
+
+fn control_issue(control: &PhysicalControl, required: bool) -> Option<&'static str> {
+    if control.placeholder_broken || control.checked_broken || control.glyph_broken {
+        return Some("current form value is invalid");
+    }
+    if let Some(message) = kind_issue(control) {
+        return Some(message);
+    }
+    if control.placeholder
+        && control
+            .bound_text
+            .as_ref()
+            .is_some_and(|text| !text.is_empty())
+    {
+        return Some("bound scalar is not empty");
+    }
+    if required && control_is_empty(control) {
+        return Some("required value is empty");
+    }
+    None
+}
+
+fn kind_issue(control: &PhysicalControl) -> Option<&'static str> {
+    match control.kind {
+        ControlKind::Date => date_issue(control),
+        ControlKind::CheckBox if checkbox_disagrees(control) => {
+            Some("current form value is invalid")
+        }
+        ControlKind::Combo | ControlKind::DropDown
+            if !control.placeholder && list_disagrees(control) =>
+        {
+            Some("current form value is invalid")
+        }
+        ControlKind::Rich | ControlKind::Plain
+            if !control.placeholder && text_bound_disagrees(control) =>
+        {
+            Some("current form value is invalid")
+        }
+        _ => None,
+    }
+}
+
+fn date_issue(control: &PhysicalControl) -> Option<&'static str> {
+    if date_metadata_unsupported(control) {
+        return Some("unsupported date metadata");
+    }
+    if control.placeholder {
+        return None;
+    }
+    let facts = control.date.as_ref()?;
+    let Some(full_date) = facts.full_date.as_deref() else {
+        return Some("current form value is invalid");
+    };
+    if !canonical_full_date(full_date) {
+        return Some("current form value is invalid");
+    }
+    let Ok((display, bound, prepared)) = prepare_control_text(control, &full_date[..10]) else {
+        return Some("current form value is invalid");
+    };
+    if control.display != display || prepared.as_deref() != Some(full_date) {
+        return Some("current form value is invalid");
+    }
+    if control.binding.is_some() && control.bound_text.as_deref() != Some(bound.as_str()) {
+        return Some("current form value is invalid");
+    }
+    None
+}
+
+fn date_metadata_unsupported(control: &PhysicalControl) -> bool {
+    let Some(facts) = &control.date else {
+        return true;
+    };
+    facts.duplicate
+        || !matches!(facts.calendar.as_deref(), None | Some("gregorian"))
+        || !matches!(facts.format.as_deref(), Some("yyyy-MM-dd" | "dd/MM/yyyy"))
+        || !matches!(
+            facts.store.as_deref(),
+            None | Some("text" | "date" | "dateTime")
+        )
+}
+
+fn canonical_full_date(value: &str) -> bool {
+    value.len() == 20 && value.ends_with("T00:00:00Z") && civil_date_text(&value[..10])
+}
+
+fn civil_date_text(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let year = parts.next().and_then(|part| part.parse::<i32>().ok());
+    let month = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let day = parts.next().and_then(|part| part.parse::<u32>().ok());
+    matches!((year, month, day, parts.next()), (Some(year), Some(month), Some(day), None)
+        if (1..=9999).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day))
+}
+
+fn checkbox_disagrees(control: &PhysicalControl) -> bool {
+    let Some(checked) = control.checked else {
+        return true;
+    };
+    let glyph = if checked {
+        control.checked_glyph.as_deref()
+    } else {
+        control.unchecked_glyph.as_deref()
+    };
+    if !control.display.is_empty() && glyph != Some(control.display.as_str()) {
+        return true;
+    }
+    if glyph.is_none() && !control.display.is_empty() {
+        return true;
+    }
+    control
+        .bound_text
+        .as_ref()
+        .is_some_and(|text| text != &checked.to_string())
+}
+
+fn list_disagrees(control: &PhysicalControl) -> bool {
+    let authority = if control.binding.is_some() {
+        control.bound_text.as_deref().unwrap_or("")
+    } else {
+        control.display.as_str()
+    };
+    match prepare_control_text(control, authority) {
+        Ok((display, bound, _)) => {
+            control.display != display
+                || control.binding.is_some()
+                    && control.bound_text.as_deref() != Some(bound.as_str())
+        }
+        Err(_) => true,
+    }
+}
+
+fn text_bound_disagrees(control: &PhysicalControl) -> bool {
+    control
+        .bound_text
+        .as_ref()
+        .is_some_and(|text| text != &control.display)
+}
+
+fn control_is_empty(control: &PhysicalControl) -> bool {
+    match control.kind {
+        ControlKind::CheckBox => control.placeholder,
+        ControlKind::Rich
+        | ControlKind::Plain
+        | ControlKind::Date
+        | ControlKind::Combo
+        | ControlKind::DropDown => {
+            control.placeholder || is_xml_whitespace(control.display.as_bytes())
+        }
+        _ => false,
+    }
+}
+
+fn prepare_control_text(
+    control: &PhysicalControl,
+    value: &str,
+) -> Result<(String, String, Option<String>)> {
+    let markup = match control.kind {
+        ControlKind::Date => date_shell(control)?,
+        ControlKind::Combo => list_shell("comboBox", &control.list_items)?,
+        ControlKind::DropDown => list_shell("dropDownList", &control.list_items)?,
+        _ => {
+            return Ok((value.to_owned(), value.to_owned(), None));
+        }
+    };
+    let parsed = parse_control(&markup)?;
+    parsed
+        .properties
+        .as_ref()
+        .ok_or_else(|| form_fault("form value metadata is missing"))?
+        .prepare_text_value(value)
+        .map_err(Error::from)
+}
+
+fn date_shell(control: &PhysicalControl) -> Result<String> {
+    let facts = control
+        .date
+        .as_ref()
+        .ok_or_else(|| form_fault("unsupported date metadata"))?;
+    if date_metadata_unsupported(control) {
+        return Err(form_fault("unsupported date metadata"));
+    }
+    let mut children = String::new();
+    if let Some(format) = &facts.format {
+        children.push_str(&prefixed_val("w", "dateFormat", format));
+    }
+    if let Some(store) = &facts.store {
+        children.push_str(&prefixed_val("w", "storeMappedDataAs", store));
+    }
+    if let Some(calendar) = &facts.calendar {
+        children.push_str(&prefixed_val("w", "calendar", calendar));
+    }
+    Ok(format!(
+        "<w:sdt xmlns:w=\"{W_NS}\"><w:sdtPr><w:date>{children}</w:date></w:sdtPr><w:sdtContent/></w:sdt>"
+    ))
+}
+
+fn list_shell(local: &str, items: &[ListChoice]) -> Result<String> {
+    let mut children = String::new();
+    for item in items {
+        let mut attributes = String::new();
+        if let Some(display) = &item.display {
+            attributes.push_str(&format!(" w:displayText=\"{}\"", xml_attr(display)));
+        }
+        if let Some(value) = &item.value {
+            attributes.push_str(&format!(" w:value=\"{}\"", xml_attr(value)));
+        }
+        children.push_str(&format!("<w:listItem{attributes}/>"));
+    }
+    Ok(format!(
+        "<w:sdt xmlns:w=\"{W_NS}\"><w:sdtPr><w:{local}>{children}</w:{local}></w:sdtPr><w:sdtContent/></w:sdt>"
+    ))
+}
+
+fn plan_fill(
+    document: &Document,
+    state: &FormState,
+    assignments: &[FormFieldAssignment],
+    selections: &[Selection],
+) -> Result<FormPlan> {
+    if assignments.iter().any(|assignment| {
+        assignments
+            .iter()
+            .filter(|other| other.target == assignment.target)
+            .count()
+            > 1
+    }) {
+        return Err(form_fault("duplicate form target"));
+    }
+    let mut plan = empty_plan(state, selections);
+    for assignment in assignments {
+        let selection = selections
+            .iter()
+            .find(|selection| selection.target == assignment.target)
+            .ok_or_else(|| form_fault("unknown form assignment"))?;
+        check_value(state, &selection.owners, &assignment.value, false)?;
+        plan.counts.push(selection.owners.len());
+        for owner in &selection.owners {
+            push_write(
+                state,
+                owner,
+                &FormResetValue::Value(assignment.value.clone()),
+                &mut plan,
+            )?;
+        }
+    }
+    preview_bindings(document, &state.doc_part, &plan.bindings)?;
+    Ok(plan)
+}
+
+fn plan_reset(
+    document: &Document,
+    state: &FormState,
+    rules: &[FormFieldRule],
+    selections: &[Selection],
+) -> Result<FormPlan> {
+    let mut plan = empty_plan(state, selections);
+    for (rule, selection) in rules.iter().zip(selections) {
+        plan.counts.push(selection.owners.len());
+        for owner in &selection.owners {
+            push_write(state, owner, &rule.reset, &mut plan)?;
+        }
+    }
+    preview_bindings(document, &state.doc_part, &plan.bindings)?;
+    Ok(plan)
+}
+
+fn empty_plan(state: &FormState, selections: &[Selection]) -> FormPlan {
+    let watched_legacy = selections
+        .iter()
+        .flat_map(|selection| selection.owners.iter())
+        .filter_map(|owner| match owner {
+            Owner::Legacy(index) => Some((
+                state.legacy[*index].part.clone(),
+                state.legacy[*index].ordinal,
+            )),
+            Owner::Control(_) => None,
+        })
+        .collect();
+    FormPlan {
+        counts: Vec::new(),
+        legacy: Vec::new(),
+        patches: Vec::new(),
+        bindings: Vec::new(),
+        watched_legacy,
+    }
+}
+
+fn push_write(
+    state: &FormState,
+    owner: &Owner,
+    reset: &FormResetValue,
+    plan: &mut FormPlan,
+) -> Result<()> {
+    match owner {
+        Owner::Legacy(index) => {
+            let FormResetValue::Value(value) = reset else {
+                return Err(form_fault("placeholder reset is not valid for the target"));
+            };
+            plan.legacy.push(LegacyWrite {
+                part: state.legacy[*index].part.clone(),
+                ordinal: state.legacy[*index].ordinal,
+                value: legacy_value(&state.legacy[*index], value)?,
+            });
+            Ok(())
+        }
+        Owner::Control(index) => {
+            let control = &state.controls[*index];
+            let (patch, bound) = match reset {
+                FormResetValue::Value(value) => value_patch(control, value)?,
+                FormResetValue::Placeholder { text } => placeholder_patch(control, text)?,
+            };
+            if let Some(value) = bound {
+                let binding = control
+                    .binding
+                    .clone()
+                    .ok_or_else(|| form_fault("form binding is incomplete"))?;
+                plan.bindings.push(BindingWrite { binding, value });
+            }
+            plan.patches.push(LogicalPatch {
+                part: control.part.clone(),
+                ordinal: control.ordinal,
+                patch,
+            });
+            Ok(())
+        }
+    }
+}
+
+fn legacy_value(
+    field: &LegacyField,
+    value: &FormFieldValue,
+) -> Result<crate::LegacyFormFieldValue> {
+    match (field.kind, value) {
+        (crate::LegacyFormFieldKind::TextInput, FormFieldValue::Text(text)) => {
+            Ok(crate::LegacyFormFieldValue::Text(text.clone()))
+        }
+        (crate::LegacyFormFieldKind::CheckBox, FormFieldValue::Checked(checked)) => {
+            Ok(crate::LegacyFormFieldValue::Checked(*checked))
+        }
+        (crate::LegacyFormFieldKind::DropDownList, FormFieldValue::SelectedIndex(index)) => {
+            Ok(crate::LegacyFormFieldValue::SelectedIndex(*index))
+        }
+        _ => Err(form_fault("form value kind is not valid for the target")),
+    }
+}
+
+fn value_patch(
+    control: &PhysicalControl,
+    value: &FormFieldValue,
+) -> Result<(ControlPatch, Option<String>)> {
+    let mut font = None;
+    let (display, bound, full_date, checked) = match control.kind {
+        ControlKind::CheckBox => {
+            let FormFieldValue::Checked(checked) = value else {
+                return Err(form_fault("form value kind is not valid for the target"));
+            };
+            let (glyph, state_font, fault) = if *checked {
+                (
+                    control.checked_glyph.clone(),
+                    control.checked_font.clone(),
+                    control.checked_fault.clone(),
+                )
+            } else {
+                (
+                    control.unchecked_glyph.clone(),
+                    control.unchecked_font.clone(),
+                    control.unchecked_fault.clone(),
+                )
+            };
+            if let Some(fault) = fault {
+                return Err(form_fault(fault));
+            }
+            let glyph =
+                glyph.ok_or_else(|| form_fault("checkbox state glyph is not a Unicode scalar"))?;
+            font = state_font;
+            (glyph, checked.to_string(), None, Some(*checked))
+        }
+        ControlKind::Rich
+        | ControlKind::Plain
+        | ControlKind::Date
+        | ControlKind::Combo
+        | ControlKind::DropDown => {
+            let FormFieldValue::Text(text) = value else {
+                return Err(form_fault("form value kind is not valid for the target"));
+            };
+            let (display, bound, full_date) = prepare_control_text(control, text)?;
+            (display, bound, full_date, None)
+        }
+        ControlKind::Structural => {
+            return Err(form_fault(
+                "structural form target does not accept a scalar value",
+            ));
+        }
+        ControlKind::Inconsistent => {
+            return Err(form_fault("content control type is inconsistent"));
+        }
+    };
+    let patch = ControlPatch {
+        placeholder: Some(false),
+        full_date: match full_date {
+            Some(value) => FullDateEdit::Set(value),
+            None if control.kind == ControlKind::Date => FullDateEdit::Clear,
+            None => FullDateEdit::Keep,
+        },
+        last_value: if matches!(control.kind, ControlKind::Combo | ControlKind::DropDown) {
+            LastValueEdit::Set(bound.clone())
+        } else {
+            LastValueEdit::Keep
+        },
+        checked,
+        display: Some(display),
+        font,
+    };
+    let bound = control.binding.as_ref().map(|_| bound);
+    Ok((patch, bound))
+}
+
+fn placeholder_patch(
+    control: &PhysicalControl,
+    text: &str,
+) -> Result<(ControlPatch, Option<String>)> {
+    if !matches!(
+        control.kind,
+        ControlKind::Rich
+            | ControlKind::Plain
+            | ControlKind::Date
+            | ControlKind::Combo
+            | ControlKind::DropDown
+    ) {
+        return Err(form_fault("placeholder reset is not valid for the target"));
+    }
+    let patch = ControlPatch {
+        placeholder: Some(true),
+        full_date: if control.kind == ControlKind::Date {
+            FullDateEdit::Clear
+        } else {
+            FullDateEdit::Keep
+        },
+        last_value: if matches!(control.kind, ControlKind::Combo | ControlKind::DropDown) {
+            LastValueEdit::Clear
+        } else {
+            LastValueEdit::Keep
+        },
+        checked: None,
+        display: Some(text.to_owned()),
+        font: None,
+    };
+    let bound = control.binding.as_ref().map(|_| String::new());
+    Ok((patch, bound))
+}
+
+fn preview_bindings(document: &Document, doc_part: &str, writes: &[BindingWrite]) -> Result<()> {
+    let _ = apply_binding_groups(document, doc_part, writes)?;
+    Ok(())
+}
+
+fn apply_binding_groups(
+    document: &Document,
+    doc_part: &str,
+    writes: &[BindingWrite],
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut grouped: Vec<(String, Vec<XmlEdit>)> = Vec::new();
+    for write in writes {
+        let (part, selection, xml) = locate_binding(document, doc_part, &write.binding)?;
+        let replacement = if selection.empty {
+            expand_empty_element(xml, &selection, &write.value)?
+        } else {
+            quick_xml::escape::escape(&write.value)
+                .into_owned()
+                .into_bytes()
+        };
+        let edit = XmlEdit {
+            start: selection.replace_start,
+            end: selection.replace_end,
+            replacement,
+        };
+        if let Some((_, edits)) = grouped.iter_mut().find(|(name, _)| name == &part) {
+            edits.push(edit);
+        } else {
+            grouped.push((part, vec![edit]));
+        }
+    }
+    let mut updated = Vec::new();
+    for (part, edits) in grouped {
+        let xml = document
+            .package
+            .get_part(&part)
+            .ok_or_else(|| form_fault(format!("custom XML part {part} is missing")))?;
+        updated.push((part, apply_xml_edits(xml, edits)?));
+    }
+    Ok(updated)
+}
+
+fn apply_form_plan(candidate: &mut Document, state: &FormState, plan: &FormPlan) -> Result<()> {
+    ensure_legacy_stable(state, plan)?;
+    for write in &plan.legacy {
+        candidate.set_legacy_form_field_value(&write.part, write.ordinal, write.value.clone())?;
+    }
+    candidate.flush_to_package()?;
+    let fresh = read_form_state(candidate)?;
+    let mut buffers: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut located = Vec::new();
+    for patch in &plan.patches {
+        let control = fresh
+            .controls
+            .iter()
+            .find(|control| control.part == patch.part && control.ordinal == patch.ordinal)
+            .ok_or_else(|| form_fault("stale form target"))?;
+        if !buffers.iter().any(|(part, _)| part == &patch.part) {
+            let xml = candidate
+                .package
+                .get_part(&patch.part)
+                .ok_or_else(|| form_fault(format!("form story part {} is missing", patch.part)))?
+                .to_vec();
+            buffers.push((patch.part.clone(), xml));
+        }
+        located.push((patch.part.clone(), control.start, patch.patch.clone()));
+    }
+    located.sort_by_key(|item| std::cmp::Reverse(item.1));
+    for (part, start, patch) in &located {
+        let xml = buffers
+            .iter_mut()
+            .find(|(name, _)| name == part)
+            .map(|(_, xml)| xml)
+            .ok_or_else(|| form_fault("form story part is missing"))?;
+        apply_control_patch(xml, *start, patch)?;
+    }
+    for (part, xml) in buffers {
+        candidate.write_story_part(&part, xml)?;
+    }
+    for (part, xml) in apply_binding_groups(candidate, &candidate.doc_part_name, &plan.bindings)? {
+        candidate.package.set_part(&part, xml);
+    }
+    Ok(())
+}
+
+fn ensure_legacy_stable(state: &FormState, plan: &FormPlan) -> Result<()> {
+    let mut parts = Vec::new();
+    for patch in &plan.patches {
+        if !parts.iter().any(|part| part == &patch.part) {
+            parts.push(patch.part.clone());
+        }
+    }
+    for part in parts {
+        let mut contained = Vec::new();
+        for patch in plan.patches.iter().filter(|patch| patch.part == part) {
+            let Some(control) = state
+                .controls
+                .iter()
+                .find(|control| control.part == patch.part && control.ordinal == patch.ordinal)
+            else {
+                continue;
+            };
+            for anchor in &state.anchors {
+                if anchor.part == part && anchor.start >= control.start && anchor.end <= control.end
+                {
+                    contained.push(anchor.ordinal);
+                }
+            }
+        }
+        let Some(minimum) = contained.into_iter().min() else {
+            continue;
+        };
+        if plan
+            .watched_legacy
+            .iter()
+            .any(|(watched, ordinal)| watched == &part && *ordinal >= minimum)
+        {
+            return Err(form_fault("legacy form target would be reindexed"));
+        }
+    }
+    Ok(())
+}
+
+fn apply_control_patch(xml: &mut Vec<u8>, start: usize, patch: &ControlPatch) -> Result<()> {
+    if let Some(placeholder) = patch.placeholder {
+        let bounds = sdt_bounds(xml, start)?;
+        let updated =
+            edit_sdt_property(xml, &bounds, PropertyEdit::Placeholder(Some(placeholder)))?;
+        xml.splice(bounds, updated);
+    }
+    match &patch.full_date {
+        FullDateEdit::Keep => {}
+        FullDateEdit::Set(value) => edit_date_attribute(xml, start, Some(value))?,
+        FullDateEdit::Clear => edit_date_attribute(xml, start, None)?,
+    }
+    match &patch.last_value {
+        LastValueEdit::Keep => {}
+        LastValueEdit::Set(value) => edit_last_value(xml, start, Some(value))?,
+        LastValueEdit::Clear => edit_last_value(xml, start, None)?,
+    }
+    if let Some(checked) = patch.checked {
+        edit_checked(xml, start, checked)?;
+    }
+    if let Some(display) = &patch.display {
+        rewrite_display(xml, start, display, patch.font.as_deref())?;
+    }
+    Ok(())
+}
+
+fn sdt_bounds(xml: &[u8], start: usize) -> Result<Range<usize>> {
+    let elems = index_elements(xml)?;
+    let sdt = elems
+        .iter()
+        .find(|elem| elem.word && elem.local == b"sdt" && elem.range.start == start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    Ok(sdt.range.clone())
+}
+
+fn edit_date_attribute(xml: &mut Vec<u8>, sdt_start: usize, value: Option<&str>) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let sdt = find_sdt(&elems, sdt_start)?;
+    let Some(properties) = direct_child(&elems, sdt.id, true, false, b"sdtPr") else {
+        return Ok(());
+    };
+    let Some(date) = direct_child(&elems, properties.id, true, false, b"date") else {
+        return if value.is_some() {
+            Err(form_fault("date type payload is missing"))
+        } else {
+            Ok(())
+        };
+    };
+    rewrite_qualified_attribute(xml, date.range.start, AttrNs::Word, "fullDate", value)
+}
+
+fn edit_last_value(xml: &mut Vec<u8>, sdt_start: usize, value: Option<&str>) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let sdt = find_sdt(&elems, sdt_start)?;
+    let Some(properties) = direct_child(&elems, sdt.id, true, false, b"sdtPr") else {
+        return Ok(());
+    };
+    let Some(list) = direct_children(&elems, properties.id)
+        .find(|elem| elem.word && matches!(elem.local.as_slice(), b"comboBox" | b"dropDownList"))
+    else {
+        return Ok(());
+    };
+    let start = list.range.start;
+    rewrite_qualified_attribute(xml, start, AttrNs::Word, "lastValue", value)
+}
+
+fn edit_checked(xml: &mut Vec<u8>, sdt_start: usize, checked: bool) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let sdt = find_sdt(&elems, sdt_start)?;
+    let Some(properties) = direct_child(&elems, sdt.id, true, false, b"sdtPr") else {
+        return Err(form_fault("content control has no properties"));
+    };
+    let Some(checkbox) = direct_child(&elems, properties.id, false, true, b"checkbox") else {
+        return Err(form_fault("checkbox type payload is missing"));
+    };
+    let value = if checked { "1" } else { "0" };
+    if let Some(existing) = direct_child(&elems, checkbox.id, false, true, b"checked") {
+        return rewrite_qualified_attribute(
+            xml,
+            existing.range.start,
+            AttrNs::W14,
+            "val",
+            Some(value),
+        );
+    }
+    let (_attributes, prefix, declare) =
+        qualified_attributes(xml, checkbox.range.start, AttrNs::W14)?;
+    let markup = match declare {
+        Some(uri) => {
+            format!("<{prefix}:checked xmlns:{prefix}=\"{uri}\" {prefix}:val=\"{value}\"/>")
+        }
+        None => format!("<{prefix}:checked {prefix}:val=\"{value}\"/>"),
+    };
+    insert_markup(xml, checkbox.range.start, &markup)
+}
+
+fn rewrite_display(
+    xml: &mut Vec<u8>,
+    sdt_start: usize,
+    value: &str,
+    font: Option<&str>,
+) -> Result<()> {
+    let mut separators = Vec::new();
+    {
+        let elems = index_elements(xml)?;
+        let sdt = find_sdt(&elems, sdt_start)?;
+        for elem in &elems {
+            if elem.word
+                && matches!(elem.local.as_slice(), b"tab" | b"br" | b"cr")
+                && accepted_display_text(&elems, sdt, elem)
+            {
+                separators.push(elem.range.start);
+            }
+        }
+    }
+    separators.sort_unstable();
+    for start in separators.into_iter().rev() {
+        let elems = index_elements(xml)?;
+        let range = elems
+            .iter()
+            .find(|elem| elem.range.start == start)
+            .ok_or_else(|| form_fault("stale form target"))?
+            .range
+            .clone();
+        xml.splice(range, Vec::new());
+    }
+    let elems = index_elements(xml)?;
+    let sdt = find_sdt(&elems, sdt_start)?;
+    let mut starts = Vec::new();
+    for elem in &elems {
+        if elem.word && elem.local == b"t" && accepted_display_text(&elems, sdt, elem) {
+            starts.push(elem.range.start);
+        }
+    }
+    if starts.is_empty() {
+        return insert_display(xml, sdt_start, value, font);
+    }
+    starts.sort_unstable();
+    for (index, start) in starts.iter().enumerate().rev() {
+        let text = if index == 0 { value } else { "" };
+        set_element_text(xml, *start, text)?;
+    }
+    if let (Some(font), Some(start)) = (font, starts.first()) {
+        apply_display_font(xml, *start, font)?;
+    }
+    Ok(())
+}
+
+fn apply_display_font(xml: &mut Vec<u8>, text_start: usize, font: &str) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let text = elems
+        .iter()
+        .find(|elem| elem.range.start == text_start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let mut parent = text.parent;
+    let mut run_start = None;
+    while let Some(id) = parent {
+        let current = elems
+            .iter()
+            .find(|elem| elem.id == id)
+            .ok_or_else(|| form_fault("stale form target"))?;
+        if current.word && current.local == b"r" {
+            run_start = Some(current.range.start);
+            break;
+        }
+        parent = current.parent;
+    }
+    let run_start = run_start
+        .ok_or_else(|| form_fault("content control has no typed text display location"))?;
+    let run = elems
+        .iter()
+        .find(|elem| elem.range.start == run_start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let properties = direct_child(&elems, run.id, true, false, b"rPr");
+    if properties.is_none() {
+        let markup = display_font_properties(font);
+        let at = run.open_end;
+        xml.splice(at..at, markup.into_bytes());
+        return Ok(());
+    }
+    let properties = properties.ok_or_else(|| form_fault("stale form target"))?;
+    let fonts = direct_child(&elems, properties.id, true, false, b"rFonts");
+    if fonts.is_none() {
+        let markup = display_font_element(font);
+        let at = properties.open_end;
+        xml.splice(at..at, markup.into_bytes());
+    }
+    let elems = index_elements(xml)?;
+    let run = elems
+        .iter()
+        .find(|elem| elem.word && elem.local == b"r" && elem.range.start == run_start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let properties = direct_child(&elems, run.id, true, false, b"rPr")
+        .ok_or_else(|| form_fault("content control has no typed text display location"))?;
+    let fonts = direct_child(&elems, properties.id, true, false, b"rFonts")
+        .ok_or_else(|| form_fault("content control has no typed text display location"))?;
+    for local in ["ascii", "hAnsi", "eastAsia", "cs"] {
+        rewrite_qualified_attribute(xml, fonts.range.start, AttrNs::Word, local, Some(font))?;
+    }
+    let elems = index_elements(xml)?;
+    let fonts = elems
+        .iter()
+        .find(|elem| elem.word && elem.local == b"rFonts" && elem.range.start == fonts.range.start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let start = fonts.range.start;
+    for local in ["asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"] {
+        rewrite_qualified_attribute(xml, start, AttrNs::Word, local, None)?;
+    }
+    Ok(())
+}
+
+fn display_font_properties(font: &str) -> String {
+    let fonts = display_font_element(font);
+    format!("<w:rPr xmlns:w=\"{W_NS}\">{fonts}</w:rPr>")
+}
+
+fn display_font_element(font: &str) -> String {
+    let font = xml_attr(font);
+    format!(
+        "<w:rFonts xmlns:w=\"{W_NS}\" w:ascii=\"{font}\" w:hAnsi=\"{font}\" w:eastAsia=\"{font}\" w:cs=\"{font}\"/>"
+    )
+}
+
+fn insert_display(
+    xml: &mut Vec<u8>,
+    sdt_start: usize,
+    value: &str,
+    font: Option<&str>,
+) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let sdt = find_sdt(&elems, sdt_start)?;
+    let inline = ancestor_local(&elems, sdt.parent, b"p");
+    let prefix = display_prefix(xml, &elems, sdt)?;
+    let markup = display_run(&prefix, value, font);
+    if !inline {
+        if let Some(paragraph) = elems.iter().find(|elem| {
+            elem.word
+                && elem.local == b"p"
+                && elem.range.start >= sdt.range.start
+                && elem.range.end <= sdt.range.end
+                && accepted_display_paragraph(&elems, sdt, elem)
+        }) {
+            return insert_markup(xml, paragraph.range.start, &markup);
+        }
+        let paragraph = if prefix.is_empty() {
+            format!("<p>{markup}</p>")
+        } else {
+            format!("<{prefix}:p>{markup}</{prefix}:p>")
+        };
+        return insert_in_content(xml, sdt_start, &paragraph);
+    }
+    insert_in_content(xml, sdt_start, &markup)
+}
+
+fn display_prefix(xml: &[u8], elems: &[XmlElem], sdt: &XmlElem) -> Result<String> {
+    let content = direct_child(elems, sdt.id, true, false, b"sdtContent")
+        .ok_or_else(|| form_fault("content control has no typed text display location"))?;
+    Ok(name_prefix(element_qname(&xml[content.range.clone()])?).to_owned())
+}
+
+fn display_run(prefix: &str, value: &str, font: Option<&str>) -> String {
+    let text = escaped_text(value);
+    let space = if needs_preserve(value) {
+        " xml:space=\"preserve\""
+    } else {
+        ""
+    };
+    let properties = font.map(display_font_properties).unwrap_or_default();
+    if prefix.is_empty() {
+        format!("<r>{properties}<t{space}>{text}</t></r>")
+    } else {
+        format!("<{prefix}:r>{properties}<{prefix}:t{space}>{text}</{prefix}:t></{prefix}:r>")
+    }
+}
+
+fn insert_in_content(xml: &mut Vec<u8>, sdt_start: usize, markup: &str) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let sdt = find_sdt(&elems, sdt_start)?;
+    let content = direct_child(&elems, sdt.id, true, false, b"sdtContent")
+        .ok_or_else(|| form_fault("content control has no typed text display location"))?;
+    insert_markup(xml, content.range.start, markup)
+}
+
+fn insert_markup(xml: &mut Vec<u8>, start: usize, markup: &str) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let elem = elems
+        .iter()
+        .find(|elem| elem.range.start == start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let range = elem.range.clone();
+    let replacement = insert_into_element(xml, &range, markup.as_bytes())?;
+    xml.splice(range, replacement);
+    Ok(())
+}
+
+fn set_element_text(xml: &mut Vec<u8>, start: usize, value: &str) -> Result<()> {
+    let elems = index_elements(xml)?;
+    let elem = elems
+        .iter()
+        .find(|elem| elem.range.start == start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let escaped = escaped_text(value);
+    if let Some(inner) = elem.inner_end {
+        let open = elem.open_end;
+        xml.splice(open..inner, escaped.into_bytes());
+    } else {
+        let range = elem.range.clone();
+        let replacement = expand_empty(&xml[range.clone()], escaped.as_bytes())?;
+        xml.splice(range, replacement);
+    }
+    if needs_preserve(value) {
+        ensure_preserve(xml, start)?;
+    }
+    Ok(())
+}
+
+fn ensure_preserve(xml: &mut Vec<u8>, start: usize) -> Result<()> {
+    rewrite_qualified_attribute(xml, start, AttrNs::Xml, "space", Some("preserve"))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AttrNs {
+    Word,
+    W14,
+    Xml,
+}
+
+struct BoundAttr {
+    namespace: Option<AttrNs>,
+    local: Vec<u8>,
+    remove_start: usize,
+    remove_end: usize,
+    value_start: usize,
+    value_end: usize,
+}
+
+fn rewrite_qualified_attribute(
+    xml: &mut Vec<u8>,
+    start: usize,
+    namespace: AttrNs,
+    local: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let (attributes, prefix, declare) = qualified_attributes(xml, start, namespace)?;
+    let matches = attributes
+        .iter()
+        .filter(|attr| attr.namespace == Some(namespace) && attr.local == local.as_bytes())
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(form_fault("duplicate qualified attribute"));
+    }
+    if let Some(found) = matches.first() {
+        if let Some(value) = value {
+            let escaped = xml_attr(value).into_bytes();
+            xml.splice(found.value_start..found.value_end, escaped);
+        } else {
+            xml.splice(found.remove_start..found.remove_end, Vec::new());
+        }
+        return Ok(());
+    }
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let elems = index_elements(xml)?;
+    let elem = elems
+        .iter()
+        .find(|elem| elem.range.start == start)
+        .ok_or_else(|| form_fault("stale form target"))?;
+    let mut tag = xml[elem.range.start..elem.open_end].to_vec();
+    let attribute = match declare {
+        Some(uri) => format!(
+            " xmlns:{prefix}=\"{uri}\" {prefix}:{local}=\"{}\"",
+            xml_attr(value)
+        ),
+        None => format!(" {prefix}:{local}=\"{}\"", xml_attr(value)),
+    };
+    insert_into_start_tag(&mut tag, &attribute)?;
+    let open = elem.open_end;
+    xml.splice(elem.range.start..open, tag);
+    Ok(())
+}
+
+fn qualified_attributes(
+    xml: &[u8],
+    start: usize,
+    wanted: AttrNs,
+) -> Result<(Vec<BoundAttr>, String, Option<&'static str>)> {
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (_namespace, event) =
+            reader
+                .read_resolved_event_into(&mut buffer)
+                .map_err(|error| {
+                    form_fault(format!("content control attribute is invalid: {error}"))
+                })?;
+        if before == start {
+            let (Event::Start(element) | Event::Empty(element)) = event else {
+                return Ok((Vec::new(), String::new(), None));
+            };
+            let element_bytes: &[u8] = &element;
+            let element_ptr = element_bytes.as_ptr() as usize;
+            let mut attributes = Vec::new();
+            for attribute in element.attributes() {
+                let attribute = attribute.map_err(|error| {
+                    form_fault(format!("content control attribute is invalid: {error}"))
+                })?;
+                let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                let std::borrow::Cow::Borrowed(raw_value) = &attribute.value else {
+                    return Err(form_fault("content control attribute is invalid"));
+                };
+                let value_ptr = raw_value.as_ptr() as usize;
+                let key_ptr = attribute.key.as_ref().as_ptr() as usize;
+                if value_ptr < element_ptr || key_ptr < element_ptr {
+                    return Err(form_fault("content control attribute is invalid"));
+                }
+                let value_start = before + 1 + (value_ptr - element_ptr);
+                let value_end = value_start + raw_value.len();
+                let key_start = before + 1 + (key_ptr - element_ptr);
+                let quote = *xml
+                    .get(
+                        value_start
+                            .checked_sub(1)
+                            .ok_or_else(|| form_fault("content control attribute is invalid"))?,
+                    )
+                    .ok_or_else(|| form_fault("content control attribute is invalid"))?;
+                if quote != b'"' && quote != b'\'' {
+                    return Err(form_fault("content control attribute is invalid"));
+                }
+                if xml.get(value_end) != Some(&quote) {
+                    return Err(form_fault("content control attribute is invalid"));
+                }
+                let mut remove_start = key_start;
+                while remove_start > before && xml[remove_start - 1].is_ascii_whitespace() {
+                    remove_start -= 1;
+                }
+                attributes.push(BoundAttr {
+                    namespace: attr_namespace(&namespace),
+                    local: local.as_ref().to_vec(),
+                    remove_start,
+                    remove_end: value_end + 1,
+                    value_start,
+                    value_end,
+                });
+            }
+            let (prefix, declare) = attribute_prefix(&reader, &element, wanted)?;
+            return Ok((attributes, prefix, declare));
+        }
+        if before > start {
+            return Err(form_fault("content control attribute position was missed"));
+        }
+        buffer.clear();
+    }
+}
+
+fn attr_namespace(namespace: &ResolveResult<'_>) -> Option<AttrNs> {
+    match namespace {
+        ResolveResult::Bound(Namespace(uri)) if *uri == W_NS.as_bytes() => Some(AttrNs::Word),
+        ResolveResult::Bound(Namespace(uri)) if *uri == W14_NS.as_bytes() => Some(AttrNs::W14),
+        ResolveResult::Bound(Namespace(uri)) if *uri == b"http://www.w3.org/XML/1998/namespace" => {
+            Some(AttrNs::Xml)
+        }
+        _ => None,
+    }
+}
+
+fn attribute_prefix(
+    reader: &NsReader<&[u8]>,
+    element: &BytesStart<'_>,
+    namespace: AttrNs,
+) -> Result<(String, Option<&'static str>)> {
+    if let Some(prefix) = prefix_in_scope(reader, namespace) {
+        return Ok((prefix, None));
+    }
+    let (preferred, uri) = match namespace {
+        AttrNs::Word => ("w", W_NS),
+        AttrNs::W14 => ("w14", W14_NS),
+        AttrNs::Xml => ("xml", "http://www.w3.org/XML/1998/namespace"),
+    };
+    if !prefix_captured(reader, element, preferred) {
+        return Ok((preferred.to_owned(), Some(uri)));
+    }
+    let mut index = 2u32;
+    loop {
+        let candidate = format!("{preferred}{index}");
+        if !prefix_captured(reader, element, &candidate) {
+            return Ok((candidate, Some(uri)));
+        }
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| form_fault("content control namespace prefix is exhausted"))?;
+    }
+}
+
+fn prefix_captured(reader: &NsReader<&[u8]>, element: &BytesStart<'_>, name: &str) -> bool {
+    let name_bytes = name.as_bytes();
+    if reader.resolver().bindings().any(|(declaration, _)| {
+        matches!(
+            declaration,
+            quick_xml::name::PrefixDeclaration::Named(prefix) if prefix == name_bytes
+        )
+    }) {
+        return true;
+    }
+    element
+        .attributes()
+        .with_checks(false)
+        .flatten()
+        .any(|attribute| {
+            let key = attribute.key.as_ref();
+            key.starts_with(b"xmlns:") && &key[b"xmlns:".len()..] == name_bytes
+                || key.split(|byte| *byte == b':').next() == Some(name_bytes)
+        })
+}
+
+fn prefix_in_scope(reader: &NsReader<&[u8]>, namespace: AttrNs) -> Option<String> {
+    if namespace == AttrNs::Xml {
+        return Some("xml".to_owned());
+    }
+    let wanted: &[u8] = match namespace {
+        AttrNs::Word => W_NS.as_bytes(),
+        AttrNs::W14 => W14_NS.as_bytes(),
+        AttrNs::Xml => b"http://www.w3.org/XML/1998/namespace",
+    };
+    for (declaration, bound) in reader.resolver().bindings() {
+        if bound.0 == wanted
+            && let quick_xml::name::PrefixDeclaration::Named(prefix) = declaration
+        {
+            return Some(String::from_utf8_lossy(prefix).into_owned());
+        }
+    }
+    None
+}
+
+fn insert_into_start_tag(tag: &mut Vec<u8>, attribute: &str) -> Result<()> {
+    let end = tag
+        .iter()
+        .rposition(|byte| *byte == b'>')
+        .ok_or_else(|| form_fault("content control start tag is not closed"))?;
+    let at = if end > 0 && tag[end - 1] == b'/' {
+        end - 1
+    } else {
+        end
+    };
+    tag.splice(at..at, attribute.as_bytes().iter().copied());
+    Ok(())
+}
+
+fn escaped_text(value: &str) -> String {
+    quick_xml::escape::escape(value).into_owned()
+}
+
+fn needs_preserve(value: &str) -> bool {
+    value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace)
+}
+
+fn find_sdt(elems: &[XmlElem], start: usize) -> Result<&XmlElem> {
+    elems
+        .iter()
+        .find(|elem| elem.word && elem.local == b"sdt" && elem.range.start == start)
+        .ok_or_else(|| form_fault("stale form target"))
 }

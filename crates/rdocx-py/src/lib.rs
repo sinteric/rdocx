@@ -136,6 +136,30 @@ pub(crate) fn rdocx_to_pyerr(py: Python<'_>, error: rdocx::Error) -> PyErr {
 #[pymodule]
 fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDocument>()?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_whole_body_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_splice_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_transaction_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(
+        document::scoped_normalization_work,
+        module
+    )?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(
+        document::word_transaction_outputs,
+        module
+    )?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_piece_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::staging_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::reopen_work, module)?)?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::main_body_block_scans, module)?)?;
     module.add_class::<document::PyFontEmbeddingLicense>()?;
     module.add_class::<document::PyEmbeddedFont>()?;
     module.add_class::<document::PyFontDefinition>()?;
@@ -162,7 +186,22 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<document::PyDocumentFragment>()?;
     module.add_class::<document::PyContentControl>()?;
     module.add_class::<document::PyContentControlTypePayload>()?;
+    module.add_class::<document::PyMailMergePackageSource>()?;
+    module.add_class::<document::PyMailMergeSettings>()?;
+    module.add_class::<document::PyMailMergeFieldMapping>()?;
+    module.add_class::<document::PyMailMergeRecipient>()?;
+    module.add_class::<document::PyMailMergePackageOptions>()?;
+    module.add_class::<document::PyMailMergePackageDiagnostic>()?;
+    module.add_class::<document::PyMailMergePreparedData>()?;
     module.add_class::<document::PyLegacyFormField>()?;
+    module.add_class::<document::PyLegacyFormFieldDefinition>()?;
+    module.add_class::<document::PyFormFieldTarget>()?;
+    module.add_class::<document::PyFormFieldValue>()?;
+    module.add_class::<document::PyFormResetValue>()?;
+    module.add_class::<document::PyFormFieldRule>()?;
+    module.add_class::<document::PyFormFieldAssignment>()?;
+    module.add_class::<document::PyFormValidationIssue>()?;
+    module.add_class::<document::PyDocumentProtection>()?;
     module.add_class::<document::PyCustomFileTime>()?;
     module.add_class::<document::PyCustomProperty>()?;
     module.add_class::<document::PyCustomProperties>()?;

@@ -1,5 +1,6 @@
 //! Layout engine orchestrator: ties all phases together.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -2515,7 +2516,7 @@ fn projected_content_char_starts(run: &CT_R) -> Vec<usize> {
             RunContent::Text(text) | RunContent::DeletedText(text) => text.text.chars().count(),
             RunContent::Tab | RunContent::Break(_) => 1,
             RunContent::Field(field) => field
-                .projected_text()
+                .effective_projected_text()
                 .map_or(0, |text| text.chars().count()),
             RunContent::SpecialCharacter(SpecialCharacter::CarriageReturn) => 1,
             RunContent::FootnoteRef { custom_mark, .. }
@@ -3367,7 +3368,7 @@ fn stored_note_cache_runs(
     inherited: Option<&CT_RPr>,
 ) -> Vec<CT_R> {
     let Some(runs) = field.cached_result_runs() else {
-        let mut run = CT_R::new(&field.cached_result);
+        let mut run = CT_R::new(&field.effective_display());
         run.properties = inherited.cloned();
         return vec![run];
     };
@@ -10383,16 +10384,18 @@ fn layout_paragraph_with_source_and_table(
                     } else {
                         (computed_value, field_kind)
                     };
-                    let stored_segments = field.cached_display_field_segments();
-                    let segments = if let Some(value) = computed_value.as_deref() {
-                        let stored_properties = stored_segments
-                            .first()
-                            .and_then(|(_, properties, _)| *properties);
-                        vec![(value, stored_properties, field)]
-                    } else {
-                        stored_segments
-                    };
+                    let stored_segments = field.effective_display_field_segments();
+                    let segments: Vec<(Cow<'_, str>, Option<&CT_RPr>, &rdocx_oxml::text::Field)> =
+                        if let Some(value) = computed_value.as_deref() {
+                            let stored_properties = stored_segments
+                                .first()
+                                .and_then(|(_, properties, _)| *properties);
+                            vec![(Cow::Borrowed(value), stored_properties, field)]
+                        } else {
+                            stored_segments
+                        };
                     for (value, stored_properties, display_owner) in segments {
+                        let value = value.as_ref();
                         let segment_field_source = source_node
                             .zip(
                                 field_indices
@@ -18494,6 +18497,255 @@ mod tests {
                     .all(|(actual, unspaced)| (*actual - unspaced - 2.0).abs() < 0.001),
                 "stored or resolved field spacing was not retained"
             );
+        }
+    }
+
+    fn cjk_word_metric_font_bytes() -> Vec<u8> {
+        let mut data = oxml_layout::bundled_fonts::bundled_font_data()
+            .into_iter()
+            .find(|(name, _)| *name == "Noto Sans SC")
+            .unwrap()
+            .1
+            .to_vec();
+        let count = u16::from_be_bytes(data[4..6].try_into().unwrap()) as usize;
+        let table = |data: &[u8], tag: &[u8; 4]| {
+            let r = (0..count)
+                .map(|n| 12 + n * 16)
+                .find(|r| &data[*r..*r + 4] == tag)
+                .unwrap();
+            u32::from_be_bytes(data[r + 8..r + 12].try_into().unwrap()) as usize
+        };
+        let os2 = table(&data, b"OS/2");
+        let hhea = table(&data, b"hhea");
+        data[os2..os2 + 2].copy_from_slice(&4_u16.to_be_bytes());
+        data[os2 + 62..os2 + 64].copy_from_slice(&0_u16.to_be_bytes());
+        data[os2 + 74..os2 + 76].copy_from_slice(&1200_u16.to_be_bytes());
+        data[os2 + 76..os2 + 78].copy_from_slice(&500_u16.to_be_bytes());
+        data[os2 + 78..os2 + 82].copy_from_slice(&(1_u32 << 17).to_be_bytes());
+        data[os2 + 82..os2 + 86].copy_from_slice(&0_u32.to_be_bytes());
+        for (at, v) in [(4, 800_i16), (6, -200), (8, 500)] {
+            data[hhea + at..hhea + at + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(
+            ttf_parser::Face::parse(&data, 0).unwrap().units_per_em(),
+            1000
+        );
+        data
+    }
+
+    #[test]
+    fn cjk_word_metrics_restore_plain_rich_objects_and_carriers_without_touching_exact() {
+        use oxml_layout::{LayoutLine, LineItem, LineSpacing};
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let data = cjk_word_metric_font_bytes();
+        fm.load_additional_fonts(&[oxml_layout::FontFile {
+            family: "Noto Sans SC".into(),
+            data: data.clone(),
+        }]);
+        let id = fm.resolve_font(Some("Noto Sans SC"), false, false).unwrap();
+        assert_eq!(fm.font_data(id).unwrap().data.as_ref(), data.as_slice());
+        let raw = fm.metrics(id, 12.0).unwrap();
+        let text = "〈中〉、你好世界";
+        let shaped = fm.shape_text(id, text, 12.0).unwrap();
+        assert!(shaped.glyph_ids.iter().all(|g| *g != 0));
+        let segment = TextSegment {
+            text: text.into(),
+            direction: oxml_layout::TextDirection::Auto,
+            source: None,
+            font_id: id,
+            font_size: 12.0,
+            glyph_ids: shaped.glyph_ids,
+            advances: shaped.advances,
+            width: shaped.width,
+            ascent: raw.ascent,
+            descent: raw.descent,
+            line_gap: raw.line_gap,
+            color: oxml_layout::Color::BLACK,
+            bold: false,
+            italic: false,
+            underline: None,
+            strike: false,
+            dstrike: false,
+            highlight: None,
+            baseline_offset: 0.0,
+            hyperlink_url: None,
+            field_kind: None,
+            field_source: None,
+            note: None,
+            note_reference_source: None,
+        };
+        let rich = fm
+            .shape_multilingual_text(
+                segment.clone(),
+                Some("zh-CN"),
+                oxml_layout::TextDirection::Auto,
+                true,
+            )
+            .unwrap();
+        assert!(rich.iter().all(|r| r.font_id() == id));
+        let line = |items, ascent, descent| LayoutLine {
+            items,
+            width: 100.0,
+            ascent,
+            descent,
+            line_gap: raw.line_gap,
+            height: ascent + descent + raw.line_gap,
+            indent_left: 0.0,
+            available_width: 468.0,
+            is_last: true,
+            forced_break_after: None,
+        };
+        for rich_path in [false, true] {
+            for object_height in [0.0_f64, 20.0] {
+                for spacing in [
+                    LineSpacing::Single,
+                    LineSpacing::Multiple(1.5),
+                    LineSpacing::AtLeast(30.0),
+                    LineSpacing::Exact(17.0),
+                ] {
+                    let mut items = if rich_path {
+                        rich.iter()
+                            .cloned()
+                            .map(LineItem::MultilingualText)
+                            .collect()
+                    } else {
+                        vec![LineItem::Text(segment.clone())]
+                    };
+                    if object_height > 0.0 {
+                        items.push(LineItem::Image {
+                            width: 20.0,
+                            height: object_height,
+                            media_id: oxml_layout::MediaId(0),
+                        });
+                    }
+                    let initial_ascent = raw.ascent.max(object_height);
+                    let mut lines = vec![line(items, initial_ascent, raw.descent)];
+                    crate::convert::restore_word_line_heights(&mut lines, spacing, None, &fm, None);
+                    let (ascent, descent, height) = match spacing {
+                        LineSpacing::Exact(_) => (initial_ascent, raw.descent, 17.0),
+                        LineSpacing::AtLeast(_) => (11.4_f64.max(object_height), 4.2, 30.0),
+                        LineSpacing::Multiple(_) => (
+                            11.4_f64.max(object_height),
+                            4.2,
+                            11.4_f64.max(object_height) + 4.2 + 7.8,
+                        ),
+                        _ => (
+                            11.4_f64.max(object_height),
+                            4.2,
+                            11.4_f64.max(object_height) + 4.2,
+                        ),
+                    };
+                    assert!(
+                        (lines[0].ascent - ascent).abs() < 1e-9,
+                        "rich={rich_path} spacing={spacing:?}"
+                    );
+                    assert!((lines[0].descent - descent).abs() < 1e-9);
+                    assert!((lines[0].height - height).abs() < 1e-9);
+                }
+            }
+        }
+        let mut carried = vec![
+            line(vec![LineItem::Text(segment)], raw.ascent, raw.descent),
+            line(Vec::new(), 0.0, 0.0),
+        ];
+        crate::convert::restore_word_line_heights(
+            &mut carried,
+            LineSpacing::Single,
+            None,
+            &fm,
+            None,
+        );
+        assert!((carried[1].height - 15.6).abs() < 1e-9);
+        let mark = fm.word_line_metrics(id, 12.0).unwrap();
+        let mut blank = vec![line(Vec::new(), 0.0, 0.0)];
+        crate::convert::restore_word_line_heights(
+            &mut blank,
+            LineSpacing::Single,
+            None,
+            &fm,
+            Some(mark),
+        );
+        assert!((blank[0].height - 15.6).abs() < 1e-9);
+        let mut objects = vec![line(
+            vec![LineItem::Image {
+                width: 20.0,
+                height: 20.0,
+                media_id: oxml_layout::MediaId(0),
+            }],
+            20.0,
+            0.0,
+        )];
+        crate::convert::restore_word_line_heights(
+            &mut objects,
+            LineSpacing::Multiple(1.5),
+            None,
+            &fm,
+            Some(mark),
+        );
+        assert!((objects[0].height - 27.8).abs() < 1e-9);
+        assert_eq!((objects[0].ascent, objects[0].descent), (20.0, 0.0));
+    }
+
+    #[test]
+    fn cjk_word_metrics_agree_in_initial_and_float_reflow_layout() {
+        use rdocx_oxml::drawing::{AnchorAlignH, WrapType};
+        let text = "〈中〉、你好世界".repeat(24);
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/><w:snapToGrid w:val="0"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Noto Sans SC" w:hAnsi="Noto Sans SC" w:eastAsia="Noto Sans SC" w:cs="Noto Sans SC"/><w:sz w:val="24"/><w:lang w:val="zh-CN" w:eastAsia="zh-CN"/></w:rPr><w:t>{text}</w:t></w:r></w:p><w:sectPr><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#
+        );
+        let source = rdocx_oxml::CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let p = source.body.paragraphs().next().unwrap().clone();
+        for exact in [false, true] {
+            for wrapped in [false, true] {
+                let mut input = if wrapped {
+                    make_wrapping_document(
+                        WrapType::Square,
+                        Some(AnchorAlignH::Left),
+                        100.0,
+                        40.0,
+                        5.0,
+                    )
+                } else {
+                    make_input_with_text("")
+                };
+                if wrapped {
+                    let BodyContent::Paragraph(target) = &mut input.document.body.content[0] else {
+                        panic!("paragraph")
+                    };
+                    let drawing = target.runs.pop().unwrap();
+                    **target = p.clone();
+                    target.runs.push(drawing);
+                } else {
+                    input.document = source.clone();
+                }
+                if exact {
+                    let BodyContent::Paragraph(target) = &mut input.document.body.content[0] else {
+                        panic!("paragraph")
+                    };
+                    let properties = target.properties.as_mut().unwrap();
+                    properties.line_rule = Some("exact".into());
+                    properties.line_spacing = Some(rdocx_oxml::units::Twips(340));
+                }
+                input.fonts = vec![oxml_layout::FontFile {
+                    family: "Noto Sans SC".into(),
+                    data: cjk_word_metric_font_bytes(),
+                }];
+                let output = deterministic_layout(&input);
+                let runs = multilingual_runs(&output);
+                assert!(runs.iter().all(|r| r.glyph_ids.iter().all(|g| *g != 0)));
+                let mut baselines = runs.iter().map(|r| r.origin.y).collect::<Vec<_>>();
+                baselines.sort_by(f64::total_cmp);
+                baselines.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+                assert!(baselines.len() > 2);
+                assert!(
+                    (baselines[0] - if exact { 81.6 } else { 83.4 }).abs() < 1e-6,
+                    "wrapped={wrapped} baselines={baselines:?}"
+                );
+                assert!(
+                    (baselines[1] - baselines[0] - if exact { 17.0 } else { 15.6 }).abs() < 1e-6,
+                    "wrapped={wrapped} baselines={baselines:?}"
+                );
+            }
         }
     }
 

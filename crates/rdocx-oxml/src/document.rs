@@ -740,6 +740,180 @@ pub enum BodyContent {
     RawXml(Box<Vec<u8>>),
 }
 
+impl BodyContent {
+    /// Whether this block's typed owners may be reused by value.
+    ///
+    /// The walk matches [`admit_word_model`]. A field, a paragraph bookmark,
+    /// or a tab stop disqualifies the block. Raw XML stays exact bytes and
+    /// is not rejected by itself. This does not serialize the block.
+    #[doc(hidden)]
+    pub fn owner_facts_reusable_by_value(&self) -> bool {
+        use crate::content_control::SdtContent;
+        use crate::revision::RevisionContent;
+        use crate::table::CellContent;
+        use crate::text::RunContent;
+        let root = match self {
+            BodyContent::Paragraph(paragraph) => WordOwner::Paragraph(paragraph),
+            BodyContent::Table(table) => WordOwner::Table(table),
+            BodyContent::ContentControl(control) => WordOwner::Control(control),
+            BodyContent::RawXml(_) => return true,
+        };
+        let mut pending = vec![root];
+        while let Some(owner) = pending.pop() {
+            match owner {
+                WordOwner::Body(body) => {
+                    for child in &body.content {
+                        match child {
+                            BodyContent::Paragraph(paragraph) => {
+                                pending.push(WordOwner::Paragraph(paragraph))
+                            }
+                            BodyContent::Table(table) => pending.push(WordOwner::Table(table)),
+                            BodyContent::ContentControl(control) => {
+                                pending.push(WordOwner::Control(control))
+                            }
+                            BodyContent::RawXml(_) => {}
+                        }
+                    }
+                }
+                WordOwner::Paragraph(paragraph) => {
+                    if !paragraph.bookmark_markers.is_empty() {
+                        return false;
+                    }
+                    if paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|properties| properties.tabs.as_ref())
+                        .is_some_and(|tabs| !tabs.tabs.is_empty())
+                    {
+                        return false;
+                    }
+                    for run in &paragraph.runs {
+                        pending.push(WordOwner::Run(run));
+                    }
+                    for (_, _, _, control) in &paragraph.content_controls {
+                        pending.push(WordOwner::Control(control));
+                    }
+                    for (_, _, revision) in &paragraph.revisions {
+                        pending.push(WordOwner::Revision(revision));
+                    }
+                    for ruby in &paragraph.rubies {
+                        for run in &ruby.ruby_text {
+                            pending.push(WordOwner::Run(run));
+                        }
+                    }
+                }
+                WordOwner::Run(run) => {
+                    for child in &run.content {
+                        match child {
+                            RunContent::Drawing(drawing) => {
+                                pending.push(WordOwner::Drawing(drawing))
+                            }
+                            RunContent::Field(_) => return false,
+                            _ => {}
+                        }
+                    }
+                }
+                WordOwner::Control(control) => {
+                    for run in control.original_resource_runs() {
+                        pending.push(WordOwner::Run(run));
+                    }
+                    for (_, revision) in &control.revisions {
+                        pending.push(WordOwner::Revision(revision));
+                    }
+                    for child in &control.content {
+                        let child = match child {
+                            SdtContent::Paragraph(paragraph) => WordOwner::Paragraph(paragraph),
+                            SdtContent::Table(table) => WordOwner::Table(table),
+                            SdtContent::Row(row) => WordOwner::Row(row),
+                            SdtContent::Cell(cell) => WordOwner::Cell(cell),
+                            SdtContent::Run(run) => WordOwner::Run(run),
+                            SdtContent::ContentControl(nested) => WordOwner::Control(nested),
+                            SdtContent::RawXml(_) => continue,
+                        };
+                        pending.push(child);
+                    }
+                }
+                WordOwner::Table(table) => {
+                    for row in &table.rows {
+                        pending.push(WordOwner::Row(row));
+                    }
+                    for (_, _, control) in &table.content_controls {
+                        pending.push(WordOwner::Control(control));
+                    }
+                }
+                WordOwner::Row(row) => {
+                    for cell in &row.cells {
+                        pending.push(WordOwner::Cell(cell));
+                    }
+                    for (_, _, control) in &row.content_controls {
+                        pending.push(WordOwner::Control(control));
+                    }
+                }
+                WordOwner::Cell(cell) => {
+                    for child in &cell.content {
+                        match child {
+                            CellContent::Paragraph(paragraph) => {
+                                pending.push(WordOwner::Paragraph(paragraph))
+                            }
+                            CellContent::Table(table) => pending.push(WordOwner::Table(table)),
+                            CellContent::ContentControl(control) => {
+                                pending.push(WordOwner::Control(control))
+                            }
+                        }
+                    }
+                }
+                WordOwner::Field(_) => return false,
+                WordOwner::Revision(revision) => {
+                    if let Some(paragraph) = revision.content_paragraph() {
+                        pending.push(WordOwner::Paragraph(paragraph));
+                    }
+                    match revision.content() {
+                        RevisionContent::Runs(runs) => {
+                            for run in runs {
+                                pending.push(WordOwner::Run(run));
+                            }
+                        }
+                        RevisionContent::PriorParagraphProperties(properties) => {
+                            if properties
+                                .tabs
+                                .as_ref()
+                                .is_some_and(|tabs| !tabs.tabs.is_empty())
+                            {
+                                return false;
+                            }
+                        }
+                        RevisionContent::Marker
+                        | RevisionContent::PriorRunProperties(_)
+                        | RevisionContent::PriorTableProperties(_)
+                        | RevisionContent::PriorSectionProperties(_) => {}
+                    }
+                    for (_, nested) in revision.nested_revisions() {
+                        pending.push(WordOwner::Revision(nested));
+                    }
+                }
+                WordOwner::Drawing(drawing) => {
+                    if let Some(anchor) = &drawing.anchor {
+                        pending.push(WordOwner::Anchor(anchor));
+                    }
+                }
+                WordOwner::Anchor(anchor) => {
+                    if let Some(shape) = &anchor.shape
+                        && (shape.text_body.is_some() || !shape.text.is_empty())
+                    {
+                        if let Some(body) = &shape.text_body {
+                            pending.push(WordOwner::Body(body));
+                        }
+                        for paragraph in &shape.text {
+                            pending.push(WordOwner::Paragraph(paragraph));
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
 /// Column definition for multi-column layouts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CT_Column {
@@ -3417,6 +3591,25 @@ impl CT_Body {
         paragraphs.into_iter()
     }
 
+    /// The number of paragraphs [`Self::paragraphs`] visits in the body
+    /// children before `index`.
+    #[doc(hidden)]
+    pub fn paragraph_count_before(&self, index: usize) -> usize {
+        let mut nested = Vec::new();
+        self.content[..index.min(self.content.len())]
+            .iter()
+            .map(|content| match content {
+                BodyContent::Paragraph(_) => 1,
+                BodyContent::ContentControl(sdt) => {
+                    nested.clear();
+                    sdt.collect_paragraphs(SdtOwner::Body, &mut nested);
+                    nested.len()
+                }
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// Whether accepting every tracked change joins the body paragraph at
     /// `index` to the next body paragraph, as Word does when a paragraph mark
     /// is deleted or moved away (`w:del` or `w:moveFrom` in the mark `w:rPr`).
@@ -3736,17 +3929,26 @@ impl CT_Body {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_marked(writer, PartWrite::Whole, &mut |_| {})
+    }
+
+    /// [`Self::to_xml`], showing `mark` the writer after the body's start
+    /// tag and after each child. `PartWrite::Frame` omits the children and
+    /// marks once, at that child boundary, before the final section.
+    fn write_marked<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        mode: PartWrite,
+        mark: &mut dyn FnMut(&Writer<W>),
+    ) -> Result<()> {
         admit_word_model(WordOwner::Body(self))?;
         writer.write_event(Event::Start(BytesStart::new("w:body")))?;
+        mark(writer);
 
-        for item in &self.content {
-            match item {
-                BodyContent::Paragraph(p) => p.to_xml(writer)?,
-                BodyContent::Table(t) => t.to_xml(writer)?,
-                BodyContent::ContentControl(sdt) => sdt.to_xml(writer)?,
-                BodyContent::RawXml(raw) => {
-                    writer.get_mut().write_all(raw)?;
-                }
+        if mode == PartWrite::Whole {
+            for item in &self.content {
+                write_body_content(item, writer)?;
+                mark(writer);
             }
         }
 
@@ -3759,10 +3961,31 @@ impl CT_Body {
     }
 }
 
+/// The two part serializations that exist today. `Whole` writes children and
+/// then the conditional `w14` declaration. `Frame` stops at the child
+/// boundary and leaves `w14` for the caller.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PartWrite {
+    Whole,
+    Frame,
+}
+
 impl Default for CT_Body {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn write_body_content<W: std::io::Write>(item: &BodyContent, writer: &mut Writer<W>) -> Result<()> {
+    match item {
+        BodyContent::Paragraph(p) => p.to_xml(writer)?,
+        BodyContent::Table(t) => t.to_xml(writer)?,
+        BodyContent::ContentControl(sdt) => sdt.to_xml(writer)?,
+        BodyContent::RawXml(raw) => {
+            writer.get_mut().write_all(raw)?;
+        }
+    }
+    Ok(())
 }
 
 /// `CT_Document` — The root document element.
@@ -3949,22 +4172,40 @@ impl CT_Document {
 
     /// Serialize to XML bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
+        Ok(self.write_part(PartWrite::Whole, None)?.0)
+    }
+
+    /// [`Self::to_xml`], and where the body's children are in its bytes:
+    /// the range between the body's start tag and its section properties or
+    /// end tag, and the range of each child there, one after the other.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)] // The bytes, the children's range and each child's range.
+    pub fn to_xml_with_body_spans(
+        &self,
+    ) -> Result<(Vec<u8>, std::ops::Range<usize>, Vec<std::ops::Range<usize>>)> {
+        let mut marks = Vec::with_capacity(self.body.content.len() + 2);
+        let xml = self.write_part(PartWrite::Whole, Some(&mut marks))?.0;
+        // A `w14` declaration added to the root moves everything after it.
+        let shift = xml.len() - marks.pop().unwrap_or(xml.len());
+        let marks = marks
+            .into_iter()
+            .map(|mark| mark + shift)
+            .collect::<Vec<_>>();
+        let content = marks[0]..marks[marks.len() - 1];
+        let children = marks.windows(2).map(|pair| pair[0]..pair[1]).collect();
+        Ok((xml, content, children))
+    }
+
+    /// The part's bytes, with `marks`, when given, holding the offset after
+    /// the body's start tag and after each child, and then the length before
+    /// any `w14` declaration is added.
+    fn write_part(
+        &self,
+        mode: PartWrite,
+        mut marks: Option<&mut Vec<usize>>,
+    ) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
         self.validate_resource_limits()?;
-        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
-        let wp_root_is_canonical = self
-            .extra_namespaces
-            .iter()
-            .find(|(name, _)| name == "xmlns:wp")
-            .is_none_or(|(_, namespace)| namespace == wp_ns);
-        let _binding_scope = root_binding_scope(
-            ROOT_R_BINDING
-                | ROOT_MC_BINDING
-                | if wp_root_is_canonical {
-                    ROOT_WP_BINDING
-                } else {
-                    0
-                },
-        );
+        let _binding_scope = self.root_binding_scope();
         let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
@@ -3973,6 +4214,125 @@ impl CT_Document {
             Some("yes"),
         )))?;
 
+        writer.write_event(Event::Start(self.root_start()))?;
+
+        // Write background element if present
+        if let Some(ref bg) = self.background_xml {
+            writer.get_mut().extend_from_slice(bg);
+        }
+        for raw in &self.background_extra_xml {
+            writer.get_mut().extend_from_slice(raw);
+        }
+
+        let mut frame_at = None;
+        match mode {
+            PartWrite::Whole => match marks.as_deref_mut() {
+                Some(marks) => {
+                    self.body
+                        .write_marked(&mut writer, PartWrite::Whole, &mut |writer| {
+                            marks.push(writer.get_ref().len())
+                        })?
+                }
+                None => self.body.to_xml(&mut writer)?,
+            },
+            PartWrite::Frame => {
+                self.body
+                    .write_marked(&mut writer, PartWrite::Frame, &mut |writer| {
+                        frame_at = Some(writer.get_ref().len())
+                    })?
+            }
+        }
+
+        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
+        if let Some(marks) = marks {
+            marks.push(writer.get_ref().len());
+        }
+
+        let mut xml = writer.into_inner();
+        if mode == PartWrite::Frame {
+            let at = frame_at.ok_or_else(|| {
+                OxmlError::InvalidValue("frame child boundary was not marked".to_owned())
+            })?;
+            let tail = xml.split_off(at);
+            return Ok((xml, Some(tail)));
+        }
+        declare_w14_on_part_root(&mut xml)?;
+        Ok((xml, None))
+    }
+
+    /// The bytes [`Self::to_xml`] writes before the first body child, through
+    /// the body start, and after the last child, including the final section.
+    /// This is before the conditional `w14` root declaration. A later block
+    /// record applies that declaration to the stored frame.
+    #[doc(hidden)]
+    pub fn body_frame_xml(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (head, tail) = self.write_part(PartWrite::Frame, None)?;
+        tail.map(|tail| (head, tail))
+            .ok_or_else(|| OxmlError::InvalidValue("frame tail was not written".to_owned()))
+    }
+
+    /// The bytes [`Self::to_xml`] writes for `item` under this part root.
+    /// The item need not belong to the body. Raw bytes pass through.
+    #[doc(hidden)]
+    pub fn body_item_xml(&self, item: &BodyContent) -> Result<Vec<u8>> {
+        match item {
+            BodyContent::Paragraph(paragraph) => {
+                admit_word_model(WordOwner::Paragraph(paragraph))?;
+            }
+            BodyContent::Table(table) => admit_word_model(WordOwner::Table(table))?,
+            BodyContent::ContentControl(control) => {
+                admit_word_model(WordOwner::Control(control))?;
+            }
+            BodyContent::RawXml(_) => {}
+        }
+        let _binding_scope = self.root_binding_scope();
+        let mut writer = Writer::new(Vec::new());
+        write_body_content(item, &mut writer)?;
+        Ok(writer.into_inner())
+    }
+
+    /// Serialize `item` as the only child of this document's body, under the
+    /// part root and with the bytes [`Self::to_xml`] writes for it there.
+    ///
+    /// The item need not belong to the body. As in [`Self::to_xml`], the root
+    /// declares `w14` when the original root does or the written bytes use it,
+    /// so a root without `w14` here does not say whether the whole part has it.
+    #[doc(hidden)]
+    pub fn standalone_body_item_xml(&self, item: &BodyContent) -> Result<Vec<u8>> {
+        let _binding_scope = self.root_binding_scope();
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(self.root_start()))?;
+        writer.write_event(Event::Start(BytesStart::new("w:body")))?;
+        write_body_content(item, &mut writer)?;
+        writer.write_event(Event::End(BytesEnd::new("w:body")))?;
+        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
+        let mut xml = writer.into_inner();
+        declare_w14_on_part_root(&mut xml)?;
+        Ok(xml)
+    }
+
+    /// The part-root guarantees the body is serialized under.
+    fn root_binding_scope(&self) -> crate::text::RootBindingScope {
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        let wp_root_is_canonical = self
+            .extra_namespaces
+            .iter()
+            .find(|(name, _)| name == "xmlns:wp")
+            .is_none_or(|(_, namespace)| namespace == wp_ns);
+        root_binding_scope(
+            ROOT_R_BINDING
+                | ROOT_MC_BINDING
+                | if wp_root_is_canonical {
+                    ROOT_WP_BINDING
+                } else {
+                    0
+                },
+        )
+    }
+
+    /// The `w:document` start tag, before any `w14` declaration.
+    fn root_start(&self) -> BytesStart<'_> {
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
         let mut doc_start = BytesStart::new("w:document");
         doc_start.push_attribute(("xmlns:w", W_NS));
         doc_start.push_attribute((
@@ -4001,24 +4361,7 @@ impl CT_Document {
         for (key, val) in self.extra_namespaces.iter().chain(&self.root_attributes) {
             doc_start.push_attribute((key.as_str(), val.as_str()));
         }
-
-        writer.write_event(Event::Start(doc_start))?;
-
-        // Write background element if present
-        if let Some(ref bg) = self.background_xml {
-            writer.get_mut().extend_from_slice(bg);
-        }
-        for raw in &self.background_extra_xml {
-            writer.get_mut().extend_from_slice(raw);
-        }
-
-        self.body.to_xml(&mut writer)?;
-
-        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
-
-        let mut xml = writer.into_inner();
-        declare_w14_on_part_root(&mut xml)?;
-        Ok(xml)
+        doc_start
     }
 }
 
@@ -4030,6 +4373,40 @@ impl Default for CT_Document {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owner_facts_reuse_rejects_equal_fields_with_different_forms() {
+        use crate::text::{Field, FieldForm};
+        let runs = vec![crate::text::CT_R::new("same")];
+        let simple = Field::from_raw("DATE", FieldForm::Simple, runs.clone()).unwrap();
+        let complex = Field::from_raw("DATE", FieldForm::Complex, runs).unwrap();
+        assert_eq!(simple, complex);
+        let bytes = |field: &Field| {
+            let mut paragraph = crate::text::CT_P::default();
+            let mut run = crate::text::CT_R::new("");
+            run.content
+                .push(crate::text::RunContent::Field(field.clone()));
+            paragraph.runs.push(run);
+            let mut writer = quick_xml::Writer::new(Vec::new());
+            paragraph.to_xml(&mut writer).unwrap();
+            writer.into_inner()
+        };
+        assert_ne!(bytes(&simple), bytes(&complex));
+        let wrap = |field: Field| {
+            let mut paragraph = crate::text::CT_P::default();
+            let mut run = crate::text::CT_R::new("");
+            run.content.push(crate::text::RunContent::Field(field));
+            paragraph.runs.push(run);
+            BodyContent::Paragraph(Box::new(paragraph))
+        };
+        assert!(!wrap(simple).owner_facts_reusable_by_value());
+        assert!(!wrap(complex).owner_facts_reusable_by_value());
+        let plain = BodyContent::Paragraph(Box::default());
+        assert!(plain.owner_facts_reusable_by_value());
+        assert!(
+            BodyContent::RawXml(Box::new(b"<w:custom/>".to_vec())).owner_facts_reusable_by_value()
+        );
+    }
+
     #[test]
     fn fx211_textbox_measurement_control() {
         let Ok(depth) = std::env::var("FX211_MEASURE_DEPTH") else {
@@ -5992,5 +6369,444 @@ mod tests {
         let sect2 = ppr2.sect_pr.as_ref().unwrap();
         assert_eq!(sect2.section_type, Some(ST_SectionType::NextPage));
         assert_eq!(sect2.orientation, Some(ST_PageOrientation::Landscape));
+    }
+
+    fn assert_body_spans_match_full_writer(document: &CT_Document) {
+        let full = document.to_xml().expect("full writer");
+        let (spanned, content, children) = document.to_xml_with_body_spans().expect("span writer");
+        assert_eq!(spanned, full);
+        assert_eq!(children.len(), document.body.content.len());
+        assert!(content.end <= spanned.len());
+        let joined: Vec<u8> = children
+            .iter()
+            .flat_map(|child| &spanned[child.clone()])
+            .copied()
+            .collect();
+        assert_eq!(joined, spanned[content.clone()]);
+        let mut cursor = content.start;
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(child.start, cursor);
+            assert!(child.end <= content.end);
+            cursor = child.end;
+            let slice = &spanned[child.clone()];
+            let empty_raw = matches!(
+                &document.body.content[index],
+                BodyContent::RawXml(raw) if raw.is_empty()
+            );
+            assert!(!slice.is_empty() || empty_raw);
+        }
+        assert_eq!(cursor, content.end);
+        let body = spanned
+            .windows(7)
+            .position(|window| window == b"<w:body")
+            .expect("body start");
+        let body_tag_end = spanned[body..]
+            .iter()
+            .position(|byte| *byte == b'>')
+            .expect("body start tag end");
+        assert_eq!(content.start, body + body_tag_end + 1);
+        if document.body.sect_pr.is_some() {
+            let sect = spanned
+                .windows(9)
+                .rposition(|window| window == b"<w:sectPr")
+                .expect("final body sectPr");
+            assert!(content.end <= sect);
+            assert!(spanned[content.end..].starts_with(b"<w:sectPr"));
+            assert!(children.iter().all(|child| child.end <= content.end));
+        }
+    }
+
+    fn assert_same_writer_error(document: &CT_Document) {
+        let full = document.to_xml().expect_err("full writer rejects");
+        let spanned = document
+            .to_xml_with_body_spans()
+            .expect_err("span writer rejects");
+        assert_eq!(full.to_string(), spanned.to_string());
+        assert!(matches!(
+            (&full, &spanned),
+            (
+                crate::error::OxmlError::InvalidValue(left),
+                crate::error::OxmlError::InvalidValue(right)
+            ) if left == right
+        ));
+    }
+
+    #[test]
+    fn body_spans_match_existing_to_xml_on_current_fixtures() {
+        let mut empty = CT_Document::new();
+        assert!(empty.body.sect_pr.is_some());
+        empty.body.sect_pr = None;
+        assert_body_spans_match_full_writer(&empty);
+
+        let mut one = CT_Document::new();
+        let mut paragraph = CT_P::new();
+        paragraph.add_run("one");
+        one.body.add_paragraph(paragraph);
+        assert_body_spans_match_full_writer(&one);
+
+        let mut many = CT_Document::new();
+        for text in ["a", "b", "c"] {
+            let mut paragraph = CT_P::new();
+            paragraph.add_run(text);
+            many.body.add_paragraph(paragraph);
+        }
+        assert_body_spans_match_full_writer(&many);
+
+        let mut broken = CT_Document::new();
+        let mut first = CT_P::new();
+        first.add_run("before section");
+        let mut properties = crate::properties::CT_PPr::default();
+        let mut paragraph_section = CT_SectPr::default_letter();
+        paragraph_section.section_type = Some(ST_SectionType::Continuous);
+        properties.sect_pr = Some(paragraph_section);
+        first.properties = Some(properties);
+        broken.body.add_paragraph(first);
+        let mut second = CT_P::new();
+        second.add_run("after section");
+        broken.body.add_paragraph(second);
+        assert!(broken.body.sect_pr.is_some());
+        let (bytes, content, children) = broken.to_xml_with_body_spans().unwrap();
+        assert_eq!(bytes, broken.to_xml().unwrap());
+        assert_eq!(children.len(), 2);
+        assert!(
+            bytes[children[0].clone()]
+                .windows(9)
+                .any(|window| window == b"<w:sectPr")
+        );
+        assert!(
+            bytes[children[1].clone()]
+                .windows(9)
+                .all(|window| window != b"<w:sectPr")
+        );
+        let final_section = bytes
+            .windows(9)
+            .rposition(|window| window == b"<w:sectPr")
+            .unwrap();
+        assert!(content.end <= final_section);
+        assert!(bytes[content.end..].starts_with(b"<w:sectPr"));
+        assert!(children.iter().all(|child| child.end <= content.end));
+        assert!(final_section >= content.end);
+
+        let table = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid></w:tbl><w:p><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let table = CT_Document::from_xml(table.as_bytes()).unwrap();
+        assert!(matches!(table.body.content[0], BodyContent::Table(_)));
+        assert_body_spans_match_full_writer(&table);
+
+        let control = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:sdt><w:sdtContent><w:p><w:r><w:t>in</w:t></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#
+        );
+        let control = CT_Document::from_xml(control.as_bytes()).unwrap();
+        assert!(matches!(
+            control.body.content[0],
+            BodyContent::ContentControl(_)
+        ));
+        assert_body_spans_match_full_writer(&control);
+
+        let textbox = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><w:r><w:drawing><wp:anchor><wp:extent cx="10" cy="20"/><wp:docPr id="1" name="box"/><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>leaf</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:body></w:document>"#
+        );
+        let textbox = CT_Document::from_xml(textbox.as_bytes()).unwrap();
+        let (bytes, _, children) = textbox.to_xml_with_body_spans().unwrap();
+        assert_eq!(bytes, textbox.to_xml().unwrap());
+        assert_eq!(children.len(), 1);
+        let marker = b"w:txbxContent";
+        assert_eq!(marker.len(), 13);
+        assert!(
+            bytes[children[0].clone()]
+                .windows(marker.len())
+                .any(|window| window == marker)
+        );
+        assert_body_spans_match_full_writer(&textbox);
+
+        let mut raw = CT_Document::new();
+        raw.body.sect_pr = None;
+        raw.body.content.push(BodyContent::RawXml(Box::default()));
+        raw.body.content.push(BodyContent::RawXml(Box::new(
+            b"<ext:block>a &amp; b</ext:block>".to_vec(),
+        )));
+        raw.body
+            .content
+            .push(BodyContent::RawXml(Box::new(b"<ext:empty/>".to_vec())));
+        let (bytes, content, children) = raw.to_xml_with_body_spans().unwrap();
+        assert_eq!(bytes, raw.to_xml().unwrap());
+        assert_eq!(children.len(), 3);
+        assert!(bytes[children[0].clone()].is_empty());
+        assert_eq!(
+            &bytes[children[1].clone()],
+            b"<ext:block>a &amp; b</ext:block>"
+        );
+        assert_eq!(&bytes[children[2].clone()], b"<ext:empty/>");
+        assert_eq!(
+            &bytes[content.clone()],
+            b"<ext:block>a &amp; b</ext:block><ext:empty/>"
+        );
+
+        let mut headed = CT_Document::new();
+        headed
+            .set_background_color("AABBCC")
+            .expect("background color");
+        let (bytes, content, _) = headed.to_xml_with_body_spans().unwrap();
+        assert_eq!(bytes, headed.to_xml().unwrap());
+        let body_at = bytes
+            .windows(7)
+            .position(|window| window == b"<w:body")
+            .unwrap();
+        let marker = b"w:background";
+        assert_eq!(marker.len(), 12);
+        assert!(
+            bytes[..body_at]
+                .windows(marker.len())
+                .any(|window| window == marker)
+        );
+        assert!(content.start > body_at);
+
+        let foreign = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:ext="urn:producer"><ext:background ext:color="red"/><w:body><w:p/></w:body></w:document>"#
+        );
+        let foreign = CT_Document::from_xml(foreign.as_bytes()).unwrap();
+        assert_eq!(
+            foreign.background_extra_xml,
+            vec![br#"<ext:background ext:color="red"/>"#.to_vec()]
+        );
+        let (bytes, content, _) = foreign.to_xml_with_body_spans().unwrap();
+        assert_eq!(bytes, foreign.to_xml().unwrap());
+        let body_at = bytes
+            .windows(7)
+            .position(|window| window == b"<w:body")
+            .unwrap();
+        let marker = b"ext:background";
+        assert_eq!(marker.len(), 14);
+        assert!(
+            bytes[..body_at]
+                .windows(marker.len())
+                .any(|window| window == marker)
+        );
+        assert!(content.start > body_at);
+
+        let alias = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:q="{W_NS}"><q:body xmlns:ext="urn:shadow"><q:p><q:r><q:t>alias</q:t></q:r></q:p><ext:note>kept</ext:note></q:body></w:document>"#
+        );
+        let alias = CT_Document::from_xml(alias.as_bytes()).unwrap();
+        assert_eq!(alias.body.content.len(), 2);
+        assert_body_spans_match_full_writer(&alias);
+
+        let w14_ns = "http://schemas.microsoft.com/office/word/2010/wordml";
+        let injected = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p xmlns:w14="{w14_ns}" w14:paraId="00000001"><w:r><w:t>id</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let injected = CT_Document::from_xml(injected.as_bytes()).unwrap();
+        let (bytes, _, children) = injected.to_xml_with_body_spans().unwrap();
+        assert_eq!(bytes, injected.to_xml().unwrap());
+        let marker = b"xmlns:w14";
+        assert_eq!(marker.len(), 9);
+        assert!(bytes.windows(marker.len()).any(|window| window == marker));
+        let identity = br#"w14:paraId="00000001""#;
+        assert!(
+            bytes[children[0].clone()]
+                .windows(identity.len())
+                .any(|window| window == identity)
+        );
+        assert_body_spans_match_full_writer(&injected);
+
+        fn nested_tables(depth: usize) -> crate::table::CT_Tbl {
+            let mut table = crate::table::CT_Tbl::new();
+            if depth > 1 {
+                let mut row = crate::table::CT_Row::new();
+                let mut cell = crate::table::CT_Tc::new();
+                cell.content
+                    .push(crate::table::CellContent::Table(nested_tables(depth - 1)));
+                row.cells.push(cell);
+                table.rows.push(row);
+            }
+            table
+        }
+        let mut deep = CT_Document::new();
+        deep.body.sect_pr = None;
+        deep.body
+            .content
+            .push(BodyContent::Table(Box::new(nested_tables(33))));
+        assert_same_writer_error(&deep);
+    }
+
+    fn assembled_body_frame(document: &CT_Document) -> Result<Vec<u8>> {
+        let (head, tail) = document.body_frame_xml()?;
+        let mut xml = head;
+        for item in &document.body.content {
+            xml.extend(document.body_item_xml(item)?);
+        }
+        xml.extend(tail);
+        crate::text::declare_w14_on_part_root(&mut xml)?;
+        Ok(xml)
+    }
+
+    #[test]
+    fn body_frame_and_items_match_existing_to_xml() {
+        let documents = [
+            {
+                let mut empty = CT_Document::new();
+                empty.body.sect_pr = None;
+                empty
+            },
+            {
+                let mut one = CT_Document::new();
+                let mut paragraph = CT_P::new();
+                paragraph.add_run("one");
+                one.body.add_paragraph(paragraph);
+                one
+            },
+            {
+                let mut many = CT_Document::new();
+                for text in ["a", "b", "c"] {
+                    let mut paragraph = CT_P::new();
+                    paragraph.add_run(text);
+                    many.body.add_paragraph(paragraph);
+                }
+                many
+            },
+        ];
+        for document in &documents {
+            let full = document.to_xml().unwrap();
+            assert_eq!(assembled_body_frame(document).unwrap(), full);
+            let (bytes, _, children) = document.to_xml_with_body_spans().unwrap();
+            assert_eq!(bytes, full);
+            for (item, child) in document.body.content.iter().zip(&children) {
+                assert_eq!(document.body_item_xml(item).unwrap(), bytes[child.clone()]);
+            }
+        }
+
+        let mut properties = CT_Document::new();
+        let mut paragraph = CT_P::new();
+        paragraph.add_run("kept");
+        paragraph.properties = Some(crate::properties::CT_PPr {
+            jc: Some(crate::ST_Jc::Center),
+            ..crate::properties::CT_PPr::default()
+        });
+        properties.body.add_paragraph(paragraph);
+        let sect = properties.body.sect_pr.as_mut().unwrap();
+        sect.section_type = Some(ST_SectionType::NextPage);
+        assert_eq!(
+            assembled_body_frame(&properties).unwrap(),
+            properties.to_xml().unwrap()
+        );
+        let full = properties.to_xml().unwrap();
+        let (head, tail) = properties.body_frame_xml().unwrap();
+        assert!(tail.windows(9).any(|window| window == b"<w:sectPr"));
+        assert!(!head.windows(9).any(|window| window == b"xmlns:w14"));
+        assert!(full.windows(9).any(|window| window == b"<w:sectPr"));
+
+        let table = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid></w:tbl></w:body></w:document>"#
+        );
+        let table = CT_Document::from_xml(table.as_bytes()).unwrap();
+        let control = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:sdt><w:sdtContent><w:p><w:r><w:t>in</w:t></w:r></w:p></w:sdtContent></w:sdt></w:body></w:document>"#
+        );
+        let control = CT_Document::from_xml(control.as_bytes()).unwrap();
+        let textbox = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><w:r><w:drawing><wp:anchor><wp:extent cx="10" cy="20"/><wp:docPr id="1" name="box"/><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>leaf</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:body></w:document>"#
+        );
+        let textbox = CT_Document::from_xml(textbox.as_bytes()).unwrap();
+        let field = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#
+        );
+        let field = CT_Document::from_xml(field.as_bytes()).unwrap();
+        for document in [&table, &control, &textbox, &field] {
+            assert_eq!(
+                assembled_body_frame(document).unwrap(),
+                document.to_xml().unwrap()
+            );
+        }
+
+        let mut background = CT_Document::new();
+        background
+            .set_background_color("AABBCC")
+            .expect("background color");
+        let foreign = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:ext="urn:producer"><ext:background ext:color="red"/><w:body><w:p/></w:body></w:document>"#
+        );
+        let foreign = CT_Document::from_xml(foreign.as_bytes()).unwrap();
+        let alias = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:q="{W_NS}"><q:body xmlns:ext="urn:shadow"><q:p><q:r><q:t>alias</q:t></q:r></q:p><ext:note>kept</ext:note></q:body></w:document>"#
+        );
+        let alias = CT_Document::from_xml(alias.as_bytes()).unwrap();
+        let defaulted = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns="urn:default"><w:body><w:p/></w:body></w:document>"#
+        );
+        let defaulted = CT_Document::from_xml(defaulted.as_bytes()).unwrap();
+        let w14_ns = "http://schemas.microsoft.com/office/word/2010/wordml";
+        let injected = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p xmlns:w14="{w14_ns}" w14:paraId="00000001"><w:r><w:t>id</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let injected = CT_Document::from_xml(injected.as_bytes()).unwrap();
+        for document in [&background, &foreign, &alias, &defaulted, &injected] {
+            let full = document.to_xml().unwrap();
+            assert_eq!(assembled_body_frame(document).unwrap(), full);
+        }
+        let (head, _) = injected.body_frame_xml().unwrap();
+        assert!(!head.windows(9).any(|window| window == b"xmlns:w14"));
+        assert!(
+            injected
+                .to_xml()
+                .unwrap()
+                .windows(9)
+                .any(|window| window == b"xmlns:w14")
+        );
+
+        let mut raw = CT_Document::new();
+        raw.body.sect_pr = None;
+        for bytes in [Vec::new(), b"<a/><b/>".to_vec(), b"<<not-xml".to_vec()] {
+            let item = BodyContent::RawXml(Box::new(bytes.clone()));
+            assert_eq!(raw.body_item_xml(&item).unwrap(), bytes);
+            raw.body.content.push(item);
+        }
+        assert_eq!(assembled_body_frame(&raw).unwrap(), raw.to_xml().unwrap());
+
+        let host = CT_Document::new();
+        let mut outsider = CT_P::new();
+        outsider.add_run("outside");
+        let item = BodyContent::Paragraph(Box::new(outsider));
+        let alone = host.body_item_xml(&item).unwrap();
+        assert!(host.body.content.is_empty());
+        let mut holder = CT_Document::new();
+        holder.body.sect_pr = None;
+        holder.body.content.push(item);
+        let (bytes, _, children) = holder.to_xml_with_body_spans().unwrap();
+        assert_eq!(alone, bytes[children[0].clone()]);
+
+        let mut literal = CT_Document::new();
+        let mut paragraph = CT_P::new();
+        paragraph.add_run("\u{1}");
+        literal.body.add_paragraph(paragraph);
+        assert_eq!(
+            assembled_body_frame(&literal).unwrap(),
+            literal.to_xml().unwrap()
+        );
+
+        fn nested_tables(depth: usize) -> crate::table::CT_Tbl {
+            let mut table = crate::table::CT_Tbl::new();
+            if depth > 1 {
+                let mut row = crate::table::CT_Row::new();
+                let mut cell = crate::table::CT_Tc::new();
+                cell.content
+                    .push(crate::table::CellContent::Table(nested_tables(depth - 1)));
+                row.cells.push(cell);
+                table.rows.push(row);
+            }
+            table
+        }
+        let mut deep = CT_Document::new();
+        deep.body.sect_pr = None;
+        deep.body
+            .content
+            .push(BodyContent::Table(Box::new(nested_tables(33))));
+        let full = deep.to_xml().expect_err("full writer rejects");
+        let frame = deep.body_frame_xml().expect_err("frame writer rejects");
+        let item = deep
+            .body_item_xml(&deep.body.content[0])
+            .expect_err("item writer rejects");
+        assert_eq!(frame.to_string(), full.to_string());
+        assert_eq!(item.to_string(), full.to_string());
     }
 }

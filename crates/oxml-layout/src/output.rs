@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use crate::paint::{Paint, Stroke};
+use crate::paint::{GradientStop, Paint, Stroke};
 use crate::path::Path;
 use crate::transform::Transform;
 
@@ -407,12 +407,65 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Effect {
+    /// A child-local linear alpha mask over the complete painted group.
+    /// Outside bounds is transparent. Stops use only color alpha and pad at
+    /// both ends. Invalid masks contribute no visible group paint.
+    LinearOpacityMask {
+        bounds: Rect,
+        start: Point,
+        end: Point,
+        stops: Vec<GradientStop>,
+    },
     OuterShadow {
         dx: f64,
         dy: f64,
         blur: f64,
         color: Color,
     },
+}
+
+impl Effect {
+    /// Shared validation for the linear opacity mask consumers. Other effects
+    /// return true without making any assertion about their own validity.
+    #[doc(hidden)]
+    pub fn linear_opacity_mask_is_valid(&self) -> bool {
+        let Self::LinearOpacityMask {
+            bounds,
+            start,
+            end,
+            stops,
+        } = self
+        else {
+            return true;
+        };
+        [
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            && bounds.width > 0.0
+            && bounds.height > 0.0
+            && (bounds.x + bounds.width).is_finite()
+            && (bounds.y + bounds.height).is_finite()
+            && start != end
+            && stops.len() >= 2
+            && stops.iter().all(|stop| {
+                stop.offset.is_finite()
+                    && (0.0..=1.0).contains(&stop.offset)
+                    && stop.color.a.is_finite()
+                    && (0.0..=1.0).contains(&stop.color.a)
+            })
+            && stops
+                .windows(2)
+                .all(|pair| pair[0].offset <= pair[1].offset)
+    }
 }
 
 /// A group of positioned children in one local coordinate system.
@@ -953,5 +1006,62 @@ mod walk_tests {
         walk(&[leaf(1.0)], &mut |_, transform| {
             assert_eq!(*transform, Transform::IDENTITY);
         });
+    }
+
+    #[test]
+    fn linear_opacity_mask_validation_ignores_rgb_and_refuses_invalid_geometry_or_alpha() {
+        use super::{Effect, Point};
+        use crate::GradientStop;
+        let mask = Effect::LinearOpacityMask {
+            bounds: Rect {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: 5.0, y: 0.0 },
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Color {
+                        r: f64::NAN,
+                        ..Color::WHITE
+                    },
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Color {
+                        a: 0.0,
+                        ..Color::BLACK
+                    },
+                },
+            ],
+        };
+        assert!(mask.linear_opacity_mask_is_valid());
+        for bad in ["width", "end", "offset", "alpha", "order", "count"] {
+            let mut candidate = mask.clone();
+            let Effect::LinearOpacityMask {
+                bounds,
+                start,
+                end,
+                stops,
+            } = &mut candidate
+            else {
+                unreachable!()
+            };
+            match bad {
+                "width" => bounds.width = 0.0,
+                "end" => *end = *start,
+                "offset" => stops[0].offset = f64::INFINITY,
+                "alpha" => stops[0].color.a = f64::NAN,
+                "order" => stops.reverse(),
+                "count" => {
+                    stops.pop();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!candidate.linear_opacity_mask_is_valid(), "{bad}");
+        }
     }
 }

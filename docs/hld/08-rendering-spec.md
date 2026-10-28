@@ -1,5 +1,18 @@
 # 08, Rendering spec
 
+
+Timeline axis scaling keeps materialized Custom paths and their text rectangle consistent with center-resized bounds before group-clip projection. Move/line points, every cubic control/end and text-rectangle coordinates use the actual signed factors. Rectangle and fallback geometry remain dynamically sized. Overflow declines the whole candidate with the original shape and default resolved state. This bounded geometry repair preserves legacy font sizes, insets, stroke/shadow parameters and precomputed paint coordinates. It does not claim general emphasis fidelity for those separate domains.
+
+Timeline soft-mask qualification covers direct leaf owners. Group-target timing retains the existing flattened hard-clip fallback with an explicit diagnostic. The neutral mask still composes an existing complete group scene once, including nested and overlapping children.
+
+## Bounded linear group opacity masks
+
+LinearOpacityMask carries finite positive child-local bounds, finite distinct endpoints and at least two ordered 0 through 1 stops with finite 0 through 1 alpha. RGB is ignored, interpolation is linear in alpha with pad extension, and paint outside bounds is transparent. Invalid masks make the raster/SVG group contribution transparent. Multiple masks multiply over the whole composited scene, including original effects and overlapping descendants, before one group opacity application. Raster and SVG share this contract without copying the scene or its text.
+
+PDF group effects remain unsupported. The ordinary PDF writer ignores the mask while emitting child text once and retaining ordinary clips, transforms and opacity. Checked conformance refuses the unsupported effect. Authored partial soft wipes disclose this limitation in the existing frame diagnostic vector. No soft-wipe PDF fidelity is promised.
+
+SmartArt profiles use their independent native text owners. Cycle text frames are 135.703070866 pt squares with 4.6 pt body insets. Pyramid text frames use 192, 249.6 and 374.4 pt widths with 4.4 pt insets, independently of their painted trapezoids. List preserves its roundRect preset text rectangle and uses 15.24/0/15.24/0 body insets. Hierarchy and relationship use 12 pt insets and matrix 8.7 pt. Native defaults use90 percent line spacing, zero before and35 percent after, with first/last paragraph spacing suppressed unless explicitly assigned. Explicit data paragraph values remain authoritative. Native qualification and shadow paint-domain fidelity stay separate.
+
 Owners: `oxml-layout` for the types, `oxml-pdf` for the shared PDF and raster
 backends, `rdocx` for native Word SVG, and `rpptx-render` for the slide
 pipeline.
@@ -624,7 +637,15 @@ the way Word measures it. Each run takes the metrics Windows reports for its
 font: the OS/2 `usWinAscent` and `usWinDescent`, plus the external leading, the
 part of the `hhea` line gap the Windows extent does not already cover, which
 Word puts above the ascent. A face that sets `USE_TYPO_METRICS` is measured on
-its typographic values. A single line of Calibri or Carlito is therefore
+its typographic values. Actual resolved faces advertising OS/2 codepage bits
+17 through 20, for CP932, CP936, CP949 or CP950, instead use gap-free `hhea`
+ascent and positive descent. Word adds fifteen percent of that extent above
+and below the baseline independently, with no additional line gap. This is a
+face classification, independent of font name, text script or requested Word
+font slot. Old or truncated codepage tables and invalid `hhea` metrics keep
+the existing fallback. The policy belongs only to `word_line_metrics`, leaving
+shared metrics and shaping, and PowerPoint, unchanged. A single line of
+Calibri or Carlito is therefore
 2500/2048 em with its baseline 1950/2048 em down, and one of Arial or
 Liberation Sans 2355/2048 em. The line takes the greatest ascent and descent of
 its runs. A line with no run is a line of the font it carries: a blank

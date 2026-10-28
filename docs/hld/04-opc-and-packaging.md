@@ -2,6 +2,10 @@
 
 Owner: `oxml-opc`, with media naming in `oxml-media`.
 
+## Producer read and writer authority
+
+Word producer reconstruction first proves the exact source partition, namespace frame and actual child reads. Its complete borrowed source-model comparison qualifies all children even after a mismatch and includes root, background and section metadata. A positive current-model result may compose with the independent normal record's exact current writer-byte proof, after the existing fallible resource/frame preflight and conservative field/private checks. None leaves the whole reader authoritative. A valid but unequal source or unavailable writer proof keeps the existing normalization route. Source facts retain no writer staged permission and do not create a generic normalization memo. Generic normalization still executes its own checked relation and full right side after a failed left. No source cache, history edge or publication shortcut is added.
+
 ## The package
 Bibliography source transactions resolve the qualified source collection
 through the document-owned custom XML graph. Source identity, GUID, relationship
@@ -32,6 +36,15 @@ keys retain their complete owner and cache with diagnostics. Unknown source
 XML and original style definitions stay untouched. Missing, ambiguous or
 unplaced required targets and malformed spans abort without publishing any
 candidate part.
+
+Mail-merge package writes use that same staged package. Settings, the owned
+custom XML store, and at most one recipient-data part are prepared together
+and reopened before the live document changes. Identical bytes do not publish.
+A refused graph leaves the previous bytes in place. Embedded table text is
+escaped into the versioned store. The encoded store, including markup, is
+capped at 16 MiB, 1024 columns, and 100000 rows before a large allocation.
+Those caps do not apply to caller-supplied external rows. The library does
+not open the declared URI, run SQL, or read a spreadsheet.
 
 ```rust
 pub struct OpcPackage {
@@ -91,6 +104,14 @@ opened. Relationships added to the current graph afterward are authored state,
 including internal theme and other typed edges that have no modeled `r:id`.
 They join deterministic semantic ordering by relationship type and normalized
 target. Unknown and external authored edges retain their target and mode.
+`OpcPackage::zip_entries` is the save-equivalent list `write_to` serializes.
+Order is content types, root relationships, owner-sorted relationships, then
+name-sorted ordinary parts. Names are the exact strings that writer emits.
+An ordinary part drops at most one leading slash from the first authored
+stored key, so `/word/a.xml` becomes `word/a.xml` and `//word/a.xml` stays
+`/word/a.xml`. Metadata and relationship names keep the serializer mappings.
+Metadata bytes are owned. Ordinary part bytes are borrowed. A name the shared
+writer rejects fails before either path emits entries.
 
 Modern presentation package identity is the main presentation part's exact
 content type. `oxml-opc` names the ordinary presentation, macro-enabled
@@ -391,6 +412,10 @@ Page-break elements are lifted out of paragraph and inline formatting before
 the XHTML documents are packaged, so spine items retain conforming flow
 content.
 
+Modern form composition uses that same package as its only store. Caller rules are transient. The private inventory is the current physical owner of each part, in deterministic preorder, before the tag filter. Dedup is only the same part and span. An exact tag spans every currently authorable internal story. Overlap, a duplicate, the wrong kind, a schema or reset binding conflict, or missing store ownership fails atomically. One current invalid state is one owned issue per physical target. Package and XML failure are errors. Empty rules discover nothing. A partial fill may leave an unassigned required control empty. A byte-equivalent candidate is a no-op, and typed equality is not a shortcut. Fields, markers, permissions, unknown XML, and independent owners stay on the approved physical grammar. There is no second form model.
+
+Accepted owned values are rich, plain, date, combo, and modern-list text, checkbox `Checked` with false present, and legacy drop-down `SelectedIndex`. Picture, group, and repeating controls refuse a scalar. A modern list keeps the existing native value and label policy. `lastValue` is a hint, not authority. Dates keep the two existing Gregorian formats and canonical UTC midnight. A placeholder is semantic empty. Reset clears `fullDate` and list selection, empties the bound value, and leaves the prompt visible. Legacy reset must use the F-288 default or fallback pair. Empty-display insertion uses the same accepted owning-content boundary as read and rewrite. The owned value is that accepted policy, not a claim that only `w:t` text was considered.
+
 ## Generalising the constructors
 
 The only docx-specific code in the existing crate is two constructors. They are
@@ -481,6 +506,8 @@ A `content_types` constants module is added alongside, so neither format crate
 hand-types the long MIME strings. It includes the modern PowerPoint comments
 and authors MIME types as well as the handout-master type.
 
+A main-part relationship id that fragment import or a returned image or hyperlink id still names is held out of staging renumbering until the main story references it or the id is gone from the relationship registry. The hold is dropped by intersecting that registry before save. Owner-part disappearance alone does not end it.
+
 The Word facade resolves at most one glossary relationship from the main
 document. The relationship must be internal, its normalized target must not
 escape the package root, the part must exist, and its override must use the
@@ -523,6 +550,15 @@ main-owned note traversal before constructing a main-owned fragment. A glossary-
 relationship refuses projection through main numeric note ownership. It never
 selects an unrelated equal-id main note.
 
+Mail-merge source metadata uses the existing `mailMergeSource` relationship
+on the settings part for both `dataSource` and ODSO `src`. That source
+relationship is External. `headerSource` may use that same type and stays
+owned by its qualified reference. Recipient rows use `recipientData`, and
+that relationship is Internal. The main document does not gain either
+relationship. The package holds at most one recipient part across both
+recipient content types. A second recipient part, or a source relationship of
+another type, refuses before mutation. Removal drops only a recipient part
+this owner can prove is unshared.
 
 Both facades resolve core properties through the package-level
 `CORE_PROPERTIES` relationship and retain its normalized target. Immutable
@@ -760,9 +796,14 @@ Authored mixed runs keep typed children and raw boundaries in one logical
 sequence. Because `w:fldSimple` and complex field sequences are paragraph
 children, the writer emits physical `w:r` segments around each field. Direct
 run properties are copied to authored segments and the cached field result.
-Positioned raw children stay on the same side of each field boundary. Legacy
+Positioned raw children stay on the same side of each field boundary. An authored
+legacy form field writes its `w:ffData` inside the begin `w:fldChar` and keeps a
+separate result region even when that result is empty. Unknown bytes, macros,
+and source prefixes on an imported field stay in place. Legacy
 unordered raw children remain at the final run boundary. Readers remain prefix
 tolerant and writers use the fixed Word prefixes.
+
+A valid isolated legacy field admits Word's exact own-name bookmark pair at pure begin and end run boundaries. The internal start stays verbatim inside the field source and the external end stays in the paragraph. Its semantic endpoints use the actual accepted and tracked prefix counts, including preceding wrappers. Other interior markers, partial or crossing pairs, duplicate IDs, mismatched names and shared boundary content retain the untyped fallback. The sole nested exception is one total complex ordinary TIME, DATE or formula leaf in either the cached result or one direct instruction argument of an own-bookmarked FORMTEXT TextInput. The instruction variant has no extra literal operand or nested switch argument. Both parsed sources and their physical markers remain authoritative. Children in both regions, multiple or deep children, simple children, nested legacy owners and private interior owners retain the fallback. Actual source inspection excludes an unmodeled simple instruction child and private instruction content without projected display. Untouched and same-current output keeps the child source. A changed literal parent uses the existing result writer, preserving reset metadata and both bookmark markers. It retains an instruction child and removes only a result child. Canonical rebuilding with a retained own-name bookmark refuses if the original instruction identity cannot be preserved. Run-root namespace sidecars are scope metadata, not extra physical run children. Projection retains one exact paragraph namespace frame, including both marker aliases, foreign opaque names and the default namespace, without hoisting child scopes. Bindings conflicting with the shared inline validation scope or the generated `w15` types decline projection before mutation. Existing root declarations are merged once. If typed rich fragment merge makes such an identity authored and canonical ordering renumbers it, the existing whole-XML bookmark patch and reparse updates both markers. Preserved imported IDs remain outside authored renumbering.
 
 Run splitting uses the same encoded raw-child position sidecar. A second
 private classification bit associates each parsed `mc:AlternateContent`
@@ -1057,6 +1098,11 @@ destination part merely because their names or bytes match.
 Word comment part creation uses the conventional names when free and scans
 numbered alternatives when either path is occupied. It never overwrites an
 unrelated part merely because the conventional comment path exists.
+Published package inspection uses those same save entries. Writer names are
+the exact strings `zip_entries` emits. An ordinary part drops at most one
+leading slash from the first authored stored key. The facade prefixes one
+slash onto each writer name. Content types and relationship parts are included
+with the ordinary parts.
 
 Word chart assembly follows the same independent suffix rule as PowerPoint.
 The document relationship targets `/word/charts/chartN.xml`, and that chart's
@@ -1904,6 +1950,22 @@ DrawingML text watermark compatibility preserves one WPS choice and a real VML t
 
 ## Checked Word operation source ownership
 
+Opaque relationship masking uses canonical writer bytes and exact owner-span proofs before authoritative namespace replay. A tail-only masked query may compose unchanged closed-child XML facts with a freshly checked frame when the head, bindings and physical occurrence still match. Field, private, malformed, changed-head and crossing-span cases retain the existing fallback. A modeled relationship ID occurring in opaque XML remains occupied. The query result does not become a stored source parse or writer proof.
+
+Trusted byte-opening provenance includes an actual ZIP file read. A successful checked story-hyperlink reopen may supply the current package and actual source parse while the authored typed body stays intact. The actual reopened parse is never replaced by that authored model. New documents still require their first checked ZIP commit, and an unrelated part error refuses before publication. Equivalent ordering of query namespace declarations does not change relationship resolution. Namespace values, declaration multiplicity and stored source-frame identity remain checked.
+
+Checked body insertion refuses an unprovable retained namespace owner or a shadowed serializer binding before publication, using the authoritative writer diagnostic. An unchanged main part retains its namespace scopes and raw subtree bytes. An unused foreign prefix remains supported. The guard is not a general XML validator. The four original infallible Rust insertion methods retain their legacy behavior. Hidden body and part readers close inherited namespace scope into each snapshot. The public full-family readers keep exact-slice XML. A closed snapshot is reusable only with the current body context and the current relationship proof. Save comparison of two byte-opened Word packages rereads the prepared packages in self-then-other order. Self is prepared before other, and the first encountered error is returned. Clearing the opening record removes trusted reread provenance and restores ZIP staging. Whole-reader and whole-writer controls also disable the independent child proofs and clear their relevant carried records. A nonempty pending relationship hold for the current main owner uses that whole canonicalization and keeps its expired, live, and referenced cleanup. A prepared staged reopen uses the shared opening record without ZIP staging only for a trusted byte-opened baseline under literal `PackageReadLimits::UNBOUNDED`. New, in-memory, Flat OPC, limited and hook commits write the checked ZIP until a later legitimate byte open. The new opening copies the current main frame, relationship dependencies and identifier-category proofs. It does not keep a chain of earlier openings. Namespace and identifier input bytes are counted on the scans that actually run. A changed header part records nonzero identifier bytes. Direct body addressing uses the same writer. Span output matches the existing document bytes, including conditional `w14`. The address cache keeps XML facts for the current head, tail and exact child bytes. One covering body frame is eligible. A raw span that crosses a body child boundary uses the checked full fallback. A split raw paragraph that stays inside one body frame still uses that fallback. Prefix and suffix alignment keeps occurrence and order. `MainBodyScans` is one retained address scan record. It is independent of the parsed opening record and exists for a new document that has no opening record. Both reopen routes carry the address-read memo under an exact current frame. Each subsequent lookup qualifies exact aligned child bytes and item coverage before reuse. Changed children invalidate their own facts and the body fingerprint without discarding unchanged neighbors. There is no history chain. Frame scans, whole serialization, hashes and other validation stay separate costs. This cache is not a constant-time total. Address scans do not grant parsed-child or serialization proof. Equality-only writer checks can consume the existing record without assembling a complete output when resource limits, the exact frame, every current child and its private facts qualify. This optional comparison requires an explicit `w14` root declaration. Other cases serialize through the established path. An opening keeps its independently qualified writer record in the existing serialized slot before an older carried record. This is writer provenance and does not supply unread source facts. Owned main output may copy an existing opening normalization only after resource admission, the block-proof switch and complete current writer-byte equality succeed. It returns a writer-only record without retained-source part identity. Every failed or unavailable proof uses the established serializer. No retained output copy is added, and the actual owned-byte copy remains linear work. Each immutable body block also stores the exact case-sensitive field-token substring result for its owned bytes. Constructors compute it, byte replacements create a new block, and frame-only copies retain it with identical bytes. It avoids repeated lexical scans in writer, read, scoped and namespace qualification. It does not replace current mutable-model checks or grant parse, source, writer or namespace authority. The independent whole-item owner scanner remains unchanged. This inline fact belongs to the existing Q22 body-scan memory layer. Picture inventory reuses each current immutable source owner for embedded relationship validation, while the public relationship API still validates the story and fingerprint first. Scoped replacement selects retained physical owners from its already checked canonical view within one immutable candidate phase. Control XML indices assign dense append-position IDs and close elements through checked direct lookup. No historical inventory or cache is added.
+
+A consuming checked Word transaction keeps an actual source package-map clone for final signature comparison, plus its original invalidation flag and complete engine mutexes. Payload sharing does not make that map clone free. The original source is not inferred from an older opening. Existing borrowing commit and consuming commit use one signature/engine finalizer. A failed or unchanged consuming replacement returns no publishable document. Within a private immutable read phase, actual canonical output and its writer record may supply repeated story/owner queries without another output assembly. Retained producer source still needs its independent correspondence proof. Resource, decoder, private-owner, namespace, related-part and original error checks remain, including the whole fallback. The view is dropped before any mutation or publication. Production read-phase reporting separates current writer calls, normalized opening copies, canonical record copies, namespace replay outputs, normalized retained/current/restored model outputs, masked rewrites and occurrence writers. Only the successful optional proof's audited debug whole-reference comparison is paused. Force-off and private-tab production fallbacks must expose their actual work and are not held to the qualified one-canonical-producer bound. Splice reporting requires actual successful preparation and consumption, counts every mandatory final owner index visit, and separately counts general-publication index visits. Pinned cold/warm 100/1000 six-run controls require one consumed packet, exact post-edit owner cardinality in the mandatory index, and no general-publication index work. An empty reopened document has no body-story owner, so its actual public insertion must decline the packet after classifying the section and expose all three general-publication index visits. Append paragraph and table survivors retain their existing contract while held ordinary runs become stale. Producer normalization can borrow a source child only from the actual read made under that same freshly constructed record and its proved complete partition. Read facts never grant writer reuse. Normalized byte fixed points share repeated parsing only within the same borrowed current document and normal frame. All source, namespace, w14, resource, private-field and fallback guards remain. Whole picture inventory and package publication stay unchanged.
+
+`CT_Document::body_frame_xml` and `body_item_xml` share the complete writer's admission and binding context. Current child serialization is separate from the authoritative retained part. A source edit reconstructs only from actual parsed child facts, with checked physical boundaries and resource validation before publication. A normalizing source child retains its parsed fact but gets no writer-reuse value. Non-round-tripping private field, tab-stop, bookmark or entity source keeps the whole fallback. Retained read facts carry across reopen only while exact part bytes match and their normalized model output matches the reopened model. Body-leading ASCII whitespace can use a separately parsed empty-frame proof under the exact canonical root and body start. Root aliases and other unproved frame changes keep the whole read. A dirty live model may still compare against the exact retained opening's cached parse. A changed package part invalidates that opening identity. Scoped replacement proves physical child selection with collision-free sentinels and the same double parse and write normalization as the whole proof. Fields and non-round-tripping children are read anew. Decoder facts cover unchanged children under their exact frame. Invalid entities in unaffected children, the head or the tail retain whole-path refusal before publication. Relationship edits and drawing-ID edits validate bounds, order and child boundaries before applying replacements. A changed frame clears child facts. Canonical retained source keeps identifier count and first-occurrence order checks, with the old whole canonicalizer as fallback. Rebased namespace spans share immutable scope vectors and admitted owner names, with current offsets and unchanged context checks. Source-model comparison reads every child and compares all root/body frame fields, rather than materializing a second document for equality alone. A late unavailable child remains a refusal. Opening writer proofs can use existing writer-qualified pieces with the same resource admission and complete fallback. Carry by model equality is limited to reusable values with a successful current opening writer proof. Field and other private-fact paths retain the normalization comparison. An ordered physical cell map keeps source ordinals and the same modeled pointer correspondence. An unqualified map leaves the legacy route and first error authoritative.
+
+The picture reader shares one prepared current main-part output and its writer record. Already populated successful source reads certify ordinary picture-free direct paragraphs or completely plain table blocks under the exact output partition, root and body declarations and bindings. Direct paragraph spans match exactly. A table hit requires an actual TableCell owner and its complete paragraph strictly inside that same certified table. All actual cell content is plain paragraphs, with no nested table, control, raw/revision container or opaque grid/property/border/shading carrier. The source argument follows the same typed cell paragraph reader and unchanged discovery grammar, without claiming complete property-byte reconstruction. Sorted local ranges fill no missing memo. Namespace scope and fragment closure still execute before a qualified paragraph is omitted from drawing parsing. A missing, changed, private or unsupported proof retains the original paragraph parser and first error. No new retained cache or source authority is added.
+
+Picture insertion shares the exact immutable raw story projection only after an independent field-token guard on that source. Direct-content filtering, body section-property classification, closing-owner fallback and placement error order remain separate. The reopened projection supplies the final physical-to-projected lookup only after the inserted direct slot exists. Field-bearing inputs keep the original scanner calls. Namespace context is scanner-local immutable shared storage, with every attribute syntax check and the original declaration decoding and ordered updates. Default bindings, aliases, shadowing and owned replacement contexts retain their values.
+
+Relationship and final retained-source readback separate their original mandatory child-read qualification from owned-model assembly. After every current read qualifies, equal private-free candidate children remain owned in place and unequal children come from the actual source parse. The complete actual frame is applied, with original empty-owner certificate completion before mutation. The exact model validator commits this transaction or restores every child and frame field before fallback. Failed qualification never retries the original first phase. Private and unavailable cases retain the original second phase and allocation order. Retained slot rejection still precedes parsing, and both unavailable and rejected optional results leave the model unchanged. Its final source bytes and record are prepared before mutation and published only after success.
+
 The bulk chart reader serializes only the main body once, without resolving
 unrelated story relationships. It discovers body owners and direct items once, then closes
 paragraph namespace scope from one batched traversal. Empty chart collections do
@@ -1951,6 +2013,11 @@ scope carrier. Local shadowing and default namespace clearing retain their
 actual scope. Paragraph identifiers and opaque control payload remain owned
 source through save and reopen. The validation inventory still requires the
 same physical paragraph owners and refuses malformed source.
+
+Direct body paragraph, run, table and cell reads serialize that owner alone.
+A standalone fragment omits only a redundant unrelated canonical root
+`xmlns:w14` binding. An original root binding, a binding the fragment uses,
+and unknown child bytes stay. Saved package bytes stay on the existing writer.
 
 Checked paragraph, regular-run, table, cell and section-property replacement
 first resolves the actual held physical owner. One complete expected expanded-
@@ -2008,6 +2075,8 @@ adjacent foreign children retain their exact bytes through replacement,
 scalar edits and save/reopen cycles. Namespace closure supplies the emitted
 owner bindings without rewriting the preserved foreign child payload.
 
+Modern form fill, reset, and protect resolve one authoritative package inventory before mutation. The private walk is the current physical owner of each part in deterministic preorder, then the tag filter. Dedup is only the same part and span. Structural picture, group, and repeating controls refuse a scalar. Rich, plain, date, combo, and modern-list text, checkbox `Checked`, and legacy `SelectedIndex` are the accepted scalars. Empty display shares the accepted owning-content boundary with read and rewrite. Placeholder reset clears `fullDate` and list selection and empties the bound value. Comment and text box certification on this path is modern only. It requires a unique case-insensitive part, exact filtered story identity and fingerprints, exact per-owner XML, and save-equivalent `part_xml` text. That text drops a BOM and is not ZIP byte proof. A proved run needs an accepted path and a proved parent. Changed or unproved parts stay conservative.
+
 ## Picture extraction and one-shot publication
 
 Word picture occurrences retain physical story ownership separately from
@@ -2055,6 +2124,20 @@ match their actual format and registered content type, with bounded complete
 decoding for supported raster formats. New unsupported media facts refuse.
 Retained unsupported facts require unchanged relationship, type and target
 bytes. Arbitrary empty relationship IDs cannot bypass source ownership.
+
+The transaction preserves unrelated parts and opaque payloads. A trusted
+reread matches `write_to` followed by a read when the baseline is still the
+unmodified package that was read and the candidate was edited from it.
+`same_package_as` has that same normalized read or reread precondition.
+The trusted flag is provenance. It does not detect an arbitrary public map
+edit. A hand-built package is untrusted from construction, so its known
+fallback is that flag and not a scan of later map edits. Normalization, a
+malformed producer, an oversize entry, a missing baseline and any other
+unproved fast path use that ZIP read. `zip_entries` remains the save-equivalent
+writer. Debug builds can install one hidden note, `set_reread_zip_note`, that
+runs immediately before that fallback `write_to`, including when the write
+returns an error. The note does not run for other `write_to` callers and it
+does not run on the fast path.
 
 The transaction preserves unrelated parts and opaque payloads. Actual
 inherited namespace bindings close standalone owner XML, including opaque
@@ -2133,7 +2216,7 @@ Picture removal drops a media part and its relationship only when the candidate 
 
 `validate` names a header or footer relationship whose target is not a header or footer part, including the part name and content type. A valid header or footer story still saves.
 
-`Document::part_names` returns the package paths a save would write, each with a leading slash, in lexicographic order. The order includes parts with no relationship and does not move when a part is rewritten. `Document::part_xml` returns the UTF-8 text of one staged part. A missing, binary, or non-UTF-8 part returns an error that names the part and its content type. A UTF-8 BOM may be stripped. UTF-16 is not decoded. The read has no mutable handle and no WASM surface.
+`Document::part_names` and `Document::part_xml` read `OpcPackage::zip_entries`, the same entries `write_to` serializes. `zip_entries` keeps writer order. Its names are the exact strings that writer emits. An ordinary part drops at most one leading slash from the first authored stored key, so `/word/a.xml` becomes `word/a.xml` and `//word/a.xml` stays `/word/a.xml`. Metadata and relationship names keep the serializer mappings. Public `part_names` prefixes one slash onto each writer name and sorts those names lexicographically. That public order is distinct from the writer order. The list includes content types, root relationships, owner relationships, and ordinary parts, including a part with no relationship. `part_xml` returns the UTF-8 text of one of those entries. A missing, binary, or non-UTF-8 part returns an error that names the part and its content type. A UTF-8 BOM may be stripped. UTF-16 is not decoded. A package that cannot save makes both calls return that save error, including when the invalid part is unrelated. The read has no mutable handle and no WASM surface. Path-save extension conversion is not this view.
 
 ## Presentation semantic export resources
 

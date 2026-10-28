@@ -431,11 +431,7 @@ impl PyParagraph {
         )?;
         {
             let document = self.document.borrow(py);
-            match document
-                .indexed_paragraph_location(&location)
-                .map(Ok)
-                .unwrap_or_else(|| location.native(&document.inner))
-            {
+            match document.paragraph_route(&location, None) {
                 Ok(location) => {
                     let (path, owner) = document.capture_owner(
                         &crate::document::WordOwnerLocation::Paragraph(location),
@@ -470,8 +466,8 @@ impl PyParagraph {
             || paragraph_location(&self.path),
             |location| Ok(ParagraphLocation::Related(location.clone())),
         )?;
-        let location = location
-            .native(candidate)
+        let location = document
+            .paragraph_route(&location, Some((prepared, candidate)))
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
         let (path, owner) = document.capture_prepared_owner(
             prepared,
@@ -480,6 +476,21 @@ impl PyParagraph {
             crate::document::WordView::Owner,
             self.furniture_scope.as_ref(),
         )?;
+        self.path = path;
+        self.owner = Some(owner);
+        Ok(self)
+    }
+
+    /// Bind the paragraph a prepared plain body splice inserts, before the
+    /// native edit places it.
+    pub(crate) fn bind_prepared_splice(
+        mut self,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedBodySplice,
+    ) -> PyResult<Self> {
+        self.furniture_scope = None;
+        let (path, owner) =
+            document.capture_prepared_splice_owner(prepared, self.path.segs.clone())?;
         self.path = path;
         self.owner = Some(owner);
         Ok(self)
@@ -573,7 +584,7 @@ impl PyParagraph {
             )?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -666,7 +677,7 @@ impl PyParagraph {
                 )?,
             )?;
             document.commit_word_revision(prepared)?;
-            document.inner = candidate;
+            document.install_inner(candidate);
             result
         };
         Ok(result)
@@ -688,11 +699,31 @@ impl PyParagraph {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("paragraph XML owner route is unsupported"))?;
-        let location = document.current_paragraph_owner(owner)?;
-        let bytes = document
-            .inner
-            .paragraph_element_xml(&location)
-            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let location = document.current_paragraph_owner(owner)?;
+            document
+                .inner
+                .paragraph_element_xml(&location)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))
+        };
+        // A direct body paragraph serializes alone, without the `w14`
+        // declaration that only the rest of the body can bring. Any other
+        // owner reads the whole story source.
+        let bytes = match document.direct_body_paragraph_slot(owner).and_then(|slot| {
+            document
+                .inner
+                .direct_body_paragraph_xml(slot)
+                .ok()
+                .flatten()
+        }) {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "paragraph");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
@@ -862,7 +893,7 @@ impl PyParagraph {
             ),
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -882,7 +913,7 @@ impl PyParagraph {
                 let location = ParagraphLocation::refreshed(&document.inner, &location)
                     .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
                 document.scoped_replacement(py, "Paragraph.replace_text", |document| {
-                    document.try_replace_text_at(&location, old, new, expect)
+                    document.try_replace_text_at_owned(&location, old, new, expect)
                 })
             }
             ParagraphLocation::Body(index) => {
@@ -892,7 +923,7 @@ impl PyParagraph {
                     .map_err(|error| crate::rdocx_to_pyerr(py, error))?
                     .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
                 document.scoped_replacement(py, "Paragraph.replace_text", |document| {
-                    document.try_replace_text_at(&location, old, new, expect)
+                    document.try_replace_text_at_owned(&location, old, new, expect)
                 })
             }
             ParagraphLocation::Cell {
@@ -901,7 +932,7 @@ impl PyParagraph {
                 cell,
                 paragraph,
             } => document.scoped_replacement(py, "Paragraph.replace_text", |document| {
-                document.try_replace_text_in_cell(
+                document.try_replace_text_in_cell_owned(
                     (table, row, cell),
                     Some(paragraph),
                     old,
@@ -959,7 +990,7 @@ impl PyParagraph {
                 .unwrap_or(crate::document::WordPublication::Conservative),
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
 

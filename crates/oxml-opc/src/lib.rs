@@ -17,6 +17,9 @@ mod signature;
 
 pub use content_types::{ContentType, ContentTypes};
 pub use error::OpcError;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use package::set_reread_zip_note;
 pub use package::{OpcPackage, PackagePart, PackageReadLimits, write_atomic_file};
 pub use relationship::{Relationship, Relationships};
 #[cfg(feature = "digital-signatures")]

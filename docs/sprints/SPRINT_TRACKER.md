@@ -117,6 +117,7 @@ defended.
 | S95.2 | M24, X | 3 | 2 | 1 | 12 to 15 | 2 | F-283 numbering-aware navigation and F-284 versioned template grammar completed. F-X192 stays unfinished and is carried to S96, which has not started. Retained two-story estimate is 8 to 10 developer-days. Original three-story estimate was 12 to 15. Actual days are the worked dates 2026-10-17 and 2026-10-18, not person-effort. Full verification at b240cb3509a9641fe265ebfc605c987a3f35e143 passed with 49 unchanged hashes, seven pixel cases, 22 package inventories under 10 MiB, both WASM targets, installed Python typing and stubs, and pinned Word 16.114 plus LibreOffice 26.2.5.2 oracles. Actual developer effort not recorded. Issues 264 and 281 stay open. No release prepared. M24 continues through S99. |
 
 | S95.3 | M24, X | 8 | 8 | 0 | 34 to 49 | 3 | Eight contracts complete, no carries. Actual days are worked dates 2026-10-18, 19 and 22, not person-effort. Current source-qualified native 6,734/73 ignored, installed Word 1,066 and applicable PPT 1,028, 49 hashes/seven pixels, 22 verified archives and current hosted 39830343186 with 27 successes/four publication skips, 26 payloads, 172 priorities and six matrix calls pass. Historical failures remain. Final review and closure outcomes follow the actual reports and sprint tag. M24 continues to S99. No publication |
+| S95.4 | M24, X | 9 | 9 | 0 | see scope notes | 6 | Nine contracts complete, no carries. Six worked dates 2026-10-23 through 28, not person-effort. Actual full source c49 with explicit old-producer applicability, all 79 Word gates and memory, PowerPoint/native qualification, 22 verified archives/49 hashes and hosted 40608035966 with 27 success/four publication skips/26 payloads/172 priorities pass. Fresh 0.16.4/0.14.4 prepared, publication held. Final review/close follow actual records |
 
 ## Completed features
 
@@ -608,6 +609,15 @@ defended.
 | F-287 | S95.3 | L | 4 to 5 | not recorded | 2026-10-22 | Accepted bounded provider implementation and actual qualification. Clean feature microscopes.49hash/sevenpixel unchanged. F-X263 and final sprint gate remain due |
 
 | F-X263 | S95.3 | L | 3 to 5 additional | not recorded | 2026-10-22 | Exact patch families prepared, clean microscope, genuinely verified22archives and actual hosted27success/fourpublicationSKIP/26payloads. Downloaded priority172calls and strict typing/stubs pass. No publication |
+| F-288 | S95.4 | M | shared authoring 12 to 17 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-289 | S95.4 | L | shared authoring 12 to 17 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-290 | S95.4 | M | shared authoring 12 to 17 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-X264 | S95.4 | L | 3 to 5 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-X265 | S95.4 | M | 2 to 3 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-X266 | S95.4 | L | 4 to 6 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-X267 | S95.4 | L | 6 to 10 | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-X268 | S95.4 | L | 12 to 21 scope judgment | not recorded | 2026-10-28 | Approved contract accepted in final source-qualified union at c49, original producers/failures and limitations retained. See final AS_BUILT |
+| F-X270 | S95.4 | L | 4 to 5 provisional | not recorded | 2026-10-28 | Actual requested release preparation, build-only artifacts and installed qualification. Publication held |
 
 ## Velocity
 
@@ -722,6 +732,7 @@ five working days.
 | S95.11 | 3 | 2 | 7.50 |
 | S95.2 | 2 | 2 | 5.00 |
 | S95.3 | 8 | 3 | 13.33 |
+| S95.4 | 9 | 6 | 7.50 |
 
 S95.2 records two worked dates, 2026-10-17 and 2026-10-18. Its 5.00 stories per week counts two completed stories over those dates. It is calendar throughput, not person effort. F-X192 remains carried and is not counted as completed.
 
@@ -747,6 +758,8 @@ S95 records one worked date,2026-10-16. Its45.00 stories per week measures paral
 
 S95.3 records three worked dates,2026-10-18,19and22. Eight stories over three date units give13.33stories/week,166.67percent above S95.2 and beyond the30percent escalation threshold. S95.11/S95.2/S95.3 total13completed stories over7worked-date units, or9.29stories/week. Shared calendar dates are not person-days. Feature effort is not recorded. Preserve the34to49developer-day expanded estimate, later sprint boundaries and explicit dependency gates. Final review and close remain due.
 
+S95.4 records six worked dates 2026-10-23 through 28. Its 7.50 stories/week is parallel calendar throughput, not person-effort. This is 43.75 percent below S95.3's 13.33 rate and exceeds the 30 percent escalation trigger. Intake expanded to eight product contracts and the requested ninth release-preparation contract. The original three-authoring-story 12 to 17 and four-repair-story 15 to 24 estimates, later combined F-X268 12 to 21 judgment and release size L category remain historical scope disclosures. Overlapping judgments are not re-summed into a capacity promise. Actual per-feature effort remains unrecorded. Preserve dependency-defined future boundaries and use smaller coherent verification batches. The last three windows S95.2/S95.3/S95.4 total 19 stories over 11 worked-date units, 8.64 stories/week, rather than a sustainable developer-effort forecast.
+
 ## Escalation record
 
 Logged when an escalation trigger from `.claude/WORKFLOW.md` fires, with what
@@ -759,6 +772,7 @@ was done about it. Empty is the expected state.
 | 2026-10-16 | Sprint throughput variance exceeds30percent | S95 | Record45.00stories/week,80.00percent above S94,as parallel calendar throughput. The last three windows yield26.25stories/week. Preserve22to31developer-day effort estimates and the explicit user-approved expansion to nine stories. Retain S95.11 and later dependency boundaries without converting throughput into elapsed delivery promises. Formal review,close and publication remain separate |
 | 2026-10-16 | Sprint throughput variance exceeds30percent | S93 | Record17.50stories/week,41.67percent below S92, as parallel calendar throughput. The last three windows yield21.25stories/week, above the2story/week planning assumption. Preserve effort estimates and require the existing S95 capacity split before opening that sprint |
 | 2026-10-15 | Three-sprint throughput differs from the2-stories/week assumption by983percent | S91, S91.1, S92 | Record21.67 stories/week as parallel calendar throughput. Retain dependency-defined roadmap boundaries and developer-effort estimates. Do not convert this observation into elapsed delivery promises or invent person-effort actuals |
+| 2026-10-28 | Throughput variance exceeds30percent | S95.4 | Record7.50stories/week over six worked dates,43.75percent below S95.3. Preserve unrecorded person-effort, approved scope limits and smaller batched verification. Release remains separately approved |
 | 2026-07-30 | Three-sprint velocity variance exceeded 30 percent | S01 to S03 | Reforecast 366 remaining estimated days to 45 to 50 active weeks, retain dependency-defined boundaries, and recalibrate after S06 |
 | 2026-07-31 | Sprint estimate variance exceeded 30 percent | S05 | Record 4 actual days against 8 estimated, retain the 45 to 50 active week reforecast, and recalibrate after S06 |
 | 2026-07-31 | Sprint estimate variance exceeded 30 percent | S06 | Reforecast 124 remaining stories at the observed five stories per active week to about 25 active weeks, while retaining dependency-defined sprint boundaries |

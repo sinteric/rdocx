@@ -479,6 +479,11 @@ fn render_elements(
                             Transform::identity(),
                             None,
                         );
+                        apply_linear_opacity_masks(
+                            &mut composited,
+                            &group.effects,
+                            child_transform,
+                        );
                         pixmap.draw_pixmap(
                             0,
                             0,
@@ -497,6 +502,70 @@ fn render_elements(
                 render_elements(pixmap, fonts, children, transform, mask);
             }
             _ => {}
+        }
+    }
+}
+
+// Render one mask per effect, not one copy of the children. The mask shader
+// uses only alpha, then multiplies the complete premultiplied painted group.
+fn apply_linear_opacity_masks(pixmap: &mut Pixmap, effects: &[Effect], transform: Transform) {
+    for effect in effects {
+        let Effect::LinearOpacityMask {
+            bounds,
+            start,
+            end,
+            stops,
+        } = effect
+        else {
+            continue;
+        };
+        if !effect.linear_opacity_mask_is_valid() {
+            pixmap.data_mut().fill(0);
+            return;
+        }
+        let rect = tiny_skia::Rect::from_xywh(
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.width as f32,
+            bounds.height as f32,
+        );
+        let shader = tiny_skia::LinearGradient::new(
+            tiny_skia::Point::from_xy(start.x as f32, start.y as f32),
+            tiny_skia::Point::from_xy(end.x as f32, end.y as f32),
+            stops
+                .iter()
+                .map(|stop| {
+                    tiny_skia::GradientStop::new(
+                        stop.offset as f32,
+                        tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, stop.color.a as f32).unwrap(),
+                    )
+                })
+                .collect(),
+            tiny_skia::SpreadMode::Pad,
+            Transform::identity(),
+        );
+        let Some((rect, shader)) = rect.zip(shader) else {
+            pixmap.data_mut().fill(0);
+            return;
+        };
+        let Some(mut alpha) = Pixmap::new(pixmap.width(), pixmap.height()) else {
+            pixmap.data_mut().fill(0);
+            return;
+        };
+        let paint = Paint {
+            shader,
+            anti_alias: true,
+            ..Paint::default()
+        };
+        alpha.fill_rect(rect, &paint, transform, None);
+        for (pixel, mask) in pixmap
+            .data_mut()
+            .chunks_exact_mut(4)
+            .zip(alpha.data().chunks_exact(4))
+        {
+            for component in pixel {
+                *component = ((u16::from(*component) * u16::from(mask[3]) + 127) / 255) as u8;
+            }
         }
     }
 }
@@ -2823,5 +2892,113 @@ mod tests {
         assert_eq!(rgb(pixmap.pixel(9, 1).unwrap()), (255, 0, 0));
         assert!(Paint::grid(bounds, 0, 1, Vec::new()).is_none());
         assert!(Paint::grid(bounds, 2, 1, vec![Color::BLACK]).is_none());
+    }
+
+    fn linear_test_mask(width: f64) -> Effect {
+        Effect::LinearOpacityMask {
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 16.0,
+            },
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: width, y: 0.0 },
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Color::WHITE,
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Color {
+                        a: 0.0,
+                        ..Color::BLACK
+                    },
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn linear_opacity_masks_multiply_complete_overlapping_scene_under_transform() {
+        let black = || {
+            solid_path(
+                Path::rect(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 16.0,
+                    height: 16.0,
+                }),
+                Color::BLACK,
+            )
+        };
+        let mut group = GroupElement {
+            transform: Transform {
+                a: 1.5,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 2.0,
+                f: 3.0,
+            },
+            clip: Some(Path::rect(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 12.0,
+            })),
+            opacity: 0.5,
+            effects: vec![linear_test_mask(16.0), linear_test_mask(16.0)],
+            children: vec![black(), black()],
+        };
+        let render =
+            |g| render_page_to_pixmap(&page(vec![PositionedElement::Group(g)]), &[], 72.0).unwrap();
+        let image = render(group.clone());
+        // Device center14.5 maps to local8.333. Both opaque children are
+        // composited once before the two masks and one group opacity.
+        let alpha = (1.0_f64 - (14.5 - 2.0) / 24.0).powi(2) * 0.5;
+        let expected = (255.0 * (1.0 - alpha)).round() as i16;
+        let pixel = image.pixel(14, 8).unwrap();
+        assert!((i16::from(pixel.red()) - expected).abs() <= 2);
+        assert_eq!(rgb(image.pixel(14, 17).unwrap()), (255, 255, 255));
+        if let Effect::LinearOpacityMask { stops, .. } = &mut group.effects[0] {
+            stops[0].color.a = f64::NAN;
+        }
+        let invalid = render(group);
+        assert_eq!(rgb(invalid.pixel(14, 8).unwrap()), (255, 255, 255));
+    }
+
+    #[test]
+    fn linear_opacity_mask_includes_shadow_and_transparent_background() {
+        let g = GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+            effects: vec![
+                Effect::OuterShadow {
+                    dx: 4.0,
+                    dy: 0.0,
+                    blur: 0.0,
+                    color: Color::BLACK,
+                },
+                linear_test_mask(24.0),
+            ],
+            children: vec![solid_path(
+                Path::rect(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 16.0,
+                    height: 16.0,
+                }),
+                Color::BLACK,
+            )],
+        };
+        let p = page(vec![PositionedElement::Group(g)]);
+        let image = super::render_page_to_pixmap_with_background(&p, &[], 72.0, true).unwrap();
+        // x18 is outside the child, inside its shadow and mask.
+        let alpha = image.pixel(18, 8).unwrap().alpha();
+        assert!((54..=62).contains(&alpha), "{alpha}");
+        assert_eq!(image.pixel(25, 8).unwrap().alpha(), 0);
     }
 }

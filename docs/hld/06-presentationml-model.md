@@ -1,5 +1,18 @@
 # 06, PresentationML model
 
+
+Timeline axis scaling keeps materialized Custom paths and their text rectangle consistent with center-resized bounds before group-clip projection. Move/line points, every cubic control/end and text-rectangle coordinates use the actual signed factors. Rectangle and fallback geometry remain dynamically sized. Overflow declines the whole candidate with the original shape and default resolved state. This bounded geometry repair preserves legacy font sizes, insets, stroke/shadow parameters and precomputed paint coordinates. It does not claim general emphasis fidelity for those separate domains.
+
+Timeline soft-mask qualification covers direct leaf owners. Group-target timing retains the existing flattened hard-clip fallback with an explicit diagnostic. The neutral mask still composes an existing complete group scene once, including nested and overlapping children.
+
+## Native bounded timeline semantics
+
+An applicable visibility set or shape effect owns visibility independently of map entries created by opacity and motion. Pending entrances supply the initial hidden state only when no applicable visibility operation owns that target. Both traversal orders preserve explicit visible and hidden sets. Native ScaleX and ScaleY use raw factors and style.rotation uses raw degrees, including factors above 10 and rotations above 360. Existing scale, spin, rotation and numeric opacity aliases retain their prior units.
+
+Native wipes reveal from the named edge and exits remove that edge. Their private evaluated source record projects an additive local_opacity_mask only while the public clip remains the evaluator-authored value. A changed or cleared clip disables that automatic mask. Other oriented and explicit clips remain authoritative. The qualified plain-paint alpha is clamp(8*p-7*u,0,1), complemented for exit, with exact start/stop endpoints. Outgoing fade retains its opacity overwrite behavior.
+
+Native qualification isolates an entrance wipe with fill=remove before later opacity and exit phases. A held wipe can mask those later properties in PowerPoint. The current evaluator does not qualify that interaction. F-X269 owns the explicit effect-composition follow-up, alongside the separate shadow domain work. Source-preserving timing import and export do not imply native compositing parity.
+
 Owner: `rpptx-oxml`, with the facade in `rpptx`.
 
 ## Parts
@@ -74,6 +87,11 @@ native facade exposes package signature reports, verifies a staged view of the
 current presentation, and signs PKCS#8 private-key DER with X.509 certificate
 DER. Signing commits only a candidate that verifies as cryptographically valid
 with complete declared coverage.
+
+Opened presentations share slide, layout and master records until an edit
+copies the record it changes. Media bytes share the package part allocation.
+Debug counters report parse, serialize, hash and ZIP work. They are not a
+stable Python export.
 
 The presentation and slide property surface is concrete and borrowed:
 
@@ -1274,7 +1292,12 @@ and Office 2015 morph metadata. Expanded-name readers select supported
 `mc:AlternateContent` choices or their fallback. The complete captured subtree
 remains the serialization source. Supported transition settings edit their
 owned attributes and selected effect while retaining sound, extensions and
-inactive compatibility branches. Removing a transition leaves timing intact.
+inactive compatibility branches. Removing a transition leaves timing intact. An edit of one slide keeps the
+producer bytes of an untouched slide and its notes. Slide `fit_text` measures
+that slide with its layout and master. It does not fail because another slide
+is broken. The global fit report still walks every slide. Notes measurement
+keeps the notes theme and notes master. Transition and footer edits prove
+only the parts they change. Ambiguous shape identity still refuses.
 Unsupported siblings, owner attributes, namespace
 bindings, and relationship-bearing content therefore remain byte-identical.
 

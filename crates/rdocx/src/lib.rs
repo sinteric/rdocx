@@ -62,23 +62,29 @@ pub use comparison::{
 };
 pub use content_control::{
     ContentControlAppearance, ContentControlLock, ContentControlPlacement, ContentControlRef,
-    ContentControlSpec, ContentControlTypePayload,
+    ContentControlSpec, ContentControlTypePayload, FormFieldAssignment, FormFieldRule,
+    FormFieldTarget, FormFieldValue, FormResetValue, FormValidationIssue,
 };
+#[cfg(debug_assertions)]
+pub use document::take_reopen_work;
+#[cfg(debug_assertions)]
+pub use document::take_staging_work;
 pub use document::{
-    AccessibilityIssue, BodyContentRef, BodyItemRef, ContentFragment, ContentLocation,
-    ContentMeasurement, Document, DocumentFragment, DrawingHorizontalAlignment,
-    DrawingHorizontalRelativeFrom, DrawingVerticalAlignment, DrawingVerticalRelativeFrom,
-    DrawingWrap, EmbeddedFont, EmbeddedFontKind, FontDefinition, FontEmbeddingLicense,
-    FragmentConflictPolicy, HeaderFooterKind, ImageInfo, ImageWatermarkOptions, IssueSeverity,
-    LinkInfo, ListLevel, ListLevelRestart, ListLevelSuffix, ListNumberFormat, NoteFamily,
-    NoteNumberFormat, NotePlacement, NotePolicy, NoteRestart, NoteSpecialRecord,
-    NumberedOutlineNode, NumberingDefinition, NumberingDefinitionLevel, NumberingFormat,
-    NumberingInstance, NumberingLevel, NumberingLevelOverride, OutlineNode, PictureAnchor,
-    PictureCrop, PictureOccurrence, PictureOptions, RenderOptions, ReplacementCountMismatch,
-    Section, SectionRef, SectionStory, StoryError, StoryId, StoryItemKind, StoryItemRef,
-    StoryItemSnapshot, StoryKind, StoryText, StoryTextItem, TextBoxDirection, TextBoxOptions,
-    TextDiagnostic, TextReport, TextWatermarkOptions, UnsupportedXmlRef, ValidationFinding,
-    ValidationReport, ValidationSeverity, WordCreationProfile, WordPackageClass, derive_font_key,
+    AccessibilityIssue, BodyContentRef, BodyItemContext, BodyItemOwners, BodyItemRef,
+    ContentFragment, ContentLocation, ContentMeasurement, Document, DocumentFragment,
+    DrawingHorizontalAlignment, DrawingHorizontalRelativeFrom, DrawingVerticalAlignment,
+    DrawingVerticalRelativeFrom, DrawingWrap, EmbeddedFont, EmbeddedFontKind, FontDefinition,
+    FontEmbeddingLicense, FragmentConflictPolicy, HeaderFooterKind, ImageInfo,
+    ImageWatermarkOptions, IssueSeverity, LinkInfo, ListLevel, ListLevelRestart, ListLevelSuffix,
+    ListNumberFormat, NoteFamily, NoteNumberFormat, NotePlacement, NotePolicy, NoteRestart,
+    NoteSpecialRecord, NumberedOutlineNode, NumberingDefinition, NumberingDefinitionLevel,
+    NumberingFormat, NumberingInstance, NumberingLevel, NumberingLevelOverride, OutlineNode,
+    PictureAnchor, PictureCrop, PictureOccurrence, PictureOptions, RenderOptions,
+    ReplacementCountMismatch, Section, SectionRef, SectionStory, StoryError, StoryId,
+    StoryItemKind, StoryItemRef, StoryItemSnapshot, StoryKind, StoryText, StoryTextItem,
+    TextBoxDirection, TextBoxOptions, TextDiagnostic, TextReport, TextWatermarkOptions,
+    UnsupportedXmlRef, ValidationFinding, ValidationReport, ValidationSeverity,
+    WordCreationProfile, WordPackageClass, derive_font_key, take_direct_fragment_bytes,
     validate_document_bytes, validate_document_file,
 };
 pub use embedded::{
@@ -88,13 +94,18 @@ pub use epub::{EpubDiagnostic, EpubWriteResult};
 pub use error::{Error, Result};
 pub use field::{
     AuthorityEntry, BarcodeCaseStyle, BarcodeField, BarcodeKind, BarcodePointOfSaleStyle,
-    CaptionOptions, CaptionTarget, CrossReferenceNumber, CrossReferenceOptions, FieldDateTime,
-    FieldEvaluation, FieldEvaluationContext, FieldOutcome, FieldsUpdateReport,
+    CaptionOptions, CaptionTarget, CrossReferenceNumber, CrossReferenceOptions, Field,
+    FieldDateTime, FieldEvaluation, FieldEvaluationContext, FieldOutcome, FieldsUpdateReport,
     GeneratedTablesReport, IndexEntry, IndexOptions, LayoutBackedFieldUpdateReport,
-    LegacyFormFieldInfo, LegacyFormFieldKind, LegacyFormFieldValue, MailMergeControl,
-    MailMergeData, MailMergeFormatContext, MailMergeFormattedText, MailMergeImage, MailMergeRecord,
-    MailMergeValue, SequenceOptions, TableOfAuthoritiesOptions, TableOfFiguresOptions, TcField,
-    TocEntrySelection, TocField, TocRebuildReport,
+    LegacyCheckBoxSize, LegacyFormFieldDefinition, LegacyFormFieldInfo, LegacyFormFieldKind,
+    LegacyFormFieldOptions, LegacyFormFieldValue, LegacyFormInfoText, LegacyTextInputType,
+    MailMergeControl, MailMergeData, MailMergeFieldMapping, MailMergeFormatContext,
+    MailMergeFormattedText, MailMergeImage, MailMergePackageDiagnostic,
+    MailMergePackageDiagnosticKind, MailMergePackageOptions, MailMergePackageSource,
+    MailMergePreparedData, MailMergeRecipient, MailMergeRecord, MailMergeSourcePolicy,
+    MailMergeTableBudget, MailMergeValue, SequenceOptions, TableOfAuthoritiesOptions,
+    TableOfFiguresOptions, TcField, TocEntrySelection, TocField, TocRebuildReport,
+    validate_mail_merge_external_uri,
 };
 pub use html::{
     HtmlDiagnostic, HtmlFragmentInsertResult, HtmlImageResource, HtmlReadResult, MhtmlDiagnostic,
@@ -122,7 +133,7 @@ pub use paragraph::{
     Alignment, BorderStyle, DropCap, FrameAnchor, FrameWrap, HyperlinkItemRef, HyperlinkRef,
     Paragraph, ParagraphBorderEdge, ParagraphBorderRef, ParagraphFrame, ParagraphItemRef,
     ParagraphMark, ParagraphMarkRef, ParagraphRef, ParagraphTextAlignment, ParagraphTextDirection,
-    SectionBreak, TabAlignment, TabLeader, TabStopRef, TextboxTightWrap,
+    SectionBreak, TabAlignment, TabLeader, TabStopRef, TextboxTightWrap, auto_line_spacing,
 };
 pub use rdocx_layout::{RevisionStyle, RevisionView};
 pub use rdocx_oxml::document::{CT_DocGrid, ST_DocGrid};

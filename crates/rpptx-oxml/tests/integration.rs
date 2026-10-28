@@ -1879,7 +1879,7 @@ fn verify_fetched_corpus() {
 fn rpptx_oxml_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(manifest.contains("name = \"rpptx-oxml\""));
-    assert!(manifest.contains("version = \"0.14.3\""));
+    assert!(manifest.contains("version = \"0.14.4\""));
     assert!(manifest.contains("publish = true"));
     assert_eq!(
         P_NS,
@@ -5112,7 +5112,7 @@ fn every_corpus_preserved_payload_is_identity_with_an_empty_map() {
             assert_eq!(
                 rewrite_rel_ids(raw, &HashMap::new())
                     .unwrap_or_else(|error| panic!("{} {part}: {error}", entry.path)),
-                *raw,
+                **raw,
                 "{} {part}",
                 entry.path
             );

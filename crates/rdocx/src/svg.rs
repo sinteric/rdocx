@@ -503,6 +503,42 @@ impl<'a> SvgState<'a> {
         accumulated: Transform,
     ) {
         let mut attributes = String::new();
+        let mut effect_attributes = String::new();
+        let mut mask_wrappers = Vec::new();
+        for (index, effect) in group.effects.iter().enumerate() {
+            let Effect::LinearOpacityMask {
+                bounds,
+                start,
+                end,
+                stops,
+            } = effect
+            else {
+                continue;
+            };
+            if !effect.linear_opacity_mask_is_valid() {
+                mask_wrappers.push("<g opacity=\"0\">".to_owned());
+                self.diagnose(
+                    &format!("{path}.effects[{index}]"),
+                    "invalid linear opacity mask makes the group transparent",
+                );
+                continue;
+            }
+            let gradient_id = self.definition_id();
+            let mask_id = self.definition_id();
+            write!(self.defs, "<linearGradient id=\"{gradient_id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" spreadMethod=\"pad\">", number(start.x), number(start.y), number(end.x), number(end.y)).unwrap();
+            for stop in stops {
+                write!(
+                    self.defs,
+                    "<stop offset=\"{}\" stop-color=\"#FFFFFF\" stop-opacity=\"{}\"/>",
+                    number(stop.offset),
+                    number(stop.color.a)
+                )
+                .unwrap();
+            }
+            write!(self.defs, "</linearGradient><mask id=\"{mask_id}\" maskUnits=\"userSpaceOnUse\" maskContentUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" style=\"mask-type:alpha\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{gradient_id})\"/></mask>", number(bounds.x), number(bounds.y), number(bounds.width), number(bounds.height), number(bounds.x), number(bounds.y), number(bounds.width), number(bounds.height)).unwrap();
+            mask_wrappers.push(format!("<g mask=\"url(#{mask_id})\">"));
+        }
+
         let group_to_page = group.transform.then(accumulated);
         if !group.transform.is_identity() {
             write!(
@@ -580,6 +616,7 @@ impl<'a> SvgState<'a> {
                             );
                         }
                     }
+                    Effect::LinearOpacityMask { .. } => {}
                     _ => self.diagnose(
                         &format!("{path}.effects[{index}]"),
                         "unsupported group effect was omitted while its children were preserved",
@@ -603,7 +640,7 @@ impl<'a> SvgState<'a> {
                             number(region.height)
                         )
                         .unwrap();
-                        write!(attributes, " filter=\"url(#{id})\"").unwrap();
+                        write!(effect_attributes, " filter=\"url(#{id})\"").unwrap();
                     }
                     Some(Ok(None)) | None => {}
                     Some(Err(())) => self.diagnose(
@@ -614,7 +651,18 @@ impl<'a> SvgState<'a> {
             }
         }
 
+        // Preserve the old unmasked markup. With masks, their wrappers surround
+        // the filtered scene so shadow and descendants are masked once together.
+        if mask_wrappers.is_empty() {
+            attributes.push_str(&effect_attributes);
+        }
         write!(output, "<g{attributes}>").unwrap();
+        for wrapper in &mask_wrappers {
+            output.push_str(wrapper);
+        }
+        if !mask_wrappers.is_empty() && !effect_attributes.is_empty() {
+            write!(output, "<g{effect_attributes}>").unwrap();
+        }
         if let Some(clip_id) = clip_id {
             write!(output, "<g clip-path=\"url(#{clip_id})\">").unwrap();
         }
@@ -625,6 +673,12 @@ impl<'a> SvgState<'a> {
             group_to_page,
         );
         if group.clip.is_some() {
+            output.push_str("</g>");
+        }
+        if !mask_wrappers.is_empty() && !effect_attributes.is_empty() {
+            output.push_str("</g>");
+        }
+        for _ in &mask_wrappers {
             output.push_str("</g>");
         }
         output.push_str("</g>");
@@ -4167,6 +4221,140 @@ mod tests {
             assert_eq!(bytes.len() as u64, guard["size"].as_u64().unwrap());
             // Native source modes are authenticated by ROOT before admission.
             // Byte/size guards here remain portable across native targets.
+        }
+    }
+
+    #[test]
+    fn linear_opacity_mask_svg_keeps_one_text_owner_and_multiplies_masks() {
+        let mask = Effect::LinearOpacityMask {
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: 100.0, y: 0.0 },
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Color::WHITE,
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Color {
+                        a: 0.0,
+                        ..Color::BLACK
+                    },
+                },
+            ],
+        };
+        let mut g = GroupElement {
+            transform: Transform {
+                e: 5.0,
+                f: 7.0,
+                ..Transform::IDENTITY
+            },
+            clip: Some(Path::rect(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 90.0,
+                height: 90.0,
+            })),
+            opacity: 0.5,
+            effects: vec![
+                mask.clone(),
+                mask,
+                Effect::OuterShadow {
+                    dx: 2.0,
+                    dy: 3.0,
+                    blur: 0.0,
+                    color: Color::BLACK,
+                },
+            ],
+            children: vec![text("Once", 4)],
+        };
+        let output = render_page(&layout(vec![PositionedElement::Group(g.clone())]), 0).unwrap();
+        assert_eq!(output.svg.matches(">Once</text>").count(), 1);
+        assert_eq!(output.svg.matches("<mask ").count(), 2);
+        assert_eq!(output.svg.matches("<linearGradient ").count(), 2);
+        assert!(output.svg.contains("mask-type:alpha"));
+        assert!(output.svg.contains("stop-opacity=\"0\""));
+        assert!(output.svg.find(" mask=\"").unwrap() < output.svg.find(" filter=\"").unwrap());
+        if let Effect::LinearOpacityMask { bounds, .. } = &mut g.effects[0] {
+            bounds.width = f64::NAN;
+        }
+        let invalid = render_page(&layout(vec![PositionedElement::Group(g)]), 0).unwrap();
+        assert!(invalid.svg.contains("<g opacity=\"0\">"));
+        assert!(!invalid.svg.contains("NaN"));
+        assert_eq!(invalid.svg.matches(">Once</text>").count(), 1);
+    }
+
+    #[test]
+    fn linear_opacity_mask_svg_raster_agree_on_colored_background_and_overlap() {
+        let mask = Effect::LinearOpacityMask {
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 24.0,
+                height: 16.0,
+            },
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: 24.0, y: 0.0 },
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Color::WHITE,
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Color {
+                        a: 0.0,
+                        ..Color::BLACK
+                    },
+                },
+            ],
+        };
+        let rect = PositionedElement::FilledRect {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 24.0,
+                height: 16.0,
+            },
+            color: Color::BLACK,
+        };
+        let g = PositionedElement::Group(GroupElement {
+            transform: Transform {
+                a: 1.5,
+                d: 1.5,
+                e: 4.0,
+                f: 5.0,
+                ..Transform::IDENTITY
+            },
+            clip: None,
+            opacity: 0.5,
+            effects: vec![mask.clone(), mask],
+            children: vec![rect.clone(), rect],
+        });
+        let mut scene = layout(vec![g]);
+        std::sync::Arc::make_mut(&mut scene.pages[0]).background =
+            Some(Paint::Solid(Color::from_hex("2080C0")));
+        let svg = render_page(&scene, 0).unwrap();
+        let png = oxml_pdf::render_page_to_png(&scene, 0, 72.0).unwrap();
+        let native = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let independent =
+            rasterise_with_resvg(&svg.svg, native.width(), native.height(), &scene.fonts);
+        for (x, y) in [(5, 10), (12, 10), (22, 10), (35, 10), (50, 10)] {
+            let i = (y * native.width() as usize + x) * 4;
+            for channel in 0..3 {
+                assert!(
+                    (i16::from(native.data()[i + channel]) - i16::from(independent[i + channel]))
+                        .abs()
+                        <= 3,
+                    "{x},{y},{channel}"
+                );
+            }
         }
     }
 }

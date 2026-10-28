@@ -1,4 +1,5 @@
 import io
+import os
 import posixpath
 import re
 import struct
@@ -298,8 +299,7 @@ def test_fx256_line_spacing_distinguishes_multiples_and_lengths(absolute):
     values = ([rdocx.Pt(18), rdocx.Emu(634), rdocx.Emu(-634),
                *[rdocx.Emu(n*635) for n in limits],
                rdocx.Emu(limits[1]*635+634), rdocx.Emu(limits[0]*635-634)] if absolute else
-              [0, 1, 2, 2.0, 1.75, -1, *[n/240 for n in limits],
-               (limits[1]+0.75)/240, (limits[0]-0.75)/240])
+              [0, 1, 2, 2.0, 1.75, -1, *[n/240 for n in limits]])
     for value in values:
         document = rdocx.Document()
         paragraph = document.add_paragraph('spacing')
@@ -330,6 +330,12 @@ def test_fx256_line_spacing_refuses_nonfinite_types_and_overflow_atomically():
                   1e308, 2**10000, (2**31)/240, (-2**31-1)/240,
                   rdocx.Emu((2**31)*635), rdocx.Emu((-2**31-1)*635)]:
         with pytest.raises((TypeError, ValueError, OverflowError)):
+            held.paragraph_format.line_spacing = value
+        assert document.to_bytes() == before and document.verify_signatures()[0]['cryptographically_valid']
+        assert held.text == run.text == 'held' and other.text == 'other' and section.xml
+    outside = ((2**31 - 1) + 0.75) / 240, ((-2**31) - 0.75) / 240
+    for value in outside:
+        with pytest.raises(ValueError):
             held.paragraph_format.line_spacing = value
         assert document.to_bytes() == before and document.verify_signatures()[0]['cryptographically_valid']
         assert held.text == run.text == 'held' and other.text == 'other' and section.xml
@@ -4672,6 +4678,12 @@ def test_comment_anchor_fields_preserve_constructor_compatibility():
                              text="Review", parent_id=None, resolved=False)
     assert detached.anchor_text is None
     assert detached.anchor is None
+    assert detached.anchor_issue is None
+    issued = rdocx.Comment(id=7, author="Ada", initials=None, date=None,
+                           text="Review", parent_id=None, resolved=False,
+                           anchor_issue="not identity")
+    assert issued == detached
+    assert issued.anchor_issue == "not identity"
     document = rdocx.Document()
     document.add_paragraph("Alpha stays.")
     document.add_paragraph("Delta goes away.")
@@ -9173,6 +9185,1418 @@ def test_fx249_individual_errors_noops_and_bulk_contracts():
     assert owner.to_bytes() == before
 
 
+def test_legacy_form_attachment_uses_conservative_lifetime():
+    import rdocx
+    definition = rdocx.LegacyFormFieldDefinition.text_input(value="field")
+
+    def alive(fn):
+        try:
+            fn()
+        except rdocx.StaleElementError:
+            return False
+        return True
+
+    document = rdocx.Document()
+    document.add_paragraph("held")
+    document.add_paragraph("target")
+    held = document.paragraphs[0]
+    heldrun = held.runs[0]
+    held_item = next(item for item in document.story_items if item.kind == "paragraph" and item.story.kind == "body")
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError):
+        document.insert_legacy_form_field(
+            rdocx.StoryRunPosition(item=next(item for item in document.story_items if item.kind == "paragraph" and item.story.kind == "body" and item.index_path != held_item.index_path), run_index=9),
+            definition,
+        )
+    assert document.to_bytes() == before
+    assert alive(lambda: held.text) and held.text == "held"
+    assert alive(lambda: heldrun.text)
+    assert alive(lambda: held_item.text)
+
+    second = next(item for item in document.story_items if item.kind == "paragraph" and item.story.kind == "body" and item.index_path != held_item.index_path)
+    document.insert_legacy_form_field(rdocx.StoryRunPosition(item=second, run_index=1), definition)
+    assert not alive(lambda: held.text)
+    assert not alive(lambda: heldrun.text)
+    fresh = document.paragraphs[0]
+    fresh_item = next(item for item in document.story_items if item.kind == "paragraph" and item.story.kind == "body")
+    assert fresh.text == "held"
+    assert fresh_item.text == "held"
+    assert document.legacy_form_fields()[0].value == "field"
+
+    document = rdocx.Document()
+    document.add_paragraph("held")
+    document.add_paragraph("target")
+    held = document.paragraphs[0]
+    heldrun = held.runs[0]
+    held_item = next(item for item in document.story_items if item.kind == "paragraph" and item.story.kind == "body")
+    document.paragraphs[1].runs[0].add_legacy_form_field(rdocx.LegacyFormFieldDefinition.text_input(value="field"))
+    assert not alive(lambda: held.text)
+    assert not alive(lambda: heldrun.text)
+    fresh_item = next(item for item in document.story_items if item.kind == "paragraph" and item.story.kind == "body")
+    assert document.paragraphs[0].text == "held"
+    assert fresh_item.text == "held"
+    assert document.legacy_form_fields()[0].value == "field"
+
+
+def test_authored_legacy_form_fields_keep_defaults_and_current_values():
+    import rdocx
+    text = rdocx.LegacyFormFieldDefinition.text_input(value="now", default="keep", calculate_on_exit=False)
+    check = rdocx.LegacyFormFieldDefinition.checkbox(checked=True, default=False, size_half_points=None)
+    choices = ["one", "two"]
+    listed = rdocx.LegacyFormFieldDefinition.drop_down_list(choices, selected_index=1, default_index=0)
+    choices.append("three")
+    document = rdocx.Document()
+    document.add_paragraph("").add_run("")
+    document.paragraphs[-1].runs[0].add_legacy_form_field(text)
+    document.paragraphs[-1].runs[0].add_legacy_form_field(check)
+    document.paragraphs[-1].runs[0].add_legacy_form_field(listed)
+    table = document.add_table(1, 1)
+    table.cell(0, 0).paragraphs[0].add_run("").add_legacy_form_field(text)
+    document.set_header("related")
+    header = next(item for item in document.story_items if item.story.kind == "header" and item.kind == "paragraph")
+    document.insert_legacy_form_field(rdocx.StoryRunPosition(item=header, run_index=0), text)
+    fields = document.legacy_form_fields()
+    texts = [field for field in fields if field.type == "text"]
+    assert len(texts) >= 3
+    assert all(field.value == "now" and field.default_value == "keep" for field in texts)
+    assert any(field.type == "checkbox" and field.value is True and field.default_value is False for field in fields)
+    assert any(field.type == "dropdown" and field.value == 1 and field.default_value == 0 and field.choices == ("one", "two") for field in fields)
+    assert any(field.source_part != "/word/document.xml" and field.value == "now" for field in texts)
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.legacy_form_fields()[0].default_value == "keep"
+    assert reopened.legacy_form_fields()[0].value == "now"
+
+
+@pytest.mark.parametrize(
+    "instruction,kind,display,current,default,changed",
+    [
+        ("FORMTEXT", '<w:textInput><w:default w:val="keep"/></w:textInput>', "now", "now", "keep", "changed"),
+        ("FORMCHECKBOX", '<w:checkBox><w:sizeAuto/><w:default w:val="0"/><w:checked/></w:checkBox>', "", True, False, False),
+        ("FORMDROPDOWN", '<w:ddList><w:listEntry w:val="one"/><w:listEntry w:val="two"/></w:ddList>', "one", 0, None, 1),
+    ],
+)
+def test_native_named_legacy_fields_keep_frozen_and_reopened_defaults(
+    instruction, kind, display, current, default, changed
+):
+    import rdocx
+
+    xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>'
+        '<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Legacy"/>'
+        f'{kind}</w:ffData></w:fldChar></w:r><w:bookmarkStart w:id="7" w:name="Legacy"/>'
+        f'<w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        f'<w:r><w:t>{display}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        '<w:bookmarkEnd w:id="7"/></w:p><w:sectPr/></w:body></w:document>'
+    ).encode()
+    document = _fx261_replace_part(rdocx.Document(), "word/document.xml", lambda _: xml)
+    fields = document.legacy_form_fields()
+    assert len(fields) == 1
+    held = fields[0]
+    assert held.value == current and held.default_value == default
+    for _ in range(2):
+        document.set_legacy_form_field_value("Legacy", changed)
+        fresh = document.legacy_form_fields()[0]
+        assert fresh.value == changed and fresh.default_value == default
+        assert held.value == current and held.default_value == default
+        raw = document.part_xml("/word/document.xml")
+        assert raw.count("<w:bookmarkStart ") == raw.count("<w:bookmarkEnd ") == 1
+        assert raw.index('fldCharType="begin"') < raw.index("<w:bookmarkStart ")
+        assert raw.index('fldCharType="end"') < raw.index("<w:bookmarkEnd ")
+        document = rdocx.Document.from_bytes(document.to_bytes())
+        assert document.legacy_form_fields()[0].default_value == default
+
+
+@pytest.mark.parametrize("instruction_region", [False, True])
+@pytest.mark.parametrize(
+    "instruction,subtype,default_xml,current,default",
+    [
+        ('TIME \\@ "HH:mm:ss"', "currentDate", "", "12:34:56", None),
+        ('DATE \\@ "yyyy-MM-dd"', "currentTime", "", "2026-10-26", None),
+        ("=2+3", "calculated", '<w:default w:val="=2+3"/>', "5.00", "=2+3"),
+    ],
+)
+def test_native_legacy_result_fields_keep_inventory_defaults_and_literal_assignments(
+    instruction, subtype, default_xml, current, default, instruction_region
+):
+    import rdocx
+
+    xml = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>'
+        '<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Legacy"/>'
+        f'<w:textInput><w:type w:val="{subtype}"/>{default_xml}</w:textInput></w:ffData></w:fldChar></w:r>'
+        '<w:bookmarkStart w:id="7" w:name="Legacy"/><w:r><w:instrText> FORMTEXT </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        f'<w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        f'<w:r><w:rPr><w:b/></w:rPr><w:t>{current}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        f'<w:r><w:instrText>{current}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+        '<w:bookmarkEnd w:id="7"/></w:p><w:sectPr/></w:body></w:document>'
+    ).encode()
+    if instruction_region:
+        separator = b'<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        begin = b'<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        xml = xml.replace(separator + begin, begin, 1)
+        inner = "5" if instruction == "=2+3" else current
+        xml = xml.replace(f"<w:t>{current}</w:t>".encode(), f"<w:instrText>{inner}</w:instrText>".encode(), 1)
+        xml = xml.replace(f"<w:r><w:instrText>{current}</w:instrText></w:r>".encode(), separator + f"<w:r><w:t>{current}</w:t></w:r>".encode(), 1)
+    document = _fx261_replace_part(rdocx.Document(), "word/document.xml", lambda _: xml)
+    fields = document.legacy_form_fields()
+    assert len(fields) == 1
+    held = fields[0]
+    paragraph = document.paragraphs[0]
+    assert held.type == "text" and held.value == current and held.default_value == default
+    before = document.to_bytes()
+    revision = document.revisions
+    document.set_legacy_form_field_value("Legacy", current)
+    document.set_legacy_form_field_value(None, current, source_part=held.source_part, ordinal=held.ordinal)
+    assert document.to_bytes() == before and document.revisions == revision
+    assert paragraph.text == current
+    with pytest.raises(TypeError):
+        document.set_legacy_form_field_value("Legacy", True)
+    with pytest.raises(rdocx.XmlError):
+        document.set_legacy_form_field_value("Legacy", "invalid\x01")
+    assert document.to_bytes() == before and document.revisions == revision
+    assert paragraph.text == current
+    reopened = rdocx.Document.from_bytes(before)
+    assert reopened.legacy_form_fields()[0].value == current
+    assert reopened.legacy_form_fields()[0].default_value == default
+    assert reopened.part_xml("/word/document.xml").count('fldCharType="begin"') == 2
+    document.set_legacy_form_field_value(None, "literal", source_part=held.source_part, ordinal=held.ordinal)
+    fresh = document.legacy_form_fields()[0]
+    assert fresh.value == "literal" and fresh.default_value == default
+    assert held.value == current and held.default_value == default
+    raw = document.part_xml("/word/document.xml")
+    assert raw.count('fldCharType="begin"') == (2 if instruction_region else 1)
+    if instruction_region:
+        assert f"<w:instrText>{inner}</w:instrText>" in raw
+    assert raw.count("<w:bookmarkStart ") == raw.count("<w:bookmarkEnd ") == 1
+    final = rdocx.Document.from_bytes(document.to_bytes()).legacy_form_fields()
+    assert len(final) == 1 and final[0].value == "literal" and final[0].default_value == default
+
+
+def test_legacy_field_factories_and_attachment_refuse_atomically():
+    import rdocx
+    document = rdocx.Document()
+    document.add_paragraph("stay")
+    paragraph = document.paragraphs[-1]
+    before = document.to_bytes()
+    revision = document.revisions
+    with pytest.raises(TypeError):
+        rdocx.LegacyFormFieldDefinition.checkbox(checked=1)
+    with pytest.raises(TypeError):
+        rdocx.LegacyFormFieldDefinition.drop_down_list("one", selected_index=0)
+    with pytest.raises(rdocx.XmlError):
+        rdocx.LegacyFormFieldDefinition.drop_down_list([], selected_index=0)
+    with pytest.raises(ValueError):
+        rdocx.LegacyFormFieldDefinition.text_input(help_text=("autotext", "gone"))
+    with pytest.raises(ValueError):
+        rdocx.LegacyFormFieldDefinition.checkbox(size_half_points=-(2**200))
+    with pytest.raises(ValueError):
+        rdocx.LegacyFormFieldDefinition.text_input(max_length=-(2**200))
+    with pytest.raises(ValueError):
+        rdocx.LegacyFormFieldDefinition.drop_down_list(["one"], selected_index=-(2**200))
+    with pytest.raises(OverflowError):
+        rdocx.LegacyFormFieldDefinition.checkbox(size_half_points=2**200)
+    with pytest.raises(OverflowError):
+        rdocx.LegacyFormFieldDefinition.text_input(max_length=2**200)
+    with pytest.raises(OverflowError):
+        rdocx.LegacyFormFieldDefinition.drop_down_list(["one"], selected_index=2**200)
+    with pytest.raises(TypeError):
+        rdocx.LegacyFormFieldDefinition.checkbox(size_half_points=True)
+    with pytest.raises(TypeError):
+        rdocx.LegacyFormFieldDefinition.text_input(max_length=True)
+    with pytest.raises(TypeError):
+        rdocx.LegacyFormFieldDefinition.drop_down_list(["one"], selected_index=True)
+    with pytest.raises(rdocx.XmlError):
+        rdocx.LegacyFormFieldDefinition.drop_down_list(["only"], selected_index=4)
+    assert document.to_bytes() == before
+    assert document.revisions == revision
+    assert paragraph.text == "stay"
+    document.paragraphs[-1].runs[0].add_legacy_form_field(
+        rdocx.LegacyFormFieldDefinition.text_input(value="ok")
+    )
+
+
+def _owned_control_location(document, tag):
+    import rdocx
+
+    needle = f'w:val="{tag}"'.encode()
+    item = next(
+        item
+        for item in document.story_items
+        if item.kind == "content_control" and needle in item.xml.split(b"<w:sdtContent", 1)[0]
+    )
+    return rdocx.ContentLocation(item.story, item.kind, item.index_path)
+
+
+def _source_built_dense_form():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Anchor")
+
+    def body():
+        return next(story for story in document.stories if story.kind == "body")
+
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body()), "block", "plain_text", tag="name"
+    )
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body()), "block", "rich_text", tag="agree"
+    )
+    document.set_content_control_type(
+        _owned_control_location(document, "agree"),
+        rdocx.ContentControlTypePayload.checkbox(),
+    )
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body()), "block", "rich_text", tag="when"
+    )
+    document.set_content_control_type(
+        _owned_control_location(document, "when"),
+        rdocx.ContentControlTypePayload.date("yyyy-MM-dd"),
+    )
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body()), "block", "rich_text", tag="color"
+    )
+    document.set_content_control_type(
+        _owned_control_location(document, "color"),
+        rdocx.ContentControlTypePayload.drop_down_list([("Red", "r"), ("Blue", "b")]),
+    )
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body()), "block", "rich_text", tag="rows"
+    )
+    document.set_content_control_type(
+        _owned_control_location(document, "rows"),
+        rdocx.ContentControlTypePayload.repeating_section(),
+    )
+    document.repeat_content_control(_owned_control_location(document, "rows"))
+    store_id = document.add_custom_xml_store(
+        b'<ns:root xmlns:ns="urn:example"><ns:child></ns:child></ns:root>',
+        ["urn:example"],
+    )
+    document.set_content_control_binding(
+        _owned_control_location(document, "name"),
+        store_id,
+        "/ns:root/ns:child",
+        "xmlns:ns='urn:example'",
+    )
+    before_paragraphs = [
+        item
+        for item in document.story_items
+        if item.kind == "paragraph" and item.story.kind == "body"
+    ]
+    document.add_paragraph("")
+    paragraphs = [
+        item
+        for item in document.story_items
+        if item.kind == "paragraph" and item.story.kind == "body"
+    ]
+    target = paragraphs[len(before_paragraphs)]
+    document.insert_legacy_form_field(
+        rdocx.StoryRunPosition(item=target, run_index=0),
+        rdocx.LegacyFormFieldDefinition.text_input(name="Legacy", value="now", default="keep"),
+    )
+    anchor = next(
+        item
+        for item in document.story_items
+        if item.kind == "paragraph" and item.story.kind == "body" and item.text == "Anchor"
+    )
+    document.add_story_permission_range(
+        rdocx.StoryRunRange(
+            start=rdocx.StoryRunPosition(item=anchor, run_index=0),
+            end=rdocx.StoryRunPosition(item=anchor, run_index=1),
+        ),
+        editor="Clerk",
+    )
+    header = document.section(0).header
+    header.is_linked_to_previous = False
+    header_story = next(story for story in document.stories if story.kind == "header")
+    document.insert_content_control(
+        rdocx.ContentLocation.end(header_story), "block", "plain_text", tag="office"
+    )
+    legacy = document.legacy_form_fields()[0]
+    legacy_target = rdocx.FormFieldTarget.legacy(legacy.source_part, legacy.ordinal)
+    rules = (
+        rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("name"),
+            reset=rdocx.FormResetValue.placeholder("Name"),
+            required=True,
+        ),
+        rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("agree"),
+            reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.checked(False)),
+            required=True,
+        ),
+        rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("when"),
+            reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("2026-10-24")),
+            required=True,
+        ),
+        rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("color"),
+            reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("Red")),
+            required=True,
+        ),
+        rdocx.FormFieldRule(
+            target=legacy_target,
+            reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("keep")),
+            required=True,
+        ),
+        rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("office"),
+            reset=rdocx.FormResetValue.placeholder("Office"),
+            required=False,
+        ),
+    )
+    assignments = (
+        rdocx.FormFieldAssignment(target=rules[0].target, value=rdocx.FormFieldValue.text("FormAda")),
+        rdocx.FormFieldAssignment(target=rules[1].target, value=rdocx.FormFieldValue.checked(True)),
+        rdocx.FormFieldAssignment(target=rules[2].target, value=rdocx.FormFieldValue.text("2026-10-23")),
+        rdocx.FormFieldAssignment(target=rules[3].target, value=rdocx.FormFieldValue.text("Blue")),
+        rdocx.FormFieldAssignment(target=legacy_target, value=rdocx.FormFieldValue.text("typed")),
+        rdocx.FormFieldAssignment(target=rules[5].target, value=rdocx.FormFieldValue.text("North")),
+    )
+    return document, rules, assignments
+
+
+@pytest.mark.parametrize("name", [
+    "FormFieldRule",
+    "FormFieldAssignment",
+    "DocumentProtection",
+    "MailMergeSettings",
+    "MailMergeFieldMapping",
+    "MailMergeRecipient",
+    "MailMergePackageOptions",
+])
+def test_form_and_mail_merge_constructor_metadata_matches_abi(name):
+    import inspect
+    import sys
+    import rdocx
+
+    # PyO3 0.29 documents that abi3 class text signatures require CPython 3.10.
+    # This checks metadata only. The public behavioral tests run on both versions.
+    constructor = getattr(rdocx, name)
+    assert constructor is getattr(rdocx._rdocx, name)
+    assert name in rdocx.__all__
+    if sys.version_info[:2] == (3, 9):
+        assert constructor.__text_signature__ is None
+        with pytest.raises(ValueError, match="no signature found for builtin type"):
+            inspect.signature(constructor)
+    else:
+        # Required names, positional-or-keyword names, then optional defaults.
+        contracts = {
+            "FormFieldRule": (("target", "reset"), (), {"required": False}),
+            "FormFieldAssignment": (("target", "value"), (), {}),
+            "DocumentProtection": (("mode",), (), {
+                "enforcement": None, "formatting": None, "provider_type": None,
+                "algorithm_class": None, "algorithm_type": None,
+                "algorithm_sid": None, "spin_count": None, "hash": None, "salt": None,
+            }),
+            "MailMergeSettings": ((), (), {
+                "main_document_type": "formLetters", "link_to_query": None,
+                "data_type": "textFile", "connect_string": None, "query": None,
+                "do_not_suppress_blank_lines": None, "destination": None,
+                "address_field_name": None, "mail_subject": None,
+                "mail_as_attachment": None, "view_merged_data": None,
+                "active_record": None, "check_errors": None,
+            }),
+            "MailMergeFieldMapping": (
+                ("column", "source_name", "mapped_name"),
+                ("column", "source_name", "mapped_name"),
+                {"language": None, "dynamic_address": None},
+            ),
+            "MailMergeRecipient": (
+                ("column", "unique_tag"), ("column", "unique_tag"), {"active": True},
+            ),
+            "MailMergePackageOptions": (
+                ("source",), ("source",), {"settings": None, "mappings": (), "recipients": ()},
+            ),
+        }
+        required, positional, defaults = contracts[name]
+        assert constructor.__text_signature__
+        signature = inspect.signature(constructor)
+        assert list(signature.parameters) == [*required, *defaults]
+        for parameter_name, parameter in signature.parameters.items():
+            expected_kind = (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD if parameter_name in positional
+                else inspect.Parameter.KEYWORD_ONLY
+            )
+            assert parameter.kind is expected_kind
+            if parameter_name in required:
+                assert parameter.default is inspect.Parameter.empty
+            else:
+                expected_default = defaults[parameter_name]
+                assert type(parameter.default) is type(expected_default)
+                assert parameter.default == expected_default
+
+
+def test_form_rules_fill_reset_and_protect_public_api(tmp_path):
+    # Basic public carriers stay. The dense half is public creation only.
+    import rdocx
+
+    for name in (
+        "FormFieldTarget",
+        "FormFieldValue",
+        "FormResetValue",
+        "FormFieldRule",
+        "FormFieldAssignment",
+        "FormValidationIssue",
+        "DocumentProtection",
+    ):
+        assert getattr(rdocx, name) is getattr(rdocx._rdocx, name)
+        assert name in rdocx.__all__
+
+    empty_tag = rdocx.FormFieldTarget.content_control_tag("")
+    legacy = rdocx.FormFieldTarget.legacy("", 0)
+    text = rdocx.FormFieldValue.text("")
+    checked = rdocx.FormFieldValue.checked(False)
+    selected = rdocx.FormFieldValue.selected_index(0)
+    reset = rdocx.FormResetValue.value(text)
+    prompt = rdocx.FormResetValue.placeholder("")
+    rule = rdocx.FormFieldRule(target=empty_tag, reset=reset)
+    assignment = rdocx.FormFieldAssignment(target=legacy, value=checked)
+    protection = rdocx.DocumentProtection(mode="forms")
+    blank = rdocx.DocumentProtection(
+        mode="readOnly",
+        hash="",
+        salt=None,
+        algorithm_sid=0,
+        spin_count=2**32 - 1,
+    )
+    assert rule.target is not empty_tag and rule.target is rule.target
+    assert rule.reset is not reset and assignment.target is not legacy
+    assert assignment.value is not checked
+    assert rule.required is False
+    assert type(rule.target).__name__ == "FormFieldTarget"
+    assert type(rule.reset).__name__ == "FormResetValue"
+    assert type(assignment.value).__name__ == "FormFieldValue"
+    assert protection.mode == "forms"
+    assert protection.enforcement is None and protection.formatting is None
+    assert protection.provider_type is None and protection.algorithm_class is None
+    assert protection.algorithm_type is None and protection.algorithm_sid is None
+    assert protection.spin_count is None and protection.hash is None and protection.salt is None
+    assert blank.hash == "" and blank.salt is None
+    assert blank.algorithm_sid == 0 and blank.spin_count == 2**32 - 1
+    full = rdocx.DocumentProtection(
+        mode="comments",
+        enforcement=False,
+        formatting=True,
+        provider_type="rsaFull",
+        algorithm_class="custom",
+        algorithm_type="custom",
+        algorithm_sid=14,
+        spin_count=100000,
+        hash="abc",
+        salt="def",
+    )
+    assert (
+        full.mode,
+        full.enforcement,
+        full.formatting,
+        full.provider_type,
+        full.algorithm_class,
+        full.algorithm_type,
+        full.algorithm_sid,
+        full.spin_count,
+        full.hash,
+        full.salt,
+    ) == ("comments", False, True, "rsaFull", "custom", "custom", 14, 100000, "abc", "def")
+    for frozen, name in (
+        (rule, "required"),
+        (assignment, "target"),
+        (protection, "mode"),
+        (empty_tag, "tag"),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(frozen, name, None)
+    for factory in (
+        rdocx.FormFieldTarget,
+        rdocx.FormFieldValue,
+        rdocx.FormResetValue,
+        rdocx.FormValidationIssue,
+    ):
+        with pytest.raises(TypeError):
+            factory()
+    with pytest.raises(TypeError):
+        rdocx.FormFieldValue.checked(1)
+    with pytest.raises(TypeError):
+        rdocx.FormFieldValue.checked(None)
+    with pytest.raises(TypeError):
+        rdocx.FormFieldTarget.legacy("word/document.xml", True)
+    with pytest.raises(TypeError):
+        rdocx.FormFieldValue.selected_index(True)
+    with pytest.raises(ValueError):
+        rdocx.FormFieldTarget.legacy("word/document.xml", -1)
+    with pytest.raises(ValueError):
+        rdocx.FormFieldValue.selected_index(-(2**200))
+    with pytest.raises(OverflowError):
+        rdocx.FormFieldTarget.legacy("word/document.xml", 2**200)
+    with pytest.raises(TypeError):
+        rdocx.FormResetValue.value("text")
+    with pytest.raises(TypeError):
+        rdocx.FormFieldRule(empty_tag, reset)
+    with pytest.raises(TypeError):
+        rdocx.FormFieldRule(target="tag", reset=reset)
+    with pytest.raises(TypeError):
+        rdocx.FormFieldAssignment(target=legacy, value="no")
+    with pytest.raises(TypeError):
+        rdocx.FormFieldRule(target=empty_tag, reset=reset, required=1)
+    with pytest.raises(ValueError):
+        rdocx.DocumentProtection(mode="password")
+    with pytest.raises(ValueError):
+        rdocx.DocumentProtection(mode="forms", provider_type="")
+    with pytest.raises(ValueError):
+        rdocx.DocumentProtection(mode="forms", algorithm_class="sha1")
+    with pytest.raises(ValueError):
+        rdocx.DocumentProtection(mode="forms", algorithm_type="sha1")
+    with pytest.raises(TypeError):
+        rdocx.DocumentProtection(mode="forms", enforcement=1)
+    with pytest.raises(TypeError):
+        rdocx.DocumentProtection(mode="forms", formatting="true")
+    with pytest.raises(TypeError):
+        rdocx.DocumentProtection(mode="forms", algorithm_sid=True)
+    with pytest.raises(TypeError):
+        rdocx.DocumentProtection(mode="forms", spin_count=1.5)
+    with pytest.raises(ValueError):
+        rdocx.DocumentProtection(mode="forms", algorithm_sid=-1)
+    with pytest.raises(ValueError):
+        rdocx.DocumentProtection(mode="forms", spin_count=-(2**200))
+    with pytest.raises(OverflowError):
+        rdocx.DocumentProtection(mode="forms", algorithm_sid=2**32)
+    with pytest.raises(OverflowError):
+        rdocx.DocumentProtection(mode="forms", spin_count=2**200)
+    tracked = rdocx.DocumentProtection(mode="trackedChanges", provider_type="custom", algorithm_type="typeAny", algorithm_class="hash")
+    assert tracked.mode == "trackedChanges"
+    assert tracked.provider_type == "custom"
+    assert tracked.algorithm_type == "typeAny"
+    assert tracked.algorithm_class == "hash"
+    assert rdocx.FormFieldValue.selected_index(0) is not selected
+    assert prompt is not reset
+    with pytest.raises(rdocx.XmlError):
+        rdocx.FormFieldValue.text("a\x00b")
+    with pytest.raises(rdocx.XmlError):
+        rdocx.FormResetValue.placeholder("a\x00b")
+    assert rdocx.FormFieldValue.text("").__class__ is rdocx.FormFieldValue
+    assert rdocx.FormResetValue.placeholder("").__class__ is rdocx.FormResetValue
+
+    document = rdocx.Document()
+    document.add_paragraph("Anchor")
+    body = next(story for story in document.stories if story.kind == "body")
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body), "block", "plain_text", tag="name"
+    )
+    rule = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("name"),
+        reset=rdocx.FormResetValue.placeholder("Name"),
+        required=True,
+    )
+    for bad in ("", b"", {}, set(), frozenset()):
+        with pytest.raises(TypeError):
+            document.validate_form(bad)
+        with pytest.raises(TypeError):
+            document.fill_form(bad, [])
+        with pytest.raises(TypeError):
+            document.fill_form([], bad)
+        with pytest.raises(TypeError):
+            document.reset_form(bad)
+        with pytest.raises(TypeError):
+            document.protect_form(bad, rdocx.DocumentProtection(mode="forms"))
+    class CarrierSequence(tuple):
+        pass
+    assert document.validate_form(CarrierSequence()) == ()
+    assert document.fill_form([], ()) == ()
+    assert document.reset_form(()) == ()
+    issues = document.validate_form([rule])
+    assert isinstance(issues, tuple) and issues
+    issue = issues[0]
+    assert issue.message == "required value is empty"
+    assert issue.source_part and isinstance(issue.ordinal, int)
+    assert type(issue.target).__name__ == "FormFieldTarget"
+    before = document.to_bytes()
+    revision = document.revisions
+    with pytest.raises(rdocx.RdocxError):
+        document.protect_form([rule], rdocx.DocumentProtection(mode="forms"))
+    with pytest.raises(rdocx.RdocxError):
+        document.protect_form([rule], rdocx.DocumentProtection(mode="readOnly"))
+    assert document.to_bytes() == before
+    counts = document.fill_form([rule], [rdocx.FormFieldAssignment(
+        target=rdocx.FormFieldTarget.content_control_tag("name"),
+        value=rdocx.FormFieldValue.text("Ada"),
+    )])
+    assert counts == (1,)
+    assert document.validate_form((rule,)) == ()
+    document.protect_form([rule], rdocx.DocumentProtection(mode="forms", enforcement=True))
+    stored = document.document_protection
+    assert stored is not None and stored.mode == "forms" and stored.enforcement is True
+    assert len(document.document_protection.__dict__ if False else (
+        stored.mode, stored.enforcement, stored.formatting, stored.provider_type,
+        stored.algorithm_class, stored.algorithm_type, stored.algorithm_sid,
+        stored.spin_count, stored.hash, stored.salt,
+    )) == 10
+    removed = document.remove_document_protection()
+    assert removed is not None and removed.mode == "forms" and removed.enforcement is True
+    assert document.document_protection is None
+    assert document.remove_document_protection() is None
+    anchor = document.paragraphs[0]
+    span = rdocx.StoryRunRange(
+        start=rdocx.StoryRunPosition(paragraph=anchor, run_index=0),
+        end=rdocx.StoryRunPosition(paragraph=anchor, run_index=1),
+    )
+    permission = document.add_story_permission_range(span, editor="Clerk")
+    assert isinstance(permission, int)
+    refused = rdocx.Document()
+    refused.add_paragraph("Anchor")
+    refused_anchor = refused.paragraphs[0]
+    refused_span = rdocx.StoryRunRange(
+        start=rdocx.StoryRunPosition(paragraph=refused_anchor, run_index=0),
+        end=rdocx.StoryRunPosition(paragraph=refused_anchor, run_index=1),
+    )
+    refused_before = refused.to_bytes()
+    with pytest.raises(rdocx.RdocxError):
+        refused.add_story_permission_range(refused_span, editor=None, group=None)
+    with pytest.raises(rdocx.RdocxError):
+        refused.add_story_permission_range(refused_span, editor="Clerk", group="Staff")
+    with pytest.raises(rdocx.RdocxError):
+        refused.add_story_permission_range(refused_span, editor="")
+    with pytest.raises(rdocx.XmlError):
+        refused.add_story_permission_range(refused_span, group="a\x00b")
+    assert refused.to_bytes() == refused_before
+    assert document.reset_form([rule]) == (1,)
+    assert revision != document.revisions or document.to_bytes() != before
+
+    dense, rules, assignments = _source_built_dense_form()
+    owned_legacy = dense.legacy_form_fields()[0]
+    assert owned_legacy.value == "now" and owned_legacy.default_value == "keep"
+    before = dense.to_bytes()
+    issues = dense.validate_form(rules)
+    assert any(issue.message == "required value is empty" and issue.ordinal < 20 for issue in issues)
+    with pytest.raises(rdocx.RdocxError, match="valid form"):
+        dense.protect_form(rules, rdocx.DocumentProtection(mode="forms"))
+    assert dense.document_protection is None
+    with pytest.raises(rdocx.RdocxError, match="kind"):
+        dense.fill_form(
+            rules,
+            [rdocx.FormFieldAssignment(
+                target=rdocx.FormFieldTarget.content_control_tag("color"),
+                value=rdocx.FormFieldValue.selected_index(1),
+            )],
+        )
+    assert dense.to_bytes() == before
+    assert issues[0].message == "required value is empty"
+    assert owned_legacy.value == "now"
+    assert dense.fill_form(rules, assignments) == (1, 1, 1, 1, 1, 1)
+    raw = dense.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(raw)) as package:
+        document_xml = package.read("word/document.xml")
+        header_xml = next(
+            package.read(name) for name in package.namelist() if name.startswith("word/header")
+        )
+        stored = package.read("customXml/item1.xml")
+    assert b"FormAda" in document_xml
+    assert b"2026-10-23T00:00:00Z" in document_xml
+    assert b">Blue<" in document_xml and b'w:lastValue="b"' in document_xml
+    assert b'w:displayText="Blue"' in document_xml
+    assert document_xml.count(b"repeatingSectionItem") == 2
+    assert b"North" in header_xml
+    assert b"FormAda" in stored
+    assert dense.legacy_form_fields()[0].value == "typed"
+    assert dense.legacy_form_fields()[0].default_value == "keep"
+    assert dense.validate_form(rules) == ()
+    dense.protect_form(rules, rdocx.DocumentProtection(mode="forms"))
+    assert dense.document_protection is not None and dense.document_protection.mode == "forms"
+    import math
+    version = subprocess.run(["pdftotext", "-v"], capture_output=True, check=True, text=True)
+    assert version.stderr.splitlines()[0].startswith("pdftotext version ")
+    pdf_path = tmp_path / "dense-form.pdf"
+    pdf = dense.to_pdfa_deterministic("pdfa-2b")
+    assert pdf.startswith(b"%PDF-") and b"<pdfaid:part>2</pdfaid:part>" in pdf
+    pdf_path.write_bytes(pdf)
+    extracted = subprocess.run(
+        ["pdftotext", str(pdf_path), "-"], capture_output=True, check=True, text=True
+    ).stdout
+    assert "FormAda" in extracted
+    bbox = subprocess.run(
+        ["pdftotext", "-bbox", str(pdf_path), "-"], capture_output=True, check=True, text=True
+    ).stdout
+    word = next(line for line in bbox.splitlines() if ">FormAda<" in line)
+    numbers = [float(piece.split('"')[1]) for piece in word.split(" ") if '="' in piece]
+    assert len(numbers) >= 4 and all(math.isfinite(number) for number in numbers)
+    raster = tmp_path / "dense-form"
+    subprocess.run(
+        ["pdftoppm", "-png", "-r", "72", str(pdf_path), str(raster)],
+        check=True,
+    )
+    pngs = list(tmp_path.glob("dense-form*.png"))
+    assert pngs and pngs[0].read_bytes().startswith(b"\x89PNG")
+    assert dense.reset_form(rules) == (1, 1, 1, 1, 1, 1)
+    raw = dense.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(raw)) as package:
+        document_xml = package.read("word/document.xml")
+        header_xml = next(
+            package.read(name) for name in package.namelist() if name.startswith("word/header")
+        )
+        stored = package.read("customXml/item1.xml")
+        package_text = b"".join(package.read(name) for name in package.namelist())
+    assert b"Name" in document_xml
+    assert b"2026-10-24T00:00:00Z" in document_xml
+    assert b">Red<" in document_xml and b'w:lastValue="r"' in document_xml
+    assert b'w:displayText="Red"' in document_xml
+    assert document_xml.count(b"repeatingSectionItem") == 2
+    assert b"Office" in header_xml
+    assert b"<ns:child></ns:child>" in stored or b"<ns:child/>" in stored
+    assert b"permStart" in package_text
+    assert dense.legacy_form_fields()[0].value == "keep"
+    assert dense.legacy_form_fields()[0].default_value == "keep"
+    assert owned_legacy.value == "now"
+    reopened = rdocx.Document.from_bytes(raw)
+    assert reopened.document_protection is not None and reopened.document_protection.mode == "forms"
+    assert reopened.validate_form(()) == ()
+    reopened_issues = reopened.validate_form(rules)
+    assert reopened_issues and all(issue.message == "required value is empty" for issue in reopened_issues)
+    assert reopened.legacy_form_fields()[0].value == "keep"
+    assert reopened.legacy_form_fields()[0].default_value == "keep"
+
+
+def _protection_fields(protection):
+    return (
+        protection.mode,
+        protection.enforcement,
+        protection.formatting,
+        protection.provider_type,
+        protection.algorithm_class,
+        protection.algorithm_type,
+        protection.algorithm_sid,
+        protection.spin_count,
+        protection.hash,
+        protection.salt,
+    )
+
+
+def _related_owner_document():
+    import rdocx
+
+    content = "<w:txbxContent><w:p><w:r><w:t>box held</w:t></w:r></w:p></w:txbxContent>"
+    body = (
+        "<w:p><w:r><w:t>body held</w:t></w:r></w:p>"
+        "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"4000\"/></w:tblGrid>"
+        "<w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>cell held</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        "<w:p><w:r><mc:AlternateContent "
+        "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
+        "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
+        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+        "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" "
+        "xmlns:v=\"urn:schemas-microsoft-com:vml\">"
+        "<mc:Choice Requires=\"wps\"><w:drawing><wp:inline>"
+        "<wp:extent cx=\"914400\" cy=\"457200\"/><wp:docPr id=\"1\" name=\"scoped box\"/>"
+        "<a:graphic><a:graphicData "
+        "uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
+        f"<wps:wsp><wps:txbx>{content}</wps:txbx></wps:wsp>"
+        "</a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice>"
+        f"<mc:Fallback><w:pict><v:shape id=\"fallback\"><v:textbox>{content}</v:textbox>"
+        "</v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p><w:sectPr/>"
+    )
+    document = _replace_document_body(rdocx.Document(), body)
+    header = document.section(0).header
+    header.is_linked_to_previous = False
+    header.add_paragraph("header held")
+    document.add_footnote(document.paragraphs[0], "note held")
+    document.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=0, run_index=0),
+            end=rdocx.RunPosition(body_index=0, run_index=1),
+        ),
+        author="Ada",
+        text="comment held",
+    )
+    return rdocx.Document.from_bytes(document.to_bytes())
+
+
+def _story_paragraph(document, kind):
+    return next(
+        item.paragraph
+        for item in document.story_items
+        if item.story.kind == kind and item.kind == "paragraph"
+    )
+
+
+def test_form_protection_and_permission_composition():
+    import rdocx
+
+    document = _related_owner_document()
+    body = document.paragraphs[0]
+    body_run = body.runs[0]
+    table = document.tables[0]
+    cell = table.cell(0, 0)
+    cell_paragraph = cell.paragraphs[0]
+    cell_run = cell_paragraph.runs[0]
+    header = document.section(0).header.paragraphs[0]
+    header_run = header.runs[0]
+    note = _story_paragraph(document, "footnote")
+    note_run = next(run for run in note.runs if run.text == "note held")
+    comment = _story_paragraph(document, "comment")
+    comment_run = comment.runs[0]
+    text_box = _story_paragraph(document, "text_box")
+    text_box_run = text_box.runs[0]
+    held = (
+        (comment, "comment held"),
+        (comment_run, "comment held"),
+        (text_box, "box held"),
+        (text_box_run, "box held"),
+        (body, "body held"),
+        (body_run, "body held"),
+        (cell, "cell held"),
+        (cell_paragraph, "cell held"),
+        (cell_run, "cell held"),
+        (header, "header held"),
+        (header_run, "header held"),
+        (note, "note held"),
+        (note_run, "note held"),
+    )
+    before = document.to_bytes()
+    assert document.fill_form([], ()) == ()
+    assert document.to_bytes() == before
+    for handle, text in held:
+        assert handle.text == text
+    empty = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("missing"),
+        reset=rdocx.FormResetValue.placeholder("Name"),
+        required=True,
+    )
+    with pytest.raises(rdocx.RdocxError):
+        document.protect_form([empty], rdocx.DocumentProtection(mode="forms"))
+    with pytest.raises(rdocx.RdocxError):
+        document.protect_form([], rdocx.DocumentProtection(mode="readOnly"))
+    assert document.to_bytes() == before
+    for handle, text in held:
+        assert handle.text == text
+
+    full = rdocx.DocumentProtection(
+        mode="comments",
+        enforcement=False,
+        formatting=True,
+        provider_type="rsaFull",
+        algorithm_class="custom",
+        algorithm_type="custom",
+        algorithm_sid=14,
+        spin_count=100000,
+        hash="abc",
+        salt="def",
+    )
+    document.set_document_protection(full)
+    stored = document.document_protection
+    assert stored is not None and _protection_fields(stored) == _protection_fields(full)
+    assert len(_protection_fields(stored)) == 10
+    for handle, text in held:
+        assert handle.text == text
+    fresh_comment = _story_paragraph(document, "comment")
+    fresh_box = _story_paragraph(document, "text_box")
+    assert fresh_comment.text == comment.text == "comment held"
+    assert fresh_box.text == text_box.text == "box held"
+    assert document.paragraphs[0].text == body.text == "body held"
+    assert document.tables[0].cell(0, 0).text == cell.text == "cell held"
+    assert document.section(0).header.paragraphs[0].text == header.text == "header held"
+    assert _story_paragraph(document, "footnote").text == note.text == "note held"
+    removed = document.remove_document_protection()
+    assert removed is not None and _protection_fields(removed) == _protection_fields(full)
+    with pytest.raises(AttributeError):
+        removed.mode = "readOnly"
+    assert document.document_protection is None
+    assert document.remove_document_protection() is None
+    for handle, text in held:
+        assert handle.text == text
+    document.protect_form([], rdocx.DocumentProtection(mode="forms", enforcement=True))
+    assert document.document_protection.mode == "forms"
+    assert document.document_protection.enforcement is True
+    for handle, text in held:
+        assert handle.text == text
+
+    retired = document.paragraphs[0]
+    assert document.remove_content(0)
+    with pytest.raises(rdocx.StaleElementError):
+        _ = retired.text
+    document.set_document_protection(rdocx.DocumentProtection(mode="readOnly"))
+    with pytest.raises(rdocx.StaleElementError):
+        _ = retired.text
+    assert document.paragraphs[0].text != "body held"
+
+    # Permission stays on the conservative publication. A document-part edit
+    # retires held body and comment handles and does not revive the removed one.
+    permitted = _related_owner_document()
+    permitted_body = permitted.paragraphs[0]
+    permitted_comment = _story_paragraph(permitted, "comment")
+    span = rdocx.StoryRunRange(
+        start=rdocx.StoryRunPosition(paragraph=permitted_body, run_index=0),
+        end=rdocx.StoryRunPosition(paragraph=permitted_body, run_index=1),
+    )
+    assert isinstance(permitted.add_story_permission_range(span, editor="Clerk"), int)
+    for handle in (permitted_body, permitted_comment, retired):
+        with pytest.raises(rdocx.StaleElementError):
+            _ = handle.text
+
+    # A form fill that rewrites the body part keeps changed-owner staleness.
+    # The comment part is a different physical owner and is not an ordinal alias.
+    filled = rdocx.Document()
+    filled.add_paragraph("body zero")
+    story = next(item for item in filled.stories if item.kind == "body")
+    filled.insert_content_control(
+        rdocx.ContentLocation.end(story), "block", "plain_text", tag="name"
+    )
+    filled.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=0, run_index=0),
+            end=rdocx.RunPosition(body_index=0, run_index=1),
+        ),
+        author="Ada",
+        text="comment zero",
+    )
+    box = (
+        "<w:p><w:r><w:t>body zero</w:t></w:r></w:p>"
+        "<w:sdt><w:sdtPr><w:tag w:val=\"name\"/><w:id w:val=\"7\"/>"
+        "<w:placeholder><w:docPart w:val=\"DefaultPlaceholder_-1854013440\"/>"
+        "</w:placeholder></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p>"
+        "</w:sdtContent></w:sdt><w:sectPr/>"
+    )
+    filled = _replace_document_body(filled, box)
+    content = "<w:txbxContent><w:p><w:r><w:t>box zero</w:t></w:r></w:p></w:txbxContent>"
+    boxed = box.replace(
+        "<w:sectPr/>",
+        "<w:p><w:r><mc:AlternateContent "
+        "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" "
+        "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
+        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
+        "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" "
+        "xmlns:v=\"urn:schemas-microsoft-com:vml\">"
+        "<mc:Choice Requires=\"wps\"><w:drawing><wp:inline>"
+        "<wp:extent cx=\"914400\" cy=\"457200\"/><wp:docPr id=\"1\" name=\"scoped box\"/>"
+        "<a:graphic><a:graphicData "
+        "uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
+        f"<wps:wsp><wps:txbx>{content}</wps:txbx></wps:wsp>"
+        "</a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice>"
+        f"<mc:Fallback><w:pict><v:shape id=\"fallback\"><v:textbox>{content}</v:textbox>"
+        "</v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p><w:sectPr/>",
+    )
+    filled = _replace_document_body(filled, boxed)
+    filled.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=0, run_index=0),
+            end=rdocx.RunPosition(body_index=0, run_index=1),
+        ),
+        author="Ada",
+        text="comment zero",
+    )
+    filled = rdocx.Document.from_bytes(filled.to_bytes())
+    stable = filled.paragraphs[0]
+    changed = filled.paragraphs[1]
+    comment_zero = _story_paragraph(filled, "comment")
+    box_zero = _story_paragraph(filled, "text_box")
+    assert stable.text == "body zero" and changed.text == ""
+    assert comment_zero.text == "comment zero" and box_zero.text == "box zero"
+    assert comment_zero.text != stable.text
+    rule = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("name"),
+        reset=rdocx.FormResetValue.placeholder("Name"),
+    )
+    assert filled.fill_form(
+        [rule],
+        [rdocx.FormFieldAssignment(
+            target=rdocx.FormFieldTarget.content_control_tag("name"),
+            value=rdocx.FormFieldValue.text("Ada"),
+        )],
+    ) == (1,)
+    with pytest.raises(rdocx.StaleElementError):
+        _ = changed.text
+    with pytest.raises(rdocx.StaleElementError):
+        _ = box_zero.text
+    assert stable.text == "body zero"
+    assert comment_zero.text == "comment zero"
+    assert _story_paragraph(filled, "comment").text == "comment zero"
+    assert filled.paragraphs[0].text == "body zero"
+
+    # Two package names that differ only by case cannot be opened. The OPC
+    # duplicate check refuses the package, so no publication can certify it.
+    ambiguous = _related_owner_document()
+    held_comment = _story_paragraph(ambiguous, "comment")
+    raw = ambiguous.to_bytes()
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(output, "w") as result:
+        payload = None
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "word/comments.xml":
+                payload = data
+            result.writestr(info, data)
+        assert payload is not None
+        result.writestr("word/Comments.xml", payload)
+    with pytest.raises(rdocx.PackageError, match="duplicate OPC part name"):
+        rdocx.Document.from_bytes(output.getvalue())
+    assert ambiguous.to_bytes() == raw
+    assert held_comment.text == "comment held"
+
+
+def test_form_batches_preserve_owners_and_refuse_invalid_targets():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("held")
+    body = next(story for story in document.stories if story.kind == "body")
+    document.insert_content_control(
+        rdocx.ContentLocation.end(body), "block", "plain_text", tag="shared"
+    )
+    header = document.section(0).header
+    header.is_linked_to_previous = False
+    header.add_paragraph("header held")
+    header_story = next(story for story in document.stories if story.kind == "header")
+    document.insert_content_control(
+        rdocx.ContentLocation.end(header_story), "block", "plain_text", tag="shared"
+    )
+    footer = document.section(0).footer
+    footer.is_linked_to_previous = False
+    footer.add_paragraph("footer held")
+    footer_story = next(story for story in document.stories if story.kind == "footer")
+    document.insert_content_control(
+        rdocx.ContentLocation.end(footer_story), "block", "plain_text", tag="aside"
+    )
+    held = document.paragraphs[0]
+    shared = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("shared"),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("")),
+    )
+    aside = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("aside"),
+        reset=rdocx.FormResetValue.placeholder("Aside"),
+        required=True,
+    )
+    before = document.to_bytes()
+    assert document.validate_form(()) == ()
+    assert document.fill_form((), ()) == ()
+    with pytest.raises(TypeError):
+        rdocx.FormFieldAssignment()
+    assert document.to_bytes() == before
+    assert held.text == "held"
+    counts = document.fill_form(
+        [shared, aside],
+        [rdocx.FormFieldAssignment(
+            target=rdocx.FormFieldTarget.content_control_tag("shared"),
+            value=rdocx.FormFieldValue.text("Ada"),
+        )],
+    )
+    assert counts == (2,)
+    assert document.validate_form([shared, aside])[0].message == "required value is empty"
+    frozen = document.validate_form([aside])
+    assert frozen[0].message == "required value is empty"
+    assert document.fill_form(
+        [shared, aside],
+        [rdocx.FormFieldAssignment(
+            target=rdocx.FormFieldTarget.content_control_tag("shared"),
+            value=rdocx.FormFieldValue.text("Ada"),
+        )],
+    ) == (2,)
+    assert frozen[0].message == "required value is empty"
+    assert held.text == "held"
+    controls = [
+        (item.story.kind, item.text)
+        for item in document.story_items
+        if item.kind == "content_control"
+    ]
+    assert controls.count(("body", "Ada")) == 1
+    assert controls.count(("header", "Ada")) == 1
+    assert controls.count(("footer", "")) == 1
+
+    checkbox_properties = (
+        '<w14:checkbox xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">'
+        '<w14:checked w14:val="0"/>'
+        '<w14:checkedState w14:val="2612" w14:font="MS Gothic"/>'
+        '<w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/>'
+        "</w14:checkbox>"
+    )
+    checkbox = _replace_document_body(
+        rdocx.Document(),
+        '<w:p><w:r><w:t>stay</w:t></w:r></w:p>'
+        + _fx241_control("box", checkbox_properties, "\u2610")
+        + _fx241_control("group", "<w:group/>", "kept")
+        + "<w:sectPr/>",
+    )
+    stay = checkbox.paragraphs[0]
+    box_rule = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("box"),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.checked(False)),
+    )
+    group_rule = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("group"),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("no")),
+    )
+    refused = checkbox.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="form value kind"):
+        checkbox.fill_form(
+            [box_rule],
+            [rdocx.FormFieldAssignment(
+                target=box_rule.target,
+                value=rdocx.FormFieldValue.text("no"),
+            )],
+        )
+    with pytest.raises(rdocx.RdocxError, match="structural"):
+        checkbox.validate_form([group_rule])
+    with pytest.raises(rdocx.RdocxError, match="duplicate"):
+        checkbox.fill_form(
+            [box_rule],
+            [
+                rdocx.FormFieldAssignment(
+                    target=box_rule.target, value=rdocx.FormFieldValue.checked(True)
+                ),
+                rdocx.FormFieldAssignment(
+                    target=box_rule.target, value=rdocx.FormFieldValue.checked(False)
+                ),
+            ],
+        )
+    with pytest.raises(rdocx.RdocxError, match="unknown form assignment"):
+        checkbox.fill_form(
+            [box_rule],
+            [rdocx.FormFieldAssignment(
+                target=rdocx.FormFieldTarget.content_control_tag("missing"),
+                value=rdocx.FormFieldValue.checked(True),
+            )],
+        )
+    with pytest.raises(rdocx.RdocxError, match="form target kinds differ"):
+        mixed = _replace_document_body(
+            rdocx.Document(),
+            _fx241_control("shared", "<w:text/>", "x")
+            + _fx241_control("shared", checkbox_properties, "\u2610")
+            + "<w:sectPr/>",
+        )
+        mixed.validate_form([rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("shared"),
+            reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("x")),
+        )])
+    assert checkbox.to_bytes() == refused
+    assert stay.text == "stay"
+
+    overlap = _replace_document_body(
+        rdocx.Document(),
+        '<w:sdt><w:sdtPr><w:tag w:val="outer"/><w:text/></w:sdtPr><w:sdtContent>'
+        + _fx241_control("inner", "<w:text/>", "in")
+        + "</w:sdtContent></w:sdt>"
+        + _fx241_legacy_text(text="KEEP")
+        + '<w:p><w:r><w:t>held</w:t></w:r></w:p><w:sectPr/>',
+    )
+    outer = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("outer"),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("O")),
+    )
+    inner = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("inner"),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("I")),
+    )
+    legacy = overlap.legacy_form_fields()[0]
+    legacy_rule = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.legacy(legacy.source_part, legacy.ordinal),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("OTHER")),
+    )
+    listed = rdocx.Document()
+    listed.add_paragraph("list")
+    listed.paragraphs[0].runs[0].add_legacy_form_field(
+        rdocx.LegacyFormFieldDefinition.drop_down_list(["one", "two"], selected_index=0, default_index=0)
+    )
+    listed_field = listed.legacy_form_fields()[0]
+    listed_rule = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.legacy(listed_field.source_part, listed_field.ordinal),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.selected_index(0)),
+    )
+    choice = _replace_document_body(
+        rdocx.Document(),
+        _fx241_control(
+            "choice",
+            '<w:dropDownList><w:listItem w:displayText="One" w:value="one"/></w:dropDownList>',
+            "One",
+        )
+        + '<w:p><w:r><w:t>held</w:t></w:r></w:p><w:sectPr/>',
+    )
+    overlap_before = overlap.to_bytes()
+    listed_before = listed.to_bytes()
+    choice_before = choice.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="overlapping form targets"):
+        overlap.validate_form([outer, inner])
+    with pytest.raises(rdocx.RdocxError, match="legacy reset value is not the explicit default"):
+        overlap.validate_form([legacy_rule])
+    with pytest.raises(rdocx.RdocxError, match="selected index is outside the legacy list"):
+        listed.fill_form(
+            [listed_rule],
+            [rdocx.FormFieldAssignment(
+                target=listed_rule.target,
+                value=rdocx.FormFieldValue.selected_index(9),
+            )],
+        )
+    with pytest.raises(rdocx.RdocxError, match="form value kind"):
+        choice.fill_form(
+            [rdocx.FormFieldRule(
+                target=rdocx.FormFieldTarget.content_control_tag("choice"),
+                reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("one")),
+            )],
+            [rdocx.FormFieldAssignment(
+                target=rdocx.FormFieldTarget.content_control_tag("choice"),
+                value=rdocx.FormFieldValue.selected_index(0),
+            )],
+        )
+    assert overlap.to_bytes() == overlap_before
+    assert listed.to_bytes() == listed_before
+    assert choice.to_bytes() == choice_before
+    assert overlap.paragraphs[-1].text == "held"
+
+    missing = _replace_document_body(
+        rdocx.Document(),
+        _fx241_control(
+            "bound",
+            '<w:dataBinding w:storeItemID="" w:xpath="/root/name"/><w:text/>',
+            "",
+        )
+        + '<w:sectPr/>',
+    )
+    with pytest.raises(rdocx.RdocxError, match="form binding is incomplete"):
+        missing.validate_form([rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("bound"),
+            reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("A")),
+        )])
+    conflict = _form_batch_conflict_document()
+    conflict_before = conflict.to_bytes()
+    conflict_held = conflict.paragraphs[-1]
+    with pytest.raises(rdocx.RdocxError, match="different values to one custom XML element"):
+        conflict.fill_form([
+            rdocx.FormFieldRule(
+                target=rdocx.FormFieldTarget.content_control_tag("left"),
+                reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("A")),
+            ),
+            rdocx.FormFieldRule(
+                target=rdocx.FormFieldTarget.content_control_tag("right"),
+                reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("B")),
+            ),
+        ], [])
+    assert conflict.to_bytes() == conflict_before
+    assert conflict_held.text == "held"
+
+    with pytest.raises(rdocx.XmlError):
+        rdocx.FormFieldValue.text("a\x00b")
+    with pytest.raises(rdocx.PackageError):
+        rdocx.Document.from_bytes(b"not a package")
+
+    retired = rdocx.Document()
+    retired.add_paragraph("gone")
+    retired.add_paragraph("live")
+    dead = retired.paragraphs[0]
+    assert retired.remove_content(0)
+    with pytest.raises(rdocx.StaleElementError):
+        _ = dead.text
+    with pytest.raises(rdocx.RdocxError, match="unknown form target"):
+        retired.fill_form([rdocx.FormFieldRule(
+            target=rdocx.FormFieldTarget.content_control_tag("missing"),
+            reset=rdocx.FormResetValue.placeholder("Name"),
+        )], [])
+    with pytest.raises(rdocx.StaleElementError):
+        _ = dead.text
+    assert retired.paragraphs[0].text == "live"
+
+    property_xml = (
+        '<p:note xmlns:p="urn:producer"><w:p><w:r><w:t>PRODUCER</w:t></w:r></w:p></p:note>'
+    )
+    opaque = _replace_document_body(
+        rdocx.Document(),
+        '<w:p><w:r><w:t>OTHER</w:t></w:r></w:p>'
+        '<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="81"/><w:text/>'
+        f'{property_xml}</w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>'
+        + _fx241_control("keep", "<w:text/>", "UNSELECTED")
+        + '<w:sectPr/>',
+    )
+    other = opaque.paragraphs[0]
+    changed = next(item for item in opaque.paragraphs if item.text == "")
+    name = rdocx.FormFieldRule(
+        target=rdocx.FormFieldTarget.content_control_tag("name"),
+        reset=rdocx.FormResetValue.value(rdocx.FormFieldValue.text("BACK")),
+        required=True,
+    )
+    opened = _document_xml(opaque).decode()
+    assert property_xml in opened
+    assert opaque.fill_form(
+        [name],
+        [rdocx.FormFieldAssignment(
+            target=name.target, value=rdocx.FormFieldValue.text("NEW")
+        )],
+    ) == (1,)
+    saved = _document_xml(opaque).decode()
+    assert property_xml in saved
+    assert "<w:sdtContent><w:p><w:r><w:t>NEW</w:t></w:r></w:p></w:sdtContent>" in saved
+    assert ">UNSELECTED<" in saved and ">OTHER<" in saved
+    assert opaque.validate_form([name]) == ()
+    with pytest.raises(rdocx.StaleElementError):
+        _ = changed.text
+    assert other.text == "OTHER"
+    assert opaque.reset_form([name]) == (1,)
+    reset = _document_xml(opaque).decode()
+    assert property_xml in reset
+    assert "<w:sdtContent><w:p><w:r><w:t>BACK</w:t></w:r></w:p></w:sdtContent>" in reset
+    assert opaque.validate_form([name]) == ()
+
+
+def _form_batch_conflict_document():
+    import rdocx
+
+    binding = (
+        '<w:dataBinding w:storeItemID="{11111111-1111-1111-1111-111111111111}" '
+        'w:xpath="/c:root/c:name" w:prefixMappings="xmlns:c=\'urn:customer\'"/>'
+    )
+    body = (
+        _fx241_control("left", binding + "<w:text/>", "old")
+        + _fx241_control("right", binding + "<w:text/>", "old")
+        + '<w:p><w:r><w:t>held</w:t></w:r></w:p><w:sectPr/>'
+    )
+    document = _replace_document_body(rdocx.Document(), body)
+    source, result = io.BytesIO(document.to_bytes()), io.BytesIO()
+    with zipfile.ZipFile(source) as zin, zipfile.ZipFile(result, "w") as zout:
+        for entry in zin.infolist():
+            raw = zin.read(entry.filename)
+            if entry.filename == "word/_rels/document.xml.rels":
+                raw = raw.replace(
+                    b"</Relationships>",
+                    b'<Relationship Id="rIdBound289" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>',
+                )
+            if entry.filename == "[Content_Types].xml":
+                raw = raw.replace(
+                    b"</Types>",
+                    b'<Override PartName="/customXml/itemProps1.xml" ContentType="application/vnd.openxmlformats-officedocument.customXmlProperties+xml"/></Types>',
+                )
+            zout.writestr(entry, raw)
+        zout.writestr(
+            "customXml/item1.xml",
+            '<c:root xmlns:c="urn:customer"><c:name>old</c:name></c:root>',
+        )
+        zout.writestr(
+            "customXml/itemProps1.xml",
+            '<ds:datastoreItem xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml" ds:itemID="{11111111-1111-1111-1111-111111111111}"><ds:schemaRefs/></ds:datastoreItem>',
+        )
+        zout.writestr(
+            "customXml/_rels/item1.xml.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="props" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" Target="itemProps1.xml"/></Relationships>',
+        )
+    return rdocx.Document.from_bytes(result.getvalue())
+
+
+def test_legacy_field_definition_public_factories_are_typed():
+    import inspect
+    import rdocx
+    assert rdocx.LegacyFormFieldDefinition.__name__ == "LegacyFormFieldDefinition"
+    text = inspect.signature(rdocx.LegacyFormFieldDefinition.text_input)
+    assert list(text.parameters)[0] == "value"
+    assert text.parameters["value"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert text.parameters["value"].default == ""
+    assert text.parameters["calculate_on_exit"].default is False
+    check = inspect.signature(rdocx.LegacyFormFieldDefinition.checkbox)
+    assert "size_half_points" in check.parameters
+    assert "size" not in check.parameters
+    assert check.parameters["checked"].default is False
+    listed = inspect.signature(rdocx.LegacyFormFieldDefinition.drop_down_list)
+    assert listed.parameters["choices"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert listed.parameters["selected_index"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert listed.parameters["selected_index"].default == 0
+    made = rdocx.LegacyFormFieldDefinition.text_input()
+    assert type(made).__name__ == "LegacyFormFieldDefinition"
+
+
 def test_fx241_python_fill_all_five_reported_form_kinds():
     import rdocx
     document = _fx241_five_kind_document()
@@ -9211,7 +10635,7 @@ def _fx241_assert_five_kind_source(raw):
     assert root.find('.//w:dropDownList', ns).get(w+'lastValue') == 'one'
     assert [x.get(w+'value') for x in root.findall('.//w:dropDownList/w:listItem', ns)] == ['one', 'two']
     legacy = root.find('.//w:ffData/w:textInput/w:default', ns)
-    assert legacy.get(w+'val') == 'filled'
+    assert legacy.get(w+'val') == 'old'
     field_paragraph = next(p for p in root.iter(w+'p') if p.find('.//w:ffData', ns) is not None)
     assert ''.join(x.text or '' for x in field_paragraph.iter(w+'t')) == 'filled'
 
@@ -10192,10 +11616,15 @@ def test_issue391_default_paragraph_format_is_owned_and_atomic():
     assert 'w:after="240"' in defaults
     assert 'w:line="360"' in defaults
     before = document.to_bytes()
-    for value in (1.5, 12, True, "12"):
+    for value in (True, "12"):
         with pytest.raises(TypeError):
             document.set_default_paragraph_format(line_spacing=value)
         assert document.to_bytes() == before
+    document.set_default_paragraph_format(line_spacing=1.5)
+    assert document.to_bytes() == before
+    document.set_default_paragraph_format(line_spacing=12)
+    defaults = _fx261_defaults(document.part_xml("/word/styles.xml"))
+    assert 'w:line="2880"' in defaults and 'w:lineRule="auto"' in defaults
     document.set_default_paragraph_format(line_spacing=rdocx.Pt(12))
     defaults = _fx261_defaults(document.part_xml("/word/styles.xml"))
     assert 'w:line="240"' in defaults
@@ -10245,8 +11674,7 @@ def test_issue391_default_paragraph_line_rules_keep_imported_states():
     assert "w:line" not in defaults and "w:lineRule" not in defaults
     refused = opened('w:line="360" w:lineRule="auto"')
     before = refused.to_bytes()
-    with pytest.raises(TypeError):
-        refused.set_default_paragraph_format(line_spacing=1.5)
+    refused.set_default_paragraph_format(line_spacing=1.5)
     assert refused.to_bytes() == before
 
 
@@ -10821,3 +12249,3005 @@ def test_issue389_retained_paragraph_alias_never_publishes_unsavable_text():
     else:
         assert paragraph.text == 'new'
         assert rdocx.Document.from_bytes(doc.to_bytes()).paragraphs[0].text == 'new'
+
+
+def _issue407_document(root_w14):
+    import rdocx
+
+    w14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+    body = "".join([
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>heading</w:t></w:r></w:p>',
+        '<w:p><w:r><w:t xml:space="preserve">see </w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>target</w:t></w:r></w:hyperlink></w:p>',
+        '<w:p><w:bookmarkStart w:id="1" w:name="target"/><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:bookmarkEnd w:id="1"/></w:p>',
+        '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p>'
+        '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+        '<w:p/></w:tc></w:tr></w:tbl>',
+        '<w:sdt><w:sdtPr><w:alias w:val="block"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>block one</w:t></w:r></w:p><w:p><w:r><w:t>block two</w:t></w:r></w:p></w:sdtContent></w:sdt>',
+        *(f'<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>{text}</w:t></w:r><w:r><w:tab/><w:t>tail</w:t></w:r></w:p>' for text in "abc"),
+        f'<w:p xmlns:w14="{w14}" w14:paraId="388B6825"><w:r><w:t>identified</w:t></w:r></w:p>',
+        '<w:p><w:r><w:t>last</w:t></w:r></w:p>',
+    ])
+    document = rdocx.Document()
+    document.add_paragraph("first")
+    document.section(0).header.add_paragraph("header text")
+    source = io.BytesIO(document.to_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(output, "w") as result_zip:
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "word/document.xml":
+                text = data.decode()
+                at = text.index("<w:sectPr")
+                text = text[:at] + body + text[at:]
+                if root_w14:
+                    text = text.replace("<w:document ", f'<w:document xmlns:w14="{w14}" ', 1)
+                data = text.encode()
+            result_zip.writestr(info, data)
+    return rdocx.Document.from_bytes(output.getvalue())
+
+
+def test_fragment_omits_unused_w14():
+    """A5. Standalone paragraph XML omits a redundant unrelated root w14 binding.
+
+    Another paragraph uses w14, so the saved part root declares it. Paragraph 0
+    does not use the prefix. Its public XML keeps an explicit original root
+    binding and drops the declaration that exists only because a sibling uses it.
+    """
+    import rdocx
+
+    unrelated = _issue407_document(False)
+    part = zipfile.ZipFile(io.BytesIO(unrelated.to_bytes())).read("word/document.xml").decode()
+    assert 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"' in part
+    first = unrelated.paragraphs[0].xml
+    assert first.startswith("<w:p")
+    assert "xmlns:w14" not in first
+    assert "w14:" not in first
+    identified = unrelated.paragraphs[9].xml
+    assert "xmlns:w14" in identified
+    assert "w14:paraId" in identified
+    explicit = _issue407_document(True)
+    kept = explicit.paragraphs[0].xml
+    assert 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"' in kept
+    saved = unrelated.to_bytes()
+    _ = unrelated.paragraphs[0].xml
+    assert unrelated.to_bytes() == saved
+    reopened = rdocx.Document.from_bytes(saved)
+    assert "xmlns:w14" not in reopened.paragraphs[0].xml
+    assert "xmlns:w14" in reopened.paragraphs[9].xml
+
+
+def _fx266_texts(doc):
+    return [paragraph.text for paragraph in doc.paragraphs]
+
+
+def test_direct_routes_match_full_body_bytes():
+    import rdocx
+
+    doc = _issue407_document(False)
+    doc.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=1, run_index=0),
+            end=rdocx.RunPosition(body_index=1, run_index=1),
+        ),
+        author="Ada",
+        text="review",
+    )
+    expected = _fx266_texts(doc)
+    for paragraph in doc.paragraphs:
+        assert paragraph.xml.startswith("<w:p")
+        for run in paragraph.runs:
+            assert run.xml.startswith("<w:r")
+    for table in doc.tables:
+        assert table.xml.startswith("<w:tbl")
+        for row in table.rows:
+            for cell in row.cells:
+                assert cell.xml.startswith("<w:tc")
+                assert "nested" in cell.text or "cell" in cell.text or cell.text == ""
+    assert "heading" in expected and "block one" in expected
+    saved = doc.to_bytes()
+    reopened = rdocx.Document.from_bytes(saved)
+    assert _fx266_texts(reopened) == expected
+    assert reopened.tables[0].cell(0, 0).paragraphs[0].text == "cell"
+
+
+def test_append_keeps_eligible_owners():
+    import rdocx
+
+    doc = _issue407_document(False)
+    held = doc.paragraphs[0]
+    held_table = doc.tables[0]
+    appended = doc.add_paragraph("appended")
+    assert appended.text == "appended"
+    assert held.text == "first"
+    assert held.runs[0].xml.startswith("<w:r")
+    assert held_table.xml.startswith("<w:tbl")
+    assert _fx266_texts(doc)[-1] == "appended"
+
+
+def test_conservative_retires_all_scopes():
+    import rdocx
+
+    doc = _issue407_document(False)
+    held = doc.paragraphs[0]
+    held_run = held.runs[0]
+    held_table = doc.tables[0]
+    inserted = doc.insert_paragraph(2, "inserted")
+    assert inserted.text == "inserted"
+    for stale in (lambda: held.text, lambda: held_run.text, lambda: held_table.xml):
+        with pytest.raises(rdocx.StaleElementError, match="Document.insert_paragraph"):
+            stale()
+    fresh = doc.paragraphs[3]
+    removed = doc.remove_content(2)
+    assert removed is True
+    with pytest.raises(rdocx.StaleElementError, match="Document.remove_content"):
+        _ = fresh.text
+
+
+def test_failed_splice_publishes_nothing():
+    import rdocx
+
+    doc = _issue407_document(False)
+    before = doc.to_bytes()
+    held = doc.paragraphs[0]
+    assert doc.remove_content(10**6) is False
+    assert doc.to_bytes() == before
+    assert held.text == "first"
+    with pytest.raises(IndexError):
+        doc.insert_paragraph(10**6, "nope")
+    assert doc.to_bytes() == before
+    assert _fx266_texts(doc)[0] == "first"
+
+
+def test_owner_scope_precedence_unchanged():
+    import rdocx
+
+    doc = _issue407_document(False)
+    held = doc.paragraphs[1]
+    doc.insert_paragraph(0, "zero")
+    with pytest.raises(rdocx.StaleElementError):
+        _ = held.text
+    doc.add_paragraph("later")
+    with pytest.raises(rdocx.StaleElementError):
+        _ = held.text
+    assert doc.paragraphs[0].text == "zero"
+
+
+def test_held_fresh_reopen_match_old_semantics():
+    import rdocx
+
+    doc = _issue407_document(True)
+    held = doc.paragraphs[3]
+    doc.add_paragraph("tail")
+    assert held.text == _fx266_texts(doc)[3]
+    native = held.xml
+    fresh = doc.paragraphs[3].xml
+    assert fresh == native
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert reopened.paragraphs[3].text == held.text
+    assert reopened.paragraphs[-1].text == "tail"
+    assert "xmlns:w14" in reopened.paragraphs[0].xml
+
+
+def test_body_work_counts_owner_lookup_without_xml():
+    """Owner lookup and capture count without reading paragraph XML."""
+    from rdocx import _rdocx
+
+    whole = getattr(_rdocx, "_word_whole_body_work", None)
+    splice = getattr(_rdocx, "_word_splice_work", None)
+    if whole is None or splice is None:
+        pytest.skip("release build: body work counters are debug-only")
+    doc = _issue407_document(False)
+    whole()
+    splice()
+    paragraph = doc.paragraphs[0]
+    visits, xml_bytes = splice()
+    rebuilds, reads = whole()
+    print("lookup_without_xml", visits, xml_bytes, rebuilds, reads)
+    assert visits > 0
+    assert xml_bytes == 0
+    assert (rebuilds, reads) == (0, 0)
+    assert paragraph.xml.startswith("<w:p")
+
+
+def test_body_work_counters_follow_owners():
+    from rdocx import _rdocx
+
+    whole = getattr(_rdocx, "_word_whole_body_work", None)
+    splice = getattr(_rdocx, "_word_splice_work", None)
+    if whole is None or splice is None:
+        pytest.skip("release build: body work counters are debug-only")
+    doc = _issue407_document(False)
+    sample = list(doc.paragraphs[:4])
+    whole()
+    splice()
+    for paragraph in sample:
+        assert paragraph.xml.startswith("<w:p")
+    visits, xml_bytes = splice()
+    rebuilds, reads = whole()
+    print("direct_n", visits, xml_bytes, rebuilds, reads)
+    assert visits == 4
+    assert xml_bytes > 0
+    assert (rebuilds, reads) == (0, 0)
+    assert xml_bytes > 0
+    whole()
+    splice()
+    for _ in range(4):
+        for paragraph in sample:
+            _ = paragraph.xml
+    visits4, xml4 = splice()
+    print("direct_4n", visits4, xml4)
+    assert visits4 == 16
+    assert xml4 == xml_bytes * 4
+    assert whole() == (0, 0)
+    # Touched XML for one owner stays the same on a larger body.
+    wide = _issue407_document(False)
+    for _ in range(20):
+        wide.add_paragraph("more")
+    wide_first = wide.paragraphs[0]
+    whole()
+    splice()
+    _ = wide_first.xml
+    _, wide_bytes = splice()
+    print("wide_bytes", wide_bytes)
+    assert wide_bytes == len(doc.paragraphs[0].xml.encode())
+    assert whole() == (0, 0)
+    # Lower bound taken before the splice. Body paragraphs, runs, tables and
+    # cells are distinct owners, and the header paragraph plus its run are
+    # further owners outside doc.paragraphs. Sections and hyperlink wrappers
+    # are omitted, and so is the run the insert creates. added_owner stays 1.
+    pre_owners = 0
+    stories = (doc.paragraphs, doc.section(0).header.paragraphs)
+    for paragraphs in stories:
+        for paragraph in paragraphs:
+            pre_owners += 1 + len(paragraph.runs)
+    for table in doc.tables:
+        pre_owners += 1
+        for row in table.rows:
+            pre_owners += len(row.cells)
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    pre_owners += 1 + len(paragraph.runs)
+    splice()
+    whole()
+    doc.insert_paragraph(2, "x")
+    mutation_visits, mutation_bytes = splice()
+    print("mutation", pre_owners, mutation_visits, mutation_bytes)
+    assert mutation_visits > 0
+    assert mutation_bytes > 0
+    assert whole() == (0, 0)
+    budget = 16 * max(pre_owners, 1) + 16 * 1 + 16
+    assert mutation_visits <= budget, (pre_owners, mutation_visits, mutation_bytes, budget)
+
+
+def test_missing_run_path_refuses():
+    import rdocx
+
+    doc = _issue407_document(False)
+    before = doc.to_bytes()
+    paragraph = doc.paragraphs[0]
+    assert paragraph.runs[0].xml.startswith("<w:r")
+    with pytest.raises(IndexError):
+        _ = paragraph.runs[5]
+    assert doc.to_bytes() == before
+    assert paragraph.text == "first"
+
+
+def _fx264_with_comment_markers(document, edit, ids):
+    import rdocx
+
+    archive = zipfile.ZipFile(io.BytesIO(document.to_bytes()))
+    parts = {item.filename: archive.read(item.filename) for item in archive.infolist()}
+    parts["word/document.xml"] = edit(parts["word/document.xml"].decode()).encode()
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    entries = "".join(
+        f'<w:comment w:id="{comment_id}" w:author="A"><w:p><w:r><w:t>remark {comment_id}</w:t></w:r></w:p></w:comment>'
+        for comment_id in ids
+    )
+    parts["word/comments.xml"] = f'<w:comments xmlns:w="{w}">{entries}</w:comments>'.encode()
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+        b"</Types>",
+        b'<Override PartName="/word/comments.xml" '
+        b'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>',
+    )
+    parts["word/_rels/document.xml.rels"] = parts["word/_rels/document.xml.rels"].replace(
+        b"</Relationships>",
+        b'<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" '
+        b'Target="comments.xml"/></Relationships>',
+    )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as rewritten:
+        for name, data in parts.items():
+            rewritten.writestr(name, data)
+    return rdocx.Document.from_bytes(output.getvalue())
+
+
+def test_line_spacing_length_is_exact_before_int():
+    import rdocx
+
+    styled = rdocx.Document()
+    styled.set_style("Normal", line_spacing=2)
+    styles = styled.part_xml("/word/styles.xml")
+    assert 'w:line="480"' in styles and 'w:lineRule="auto"' in styles
+    styled.set_style("Normal", line_spacing=rdocx.Pt(18))
+    styles = styled.part_xml("/word/styles.xml")
+    assert 'w:line="360"' in styles and 'w:lineRule="exact"' in styles
+
+    defaults = rdocx.Document()
+    defaults.set_default_paragraph_format(line_spacing=1.0)
+    stored = _fx261_defaults(defaults.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in stored and 'w:lineRule="auto"' in stored
+
+    paragraph = rdocx.Document()
+    paragraph.add_paragraph("grid")
+    paragraph.paragraphs[0].paragraph_format.line_spacing = 2
+    xml = paragraph.part_xml("/word/document.xml")
+    assert 'w:line="480"' in xml and 'w:lineRule="auto"' in xml
+    paragraph.paragraphs[0].paragraph_format.line_spacing = rdocx.Pt(18)
+    xml = paragraph.part_xml("/word/document.xml")
+    assert 'w:line="360"' in xml and 'w:lineRule="exact"' in xml
+    before = paragraph.to_bytes()
+    with pytest.raises(TypeError):
+        paragraph.paragraphs[0].paragraph_format.line_spacing = True
+    with pytest.raises(TypeError):
+        paragraph.paragraphs[0].paragraph_format.line_spacing = "2"
+    assert paragraph.to_bytes() == before
+    paragraph.paragraphs[0].paragraph_format.line_spacing = None
+    xml = paragraph.part_xml("/word/document.xml")
+    assert "w:line=" not in xml and "lineRule" not in xml
+
+
+def test_line_spacing_batch_is_atomic():
+    import rdocx
+
+    document = _fx261_set_doc_defaults(
+        rdocx.Document(),
+        '<w:pPrDefault><w:pPr><w:spacing w:before="120"/></w:pPr></w:pPrDefault>',
+    )
+    before = document.to_bytes()
+    with pytest.raises(TypeError):
+        document.set_default_paragraph_format(space_before=rdocx.Pt(6), line_spacing=True)
+    assert document.to_bytes() == before
+    with pytest.raises(ValueError):
+        document.set_default_paragraph_format(line_spacing=float("nan"))
+    assert document.to_bytes() == before
+    with pytest.raises(ValueError):
+        document.set_default_paragraph_format(line_spacing=10**10000)
+    assert document.to_bytes() == before
+    with pytest.raises(TypeError):
+        document.set_style("Normal", space_before=rdocx.Pt(6), line_spacing=True)
+    assert document.to_bytes() == before
+    with pytest.raises(ValueError):
+        document.set_style("Normal", line_spacing=float("inf"))
+    assert document.to_bytes() == before
+    with pytest.raises(ValueError):
+        document.set_style("Normal", line_spacing=10**10000)
+    assert document.to_bytes() == before
+    paragraph = rdocx.Document()
+    paragraph.add_paragraph("held")
+    paragraph.paragraphs[0].paragraph_format.line_spacing = 2
+    before = paragraph.to_bytes()
+    with pytest.raises(ValueError):
+        paragraph.paragraphs[0].paragraph_format.line_spacing = float("nan")
+    with pytest.raises(ValueError):
+        paragraph.paragraphs[0].paragraph_format.line_spacing = 10**10000
+    assert paragraph.to_bytes() == before
+    omitted = _fx261_set_doc_defaults(
+        rdocx.Document(),
+        '<w:pPrDefault><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault>',
+    )
+    omitted.set_default_paragraph_format(space_before=rdocx.Pt(6))
+    stored = _fx261_defaults(omitted.part_xml("/word/styles.xml"))
+    assert 'w:before="120"' in stored
+    assert 'w:line="360"' in stored and 'w:lineRule="auto"' in stored
+    omitted.set_default_paragraph_format(line_spacing=None)
+    stored = _fx261_defaults(omitted.part_xml("/word/styles.xml"))
+    assert "w:line" not in stored and "lineRule" not in stored
+    assert 'w:before="120"' in stored
+
+    def normal_style(xml):
+        start = xml.find('w:styleId="Normal"')
+        end = xml.find("</w:style>", start)
+        return xml[start:end]
+
+    styled = rdocx.Document()
+    styled.set_style("Normal", line_spacing=2, space_before=rdocx.Pt(6))
+    normal = normal_style(styled.part_xml("/word/styles.xml"))
+    assert 'w:line="480"' in normal and 'w:lineRule="auto"' in normal
+    assert 'w:before="120"' in normal
+    styled.set_style("Normal", space_before=rdocx.Pt(12))
+    normal = normal_style(styled.part_xml("/word/styles.xml"))
+    assert 'w:before="240"' in normal
+    assert 'w:line="480"' in normal and 'w:lineRule="auto"' in normal
+
+    def with_rule(document, rule):
+        def transform(data):
+            text = data.decode()
+            start = text.find('w:styleId="Normal"')
+            end = text.find("</w:style>", start)
+            block = text[start:end].replace('w:lineRule="exact"', f'w:lineRule="{rule}"', 1)
+            return (text[:start] + block + text[end:]).encode()
+
+        return _fx261_replace_part(document, "word/styles.xml", transform)
+
+    exact = rdocx.Document()
+    exact.set_style("Normal", line_spacing=rdocx.Pt(12), space_before=rdocx.Pt(6))
+    at_least = with_rule(exact, "atLeast")
+    at_least.set_style("Normal", space_after=rdocx.Pt(3))
+    normal = normal_style(at_least.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in normal and 'w:lineRule="atLeast"' in normal
+    assert 'w:before="120"' in normal
+    unknown = with_rule(exact, "precise")
+    unknown.set_style("Normal", space_after=rdocx.Pt(3))
+    normal = normal_style(unknown.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in normal and 'w:lineRule="precise"' in normal
+    at_least.set_style("Normal", line_spacing=1)
+    normal = normal_style(at_least.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in normal and 'w:lineRule="auto"' in normal
+
+    styled.set_style("Normal", line_spacing=None)
+    normal = normal_style(styled.part_xml("/word/styles.xml"))
+    assert "w:line" not in normal and "lineRule" not in normal
+    assert 'w:before="240"' in normal
+    cleared = styled.to_bytes()
+    styled.set_style("Normal", line_spacing=None)
+    assert styled.to_bytes() == cleared
+
+    bare = rdocx.Document()
+    bare.add_style("Bare", "paragraph")
+    bare_before = bare.to_bytes()
+    bare.set_style("Bare", line_spacing=None)
+    assert bare.to_bytes() == bare_before
+    bare.set_style("Bare", line_spacing=None)
+    assert bare.to_bytes() == bare_before
+
+    callout = rdocx.Document()
+    callout.add_style("Callout", "character", bold=True)
+    callout_before = callout.to_bytes()
+    callout.set_style("Callout", line_spacing=None)
+    assert callout.to_bytes() == callout_before
+    with pytest.raises(ValueError, match="no paragraph formatting"):
+        callout.set_style("Callout", space_after=12700)
+    assert callout.to_bytes() == callout_before
+
+    class SequencedInt(int):
+        def __new__(cls, first):
+            value = int.__new__(cls, 1)
+            value.calls = 0
+            value.first = first
+            return value
+
+        def __float__(self):
+            self.calls += 1
+            if self.calls == 1:
+                return self.first
+            return float("inf")
+
+    findings = []
+
+    def expect_once(surface, assign, xml_of, getter):
+        token = SequencedInt(1.0)
+        try:
+            assign(token)
+            xml = xml_of()
+            got = None if getter is None else getter()
+        except Exception as exc:
+            findings.append(
+                f"{surface} once raised {type(exc).__name__}: {exc} calls={token.calls}"
+            )
+            return
+        stored = 'w:line="240"' in xml and 'w:lineRule="auto"' in xml
+        if token.calls != 1 or not stored or got not in (None, 1, 1.0):
+            findings.append(
+                f"{surface} once calls={token.calls} getter={got!r} stored240={stored}"
+            )
+
+    def expect_nonfinite(surface, document, assign):
+        before = document.to_bytes()
+        token = SequencedInt(float("inf"))
+        try:
+            assign(token)
+        except ValueError:
+            refused = True
+        except Exception as exc:
+            findings.append(
+                f"{surface} nonfinite raised {type(exc).__name__}: {exc} calls={token.calls}"
+            )
+            return
+        else:
+            refused = False
+        if (not refused) or token.calls != 1 or document.to_bytes() != before:
+            findings.append(
+                f"{surface} nonfinite refused={refused} calls={token.calls} "
+                f"bytes_same={document.to_bytes() == before}"
+            )
+
+    default_once = rdocx.Document()
+    expect_once(
+        "default",
+        lambda token: default_once.set_default_paragraph_format(line_spacing=token),
+        lambda: _fx261_defaults(default_once.part_xml("/word/styles.xml")),
+        lambda: default_once.default_paragraph_format.line_spacing,
+    )
+    style_once = rdocx.Document()
+    expect_once(
+        "style",
+        lambda token: style_once.set_style("Normal", line_spacing=token),
+        lambda: normal_style(style_once.part_xml("/word/styles.xml")),
+        None,
+    )
+    paragraph_once = rdocx.Document()
+    paragraph_once.add_paragraph("counted")
+    expect_once(
+        "paragraph",
+        lambda token: setattr(
+            paragraph_once.paragraphs[0].paragraph_format, "line_spacing", token
+        ),
+        lambda: paragraph_once.part_xml("/word/document.xml"),
+        lambda: paragraph_once.paragraphs[0].paragraph_format.line_spacing,
+    )
+
+    default_bad = rdocx.Document()
+    expect_nonfinite(
+        "default",
+        default_bad,
+        lambda token: default_bad.set_default_paragraph_format(line_spacing=token),
+    )
+    style_bad = rdocx.Document()
+    expect_nonfinite(
+        "style",
+        style_bad,
+        lambda token: style_bad.set_style("Normal", line_spacing=token),
+    )
+    paragraph_bad = rdocx.Document()
+    paragraph_bad.add_paragraph("counted")
+    expect_nonfinite(
+        "paragraph",
+        paragraph_bad,
+        lambda token: setattr(
+            paragraph_bad.paragraphs[0].paragraph_format, "line_spacing", token
+        ),
+    )
+    assert findings == []
+
+
+def test_line_spacing_grid_boundaries_round_trip_without_line_rule():
+    import math
+
+    import rdocx
+
+    for line in (123, -123, 259, 2147483647, -2147483648):
+        document = rdocx.Document()
+        document.add_paragraph("grid")
+        document.paragraphs[0].paragraph_format.line_spacing = line / 240
+        assert document.paragraphs[0].paragraph_format.line_spacing == pytest.approx(line / 240)
+        xml = document.part_xml("/word/document.xml")
+        assert f'w:line="{line}"' in xml
+
+    above = math.nextafter(2147483647 / 240, math.inf)
+    below = math.nextafter(-2147483648 / 240, -math.inf)
+    probe = rdocx.Document()
+    probe.add_paragraph("edge")
+    for value in (above, below):
+        with pytest.raises(ValueError):
+            probe.paragraphs[0].paragraph_format.line_spacing = value
+    with pytest.raises(ValueError):
+        probe.set_default_paragraph_format(line_spacing=above)
+    with pytest.raises(ValueError):
+        probe.set_style("Normal", line_spacing=below)
+
+    absent = rdocx.Document()
+    absent.add_paragraph("holder")
+
+    def plant(data):
+        xml = data.decode().replace(
+            "<w:r>", '<w:pPr><w:spacing w:line="123"/></w:pPr><w:r>', 1
+        )
+        return xml.encode()
+
+    opened = _fx261_replace_part(absent, "word/document.xml", plant)
+    before = opened.to_bytes()
+    assert opened.paragraphs[0].paragraph_format.line_spacing == pytest.approx(123 / 240)
+    opened.paragraphs[0].paragraph_format.line_spacing = opened.paragraphs[0].paragraph_format.line_spacing
+    assert opened.to_bytes() == before
+    xml = opened.part_xml("/word/document.xml")
+    assert 'w:line="123"' in xml and "lineRule" not in xml
+    defaults = _fx261_set_doc_defaults(
+        rdocx.Document(),
+        '<w:pPrDefault><w:pPr><w:spacing w:line="123"/></w:pPr></w:pPrDefault>',
+    )
+    before = defaults.to_bytes()
+    defaults.set_default_paragraph_format(line_spacing=defaults.default_paragraph_format.line_spacing)
+    assert defaults.to_bytes() == before
+    stored = _fx261_defaults(defaults.part_xml("/word/styles.xml"))
+    assert 'w:line="123"' in stored and "lineRule" not in stored
+
+    def normal_style(xml):
+        start = xml.find('w:styleId="Normal"')
+        end = xml.find("</w:style>", start)
+        return xml[start:end]
+
+    styled = rdocx.Document()
+    styled.set_style("Normal", line_spacing=123 / 240)
+    styles = normal_style(styled.part_xml("/word/styles.xml"))
+    assert 'w:line="123"' in styles and 'w:lineRule="auto"' in styles
+    bare = _fx261_replace_part(
+        styled,
+        "word/styles.xml",
+        lambda data: data.replace(b'w:line="123" w:lineRule="auto"', b'w:line="123"', 1),
+    )
+    before = bare.to_bytes()
+    bare.set_style("Normal", line_spacing=123 / 240)
+    assert bare.to_bytes() == before
+    styles = normal_style(bare.part_xml("/word/styles.xml"))
+    assert 'w:line="123"' in styles and "lineRule" not in styles
+    bare.set_style("Normal", space_before=rdocx.Pt(6))
+    styles = normal_style(bare.part_xml("/word/styles.xml"))
+    assert 'w:line="123"' in styles and "lineRule" not in styles
+
+    at_least = _fx261_set_doc_defaults(
+        rdocx.Document(),
+        '<w:pPrDefault><w:pPr><w:spacing w:line="240" w:lineRule="atLeast"/></w:pPr></w:pPrDefault>',
+    )
+    at_least.set_default_paragraph_format(space_after=rdocx.Pt(6))
+    stored = _fx261_defaults(at_least.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in stored and 'w:lineRule="atLeast"' in stored
+    at_least.set_default_paragraph_format(line_spacing=1)
+    stored = _fx261_defaults(at_least.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in stored and 'w:lineRule="auto"' in stored
+
+    off = rdocx.Document()
+    off.add_paragraph("off")
+    off.paragraphs[0].paragraph_format.line_spacing = 1.0021
+    assert 'w:line="240"' in off.part_xml("/word/document.xml")
+    off.paragraphs[0].paragraph_format.line_spacing = -1.0021
+    assert 'w:line="-240"' in off.part_xml("/word/document.xml")
+
+
+@pytest.mark.parametrize("start_in_control", [False, True])
+def test_cross_cell_comment_lists_accepted_text(start_in_control):
+    import rdocx
+
+    document = rdocx.Document()
+    table = document.add_table(1, 2)
+    table.cell(0, 0).paragraphs[0].add_run("Preconditions and test data")
+    table.cell(0, 1).paragraphs[0].add_run("the second cell")
+    start = '<w:commentRangeStart w:id="0"/>'
+    if start_in_control:
+        start = (
+            '<w:sdt><w:sdtPr><w:tag w:val="goog_rdk_0"/></w:sdtPr>'
+            f"<w:sdtContent>{start}</w:sdtContent></w:sdt>"
+        )
+
+    def edit(xml):
+        first = xml.index("<w:r>", xml.index("<w:tc>"))
+        xml = xml[:first] + start + xml[first:]
+        second = xml.index("</w:p>", xml.index("the second cell"))
+        end = '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+        return xml[:second] + end + xml[second:]
+
+    document = _fx264_with_comment_markers(document, edit, [0])
+    (comment,) = document.comments
+    assert comment.anchor_text == "Preconditions and test data\nthe second cell"
+    assert comment.anchor_issue is None
+    assert comment.anchor.start.item.text == "Preconditions and test data"
+    assert comment.anchor.end.item.text == "the second cell"
+    stories = [
+        (position.item.story.kind, position.item.story.owner_index)
+        for position in (comment.anchor.start, comment.anchor.end)
+    ]
+    assert stories == [("table_cell", 0), ("table_cell", 1)]
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.comments[0].anchor_text == comment.anchor_text
+    assert document.remove_comment(0)
+    assert document.comments == ()
+
+
+def test_mixed_comment_anchors_keep_good_rows():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("kept")
+    document.add_paragraph("wrapped")
+
+    def edit(xml):
+        for comment_id, text in ((0, "kept"), (1, "wrapped")):
+            run = f"<w:r><w:t>{text}</w:t></w:r>"
+            content = run if comment_id == 0 else f"<w:smartTag>{run}</w:smartTag>"
+            xml = xml.replace(
+                run,
+                f'<w:commentRangeStart w:id="{comment_id}"/>{content}'
+                f'<w:commentRangeEnd w:id="{comment_id}"/>'
+                f'<w:r><w:commentReference w:id="{comment_id}"/></w:r>',
+                1,
+            )
+        return xml
+
+    document = _fx264_with_comment_markers(document, edit, [0, 1])
+    kept, wrapped = document.comments
+    assert (kept.anchor_text, kept.anchor_issue) == ("kept", None)
+    assert wrapped.anchor is None and wrapped.anchor_text is None
+    assert wrapped.anchor_issue is not None and "comment 1" in wrapped.anchor_issue
+
+
+def _fx264_assert_parts_match_saved_entries(document):
+    names = document.part_names()
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as saved:
+        entries = {name: saved.read(name) for name in saved.namelist()}
+    assert names == tuple(sorted(f"/{entry}" for entry in entries))
+    for name in ("/[Content_Types].xml", "/_rels/.rels", "/word/_rels/document.xml.rels"):
+        assert name in names
+        assert document.part_xml(name).encode() == entries[name[1:]]
+    for entry, data in entries.items():
+        if entry.endswith((".xml", ".rels")):
+            assert document.part_xml(f"/{entry}").encode() == data
+    assert document.part_xml("[content_types].xml").encode() == entries["[Content_Types].xml"]
+    return entries
+
+
+def test_part_xml_matches_zip_entry():
+    import rdocx
+
+    fresh = rdocx.Document()
+    fresh.add_paragraph("x")
+    _fx264_assert_parts_match_saved_entries(fresh)
+    fresh.add_paragraph("edited")
+    _fx264_assert_parts_match_saved_entries(fresh)
+
+    document = rdocx.Document()
+    document.add_paragraph("linked")
+    document.set_header("header")
+    header = next(story for story in document.stories if story.kind == "header")
+    document.add_hyperlink_to_story(header, "home", "https://example.invalid/header")
+    entries = _fx264_assert_parts_match_saved_entries(document)
+    assert b"https://example.invalid/header" in entries["word/_rels/header1.xml.rels"]
+    assert (
+        document.part_xml("word/_rels/HEADER1.XML.RELS").encode()
+        == entries["word/_rels/header1.xml.rels"]
+    )
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as source, zipfile.ZipFile(
+        output, "w"
+    ) as result:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "[Content_Types].xml" or info.filename.endswith(".rels"):
+                data = data.replace(b"?>", b"?><!-- issue 406 producer -->", 1)
+            result.writestr(info, data)
+    reopened = rdocx.Document.from_bytes(output.getvalue())
+    reopened_entries = _fx264_assert_parts_match_saved_entries(reopened)
+    for name in (
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "word/_rels/header1.xml.rels",
+    ):
+        assert b"issue 406 producer" in reopened_entries[name]
+        assert b"issue 406 producer" in reopened.part_xml(f"/{name}").encode()
+
+
+def test_part_xml_keeps_slash_case_and_binary_errors():
+    import rdocx
+
+    pictured = rdocx.Document()
+    pictured.add_picture(PNG, "pixel.png", rdocx.Pt(1), rdocx.Pt(1))
+    media = next(name for name in pictured.part_names() if "/media/" in name)
+    with pytest.raises(rdocx.RdocxError, match="not UTF-8"):
+        pictured.part_xml(media)
+    with pytest.raises(rdocx.RdocxError, match="missing"):
+        pictured.part_xml("/word/_rels/absent.xml.rels")
+    bad = _fx261_add_part(
+        rdocx.Document(),
+        "word/bad.xml",
+        b"<bad>\x01</bad>",
+        "application/xml",
+    )
+    try:
+        bad.part_names()
+        names_failed = False
+    except rdocx.RdocxError:
+        names_failed = True
+    try:
+        bad.to_bytes()
+        save_failed = False
+    except rdocx.RdocxError:
+        save_failed = True
+    assert names_failed == save_failed
+    assert names_failed is False and save_failed is False
+
+    refused = rdocx.Document()
+    before = refused.to_bytes()
+    names = refused.part_names()
+    styles = refused.part_xml("/word/styles.xml")
+    # Checked insertion rejects the invalid candidate before publication.
+    # Inspection must continue to expose the unchanged save-equivalent view.
+    with pytest.raises(rdocx.XmlError, match="paragraph text"):
+        refused.add_paragraph("tab\tand\x01")
+    assert refused.to_bytes() == before
+    assert refused.part_names() == names
+    assert refused.part_xml("/word/styles.xml") == styles
+
+
+def test_comment_anchor_text_tracks_retained_run_edits():
+    import rdocx
+
+    def publish(edit):
+        document = rdocx.Document()
+        document.add_paragraph("anchor")
+        document.add_comment(
+            rdocx.RunRange(
+                start=rdocx.RunPosition(body_index=0, run_index=0),
+                end=rdocx.RunPosition(body_index=0, run_index=1),
+            ),
+            author="Ada",
+            text="note",
+        )
+        held = document.comments[0]
+        before = held.anchor_text
+        edit(document.paragraphs[0].runs[0])
+        assert held.anchor_text == before
+        fresh = document.comments[0]
+        assert fresh.anchor_text != before
+        assert fresh.anchor_issue is None
+        assert fresh.anchor is not None
+        reopened = rdocx.Document.from_bytes(document.to_bytes()).comments[0]
+        assert reopened.anchor_text == fresh.anchor_text
+        assert reopened.anchor_issue is None
+        return fresh.anchor_text
+
+    assert "\t" in publish(lambda run: run.add_tab())
+    assert publish(lambda run: setattr(run, "text", "changed")) == "changed"
+    assert "\n" in publish(lambda run: run.add_break())
+
+
+def test_fx265_insert_document_keeps_picture_bytes_for_both_orders():
+    """Python insert_document follows fragment import, not native insert_document."""
+    import rdocx
+
+    red = _one_pixel_png(b"\xc8\x00\x00")
+    blue = _one_pixel_png(b"\x00\x00\xc8")
+    policies = [
+        None,
+        rdocx.FragmentConflictPolicy.reuse_equivalent().with_related_part_reuse(False),
+    ]
+    for policy in policies:
+        for order in ((red, blue), (blue, red)):
+            target = rdocx.Document()
+            target.add_picture(blue, "blue.png")
+            target.add_picture(red, "red.png")
+            source = rdocx.Document()
+            source.add_picture(order[0], "first.png")
+            source.add_picture(order[1], "second.png")
+            if policy is None:
+                target.insert_document(source, at=2)
+            else:
+                target.insert_document(source, at=2, policy=policy)
+            reopened = rdocx.Document.from_bytes(target.to_bytes())
+            package_bytes = reopened.to_bytes()
+            with zipfile.ZipFile(io.BytesIO(package_bytes)) as package:
+                xml = package.read("word/document.xml").decode()
+                relationships = package.read("word/_rels/document.xml.rels").decode()
+                targets = {
+                    re.search(r'Id="([^"]+)"', element).group(1): re.search(
+                        r'Target="([^"]+)"', element
+                    ).group(1)
+                    for element in re.findall(r"<Relationship [^>]*>", relationships)
+                }
+                shown = []
+                for embed in re.findall(r'r:embed="([^"]+)"', xml):
+                    target_name = targets[embed]
+                    if target_name.startswith("/"):
+                        part = target_name.lstrip("/")
+                    else:
+                        part = posixpath.normpath(posixpath.join("word", target_name))
+                    shown.append(package.read(part))
+            assert shown[2:] == [order[0], order[1]]
+
+
+import collections.abc
+
+
+class _CountedSequence(collections.abc.Sequence):
+    def __init__(self, reported):
+        self.reported = reported
+
+    def __len__(self):
+        return self.reported
+
+    def __getitem__(self, index):
+        raise AssertionError("mail-merge sequence was indexed before the cap")
+
+
+def test_mail_merge_package_authoring_round_trips_public_api():
+    import inspect
+    import io
+    import zipfile
+    import rdocx
+    from rdocx import _rdocx
+
+    names = (
+        "MailMergePackageSource",
+        "MailMergeSettings",
+        "MailMergeFieldMapping",
+        "MailMergeRecipient",
+        "MailMergePackageOptions",
+        "MailMergePackageDiagnostic",
+        "MailMergePreparedData",
+    )
+    for name in names:
+        assert name in rdocx.__all__
+        assert getattr(rdocx, name) is getattr(_rdocx, name)
+    columns = ["héllo", "line"]
+    rows = [["你\r\n", "a\tb"]]
+    source = rdocx.MailMergePackageSource.embedded(columns, rows)
+    columns.append("mutated")
+    rows[0].append("mutated")
+    assert source.columns == ("héllo", "line")
+    assert source.records == (("你\r\n", "a\tb"),)
+    external = rdocx.MailMergePackageSource.external("file:///declared/people.csv")
+    mapping = rdocx.MailMergeFieldMapping(0, "héllo", "FirstName", language="en-US")
+    recipient = rdocx.MailMergeRecipient(0, b"opaque", active=False)
+    option_mappings = [mapping]
+    options = rdocx.MailMergePackageOptions(source, mappings=option_mappings, recipients=(recipient,))
+    option_mappings.clear()
+    assert options.mappings[0].source_name == "héllo"
+    assert options.settings.main_document_type == "formLetters"
+    assert options.settings.data_type == "textFile"
+    prepared_document = rdocx.Document()
+    prepared_document.set_mail_merge_package(rdocx.MailMergePackageOptions(source))
+    prepared = prepared_document.prepare_mail_merge_data()
+    prepared.records[0]["héllo"] = "local copy"
+    assert prepared.records[0]["héllo"] == "你\r\n"
+    blocked_document = rdocx.Document()
+    blocked_document.set_mail_merge_package(rdocx.MailMergePackageOptions(external))
+    diagnostic = blocked_document.prepare_mail_merge_data().diagnostics[0]
+    for carrier, attribute, value in (
+        (source, "uri", "file:///changed.csv"),
+        (options.settings, "data_type", "database"),
+        (mapping, "mapped_name", "LastName"),
+        (recipient, "active", True),
+        (options, "source", external),
+        (diagnostic, "message", "changed"),
+        (prepared, "records", ()),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(carrier, attribute, value)
+    assert inspect.signature(rdocx.Document.prepare_mail_merge_data).parameters["policy"].default == "offline"
+    document = rdocx.Document()
+    document.set_mail_merge_package(options)
+    document.add_table(1, 1)
+    held_cell = document.tables[0].rows[0].cells[0]
+    held_cell.text = "cell"
+    held = document.add_paragraph("held")
+    held_run = held.runs[0]
+    same = document.to_bytes()
+    document.set_mail_merge_package(options)
+    assert document.to_bytes() == same
+    assert held.text == "held" and held_run.text == "held" and held_cell.text == "cell"
+    def relocate_owner(package_bytes):
+        with zipfile.ZipFile(io.BytesIO(package_bytes)) as archive:
+            parts = {item: archive.read(item) for item in archive.namelist()}
+        settings_name = next(name for name in parts if name.endswith("settings.xml") and b"mailMerge" in parts[name])
+        rels_name = settings_name.rsplit("/", 1)[0] + "/_rels/" + settings_name.rsplit("/", 1)[1] + ".rels"
+        if rels_name not in parts:
+            rels_name = "word/_rels/settings.xml.rels"
+        recipient_name = next(name for name in parts if name.endswith("recipientData.xml"))
+        new_settings = "custom/merge-owner.xml"
+        new_recipient = "custom/rows/people.xml"
+        new_rels = "custom/_rels/merge-owner.xml.rels"
+        types = parts["[Content_Types].xml"].decode()
+        types = types.replace(f'PartName="/{settings_name}"', 'PartName="/custom/merge-owner.xml"')
+        types = types.replace(f'PartName="/{recipient_name}"', 'PartName="/custom/rows/people.xml"')
+        parts["[Content_Types].xml"] = types.encode()
+        document_rels = parts["word/_rels/document.xml.rels"].decode()
+        document_rels = document_rels.replace("settings.xml", "../custom/merge-owner.xml")
+        parts["word/_rels/document.xml.rels"] = document_rels.encode()
+        owner_rels = parts.pop(rels_name).decode()
+        owner_rels = owner_rels.replace(recipient_name.rsplit("/", 1)[-1], "rows/people.xml")
+        parts[new_rels] = owner_rels.encode()
+        parts[new_settings] = parts.pop(settings_name)
+        parts[new_recipient] = parts.pop(recipient_name)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for item, blob in parts.items():
+                archive.writestr(item, blob)
+        return buffer.getvalue()
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    snapshot = reopened.mail_merge_package()
+    assert snapshot.source.records == (("你\r\n", "a\tb"),)
+    moved = rdocx.Document.from_bytes(relocate_owner(document.to_bytes()))
+    moved_snapshot = moved.mail_merge_package()
+    assert moved_snapshot.source.records == (("你\r\n", "a\tb"),)
+    assert moved_snapshot.recipients[0].unique_tag == b"opaque"
+    moved.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            source,
+            recipients=(rdocx.MailMergeRecipient(1, b"moved", active=False),),
+        )
+    )
+    updated = rdocx.Document.from_bytes(moved.to_bytes()).mail_merge_package()
+    assert updated.recipients[0].unique_tag == b"moved" and updated.recipients[0].active is False
+    with zipfile.ZipFile(io.BytesIO(moved.to_bytes())) as archive:
+        assert "custom/merge-owner.xml" in archive.namelist()
+        assert "custom/rows/people.xml" in archive.namelist()
+    assert snapshot.recipients[0].unique_tag == b"opaque" and snapshot.recipients[0].active is False
+    assert reopened.remove_mail_merge_package() is True
+    assert reopened.mail_merge_package() is None
+    assert reopened.remove_mail_merge_package() is False
+    before = document.to_bytes()
+    with pytest.raises(TypeError):
+        document.set_mail_merge_package(source)
+    assert document.to_bytes() == before
+    assert held.text == "held" and held_run.text == "held" and held_cell.text == "cell"
+
+
+def test_mail_merge_data_preparation_is_offline_and_diagnostic():
+    import rdocx
+
+    absent = rdocx.Document()
+    with pytest.raises(rdocx.RdocxError, match="absent"):
+        absent.prepare_mail_merge_data()
+    document = rdocx.Document()
+    document.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(rdocx.MailMergePackageSource.external("file:///declared/people.csv"))
+    )
+    blocked = document.prepare_mail_merge_data()
+    assert blocked.records == () and blocked.diagnostics[0].kind == "external_source_blocked"
+    with pytest.raises(AttributeError):
+        blocked.diagnostics[0].kind = "changed"
+    with pytest.raises(rdocx.RdocxError):
+        document.prepare_mail_merge_data(external_records=_CountedSequence(1))
+    unavailable = document.prepare_mail_merge_data(policy="caller_supplied")
+    assert unavailable.records == ()
+    assert unavailable.diagnostics[0].kind == "external_source_unavailable"
+    empty = document.prepare_mail_merge_data(policy="caller_supplied", external_records=())
+    assert empty.records == () and empty.diagnostics == ()
+    supplied = document.prepare_mail_merge_data(policy="caller_supplied", external_records=[{"kept": "row"}])
+    first = supplied.records
+    first[0]["kept"] = "changed"
+    assert supplied.records[0]["kept"] == "row"
+    alias = rdocx.Document()
+    alias.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.external("file:///declared/people.csv"),
+            mappings=(rdocx.MailMergeFieldMapping(0, "Family", "LastName"),),
+        )
+    )
+    aliased = alias.prepare_mail_merge_data(policy="caller_supplied", external_records=_CountedSequence(1))
+    assert aliased.records == () and aliased.diagnostics[0].kind == "unsupported_source"
+    native = rdocx.Document()
+    native.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.embedded(["FirstName"], [["Ada"]]),
+            settings=rdocx.MailMergeSettings(data_type="native"),
+            mappings=(rdocx.MailMergeFieldMapping(0, "FirstName", "FirstName"),),
+        )
+    )
+    native_rows = native.prepare_mail_merge_data()
+    assert native_rows.records == () and native_rows.diagnostics[0].kind == "unsupported_source"
+    embedded = rdocx.Document()
+    embedded.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.embedded(["FirstName"], [["Ada"]]),
+            mappings=(rdocx.MailMergeFieldMapping(0, "FirstName", "FirstName"),),
+            recipients=(rdocx.MailMergeRecipient(0, b"tag"),),
+        )
+    )
+    blocked_rows = embedded.prepare_mail_merge_data()
+    assert blocked_rows.records == () and blocked_rows.diagnostics[0].kind == "unsupported_source"
+    with pytest.raises(rdocx.RdocxError):
+        embedded.prepare_mail_merge_data(policy="caller_supplied", external_records=_CountedSequence(1))
+
+
+def test_mail_merge_package_snapshot_and_conversion_are_atomic():
+    import io
+    import zipfile
+    import rdocx
+
+    with pytest.raises(rdocx.XmlError):
+        rdocx.MailMergePackageSource.embedded(["\u0001"], [])
+    with pytest.raises(rdocx.RdocxError):
+        rdocx.MailMergePackageSource.external("ftp://declared.example/people.csv")
+    with pytest.raises(ValueError):
+        rdocx.MailMergePackageSource.embedded(_CountedSequence(1025), [])
+    with pytest.raises(ValueError):
+        rdocx.MailMergePackageSource.embedded(["a"], _CountedSequence(100_001))
+    with pytest.raises(rdocx.RdocxError, match="16 MiB"):
+        rdocx.MailMergePackageSource.embedded(["&" * 4_000_000], [])
+    with pytest.raises(rdocx.RdocxError, match="rectangular"):
+        rdocx.MailMergePackageSource.embedded(["a"], [["x", "y"]])
+    with pytest.raises(TypeError):
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.external("https://declared.example/people.csv"),
+            mappings=None,
+        )
+    with pytest.raises(TypeError):
+        rdocx.MailMergeFieldMapping(True, "given", "FirstName")
+    with pytest.raises(ValueError):
+        rdocx.MailMergeFieldMapping(-1, "given", "FirstName")
+    with pytest.raises(OverflowError):
+        rdocx.MailMergeFieldMapping(2**32, "given", "FirstName")
+    with pytest.raises(TypeError):
+        rdocx.MailMergeRecipient(0, b"tag", active=1)
+    low = rdocx.MailMergeSettings(active_record=-1, check_errors=-5)
+    assert low.active_record == -1 and low.check_errors == -5
+    with pytest.raises(OverflowError):
+        rdocx.MailMergeSettings(active_record=2**31)
+    with pytest.raises(ValueError):
+        rdocx.MailMergeSettings(check_errors=-(2**31) - 1)
+    document = rdocx.Document()
+    document.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.embedded(["FirstName"], [["Ada"]]),
+            mappings=(rdocx.MailMergeFieldMapping(0, "FirstName", "FirstName"),),
+        )
+    )
+    prepared = document.prepare_mail_merge_data()
+    assert prepared.records == ({"FirstName": "Ada"},) and prepared.diagnostics == ()
+    body = next(story for story in document.stories if story.kind == "body")
+    document.insert_content_control(rdocx.ContentLocation.end(body), "block", "rich_text", tag="bound")
+    document.set_content_control_value_by_tag("bound", "shown")
+    location = _content_location(document, lambda item: item.kind == "content_control")
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        settings = archive.read("word/settings.xml").decode()
+        old_item = archive.read("customXml/item1.xml")
+    marker = settings.index("rdocx.mailMerge.storeItemId")
+    value_at = settings.index('w:val="', marker) + len('w:val="')
+    store_id = settings[value_at:settings.index('"', value_at)]
+    document.set_content_control_binding(
+        location, store_id, "/m:mergeData/m:records/m:record/m:cell", "xmlns:m='urn:rdocx:mail-merge-data:v1'"
+    )
+    document.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.embedded(["FirstName"], [["Grace"]]),
+            mappings=(rdocx.MailMergeFieldMapping(0, "FirstName", "FirstName"),),
+        )
+    )
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        items = {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("customXml/item") and "Props" not in name
+        }
+        settings = archive.read("word/settings.xml").decode()
+    assert old_item in items.values()
+    assert any(b"Grace" in blob and blob != old_item for blob in items.values())
+    assert store_id not in settings[settings.index("rdocx.mailMerge.storeItemId"):]
+    assert document.content_controls()[0].text == "shown"
+    def rewrite(package_bytes, name, transform):
+        with zipfile.ZipFile(io.BytesIO(package_bytes)) as archive:
+            parts = {item: archive.read(item) for item in archive.namelist()}
+        parts[name] = transform(parts[name])
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for item, blob in parts.items():
+                archive.writestr(item, blob)
+        return buffer.getvalue()
+
+    imported = rdocx.Document.from_bytes(
+        rewrite(
+            document.to_bytes(),
+            "word/settings.xml",
+            lambda blob: blob.replace(b'w:val="textFile"', b'w:val="vendorData"', 1),
+        )
+    )
+    assert imported.mail_merge_package().settings.data_type == "vendorData"
+    imported_before = imported.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="data type"):
+        imported.set_mail_merge_package(
+            rdocx.MailMergePackageOptions(
+                rdocx.MailMergePackageSource.external("file:///declared/people.csv"),
+                settings=rdocx.MailMergeSettings(data_type="vendorData"),
+            )
+        )
+    assert imported.to_bytes() == imported_before
+    uri_planted = rdocx.Document()
+    uri_planted.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(rdocx.MailMergePackageSource.external("file:///declared/people.csv"))
+    )
+    wider_snapshot = rdocx.Document.from_bytes(
+        rewrite(
+            uri_planted.to_bytes(),
+            "word/_rels/settings.xml.rels",
+            lambda blob: blob.replace(
+                b"file:///declared/people.csv", b"ftp://declared.example/people.csv", 1
+            ),
+        )
+    ).mail_merge_package()
+    assert wider_snapshot.source.uri == "ftp://declared.example/people.csv"
+    current_settings = zipfile.ZipFile(io.BytesIO(document.to_bytes())).read("word/settings.xml").decode()
+    marker = current_settings.index("rdocx.mailMerge.storeItemId")
+    value_at = current_settings.index('w:val="', marker) + len('w:val="')
+    current_id = current_settings[value_at:current_settings.index('"', value_at)]
+    stale = rewrite(
+        document.to_bytes(),
+        "word/settings.xml",
+        lambda blob: blob.replace(current_id.encode(), b"{FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF}", 1),
+    )
+    stale_document = rdocx.Document.from_bytes(stale)
+    stale_before = stale_document.to_bytes()
+    with pytest.raises(rdocx.RdocxError):
+        stale_document.set_mail_merge_package(
+            rdocx.MailMergePackageOptions(rdocx.MailMergePackageSource.external("file:///declared/other.csv"))
+        )
+    assert stale_document.to_bytes() == stale_before
+    owner = rdocx.Document()
+    owner.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.external("file:///declared/owner.csv")
+        )
+    )
+    with zipfile.ZipFile(io.BytesIO(owner.to_bytes())) as archive:
+        owner_parts = {name: archive.read(name) for name in archive.namelist()}
+    source_rel = owner_parts["word/_rels/settings.xml.rels"].decode()
+    source_id = source_rel.split('Id="', 1)[1].split('"', 1)[0]
+
+    def pack(parts):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, body in parts.items():
+                archive.writestr(name, body)
+        return buffer.getvalue()
+
+    def settings_case(body, external):
+        copied = dict(owner_parts)
+        copied["word/settings.xml"] = body
+        if external:
+            rels = copied["word/_rels/document.xml.rels"].decode()
+            copied["word/_rels/document.xml.rels"] = rels.replace(
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"',
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml" TargetMode="External"',
+                1,
+            ).encode()
+        opened = rdocx.Document.from_bytes(pack(copied))
+        return opened
+
+    word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    src_xml = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:settings xmlns:w="{word}" xmlns:r="{rel}">'
+        f'<w:mailMerge><w:dataType w:val="native"/>'
+        f'<w:odso><w:src r:id="{source_id}"/></w:odso></w:mailMerge></w:settings>'
+    ).encode()
+    internal = settings_case(src_xml, False)
+    assert internal.mail_merge_package().source.uri == "file:///declared/owner.csv"
+    assert internal.prepare_mail_merge_data().diagnostics[0].kind == "external_source_blocked"
+    hidden = settings_case(src_xml, True)
+    hidden_before = hidden.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="settings"):
+        hidden.mail_merge_package()
+    with pytest.raises(rdocx.RdocxError, match="settings"):
+        hidden.prepare_mail_merge_data()
+    with pytest.raises(rdocx.RdocxError, match="settings"):
+        hidden.set_mail_merge_package(
+            rdocx.MailMergePackageOptions(
+                rdocx.MailMergePackageSource.external("file:///declared/other.csv")
+            )
+        )
+    assert hidden.to_bytes() == hidden_before
+    type_xml = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<settings xmlns="{word}"><mailMerge><dataType/></mailMerge></settings>'
+    ).encode()
+    with pytest.raises(rdocx.RdocxError, match="source"):
+        settings_case(type_xml, False).mail_merge_package()
+    with pytest.raises(rdocx.RdocxError, match="settings"):
+        settings_case(type_xml, True).mail_merge_package()
+    foreign_xml = (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:settings xmlns:w="{word}"><m:mailMerge xmlns:m="urn:f290:not-word">'
+        f'<m:dataType m:val="native"/></m:mailMerge></w:settings>'
+    ).encode()
+    assert settings_case(foreign_xml, False).mail_merge_package() is None
+
+
+def test_mail_merge_mappings_use_word_slots():
+    import io
+    import zipfile
+    import rdocx
+
+    document = rdocx.Document()
+    document.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.external("file:///declared/slots.csv"),
+            mappings=(
+                rdocx.MailMergeFieldMapping(1, "Family", "LastName"),
+                rdocx.MailMergeFieldMapping(0, "Given", "FirstName"),
+            ),
+            recipients=(rdocx.MailMergeRecipient(0, b"one"),),
+        )
+    )
+    snapshot = document.mail_merge_package()
+    assert [item.mapped_name for item in snapshot.mappings] == ["FirstName", "LastName"]
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError):
+        document.set_mail_merge_package(
+            rdocx.MailMergePackageOptions(
+                rdocx.MailMergePackageSource.external("file:///declared/slots.csv"),
+                mappings=(rdocx.MailMergeFieldMapping(0, "Given", "NotARole"),),
+            )
+        )
+    assert document.to_bytes() == before
+    with zipfile.ZipFile(io.BytesIO(before)) as archive:
+        names = archive.namelist()
+        recipient_name = next(name for name in names if "recipientData" in name and name.endswith(".xml"))
+        recipient_bytes = archive.read(recipient_name)
+        rels_name = "word/_rels/document.xml.rels"
+        rels = archive.read(rels_name).decode()
+        parts = {name: archive.read(name) for name in names}
+    shared_rel = (
+        '<Relationship Id="rIdKeep" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/recipientData" '
+        'Target="recipientData.xml"/>'
+    )
+    parts[rels_name] = rels.replace("</Relationships>", shared_rel + "</Relationships>").encode()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, blob in parts.items():
+            archive.writestr(name, blob)
+    shared = rdocx.Document.from_bytes(buffer.getvalue())
+    shared_before = shared.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="recipient"):
+        shared.set_mail_merge_package(
+            rdocx.MailMergePackageOptions(
+                rdocx.MailMergePackageSource.external("file:///declared/slots.csv"),
+                recipients=(rdocx.MailMergeRecipient(1, b"two", active=False),),
+            )
+        )
+    assert shared.to_bytes() == shared_before
+    assert shared.remove_mail_merge_package() is True
+    assert shared.mail_merge_package() is None
+    assert shared.remove_mail_merge_package() is False
+    with zipfile.ZipFile(io.BytesIO(shared.to_bytes())) as archive:
+        assert archive.read(recipient_name) == recipient_bytes
+    duplicate = rdocx.Document()
+    duplicate.set_mail_merge_package(
+        rdocx.MailMergePackageOptions(
+            rdocx.MailMergePackageSource.external("file:///declared/slots.csv"),
+            recipients=(rdocx.MailMergeRecipient(0, b"one"),),
+        )
+    )
+    with zipfile.ZipFile(io.BytesIO(duplicate.to_bytes())) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+        original = next(name for name in parts if name.endswith("recipientData.xml"))
+    parts["word/recipientExtra.xml"] = parts[original]
+    types = parts["[Content_Types].xml"].decode()
+    parts["[Content_Types].xml"] = types.replace(
+        "</Types>",
+        '<Override PartName="/word/recipientExtra.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml"/>'
+        "</Types>",
+    ).encode()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, blob in parts.items():
+            archive.writestr(name, blob)
+    crowded = rdocx.Document.from_bytes(buffer.getvalue())
+    crowded_before = crowded.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="recipient"):
+        crowded.set_mail_merge_package(
+            rdocx.MailMergePackageOptions(rdocx.MailMergePackageSource.external("file:///declared/other.csv"))
+        )
+    assert crowded.to_bytes() == crowded_before
+
+
+_FX268_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_FX268_TWIN = (
+    '<w:sdt xmlns:x="urn:x"><w:sdtPr><x:meta/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>twin</w:t></w:r>'
+    "</w:p></w:sdtContent></w:sdt>"
+)
+_FX268_ALIAS = (
+    f'<q:sdt xmlns:q="{_FX268_W}"><q:sdtPr><q:tag q:val="t"/></q:sdtPr><q:sdtContent><q:p><q:r>'
+    "<q:t>in q</q:t></q:r></q:p></q:sdtContent></q:sdt>"
+)
+_FX268_BODY_EDITS = {
+    "insert_paragraph": lambda doc: doc.insert_paragraph(1, "inserted"),
+    "add_paragraph": lambda doc: doc.add_paragraph("appended"),
+    "insert_table": lambda doc: doc.insert_table(1, 1, 2),
+    "add_table": lambda doc: doc.add_table(1, 2),
+    "insert_paragraph_before": lambda doc: doc.paragraphs[1].insert_paragraph_before("before"),
+    "add_heading": lambda doc: doc.add_heading("heading"),
+    "add_page_break": lambda doc: doc.add_page_break(),
+}
+
+
+def _fx268_root_declaration(document, name, value):
+    """Return a package whose main root carries `name="value"`.
+
+    The declaration is written on `word/document.xml` before `from_bytes`.
+    A package-wide URI replace does not do this when the root omits the prefix.
+    """
+    decl = f'{name}="{value}"'.encode()
+    source = io.BytesIO(document.to_bytes())
+    result = io.BytesIO()
+    saw = False
+    with zipfile.ZipFile(source) as source_zip:
+        with zipfile.ZipFile(result, "w") as result_zip:
+            for info in source_zip.infolist():
+                data = source_zip.read(info.filename)
+                if info.filename == "word/document.xml":
+                    start = data.find(b"<w:document")
+                    end = data.find(b">", start)
+                    root = data[start:end]
+                    token = name.encode() + b'="'
+                    if token in root:
+                        at = root.find(token)
+                        quote = root.find(b'"', at + len(token))
+                        root = root[: at + len(token)] + value.encode() + root[quote:]
+                    else:
+                        root = root + b" " + decl
+                    data = data[:start] + root + data[end:]
+                    assert decl in data[start : data.find(b">", start) + 1]
+                    saw = True
+                result_zip.writestr(info, data)
+    assert saw
+    opened = type(document).from_bytes(result.getvalue())
+    return opened
+
+
+@pytest.mark.parametrize("owners", ["valid", "foreign", "alias", "twin", "default", "rshadow"])
+@pytest.mark.parametrize("edit", sorted(_FX268_BODY_EDITS))
+def test_checked_body_insertions_preserve_owners_on_namespace_refusal(owners, edit):
+    """A1. Checked body insertions refuse before an unsavable namespace replay.
+
+    The read-only package saves. A valid body still accepts the edit. Alias and
+    twin owners are the contributed ambiguous fixtures. The checked call must
+    raise before it changes model text, package bytes, or the held paragraph.
+    """
+    import rdocx
+
+    body = '<w:p><w:r><w:t>keep</w:t></w:r></w:p><w:p><w:r><w:t>drop</w:t></w:r></w:p>'
+    if owners == "alias":
+        body += _FX268_ALIAS
+    elif owners == "twin":
+        body += _FX268_TWIN + '<w:p><w:r><w:t>mid</w:t></w:r></w:p>' + _FX268_TWIN
+    elif owners == "default":
+        body += "<producer/>"
+    doc = _replace_document_body(
+        rdocx.Document(),
+        body,
+        root_default="urn:producer" if owners == "default" else None,
+    )
+    if owners == "foreign":
+        doc = _fx268_root_declaration(doc, "xmlns:z", "urn:unused-foreign")
+    elif owners == "rshadow":
+        doc = _fx268_root_declaration(
+            doc,
+            "xmlns:r",
+            "urn:shadow-relationships",
+        )
+    before = doc.to_bytes()
+    texts = [paragraph.text for paragraph in doc.paragraphs]
+    tables = len(doc.tables)
+    held = doc.paragraphs[0]
+    held_text = held.text
+    held_xml = held.xml
+    assert held_text == "keep"
+    assert ">keep<" in held_xml
+    assert before.startswith(b"PK")
+    if owners in ("valid", "foreign"):
+        _FX268_BODY_EDITS[edit](doc)
+        saved = doc.to_bytes()
+        assert saved != before
+        reopened = rdocx.Document.from_bytes(saved)
+        assert reopened.paragraphs[0].text == "keep"
+        return
+    try:
+        _FX268_BODY_EDITS[edit](doc)
+    except rdocx.RdocxError as error:
+        message = str(error)
+        assert "namespace owner" in message or "shadowed `" in message
+        assert doc.to_bytes() == before
+        assert [paragraph.text for paragraph in doc.paragraphs] == texts
+        assert len(doc.tables) == tables
+        assert held.text == held_text
+        assert held.xml == held_xml
+    else:
+        mutated = [paragraph.text for paragraph in doc.paragraphs]
+        try:
+            held_after = held.text
+        except rdocx.StaleElementError as stale:
+            held_after = f"stale: {stale}"
+        try:
+            doc.to_bytes()
+        except rdocx.RdocxError as error:
+            raise AssertionError(
+                f"{owners}/{edit} mutated before save failure: texts {texts!r} -> {mutated!r}, "
+                f"tables {tables} -> {len(doc.tables)}, held {held_text!r} -> {held_after!r}, "
+                f"save {error}"
+            ) from error
+        raise AssertionError(
+            f"{owners}/{edit} published bytes without an early namespace refusal: "
+            f"texts {texts!r} -> {mutated!r}"
+        )
+
+
+def test_checked_body_insertion_index_precedes_namespace_refusal():
+    import rdocx
+
+    doc = _replace_document_body(
+        rdocx.Document(),
+        '<w:p><w:r><w:t>keep</w:t></w:r></w:p><w:p><w:r><w:t>drop</w:t></w:r></w:p>' + _FX268_ALIAS,
+    )
+    before = doc.to_bytes()
+    held = doc.paragraphs[0].xml
+    with pytest.raises(IndexError):
+        doc.insert_paragraph(99, "\x01")
+    with pytest.raises(IndexError):
+        doc.insert_table(99, 1, 1)
+    with pytest.raises(rdocx.XmlError, match="paragraph text"):
+        doc.insert_paragraph(1, "\x01")
+    with pytest.raises(rdocx.XmlError, match="paragraph text"):
+        doc.add_paragraph("\x01")
+    assert doc.to_bytes() == before
+    assert doc.paragraphs[0].xml == held
+
+
+def _fx268_body_work():
+    from rdocx import _rdocx
+
+    return getattr(_rdocx, "_word_whole_body_work", None)
+
+
+def _fx268_review_document(paragraphs):
+    """Review-shaped body for the mechanism 1 qualified splice case.
+
+    Paragraphs carry several runs. Every tenth paragraph adds a picture and a
+    table. The package then has two sections, a header, comments, and the
+    tracked, control, spot, row, after, and end snippets.
+    """
+    import rdocx
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    w15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"'
+    document = rdocx.Document()
+    for i in range(paragraphs):
+        paragraph = document.add_paragraph()
+        for k in range(3):
+            paragraph.add_run(f"run {k} of paragraph {i} ").bold = False
+        if i % 10 == 9:
+            paragraph.add_run("").add_picture(_one_pixel_png(), "pixel.png")
+            table = document.add_table(2, 2)
+            table.cell(0, 0).text = f"cell of table {i // 10}"
+    document.section(0).header.add_paragraph("header")
+    for k in range(2):
+        at = document.find_content_index(document.add_paragraph(f"commented {k}"))
+        document.add_comment(
+            rdocx.RunRange(
+                start=rdocx.RunPosition(body_index=at, run_index=0),
+                end=rdocx.RunPosition(body_index=at, run_index=0),
+            ),
+            author="Reviewer",
+            text=f"comment {k}",
+        )
+    tail = "".join([
+        f'<w:p><w:r><w:t xml:space="preserve">tracked </w:t></w:r><w:ins {w} w:id="901" w:author="Editor" '
+        'w:date="2026-01-01T00:00:00Z"><w:r><w:t>inserted</w:t></w:r></w:ins></w:p>',
+        f'<w:sdt {w}><w:sdtPr><w:tag w:val="probe0"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r>'
+        '</w:p></w:sdtContent></w:sdt>',
+        '<w:p><w:r><w:t>spot</w:t></w:r></w:p>',
+        f'<w:sdt {w} {w15}><w:sdtPr><w:tag w:val="rows"/><w15:repeatingSection/></w:sdtPr><w:sdtContent><w:sdt>'
+        '<w:sdtPr><w15:repeatingSectionItem/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>row</w:t></w:r></w:p>'
+        '</w:sdtContent></w:sdt></w:sdtContent></w:sdt>',
+        '<w:p><w:r><w:t>after the rows</w:t></w:r></w:p>',
+        '<w:p><w:r><w:t>end</w:t></w:r></w:p>',
+    ])
+    source = io.BytesIO(document.to_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(output, "w") as result_zip:
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "word/document.xml":
+                text = data.decode()
+                at = text.rindex("<w:sectPr")
+                section = text[at:text.index("</w:sectPr>", at) + len("</w:sectPr>")]
+                text = text[:at] + f"<w:p><w:pPr>{section}</w:pPr></w:p>" + tail + text[at:]
+                data = text.encode()
+            result_zip.writestr(info, data)
+    return rdocx.Document.from_bytes(output.getvalue())
+
+
+@pytest.mark.parametrize("paragraphs", [20, 80])
+def test_word_owner_pieces_follow_edits_splices_and_related_owners(paragraphs):
+    """Mechanism 1 qualified splice on a review-shaped document.
+
+    Later owner-piece cases stay out of this group. The debug counter is
+    drained before each measured call. Its delta is inventory and whole-source
+    reads only. A release build without the counter keeps the functional checks.
+    """
+    import rdocx
+
+    work = _fx268_body_work()
+    doc = _fx268_review_document(paragraphs)
+    texts = [paragraph.text for paragraph in doc.paragraphs]
+    assert texts[-6:] == ["tracked inserted", "control", "spot", "row", "after the rows", "end"]
+    assert len(doc.sections) == 2
+    assert doc.section(0).header.paragraphs[0].text == "header"
+    assert len(doc.tables) >= 2
+    held = doc.paragraphs[0]
+    costs = []
+
+    def measured(call, label):
+        if work is None:
+            return call()
+        work()
+        result = call()
+        delta = work()
+        if delta != (0, 0):
+            costs.append((label, delta))
+        return result
+
+    for paragraph in doc.paragraphs[-10:] + doc.paragraphs[8:11]:
+        if paragraph.text in ("control", "row"):
+            continue
+        label = paragraph.text
+        measured(lambda paragraph=paragraph: paragraph.xml, f"paragraph.xml {label}")
+        for run in paragraph.runs:
+            measured(lambda run=run: run.xml, f"run.xml {label}")
+    for index, table in enumerate((doc.tables[0], doc.tables[-1])):
+        measured(lambda table=table: table.xml, f"table.xml {index}")
+        measured(lambda table=table: table.cell(0, 0).xml, f"cell.xml {index}")
+    spot = doc.find_content_index(doc.paragraphs[-4])
+    tables = len(doc.tables)
+    measured(lambda: doc.insert_paragraph(spot, "inserted"), "insert_paragraph")
+    with pytest.raises(rdocx.StaleElementError):
+        _ = held.text
+    assert measured(lambda: doc.remove_content(spot), "remove_content")
+    measured(lambda: doc.paragraphs[-2].insert_paragraph_before("before"), "insert_paragraph_before")
+    measured(lambda: doc.insert_paragraph(spot, "x"), "insert_paragraph_x")
+    assert measured(lambda: doc.remove_content_range(spot, spot + 2), "remove_content_range") == 2
+    appended = measured(lambda: doc.add_paragraph("appended"), "add_paragraph")
+    assert appended.text == "appended"
+    measured(lambda: doc.insert_table(spot, 2, 2), "insert_table")
+    measured(lambda: doc.add_table(1, 2), "add_table")
+    assert len(doc.tables) == tables + 2
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert [paragraph.text for paragraph in reopened.paragraphs] == texts[:-4] + [
+        "row", "before", "after the rows", "end", "appended"]
+    xml = reopened.part_xml("/word/document.xml")
+    assert "<w15:repeatingSectionItem/>" in xml and 'w:val="probe0"' in xml and 'w:id="901"' in xml
+    assert len(reopened.sections) == 2 and len(reopened.tables) == len(doc.tables)
+    assert not costs, costs
+
+
+@pytest.mark.parametrize("paragraphs", [20, 80])
+@pytest.mark.parametrize("kind", ["run", "cell", "header"])
+def test_word_owner_pieces_keep_changed_text_without_a_full_rebuild(paragraphs, kind):
+    """Owner-preserving text edits on a producer-retained document.
+
+    Setup stays outside the counter. A qualified changed publication then
+    keeps the whole-body inventory rebuild count at zero and reads at most
+    two owner pieces. Release builds
+    without the counter still check held, fresh, and reopened values.
+    A run edit keeps its held run. A cell or header edit retires that held
+    body run, matching the checked full path, and the fresh body run keeps
+    its previous text. The held body paragraph stays readable.
+    """
+    import rdocx
+    from rdocx import _rdocx
+
+    work = _fx268_body_work()
+    piece = getattr(_rdocx, "_word_piece_work", None)
+    if work is not None or piece is not None:
+        assert callable(work) and callable(piece)
+    doc = _fx268_review_document(paragraphs)
+    body = doc.paragraphs[1]
+    run = doc.paragraphs[0].runs[0]
+    cell = doc.tables[0].cell(0, 0)
+    header = doc.section(0).header.paragraphs[0]
+    body_text = body.text
+    run_text = run.text
+    cell_text = cell.text
+    header_text = header.text
+    if kind == "run":
+        call = lambda: setattr(run, "text", "changed run")
+        changed = "changed run"
+    elif kind == "cell":
+        call = lambda: setattr(cell, "text", "changed cell")
+        changed = "changed cell"
+    else:
+        call = lambda: setattr(header, "text", "changed header")
+        changed = "changed header"
+    if work is not None:
+        piece()
+        work()
+        call()
+        piece_reads = piece()
+        rebuilds, reads = work()
+    else:
+        call()
+        piece_reads = None
+        rebuilds, reads = None, None
+    if kind == "run":
+        assert run.text == changed
+        assert doc.paragraphs[0].runs[0].text == changed
+        assert body.text == body_text
+        assert header.text == header_text
+    elif kind == "cell":
+        assert cell.text == changed
+        assert doc.tables[0].cell(0, 0).text == changed
+        with pytest.raises(rdocx.StaleElementError):
+            _ = run.text
+        assert doc.paragraphs[0].runs[0].text == run_text
+        assert body.text == body_text
+        assert header.text == header_text
+    else:
+        assert header.text == changed
+        assert doc.section(0).header.paragraphs[0].text == changed
+        with pytest.raises(rdocx.StaleElementError):
+            _ = run.text
+        assert doc.paragraphs[0].runs[0].text == run_text
+        assert cell.text == cell_text
+        assert body.text == body_text
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert reopened.paragraphs[1].text == body.text
+    assert reopened.paragraphs[0].runs[0].text == doc.paragraphs[0].runs[0].text
+    assert reopened.tables[0].cell(0, 0).text == doc.tables[0].cell(0, 0).text
+    assert reopened.section(0).header.paragraphs[0].text == doc.section(0).header.paragraphs[0].text
+    assert reopened.section(0).header.paragraphs[0].text != reopened.paragraphs[1].text
+    if work is not None:
+        print(f"piece-count {kind} {paragraphs} {piece_reads} {(rebuilds, reads)}")
+        assert rebuilds == 0 and reads == 0, (kind, paragraphs, piece_reads, rebuilds, reads)
+        assert piece_reads <= 2, (kind, paragraphs, piece_reads, rebuilds, reads)
+
+
+@pytest.mark.parametrize("paragraphs", [20, 80])
+@pytest.mark.parametrize("splice", ["insert", "remove"])
+def test_word_owner_pieces_reuse_neighbors_after_a_body_splice(paragraphs, splice):
+    """A top insert or tail removal keeps neighboring owner pieces.
+
+    The document is N distinct one-run paragraphs, reopened before the
+    measured calls. The splice reads no body piece and no whole-body
+    inventory. The next owner-preserving run edit, on a run fetched after
+    the splice, reads at most one piece. A release build without the
+    counters still checks the texts and the reopened package.
+    """
+    import rdocx
+    from rdocx import _rdocx
+
+    piece = getattr(_rdocx, "_word_piece_work", None)
+    whole = getattr(_rdocx, "_word_whole_body_work", None)
+    measure = piece is not None or whole is not None
+    if measure:
+        assert callable(piece) and callable(whole)
+    document = rdocx.Document()
+    for index in range(paragraphs):
+        document.add_paragraph(f"p{index}")
+    document = rdocx.Document.from_bytes(document.to_bytes())
+    original = [f"p{index}" for index in range(paragraphs)]
+    assert [paragraph.text for paragraph in document.paragraphs] == original
+    if measure:
+        piece()
+        whole()
+    if splice == "insert":
+        document.insert_paragraph(0, "prefix")
+    else:
+        document.remove_content(document.find_content_index(document.paragraphs[-1]))
+    splice_cost = (piece(), whole()) if measure else None
+    if splice == "insert":
+        document.paragraphs[-1].runs[0].text = "edited"
+        expected = ["prefix", *original[:-1], "edited"]
+    else:
+        document.paragraphs[0].runs[0].text = "edited"
+        expected = ["edited", *original[1:-1]]
+    edit_cost = (piece(), whole()) if measure else None
+    assert [paragraph.text for paragraph in document.paragraphs] == expected
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert [paragraph.text for paragraph in reopened.paragraphs] == expected
+    if measure:
+        assert splice_cost == (0, (0, 0)), (splice, paragraphs, splice_cost, edit_cost)
+        edit_piece, edit_whole = edit_cost
+        assert edit_piece <= 1 and edit_whole == (0, 0), (
+            splice,
+            paragraphs,
+            splice_cost,
+            edit_cost,
+        )
+
+
+def _fx268_staging_work():
+    from rdocx import _rdocx
+
+    work = getattr(_rdocx, "_staging_work", None)
+    if work is None:
+        return None
+    assert callable(work)
+    sample = list(work())
+    assert len(sample) == 6
+    assert list(work()) == [0, 0, 0, 0, 0, 0]
+    return work
+
+
+def _fx268_opened_review(paragraphs):
+    """Opened review package with a font and a numbering part.
+
+    The review body is built here. Seed font and numbering are applied
+    outside the measured window.
+    """
+    import rdocx
+
+    document = _fx268_review_document(paragraphs)
+    document.set_font(rdocx.FontDefinition("Seed"))
+    document.add_numbering_definition([rdocx.ListLevel(text="%1.")])
+    return rdocx.Document.from_bytes(document.to_bytes())
+
+
+def _fx268_take_staging(work):
+    if work is None:
+        return None
+    return list(work())
+
+
+def _fx268_reopen_work():
+    from rdocx import _rdocx
+
+    work = getattr(_rdocx, "_reopen_work", None)
+    if work is None:
+        return None
+    assert callable(work)
+    sample = list(work())
+    assert len(sample) == 3
+    assert list(work()) == [0, 0, 0]
+    return work
+
+
+def test_header_story_text_reopen_counts_the_changed_header_part():
+    """Header story text goes through the checked staged reopen.
+
+    `Paragraph.text` does not. `Document.set_story_text` does. Each document
+    is already opened from bytes. Both 20 and 80 paragraphs run here. Two
+    changed warmups and two later edits are the measured public calls. Each
+    warm sample has zero ZIP writes and main parses, positive identifier
+    bytes, and zero in the first four staging slots. Matching identifier
+    bytes stay within 16 across the two sizes. Child slots are compared
+    across those sizes. The held header snapshot keeps its old text and XML.
+    The held body paragraph and its regular run are stale. A fresh body
+    paragraph, comments, and controls stay put. Save and reopen checks stay
+    outside the counter window. Release builds without the counters still
+    check both sizes. This does not pass a package read limit.
+    """
+    import rdocx
+
+    reopen = _fx268_reopen_work()
+    staging = _fx268_staging_work()
+    recorded = {}
+    for paragraphs in (20, 80):
+        document = _fx268_review_document(paragraphs)
+        body = document.paragraphs[1]
+        body_text = body.text
+        run = document.paragraphs[0].runs[0]
+        comments = len(document.comments)
+        controls = [control.tag for control in document.content_controls()]
+        sections = len(document.sections)
+        owned = next(
+            item
+            for item in document.story_items
+            if item.story.kind == "header" and item.kind == "paragraph" and item.text == "header"
+        )
+        owned_text = owned.text
+        owned_xml = owned.xml
+        texts = ("header A1", "header B2", "header C3", "header D4")
+        reopen_samples = []
+        staging_samples = []
+        for text in texts:
+            item = next(
+                item
+                for item in document.story_items
+                if item.story.kind == "header" and item.kind == "paragraph"
+            )
+            if reopen is not None:
+                reopen()
+            if staging is not None:
+                staging()
+            document.set_story_text(item, text)
+            reopen_samples.append(list(reopen()) if reopen is not None else None)
+            staging_samples.append(list(staging()) if staging is not None else None)
+        assert owned.text == owned_text == "header"
+        assert owned.xml == owned_xml
+        fresh = next(
+            item
+            for item in document.story_items
+            if item.story.kind == "header" and item.kind == "paragraph"
+        )
+        assert fresh.text == "header D4"
+        with pytest.raises(rdocx.StaleElementError):
+            _ = body.text
+        with pytest.raises(rdocx.StaleElementError):
+            _ = run.text
+        assert document.paragraphs[1].text == body_text
+        assert len(document.comments) == comments
+        assert [control.tag for control in document.content_controls()] == controls
+        assert len(document.sections) == sections
+        saved = document.to_bytes()
+        reopened = rdocx.Document.from_bytes(saved)
+        assert reopened.section(0).header.paragraphs[0].text == "header D4"
+        assert reopened.paragraphs[1].text == body_text
+        assert len(reopened.comments) == comments
+        assert [control.tag for control in reopened.content_controls()] == controls
+        assert len(reopened.sections) == sections
+        recorded[paragraphs] = (reopen_samples, staging_samples)
+        print({"paragraphs": paragraphs, "reopen": reopen_samples, "staging": staging_samples})
+    if reopen is None:
+        return
+    small_reopen, small_staging = recorded[20]
+    large_reopen, large_staging = recorded[80]
+    for ordinal, (left, right, left_stage, right_stage) in enumerate(
+        zip(small_reopen, large_reopen, small_staging, large_staging)
+    ):
+        if ordinal < 2:
+            continue
+        assert left[0] == 0 and left[1] == 0, (ordinal, left, right)
+        assert right[0] == 0 and right[1] == 0, (ordinal, left, right)
+        assert left[2] > 0 and right[2] > 0, (ordinal, left, right)
+        assert abs(left[2] - right[2]) <= 16, (ordinal, left, right)
+        assert left_stage[:4] == [0, 0, 0, 0], (ordinal, left_stage, right_stage)
+        assert right_stage[:4] == [0, 0, 0, 0], (ordinal, left_stage, right_stage)
+        assert left_stage[4:] == right_stage[4:], (ordinal, left_stage, right_stage)
+
+
+@pytest.mark.parametrize("paragraphs", [20, 80])
+def test_unchanged_main_staging_font_and_numbering(paragraphs):
+    """Font and numbering edits on one opened review document.
+
+    Two changed font publications warm the opened main part. Two later public
+    edits, one numbering definition and one font, are the warm samples. The
+    first four staging slots of those warm samples are zero. The last two
+    slots are child-staging debt. Forms, modern fields, and mail merge are
+    not exercised. Save and reopen checks stay outside the counter window.
+    """
+    import rdocx
+
+    work = _fx268_staging_work()
+    document = _fx268_opened_review(paragraphs)
+    _fx268_take_staging(work)
+    warmups = []
+    for name in ("Warmup A", "Warmup B"):
+        _fx268_take_staging(work)
+        document.set_font(rdocx.FontDefinition(name))
+        warmups.append(_fx268_take_staging(work))
+    samples = []
+    _fx268_take_staging(work)
+    document.add_numbering_definition([rdocx.ListLevel(text="%1.")])
+    samples.append(_fx268_take_staging(work))
+    _fx268_take_staging(work)
+    document.set_font(rdocx.FontDefinition("Warm C"))
+    samples.append(_fx268_take_staging(work))
+    saved = document.to_bytes()
+    reopened = rdocx.Document.from_bytes(saved)
+    assert any(font.name == "Warm C" for font in reopened.fonts)
+    assert "w:abstractNum" in reopened.part_xml("/word/numbering.xml")
+    assert any("run 0 of paragraph 0" in paragraph.text for paragraph in reopened.paragraphs)
+    assert any(control.tag == "probe0" for control in reopened.content_controls())
+    assert reopened.section(0).header.paragraphs[0].text == "header"
+    assert len(reopened.comments) >= 2
+    assert len(reopened.sections) >= 2
+    _fx268_take_staging(work)
+    print({"paragraphs": paragraphs, "warmups": warmups, "warm": samples})
+    if work is None:
+        return
+    for sample in samples:
+        assert sample[:4] == [0, 0, 0, 0], (paragraphs, warmups, samples)
+        assert len(sample) == 6
+
+
+@pytest.mark.parametrize("paragraphs", [20, 80])
+def test_repeated_add_run_does_not_reread_every_changed_piece(paragraphs):
+    """Four body paragraphs each gain one run.
+
+    The next edit must not reread every previously changed piece. Held runs
+    from before the first add_run raise StaleElementError, the same result
+    as the mechanism 3 extension 048b9142. An unchanged held paragraph stays
+    live, and the XML string taken from that unchanged paragraph stays
+    byte-identical. A story item taken from the first changed paragraph
+    keeps the text and XML it stored. The new owner includes the added
+    text. Fresh paragraphs and a reopened package retain the added text.
+    A release build without the counters still checks those values.
+    """
+    import rdocx
+    from rdocx import _rdocx
+
+    work = _fx268_body_work()
+    piece = getattr(_rdocx, "_word_piece_work", None)
+    if work is not None or piece is not None:
+        assert callable(work) and callable(piece)
+    document = _fx268_review_document(paragraphs)
+    chosen = document.paragraphs[:4]
+    assert len(chosen) == 4
+    held = [paragraph.runs[0] for paragraph in chosen]
+    before = [paragraph.text for paragraph in chosen]
+    unchanged = document.paragraphs[4]
+    unchanged_text = unchanged.text
+    unchanged_xml = unchanged.xml
+    owned_snapshot = next(
+        item
+        for item in document.story_items
+        if item.story.kind == "body"
+        and item.kind == "paragraph"
+        and item.text == before[0]
+    )
+    owned_text = owned_snapshot.text
+    owned_xml = owned_snapshot.xml
+    piece_reads = []
+    whole = []
+    for index, paragraph in enumerate(chosen):
+        if piece is not None:
+            piece()
+            work()
+        added = paragraph.add_run(f" extra {index}")
+        assert added.text == f" extra {index}"
+        if piece is not None:
+            piece_reads.append(piece())
+            whole.append(work())
+    fresh = document.paragraphs[:4]
+    for index, (paragraph, old) in enumerate(zip(fresh, before)):
+        assert paragraph.runs[-1].text == f" extra {index}"
+        assert old in paragraph.text
+    for run in held:
+        with pytest.raises(rdocx.StaleElementError):
+            run.text
+    assert unchanged.text == unchanged_text
+    assert unchanged.xml == unchanged_xml
+    assert owned_snapshot.text == owned_text == before[0]
+    assert owned_snapshot.xml == owned_xml
+    assert " extra 0" not in owned_snapshot.text
+    assert " extra 0" in document.paragraphs[0].text
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    for index, old in enumerate(before):
+        paragraph = reopened.paragraphs[index]
+        assert paragraph.runs[-1].text == f" extra {index}"
+        assert old in paragraph.text
+    print({"paragraphs": paragraphs, "piece": piece_reads, "whole": whole})
+    if piece is None:
+        return
+    assert all(rebuilds == 0 and reads == 0 for rebuilds, reads in whole), whole
+    assert piece_reads[-1] <= 2, (paragraphs, piece_reads, whole)
+
+
+def test_fx268_body_locations_keep_physical_slots():
+    """Indexed body edits keep physical slots at 20 and 80 paragraphs.
+
+    pop_content at the end index resolves the body story and then refuses.
+    The first measured address delta can be zero when construction already
+    filled the cache. A repeated refusal adds no address scans. Reading the
+    debug counter does not clear it. Functional checks do not require it.
+    """
+    import rdocx
+    from rdocx import _rdocx
+
+    scans = getattr(_rdocx, "_main_body_block_scans", None)
+    records = []
+    for paragraphs in (20, 80):
+        document = rdocx.Document()
+        for index in range(paragraphs):
+            document.add_paragraph("same" if index < 2 else f"row {index}")
+        document.add_table(1, 1)
+        assert document.paragraphs[0].text == document.paragraphs[1].text == "same"
+        body = next(story for story in document.stories if story.kind == "body")
+        document.insert_content_control(
+            rdocx.ContentLocation.end(body), "block", "rich_text", tag="nest"
+        )
+        assert any(control.tag == "nest" for control in document.content_controls())
+        direct = [
+            item.direct_body_index
+            for item in document.story_items
+            if item.direct_body_index is not None
+        ]
+        end_index = max(direct) + 1
+        held = document.paragraphs[0]
+        table = document.tables[0]
+        before = document.to_bytes()
+        with pytest.raises(IndexError):
+            document.pop_content(paragraphs + 50)
+        assert document.to_bytes() == before
+        assert held.text == "same"
+        assert table.cell(0, 0).text == ""
+
+        before = document.to_bytes()
+        mark = scans() if callable(scans) else None
+        with pytest.raises(IndexError):
+            document.pop_content(end_index)
+        first_measured = None if mark is None else scans() - mark
+        assert document.to_bytes() == before
+        assert held.text == "same"
+        assert table.cell(0, 0).text == ""
+        mark = scans() if callable(scans) else None
+        with pytest.raises(IndexError):
+            document.pop_content(end_index)
+        repeat = None if mark is None else scans() - mark
+        assert document.to_bytes() == before
+        assert held.text == "same"
+        assert table.cell(0, 0).text == ""
+
+        imported = rdocx.Document()
+        imported.add_paragraph("imported")
+        document.insert_document(imported, at=end_index)
+        assert document.paragraphs[-1].text == "imported"
+        second = document.paragraphs[1]
+        fragment = document.pop_content(1)
+        assert fragment.kind == "paragraph"
+        with pytest.raises(rdocx.StaleElementError):
+            _ = second.text
+        document.insert_content(1, fragment)
+        restored = document.paragraphs[1]
+        assert restored.text == "same"
+        assert document.paragraphs[0].text == "same"
+        document.clone_content(restored, 0)
+        with pytest.raises(rdocx.StaleElementError):
+            _ = restored.text
+        table = document.tables[0]
+        document.move_content(table, 0)
+        with pytest.raises(rdocx.StaleElementError):
+            _ = table.cell(0, 0).text
+        fresh = rdocx.Document.from_bytes(document.to_bytes())
+        same = [paragraph for paragraph in fresh.paragraphs if paragraph.text == "same"]
+        assert len(same) == 3
+        assert fresh.find_content_index(fresh.tables[0]) == 0
+        assert [fresh.find_content_index(paragraph) for paragraph in same[:3]] == [1, 2, 3]
+        assert fresh.paragraphs[-1].text == "imported"
+        assert fresh.tables[0].cell(0, 0).text == ""
+        assert any(control.tag == "nest" for control in fresh.content_controls())
+        records.append(
+            {
+                "paragraphs": paragraphs,
+                "first_measured": first_measured,
+                "repeat": repeat,
+            }
+        )
+
+    if callable(scans):
+        seen = scans()
+        assert scans() == seen
+        assert [record["repeat"] for record in records] == [0, 0]
+    print(records)
+
+
+_FX268_A10_EDITS = (
+    "Table.add_row",
+    "Cell.text",
+    "Run.text",
+    "Document.add_bullet_list_item",
+    "Document.insert_section",
+    "Document.insert_html",
+    "Document.add_footnote",
+    "Document.import_fragment",
+    "SectionHandle.set_page_border",
+    "Paragraph.replace_text",
+    "Cell.replace_text",
+    "Document.replace_text_at",
+    "Document.add_picture",
+    "Cell.add_picture",
+)
+
+# Structural publishers invalidate the held header paragraph. Text and row
+# edits do not. The product handle policy stays as it is.
+_FX268_A10_STRUCTURAL = frozenset(
+    {
+        "Document.add_bullet_list_item",
+        "Document.insert_section",
+        "Document.insert_html",
+        "Document.import_fragment",
+        "SectionHandle.set_page_border",
+        "Paragraph.replace_text",
+        "Cell.replace_text",
+        "Document.replace_text_at",
+        "Document.add_picture",
+        "Cell.add_picture",
+    }
+)
+
+# Immutable opened-review package bytes, one entry per paragraph count.
+_FX268_A10_SEED_PACKAGES = {}
+
+
+def _fx268_a10_seed_package(paragraphs):
+    """Build the rich review package once for this process and paragraph count."""
+    package = _FX268_A10_SEED_PACKAGES.get(paragraphs)
+    if package is None:
+        package = _fx268_opened_review(paragraphs).to_bytes()
+        _FX268_A10_SEED_PACKAGES[paragraphs] = package
+    return package
+
+
+def _fx268_a10_open(paragraphs):
+    import rdocx
+
+    return rdocx.Document.from_bytes(_fx268_a10_seed_package(paragraphs))
+
+
+_FX268_A10_PRODUCER_PACKAGES = {}
+
+
+def _fx268_producer_package(paragraphs, root_prefix=None, run_sibling=None):
+    """Producer bytes from the paragraph-count seed. Built once per prefix."""
+    key = (paragraphs, root_prefix, run_sibling)
+    package = _FX268_A10_PRODUCER_PACKAGES.get(key)
+    if package is not None:
+        return package
+    source = io.BytesIO(_fx268_a10_seed_package(paragraphs))
+    written = io.BytesIO()
+    saw = False
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(written, "w") as copy:
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "word/document.xml":
+                body = data.replace(b"<w:body>", b"<w:body>\n", 1)
+                assert body != data
+                data = body
+                if run_sibling:
+                    data = data.replace(b"</w:r>", run_sibling + b"</w:r>", 1)
+                if root_prefix:
+                    namespace = b'="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+                    prefix = root_prefix.encode()
+                    rewritten = data.replace(
+                        b"<w:document ",
+                        b"<%s:document xmlns:%s%s " % (prefix, prefix, namespace),
+                        1,
+                    )
+                    rewritten = rewritten.replace(
+                        b"</w:document>",
+                        b"</%s:document>" % prefix,
+                        1,
+                    )
+                    assert rewritten != data
+                    data = rewritten
+                saw = True
+            copy.writestr(info, data)
+    assert saw
+    package = written.getvalue()
+    _FX268_A10_PRODUCER_PACKAGES[key] = package
+    return package
+
+
+def _fx268_producer_opened(paragraphs, root_prefix=None, run_sibling=None):
+    """Opened review package whose main part keeps a producer body break.
+
+    `root_prefix` rebinds the Word namespace on the document element only.
+    The header, tracked revision, controls, pictures, and numbering stay.
+    Each call still opens a fresh document from the cached package bytes.
+    """
+    import rdocx
+
+    return rdocx.Document.from_bytes(_fx268_producer_package(paragraphs, root_prefix, run_sibling))
+
+
+def _fx268_a10_call(edit, document, k):
+    """Bind one public edit. Lookup happens here, before the counter window."""
+    import rdocx
+
+    if edit == "Table.add_row":
+        table = document.tables[-1]
+        return table.add_row
+    if edit == "Cell.text":
+        cell = document.tables[-1].cell(0, 1)
+        text = f"cell {k}"
+        return lambda: setattr(cell, "text", text)
+    if edit == "Run.text":
+        run = [paragraph for paragraph in document.paragraphs if paragraph.text.startswith("end")][-1].runs[0]
+        text = f"end {k}"
+        return lambda: setattr(run, "text", text)
+    if edit == "Document.add_bullet_list_item":
+        text = f"item {k}"
+        return lambda: document.add_bullet_list_item(text)
+    if edit == "Document.insert_section":
+        index = len(document.sections)
+        return lambda: document.insert_section(index)
+    if edit == "Document.insert_html":
+        anchor = [paragraph for paragraph in document.paragraphs if paragraph.text == "spot"][-1]
+        html = f"<p>inserted {k}</p>"
+        return lambda: document.insert_html(html, after=anchor)
+    if edit == "Document.add_footnote":
+        paragraph = [item for item in document.paragraphs if item.text == "spot"][-1]
+        note = f"note {k}"
+        return lambda: document.add_footnote(paragraph, note)
+    if edit == "Document.import_fragment":
+        source = rdocx.Document()
+        source.add_paragraph(f"imported {k}")
+        source.add_paragraph("second")
+        story = next(item for item in source.stories if item.kind == "body")
+        fragment = rdocx.DocumentFragment.from_range(
+            source,
+            rdocx.ContentLocation(story, "paragraph", [0]),
+            rdocx.ContentLocation(story, "paragraph", [1]),
+        )
+        body = next(item for item in document.stories if item.kind == "body")
+        destination = rdocx.ContentLocation.end(body)
+        source_main_xml = len(source.part_xml("/word/document.xml"))
+
+        def call():
+            return document.import_fragment(destination, fragment)
+
+        call.source_main_xml = source_main_xml
+        return call
+    if edit == "SectionHandle.set_page_border":
+        section = document.section(0)
+        edge = ("top", "left", "bottom", "right")[k]
+        return lambda: section.set_page_border(edge)
+    if edit in ("Paragraph.replace_text", "Document.replace_text_at"):
+        old, new = ("spot", "omega") if k % 2 == 0 else ("omega", "spot")
+        paragraph = next(item for item in document.paragraphs if item.text == old)
+        if edit == "Paragraph.replace_text":
+            def replace():
+                assert paragraph.replace_text(old, new) == 1
+            return replace
+        index = document.find_content_index(paragraph)
+        item = next(item for item in document.story_items
+                    if item.story.kind == "body" and item.kind == "paragraph"
+                    and item.direct_body_index == index)
+        def replace():
+            assert document.replace_text_at(item, old, new) == 1
+        return replace
+    if edit == "Cell.replace_text":
+        cell = document.tables[-1].cell(0, 0)
+        old, new = ("cell of table", "omega table") if k % 2 == 0 else ("omega table", "cell of table")
+        def replace():
+            assert cell.replace_text(old, new) == 1
+        return replace
+    if edit in ("Document.add_picture", "Cell.add_picture"):
+        target = document if edit == "Document.add_picture" else document.tables[-1].cell(0, 0)
+        data = _one_pixel_png(bytes([k, k, k]))
+        return lambda: target.add_picture(data, f"added{k}.png", 12700, 12700)
+    raise AssertionError(edit)
+
+
+def _fx268_a10_context(document):
+    main = document.part_xml("/word/document.xml")
+    return {
+        "header": document.section(0).header.paragraphs[0].text,
+        "controls": [control.tag for control in document.content_controls()],
+        "comments": len(document.comments),
+        "pictures": len(document.pictures()),
+        "numbering": "w:abstractNum" in document.part_xml("/word/numbering.xml"),
+        "tracked": 'w:id="901"' in main,
+        "field": ("fldChar" in main) or ("fldSimple" in main) or ("instrText" in main),
+        "cell_text": document.tables[-1].cell(0, 0).text,
+        "rows": len(document.tables[-1].rows),
+        "sections": len(document.sections),
+        "texts": [paragraph.text for paragraph in document.paragraphs],
+    }
+
+
+def _fx268_a10_kept(document, header, before, edit):
+    import rdocx
+
+    if edit in _FX268_A10_STRUCTURAL:
+        with pytest.raises(rdocx.StaleElementError, match=re.escape(edit)):
+            _ = header.text
+        fresh = document.section(0).header.paragraphs[0].text
+        assert fresh == before["header"] == "header"
+    else:
+        assert header.text == before["header"] == "header"
+    assert [control.tag for control in document.content_controls()] == before["controls"]
+    assert "probe0" in before["controls"]
+    assert len(document.comments) == before["comments"]
+    assert len(document.pictures()) == before["pictures"] + (4 if edit in ("Document.add_picture", "Cell.add_picture") else 0)
+    assert before["pictures"] > 0
+    main = document.part_xml("/word/document.xml")
+    assert ('w:id="901"' in main) is before["tracked"]
+    assert before["tracked"]
+    field_now = ("fldChar" in main) or ("fldSimple" in main) or ("instrText" in main)
+    assert field_now is before["field"]
+    assert ("w:abstractNum" in document.part_xml("/word/numbering.xml")) is before["numbering"]
+    assert before["numbering"]
+
+
+def _fx268_a10_result(edit, document, before):
+    texts = [paragraph.text for paragraph in document.paragraphs]
+    if edit == "Table.add_row":
+        assert len(document.tables[-1].rows) == before["rows"] + 4
+    elif edit == "Cell.text":
+        assert document.tables[-1].cell(0, 1).text == "cell 3"
+    elif edit == "Run.text":
+        assert "end 3" in texts
+    elif edit == "Document.add_bullet_list_item":
+        assert [text for text in texts if text.startswith("item ")] == [
+            "item 0",
+            "item 1",
+            "item 2",
+            "item 3",
+        ]
+    elif edit == "Document.insert_section":
+        assert len(document.sections) == before["sections"] + 4
+    elif edit == "Document.insert_html":
+        # Each insert_html uses the same anchor, so the newest paragraph
+        # lands immediately after that anchor and the earlier inserts move down.
+        assert [text for text in texts if text.startswith("inserted ")] == [
+            "inserted 3",
+            "inserted 2",
+            "inserted 1",
+            "inserted 0",
+        ]
+    elif edit == "Document.add_footnote":
+        notes = document.part_xml("/word/footnotes.xml")
+        for k in range(4):
+            assert f"note {k}" in notes
+        assert "spot" in texts
+    elif edit == "Document.import_fragment":
+        assert [text for text in texts if text.startswith("imported ")] == [
+            "imported 0",
+            "imported 1",
+            "imported 2",
+            "imported 3",
+        ]
+    elif edit in ("Paragraph.replace_text", "Document.replace_text_at"):
+        assert "spot" in texts
+        assert "omega" not in texts
+    elif edit == "Cell.replace_text":
+        assert document.tables[-1].cell(0, 0).text == before["cell_text"]
+    elif edit in ("Document.add_picture", "Cell.add_picture"):
+        assert len(document.pictures()) == before["pictures"] + 4
+        actual = [document.image_data(picture.relationship_id) for picture in document.pictures()]
+        assert actual[-4:] == [_one_pixel_png(bytes([k, k, k])) for k in range(4)]
+    elif edit == "SectionHandle.set_page_border":
+        main = document.part_xml("/word/document.xml")
+        assert "pgBorders" in main
+        for edge in ("top", "left", "bottom", "right"):
+            assert f"w:{edge}" in main
+    else:
+        raise AssertionError(edit)
+    assert any(text.startswith("run 0 of paragraph 0") for text in texts)
+    assert "control" in texts
+
+
+@pytest.mark.parametrize("edit", _FX268_A10_EDITS)
+def test_staging_writes_and_reads_only_the_main_part_blocks_an_edit_changes(edit):
+    """A10. Two changed warmups, then two distinct public edits at 20 and 80.
+
+    The opened review package keeps pictures, numbering, the header, the
+    tracked revision, and the content controls. Lookup is outside the counter
+    window. Debug builds compare the six staging slots and the three reopen
+    slots. Release builds without those hooks still check the edit, the
+    reopened package, and the kept owners.
+    """
+    import rdocx
+
+    work = _fx268_staging_work()
+    reopen = _fx268_reopen_work()
+    if (work is None) != (reopen is None):
+        raise AssertionError("staging and reopen counters are one debug pair")
+    counts = []
+    reopens = []
+    for paragraphs in (20, 80):
+        if edit in ("Document.import_fragment", "Paragraph.replace_text", "Cell.replace_text",
+                    "Document.replace_text_at", "Document.add_picture", "Cell.add_picture"):
+            document = _fx268_producer_opened(paragraphs)
+        else:
+            document = _fx268_a10_open(paragraphs)
+        before = _fx268_a10_context(document)
+        main_xml = len(document.part_xml("/word/document.xml"))
+        header = document.section(0).header.paragraphs[0]
+        setup_sources = []
+        for k in (0, 1):
+            call = _fx268_a10_call(edit, document, k)
+            setup_sources.append(getattr(call, "source_main_xml", None))
+            call()
+        sample = []
+        opened = []
+        measured_sources = []
+        for k in (2, 3):
+            call = _fx268_a10_call(edit, document, k)
+            measured_sources.append(getattr(call, "source_main_xml", None))
+            if work is not None:
+                work()
+                reopen()
+            call()
+            if work is not None:
+                staged = list(work())
+                opened_work = list(reopen())
+                assert len(staged) == 6
+                assert len(opened_work) == 3
+                sample.append(staged)
+                opened.append(opened_work)
+        print(
+            {
+                "edit": edit,
+                "paragraphs": paragraphs,
+                "main_xml": main_xml,
+                "setup_fragment_source_main_xml": setup_sources,
+                "fragment_source_main_xml": measured_sources,
+                "staging": sample,
+                "reopen": opened,
+            }
+        )
+        _fx268_a10_kept(document, header, before, edit)
+        _fx268_a10_result(edit, document, before)
+        saved = document.to_bytes()
+        reopened = rdocx.Document.from_bytes(saved)
+        assert reopened.to_bytes() == saved
+        _fx268_a10_result(edit, reopened, before)
+        assert reopened.section(0).header.paragraphs[0].text == "header"
+        assert [control.tag for control in reopened.content_controls()] == before["controls"]
+        counts.append(sample)
+        reopens.append(opened)
+    if work is None:
+        return
+    imported = edit == "Document.import_fragment"
+    assert counts[0] == counts[1], (edit, counts)
+    for sample in counts[0]:
+        if imported:
+            continue
+        assert sample[:4] == [0, 0, 0, 0], (edit, counts)
+    for left, right in zip(reopens[0], reopens[1]):
+        assert left[0] == right[0] == 0, (edit, reopens)
+        assert left[1] == right[1] == (1 if imported else 0), (edit, reopens)
+        assert abs(left[2] - right[2]) <= 16, (edit, reopens)
+
+
+def test_a_fragment_imports_into_a_main_part_whose_root_has_another_word_prefix():
+    """A producer may bind the Word namespace to another root prefix.
+
+    Three fragment imports append their first paragraphs. Header, controls,
+    pictures, and numbering stay. Save and reopen match the live document.
+    """
+    import rdocx
+
+    document = _fx268_producer_opened(20, "x")
+    before = _fx268_a10_context(document)
+    main_xml = len(document.part_xml("/word/document.xml"))
+    header = document.section(0).header.paragraphs[0]
+    texts = list(before["texts"])
+    sources = []
+    for k in range(3):
+        call = _fx268_a10_call("Document.import_fragment", document, k)
+        sources.append(call.source_main_xml)
+        call()
+    live_texts = [paragraph.text for paragraph in document.paragraphs]
+    print(
+        {
+            "edit": "alternate-root",
+            "paragraphs": 20,
+            "main_xml": main_xml,
+            "fragment_source_main_xml": sources,
+            "texts": live_texts,
+        }
+    )
+    assert live_texts == texts + [
+        "imported 0",
+        "imported 1",
+        "imported 2",
+    ]
+    _fx268_a10_kept(document, header, before, "Document.import_fragment")
+    saved = document.to_bytes()
+    reopened = rdocx.Document.from_bytes(saved)
+    assert reopened.to_bytes() == saved
+    assert [paragraph.text for paragraph in reopened.paragraphs] == [
+        paragraph.text for paragraph in document.paragraphs
+    ]
+    assert reopened.section(0).header.paragraphs[0].text == "header"
+    assert [control.tag for control in reopened.content_controls()] == before["controls"]
+
+
+
+def test_story_pictures_preserve_refusal_on_an_unreadable_unaffected_attribute():
+    import rdocx
+
+    for cell in (False, True):
+        document = _fx268_producer_opened(
+            20, run_sibling=b'<x:foo xmlns:x="urn:x" x:a="&bogus;"/>'
+        )
+        held = document.section(0).header.paragraphs[0]
+        texts = [paragraph.text for paragraph in document.paragraphs]
+        for k in range(3):
+            target = document.tables[-1].cell(0, 0) if cell else document
+            with pytest.raises(rdocx.RdocxError, match="bogus"):
+                target.add_picture(_one_pixel_png(bytes([k, k, k])), f"bad{k}.png", 12700, 12700)
+            assert held.text == "header"
+            assert [paragraph.text for paragraph in document.paragraphs] == texts
+
+
+def test_body_block_reuse_preserves_forms_settings_and_live_owners():
+    """A3: cached body edits keep physical form state and live owner policy."""
+    import rdocx
+
+    document, rules, assignments = _source_built_dense_form()
+    assert document.fill_form(rules, assignments) == (1, 1, 1, 1, 1, 1)
+    source = rdocx.MailMergePackageSource.embedded(["Person"], [["MergeAda"]])
+    document.set_mail_merge_package(rdocx.MailMergePackageOptions(source))
+    document = rdocx.Document.from_bytes(document.to_bytes())
+    anchor = next(p for p in document.paragraphs if p.text == "Anchor")
+    run = anchor.runs[0]
+    snapshots = document.content_controls()
+    fields = document.legacy_form_fields()
+    custom = {name: document.part_xml(name) for name in document.part_names()
+              if name.startswith("/customXml/")}
+    for text in ("Anchor one", "Anchor two", "Anchor three"):
+        run.text = text
+        assert anchor.text == run.text == text
+        assert [(c.tag, c.text) for c in document.content_controls()] == [
+            (c.tag, c.text) for c in snapshots
+        ]
+        assert [(f.name, f.value, f.default_value, f.source_part, f.ordinal)
+                for f in document.legacy_form_fields()] == [
+            (f.name, f.value, f.default_value, f.source_part, f.ordinal) for f in fields
+        ]
+        assert document.validate_form(rules) == ()
+        assert document.prepare_mail_merge_data().records == ({"Person": "MergeAda"},)
+    document.insert_paragraph(0, "new first physical owner")
+    with pytest.raises(rdocx.StaleElementError):
+        _ = anchor.text
+    fresh = next(p for p in document.paragraphs if p.text == "Anchor three")
+    assert fresh.text == "Anchor three"
+    assert {name: document.part_xml(name) for name in custom} == custom
+    assert fields[0].default_value == "keep" and fields[0].value == "typed"
+    saved = document.to_bytes()
+    reopened = rdocx.Document.from_bytes(saved)
+    assert reopened.to_bytes() == saved
+    assert reopened.paragraphs[0].text == "new first physical owner"
+    assert reopened.validate_form(rules) == ()
+    assert reopened.legacy_form_fields()[0].default_value == "keep"
+    assert reopened.legacy_form_fields()[0].value == "typed"
+    assert {name: reopened.part_xml(name) for name in custom} == custom
+    assert reopened.prepare_mail_merge_data().records == ({"Person": "MergeAda"},)
+
+
+def test_unchanged_main_staging_keeps_forms_and_settings_authoritative():
+    """A5: related-only changes cannot replace form or settings authority."""
+    import rdocx
+
+    document, rules, assignments = _source_built_dense_form()
+    document.fill_form(rules, assignments)
+    source = rdocx.MailMergePackageSource.embedded(["Person"], [["MergeAda"]])
+    document.set_mail_merge_package(rdocx.MailMergePackageOptions(source))
+    document = rdocx.Document.from_bytes(document.to_bytes())
+    main = document.part_xml("/word/document.xml")
+    custom = {name: document.part_xml(name) for name in document.part_names()
+              if name.startswith("/customXml/")}
+    held = next(p for p in document.paragraphs if p.text == "Anchor")
+    run = held.runs[0]
+    for name in ("Forms warm one", "Forms warm two", "Forms measured"):
+        held = next(p for p in document.paragraphs if p.text == "Anchor")
+        run = held.runs[0]
+        document.set_font(rdocx.FontDefinition(name))
+        for owner in (held, run):
+            with pytest.raises(rdocx.StaleElementError, match="Document.set_font"):
+                _ = owner.text
+        assert next(p for p in document.paragraphs if p.text == "Anchor").text == "Anchor"
+        assert document.part_xml("/word/document.xml") == main
+        assert document.validate_form(rules) == ()
+    document.add_numbering_definition([rdocx.ListLevel(text="%1.")])
+    assert next(p for p in document.paragraphs if p.text == "Anchor").text == "Anchor"
+    assert document.part_xml("/word/document.xml") == main
+    assert {name: document.part_xml(name) for name in custom} == custom
+    assert document.prepare_mail_merge_data().records == ({"Person": "MergeAda"},)
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.part_xml("/word/document.xml") == main
+    assert reopened.validate_form(rules) == ()
+    assert reopened.legacy_form_fields()[0].value == "typed"
+    assert reopened.legacy_form_fields()[0].default_value == "keep"
+    assert any(font.name == "Forms measured" for font in reopened.fonts)
+    assert reopened.prepare_mail_merge_data().records == ({"Person": "MergeAda"},)
+    assert {name: reopened.part_xml(name) for name in custom} == custom
+    assert reopened.reset_form(rules) == (1, 1, 1, 1, 1, 1)
+    assert reopened.legacy_form_fields()[0].value == "keep"
+    assert reopened.legacy_form_fields()[0].default_value == "keep"
+    again = rdocx.Document.from_bytes(reopened.to_bytes())
+    assert again.legacy_form_fields()[0].value == "keep"
+    assert again.legacy_form_fields()[0].default_value == "keep"
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_word_piece_shared_header_identity_uses_opc_part_names(alias):
+    import xml.etree.ElementTree as ET
+    import rdocx
+    from rdocx import _rdocx
+
+    source = rdocx.Document()
+    source.add_paragraph("body")
+    source.set_header("shared header")
+    with zipfile.ZipFile(io.BytesIO(source.to_bytes())) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    relationships = ET.fromstring(parts["word/_rels/document.xml.rels"])
+    header = next(item for item in relationships if item.get("Type").endswith("/header"))
+    target = header.get("Target")
+    assert target is not None and target.endswith("header1.xml")
+    namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ET.SubElement(relationships, "{" + namespace + "}Relationship", {
+        "Id": "pieceAlias", "Type": header.get("Type"),
+        "Target": target.replace("header1.xml", "Header1.xml") if alias else target,
+    })
+    parts["word/_rels/document.xml.rels"] = ET.tostring(relationships)
+    xml = parts["word/document.xml"].decode()
+    at = xml.index(">", xml.index("<w:sectPr")) + 1
+    xml = xml[:at] + '<w:headerReference w:type="first" r:id="pieceAlias"/>' + xml[at:]
+    parts["word/document.xml"] = xml.encode()
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    work = getattr(_rdocx, "_word_whole_body_work", None)
+    if work is not None:
+        work()
+    document = rdocx.Document.from_bytes(output.getvalue())
+    if work is not None:
+        assert (work()[0] > 0) is alias
+    assert document.section(0).header.paragraphs[0].text == "shared header"
+    held = document.paragraphs[0]
+    main = document.part_xml("/word/document.xml")
+    if work is not None:
+        work()
+    document.set_font(rdocx.FontDefinition("Shared header check"))
+    if work is not None:
+        assert (work()[0] > 0) is alias
+    with pytest.raises(rdocx.StaleElementError, match="Document.set_font"):
+        _ = held.text
+    assert document.paragraphs[0].text == "body"
+    assert document.part_xml("/word/document.xml") == main
+    saved = document.to_bytes()
+    reopened = rdocx.Document.from_bytes(saved)
+    assert reopened.to_bytes() == saved
+    assert reopened.paragraphs[0].text == "body"
+    assert reopened.section(0).header.paragraphs[0].text == "shared header"
+
+
+def _fx268_transaction_fixture(paragraphs=25):
+    import rdocx
+
+    document = rdocx.Document()
+    for index in range(paragraphs):
+        document.add_paragraph(f'alpha {index}')
+    document.add_table(1, 1).cell(0, 0).text = 'alpha cell'
+    return rdocx.Document.from_bytes(document.to_bytes())
+
+
+def _fx268_transaction_counter():
+    from rdocx import _rdocx
+
+    counter = getattr(_rdocx, '_word_transaction_work', None)
+    if counter is None:
+        pytest.skip('requires actual debug transaction counters')
+    return counter
+
+
+@pytest.mark.parametrize('publisher', [
+    'Document.replace_text_at', 'Paragraph.replace_text', 'Cell.replace_text',
+    'Document.add_picture', 'Cell.add_picture',
+])
+def test_fx268_owned_transaction_eliminates_nested_candidate_clone(publisher):
+    import rdocx
+
+    counter = _fx268_transaction_counter()
+    document = _fx268_transaction_fixture()
+
+    def apply(old, new):
+        if publisher == 'Document.replace_text_at':
+            return document.replace_text_at(next(item for item in document.story_items if item.story.kind == "body" and item.kind == "paragraph" and item.direct_body_index == 0), old, new, expect=1)
+        if publisher == 'Paragraph.replace_text':
+            return document.paragraphs[0].replace_text(old, new, expect=1)
+        if publisher == 'Cell.replace_text':
+            return document.tables[0].cell(0, 0).replace_text(old, new, expect=1)
+        owner = document if publisher == 'Document.add_picture' else document.tables[0].cell(0, 0)
+        return owner.add_picture(_one_pixel_png(), 'owned.png')
+
+    apply('alpha', 'omega')
+    apply('omega', 'alpha')
+    counter()
+    result = apply('alpha', 'omega')
+    native, _ = counter()
+    if 'replace_text' in publisher:
+        assert result == 1
+    else:
+        assert result is not None
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    if publisher == 'Cell.replace_text':
+        assert reopened.tables[0].cell(0, 0).text == 'omega cell'
+    elif 'replace_text' in publisher:
+        assert reopened.paragraphs[0].text == 'omega 0'
+    else:
+        assert len(reopened.pictures()) == 3
+    assert native[0] == 0, f'public binding cloned its private candidate again: {native}'
+
+
+@pytest.mark.parametrize('kind', ['scoped', 'picture'])
+def test_fx268_immutable_phase_shares_actual_main_output(kind):
+    counter = _fx268_transaction_counter()
+    document = _fx268_transaction_fixture()
+    if kind == 'scoped':
+        document.paragraphs[0].replace_text('alpha', 'omega', expect=1)
+        document.paragraphs[0].replace_text('omega', 'alpha', expect=1)
+        counter()
+        assert document.paragraphs[0].replace_text('alpha', 'omega', expect=1) == 1
+        native, _ = counter()
+        calls, output_bytes = native[1:3]
+    else:
+        document.add_picture(_one_pixel_png(), 'warm1.png')
+        document.add_picture(_one_pixel_png(), 'warm2.png')
+        counter()
+        document.add_picture(_one_pixel_png(), 'measured.png')
+        native, _ = counter()
+        calls, output_bytes = native[3:5]
+    assert output_bytes > 0, f'no actual current output measured: {native}'
+    assert calls == 1, f'immutable {kind} phase repeated canonical output: {native}'
+
+
+@pytest.mark.parametrize('paragraphs', [100, 1000])
+@pytest.mark.parametrize('state', ['cold', 'warm'])
+def test_fx268_original407_insert_prepares_one_complete_splice_packet(paragraphs, state):
+    import rdocx
+
+    counter = _fx268_transaction_counter()
+    from docx import Document as SourceDocument
+    from docx.shared import Pt, RGBColor
+
+    source = SourceDocument()
+    for index in range(paragraphs):
+        paragraph = source.add_paragraph()
+        for run_index in range(6):
+            run = paragraph.add_run(f'run {run_index} of paragraph {index:04} ')
+            run.font.name = 'Arial'
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+            run.bold = run.italic = run.font.small_caps = run.font.strike = run.underline = False
+    package = io.BytesIO()
+    source.save(package)
+    document = rdocx.Document.from_bytes(package.getvalue())
+    owner_count = sum(1 + len(paragraph.runs) for paragraph in source.paragraphs) + len(source.sections)
+    if state == 'warm':
+        for _ in range(2):
+            inserted_warmup = document.insert_paragraph(10, 'x')
+            owner_count += 1 + len(inserted_warmup.runs)
+    held = document.paragraphs[10]
+    counter()
+    inserted = document.insert_paragraph(10, 'x')
+    _, work = counter()
+    assert inserted.text == 'x'
+    with pytest.raises(rdocx.StaleElementError):
+        _ = held.text
+    expected = 'x' if state == 'warm' else ''.join(f'run {j} of paragraph 0010 ' for j in range(6))
+    assert rdocx.Document.from_bytes(document.to_bytes()).paragraphs[11].text == expected
+    assert work[:3] == [0, 0, 0] or work[:3] == (0, 0, 0), f'repeated real walks/map insertions: {work}'
+    assert 0 < work[3] <= owner_count, f'canonical and slot analysis repeated {owner_count} actual owners: {work}'
+    assert work[4:6] == (1, 1) or work[4:6] == [1, 1], f'packet not prepared and consumed: {work}'
+    assert work[6] == owner_count + 2, f'mandatory final owner indexing missing/repeated: {work}'
+    assert work[7] == 0, f'general publication rebuilt indexes instead of consuming packet: {work}'
+
+
+@pytest.mark.parametrize('edit', [
+    'add_paragraph', 'add_table', 'insert_paragraph', 'insert_table',
+    'remove_content', 'remove_content_range',
+])
+def test_fx268_complete_splice_packet_preserves_all_consumers(edit):
+    import rdocx
+
+    counter = _fx268_transaction_counter()
+    document = _fx268_transaction_fixture()
+    held = document.paragraphs[0]
+    held_run = held.runs[0]
+    held_table = document.tables[0]
+    counter()
+    if edit == 'add_paragraph':
+        result = document.add_paragraph('born')
+    elif edit == 'add_table':
+        result = document.add_table(1, 1)
+    elif edit == 'insert_paragraph':
+        result = document.insert_paragraph(10, 'born')
+    elif edit == 'insert_table':
+        result = document.insert_table(10, 1, 1)
+    elif edit == 'remove_content':
+        result = document.remove_content(10)
+    else:
+        result = document.remove_content_range(10, 12)
+    _, work = counter()
+    if edit.startswith('add_'):
+        assert held.text == 'alpha 0'
+        with pytest.raises(rdocx.StaleElementError):
+            _ = held_run.text
+        assert held_table.cell(0, 0).text == 'alpha cell'
+    else:
+        with pytest.raises(rdocx.StaleElementError):
+            _ = held.text
+        with pytest.raises(rdocx.StaleElementError):
+            _ = held_run.text
+        with pytest.raises(rdocx.StaleElementError):
+            _ = held_table.cell(0, 0).text
+    if edit.endswith('paragraph'):
+        assert result.text == 'born'
+        result.text = 'current born'
+    elif edit.endswith('table'):
+        result.cell(0, 0).text = 'current born'
+        assert result.cell(0, 0).text == 'current born'
+    saved = document.to_bytes()
+    reopened = rdocx.Document.from_bytes(saved)
+    assert [paragraph.text for paragraph in reopened.paragraphs] == [paragraph.text for paragraph in document.paragraphs]
+    assert len(reopened.tables) == len(document.tables)
+    assert work[:3] == [0, 0, 0] or work[:3] == (0, 0, 0), f'duplicate splice work in {edit}: {work}'
+    assert tuple(work[4:6]) == (1, 1), f'{edit} did not consume a prepared packet: {work}'
+    assert work[6] > 0 and work[7] == 0, f'{edit} missed mandatory indexing or used general publication: {work}'
+
+
+def test_fx268_scoped_production_fallback_reports_actual_outputs():
+    import rdocx
+    from rdocx import _rdocx
+
+    counter = _fx268_transaction_counter()
+    source = rdocx.Document()
+    source.add_paragraph('alpha')
+    with zipfile.ZipFile(io.BytesIO(source.to_bytes())) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    parts['word/document.xml'] = parts['word/document.xml'].replace(
+        b'<w:r>', b'<w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr><w:r>', 1)
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, 'w') as archive:
+        for name, value in parts.items():
+            archive.writestr(name, value)
+    document = rdocx.Document.from_bytes(package.getvalue())
+    paragraph = document.paragraphs[0]
+    counter()
+    outputs_counter = getattr(_rdocx, '_word_transaction_outputs', None)
+    if outputs_counter is not None:
+        outputs_counter()
+    assert paragraph.replace_text('alpha', 'omega', expect=1) == 1
+    native, _ = counter()
+    # This assertion actually fails on the authenticated pre-remediation module.
+    assert native[1] >= 3, f'production full-proof current writers disappeared: {native}'
+    outputs = _rdocx._word_transaction_outputs()
+    for name in ('namespace_current_writer', 'proof_current_writer',
+                 'normalized_retained_writer', 'normalized_current_writer',
+                 'normalized_restored_writer', 'retained_probe_copy',
+                 'masked_checked_rewrite', 'masked_retained_rewrite',
+                 'normalized_masked_checked_writer', 'normalized_masked_retained_writer'):
+        assert outputs['scoped.' + name][0] == 1, outputs
+        assert outputs['scoped.' + name][1] > 0, outputs
+    assert outputs['scoped.masked_occurrence_writer'][0] == 2, outputs
+    assert rdocx.Document.from_bytes(document.to_bytes()).paragraphs[0].text == 'omega'
+
+
+def test_fx268_splice_fallback_exposes_general_publication_index_work():
+    import rdocx
+
+    counter = _fx268_transaction_counter()
+    # Only the section owner exists. The actual planner classifies it but
+    # cannot establish a body story, so this public insertion uses fallback.
+    document = rdocx.Document.from_bytes(rdocx.Document().to_bytes())
+    counter()
+    inserted = document.insert_paragraph(0, 'fallback')
+    _, work = counter()
+    assert tuple(work[:3]) == (0, 0, 0), work
+    assert work[3] == 1, work
+    assert tuple(work[4:6]) == (0, 0), work
+    assert work[6] == 0 and work[7] == 3, work
+    assert inserted.text == 'fallback'
+    assert rdocx.Document.from_bytes(document.to_bytes()).paragraphs[0].text == 'fallback'
+
+
+@pytest.mark.parametrize('publisher', ['Document.add_picture', 'Cell.add_picture'])
+@pytest.mark.parametrize('paragraphs', [25, 100])
+def test_fx268_picture_normalization_reuses_actual_checked_rounds(publisher, paragraphs):
+    from docx import Document as SourceDocument
+    from docx.shared import Pt, RGBColor
+    import rdocx
+    from rdocx import _rdocx
+
+    counter = getattr(_rdocx, '_scoped_normalization_work', None)
+    if counter is None:
+        pytest.skip('release build: normalization work counters are debug-only')
+    source = SourceDocument()
+    for index in range(paragraphs):
+        paragraph = source.add_paragraph()
+        for j in range(6):
+            run = paragraph.add_run(f'run {j} of paragraph {index:04} ')
+            run.font.name = 'Arial'
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+            run.bold = run.italic = run.font.small_caps = run.font.strike = run.underline = False
+    source.add_table(rows=1, cols=1).cell(0, 0).text = 'picture target'
+    pieces = len(source.element.body) - int(source.element.body.sectPr is not None)
+    package = io.BytesIO()
+    source.save(package)
+    document = rdocx.Document.from_bytes(package.getvalue())
+    owner = document if publisher == 'Document.add_picture' else document.tables[0].cell(0, 0)
+    counter()
+    _rdocx._staging_work()
+    picture = owner.add_picture(_one_pixel_png(), 'rounds.png')
+    work = counter()
+    staging = _rdocx._staging_work()
+    assert work['producer.seed_eligible'][0] == pieces, work
+    assert work['left.seed_used'][0] == pieces, work
+    assert work['pair.fixed_used'][0] == pieces, work
+    for name in ['left.read1', 'right.read1', 'right.read2', 'right.write1', 'right.write2']:
+        assert work.get(name, [0, 0]) == [0, 0] or work.get(name, [0, 0]) == (0, 0), work
+    for name in ['left.read2', 'left.write1', 'left.write2']:
+        assert work[name][0] == pieces and work[name][1] > 0, work
+    assert staging[0] == 0, f'whole-parse fallback hid producer work: {staging}'
+    assert staging[5] <= 3 * pieces + 20, staging
+    assert picture.bytes == _one_pixel_png()
+    assert len(rdocx.Document.from_bytes(document.to_bytes()).pictures()) == 1

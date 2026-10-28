@@ -128,11 +128,6 @@ struct PreparedConnector {
     custom_geometry: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum DiagramLineSpacing {
-    Points(i32),
-}
-
 pub(crate) fn expand_tree(
     tree: &mut CT_ShapeTree,
     resources: &HashMap<String, DiagramResources>,
@@ -3452,7 +3447,7 @@ fn authentic_list(
         shapes.push(prepared_shape(
             relative_rect(bounds, text_x, y - 39.516, text_width, 79.032),
             "roundRect",
-            diagram_text(node.text, 3_400, false, [15.3, 3.0, 15.3, 1.0], None)?,
+            diagram_text(node.text, 3_400, false, [15.24, 0.0, 15.24, 0.0])?,
             "node1",
             index,
         ));
@@ -3756,13 +3751,7 @@ fn authentic_hierarchy(
         let mut front_shape = prepared_shape(
             relative_rect(bounds, x, y, width, height),
             "roundRect",
-            diagram_text(
-                node.text,
-                4_000,
-                true,
-                [7.2, 8.3, 7.2, 6.1],
-                Some(DiagramLineSpacing::Points(4_300)),
-            )?,
+            diagram_text(node.text, 4_000, true, [12.0; 4])?,
             if index == 0 { "fgAcc0" } else { "fgAcc2" },
             index,
         );
@@ -3798,10 +3787,27 @@ fn authentic_hierarchy(
     Ok(PreparedDiagram { shapes, connectors })
 }
 
+// Native drawing1.xml text-owner xfrm/txXfrm, in EMU. These are
+// meaningful invisible text frames, not the tight bounds of circular arrows.
 const CYCLE1_NODE_RECTS: [(f64, f64, f64, f64); 3] = [
-    (326.0, 18.0, 168.0, 144.0),
-    (212.0, 216.0, 168.0, 144.0),
-    (98.0, 18.0, 168.0, 144.0),
+    (
+        4_244_848.0 / EMU_PER_POINT,
+        337_828.0 / EMU_PER_POINT,
+        1_723_429.0 / EMU_PER_POINT,
+        1_723_429.0 / EMU_PER_POINT,
+    ),
+    (
+        2_795_885.0 / EMU_PER_POINT,
+        2_847_506.0 / EMU_PER_POINT,
+        1_723_429.0 / EMU_PER_POINT,
+        1_723_429.0 / EMU_PER_POINT,
+    ),
+    (
+        1_346_921.0 / EMU_PER_POINT,
+        337_828.0 / EMU_PER_POINT,
+        1_723_429.0 / EMU_PER_POINT,
+        1_723_429.0 / EMU_PER_POINT,
+    ),
 ];
 const CYCLE1_ARROW_RECTS: [(f64, f64, f64, f64); 3] = [
     (354.714_844, 162.070_312, 76.035_156, 123.066_407),
@@ -3827,13 +3833,7 @@ fn authentic_cycle(nodes: &[RenderNode<'_>], bounds: Rect) -> Result<PreparedDia
         shapes.push(prepared_shape(
             relative_rect(bounds, x, y, width, height),
             "rect",
-            diagram_text(
-                node.text,
-                4_600,
-                true,
-                [7.2, 13.2, 7.2, 1.2],
-                Some(DiagramLineSpacing::Points(4_900)),
-            )?,
+            diagram_text(node.text, 4_600, true, [4.6; 4])?,
             "revTx",
             index,
         ));
@@ -3883,13 +3883,7 @@ fn authentic_relationship(
             parent_height * 360.0,
         ),
         "ellipse",
-        diagram_text(
-            nodes[0].text,
-            4_000,
-            true,
-            [12.0; 4],
-            Some(DiagramLineSpacing::Points(4_500)),
-        )?,
+        diagram_text(nodes[0].text, 4_000, true, [12.0; 4])?,
         "node0",
         0,
     )];
@@ -3962,13 +3956,7 @@ fn authentic_matrix(
             center_height,
         ),
         "roundRect",
-        diagram_text(
-            nodes[0].text,
-            2_900,
-            true,
-            [8.7, 10.7, 8.7, 10.7],
-            Some(DiagramLineSpacing::Points(3_200)),
-        )?,
+        diagram_text(nodes[0].text, 2_900, true, [8.7; 4])?,
         "fgShp",
         0,
     ));
@@ -3996,22 +3984,20 @@ fn authentic_pyramid(
         let mut shape = prepared_shape(rect, "trapezoid", None, "node1", index);
         shape.custom_geometry = Some(pyramid_level_geometry(index));
         shapes.push(shape);
-        let insets = match index {
-            0 => [4.4, 7.0, 4.4, 1.0],
-            1 => [96.0, 6.4, 96.0, 4.4],
-            2 => [4.4, 6.5, 4.4, 2.3],
-            _ => unreachable!("three pyramid levels"),
-        };
+        // Native txXfrm is a separate centered frame. The lower two
+        // levels use 65% of their painted trapezoid's width.
+        let text_width = if index == 0 { width } else { width * 0.65 };
+        let text_rect = relative_rect(
+            bounds,
+            x + (width - text_width) / 2.0,
+            y,
+            text_width,
+            level_height,
+        );
         shapes.push(prepared_shape(
-            rect,
+            text_rect,
             "rect",
-            diagram_text(
-                node.text,
-                4_400,
-                true,
-                insets,
-                Some(DiagramLineSpacing::Points(4_600)),
-            )?,
+            diagram_text(node.text, 4_400, true, [4.4; 4])?,
             "revTx",
             index,
         ));
@@ -4056,7 +4042,6 @@ fn diagram_text(
     font_size: i32,
     centered: bool,
     insets: [f64; 4],
-    line_spacing: Option<DiagramLineSpacing>,
 ) -> Result<Option<CT_TextBody>, String> {
     let Some(text) = text else {
         return Ok(None);
@@ -4068,6 +4053,9 @@ fn diagram_text(
     text.body_properties.top_inset = Some(top);
     text.body_properties.right_inset = Some(right);
     text.body_properties.bottom_inset = Some(bottom);
+    text.body_properties
+        .space_first_last_paragraph
+        .get_or_insert(false);
     let mut xml = String::from_utf8(text.to_xml().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     let mut cursor = 0usize;
@@ -4090,29 +4078,32 @@ fn diagram_text(
         }
     }
     let mut text = CT_TextBody::from_xml(xml.as_bytes()).map_err(|error| error.to_string())?;
-    if centered {
-        // The layout's alignment and line spacing are defaults. A data
-        // point's own paragraph properties win where they set a value, and
-        // an empty paragraph stays empty.
-        for index in 0..text.paragraph_count() {
-            let Some(paragraph) = text.paragraph_mut(index) else {
-                continue;
-            };
-            if paragraph.properties.is_none()
-                && paragraph.runs.is_empty()
-                && paragraph.end_properties.is_none()
-                && paragraph.raw_children().is_empty()
-            {
-                continue;
-            }
-            let properties = paragraph.properties_mut();
-            properties.alignment.get_or_insert(TextAlignment::Center);
-            if let Some(DiagramLineSpacing::Points(value)) = line_spacing {
-                properties
-                    .line_spacing
-                    .get_or_insert(TextSpacing::Points(value));
-            }
+    // Native profile defaults are independent of horizontal alignment.
+    // Explicit data properties and genuinely empty paragraphs remain intact.
+    for index in 0..text.paragraph_count() {
+        let Some(paragraph) = text.paragraph_mut(index) else {
+            continue;
+        };
+        if paragraph.properties.is_none()
+            && paragraph.runs.is_empty()
+            && paragraph.end_properties.is_none()
+            && paragraph.raw_children().is_empty()
+        {
+            continue;
         }
+        let properties = paragraph.properties_mut();
+        if centered {
+            properties.alignment.get_or_insert(TextAlignment::Center);
+        }
+        properties
+            .line_spacing
+            .get_or_insert(TextSpacing::Percent("90000".to_owned()));
+        properties
+            .space_before
+            .get_or_insert(TextSpacing::Percent("0".to_owned()));
+        properties
+            .space_after
+            .get_or_insert(TextSpacing::Percent("35000".to_owned()));
     }
     Ok(Some(text))
 }
@@ -4898,11 +4889,29 @@ mod tests {
                 .map(|shape| shape.rect)
                 .collect::<Vec<_>>(),
             vec![
-                relative_rect(bounds, 326.0, 18.0, 168.0, 144.0),
+                relative_rect(
+                    bounds,
+                    4244848.0 / 12700.0,
+                    337828.0 / 12700.0,
+                    1723429.0 / 12700.0,
+                    1723429.0 / 12700.0
+                ),
                 relative_rect(bounds, 354.714_844, 162.070_312, 76.035_156, 123.066_407,),
-                relative_rect(bounds, 212.0, 216.0, 168.0, 144.0),
+                relative_rect(
+                    bounds,
+                    2795885.0 / 12700.0,
+                    2847506.0 / 12700.0,
+                    1723429.0 / 12700.0,
+                    1723429.0 / 12700.0
+                ),
                 relative_rect(bounds, 129.750_001, 162.269_614, 98.347_706, 120.429_749,),
-                relative_rect(bounds, 98.0, 18.0, 168.0, 144.0),
+                relative_rect(
+                    bounds,
+                    1346921.0 / 12700.0,
+                    337828.0 / 12700.0,
+                    1723429.0 / 12700.0,
+                    1723429.0 / 12700.0
+                ),
                 relative_rect(bounds, 237.890_681, 4.234_377, 95.574_267, 57.816_436,),
             ]
         );
@@ -5365,5 +5374,105 @@ mod tests {
                 .unwrap_err()
                 .contains("futureLayout")
         );
+    }
+
+    #[test]
+    fn native_diagram_defaults_preserve_explicit_spacing_and_empty_paragraphs() {
+        let source=CT_TextBody::from_xml(br#"<a:txBody xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:bodyPr anchor="ctr" spcFirstLastPara="1"/><a:lstStyle/><a:p><a:pPr algn="r"><a:lnSpc><a:spcPts val="2200"/></a:lnSpc><a:spcBef><a:spcPct val="12000"/></a:spcBef><a:spcAft><a:spcPts val="700"/></a:spcAft></a:pPr><a:r><a:rPr sz="2000"/><a:t>explicit</a:t></a:r></a:p><a:p/><a:p><a:r><a:rPr sz="2000"/><a:t>default</a:t></a:r></a:p></a:txBody>"#).unwrap();
+        for centered in [false, true] {
+            let out = diagram_text(Some(&source), 3400, centered, [15.24, 0.0, 15.24, 0.0])
+                .unwrap()
+                .unwrap();
+            let explicit = out
+                .paragraphs()
+                .first()
+                .unwrap()
+                .properties
+                .as_ref()
+                .unwrap();
+            assert_eq!(explicit.alignment, Some(TextAlignment::Right));
+            assert_eq!(explicit.line_spacing, Some(TextSpacing::Points(2200)));
+            assert_eq!(
+                explicit.space_before,
+                Some(TextSpacing::Percent("12000".to_owned()))
+            );
+            assert_eq!(explicit.space_after, Some(TextSpacing::Points(700)));
+            assert!(out.paragraphs().get(1).unwrap().properties.is_none());
+            let defaults = out
+                .paragraphs()
+                .get(2)
+                .unwrap()
+                .properties
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                defaults.line_spacing,
+                Some(TextSpacing::Percent("90000".to_owned()))
+            );
+            assert_eq!(
+                defaults.space_after,
+                Some(TextSpacing::Percent("35000".to_owned()))
+            );
+            assert_eq!(
+                defaults.alignment,
+                if centered {
+                    Some(TextAlignment::Center)
+                } else {
+                    None
+                }
+            );
+            assert_eq!(out.body_properties.space_first_last_paragraph, Some(true));
+        }
+        let plain = text("one");
+        let out = diagram_text(Some(&plain), 3400, false, [0.0; 4])
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.body_properties.space_first_last_paragraph, Some(false));
+    }
+
+    #[test]
+    fn native_pyramid_text_frames_are_independent_and_scale_with_bounds() {
+        let texts = [text("one"), text("two"), text("three")];
+        let nodes = [
+            RenderNode {
+                id: "1",
+                text: Some(&texts[0]),
+            },
+            RenderNode {
+                id: "2",
+                text: Some(&texts[1]),
+            },
+            RenderNode {
+                id: "3",
+                text: Some(&texts[2]),
+            },
+        ];
+        let bounds = Rect {
+            x: 31.0,
+            y: 47.0,
+            width: 1152.0,
+            height: 180.0,
+        };
+        let result = authentic_pyramid(&nodes, bounds, &test_program()).unwrap();
+        for (index, (x, width)) in [(192.0, 192.0), (163.2, 249.6), (100.8, 374.4)]
+            .into_iter()
+            .enumerate()
+        {
+            let owner = &result.shapes[index * 2 + 1];
+            assert!((owner.rect.x - (31.0 + x * 2.0)).abs() < 0.001);
+            assert!((owner.rect.width - width * 2.0).abs() < 0.001);
+            assert_eq!(owner.rect.height, 60.0);
+            let body = owner.text.as_ref().unwrap();
+            assert_eq!(
+                body.body_properties.left_inset,
+                Some(Coordinate32Value::Emu(55880))
+            );
+            assert_eq!(
+                body.body_properties.top_inset,
+                Some(Coordinate32Value::Emu(55880))
+            );
+            assert!(result.shapes[index * 2].text.is_none());
+        }
+        assert!(result.shapes[3].rect.width > result.shapes[1].rect.width);
     }
 }

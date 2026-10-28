@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use oxml_chart::{render_chart_placeholder, render_chart_with_legend_notice};
 use oxml_drawing::color::{ColorChoice, ColorMap, ColorMapSlot, RgbColor, resolve_color};
@@ -3569,6 +3569,37 @@ fn find_group_lineage(
     false
 }
 
+// Geometry was materialized at the source extent before timing evaluation.
+// Keep its local coordinates and text frame in the same scaled space as bounds.
+// The candidate is private, so a failed coordinate never reaches publication.
+fn scale_materialized_timeline_geometry(geometry: &mut ResolvedGeometry, x: f64, y: f64) -> bool {
+    let ResolvedGeometry::Custom { paths, text_rect } = geometry else {
+        return true;
+    };
+    let point = |point: &mut Point| {
+        point.x *= x;
+        point.y *= y;
+        point.x.is_finite() && point.y.is_finite()
+    };
+    let paths_finite = paths.iter_mut().all(|path| {
+        path.commands.iter_mut().all(|command| match command {
+            PathCommand::MoveTo(p) | PathCommand::LineTo(p) => point(p),
+            PathCommand::CurveTo { c1, c2, to } => point(c1) && point(c2) && point(to),
+            PathCommand::Close => true,
+        })
+    });
+    let text_finite = text_rect.as_mut().is_none_or(|rect| {
+        rect.x *= x;
+        rect.y *= y;
+        rect.width *= x;
+        rect.height *= y;
+        [rect.x, rect.y, rect.width, rect.height]
+            .into_iter()
+            .all(f64::is_finite)
+    });
+    paths_finite && text_finite
+}
+
 fn apply_timeline_state(
     mut slide: ResolvedSlide,
     identities: Vec<ResolvedShapeIdentity>,
@@ -3592,6 +3623,7 @@ fn apply_timeline_state(
             .entry(group_id)
             .or_insert_with(|| TimelineGroupGeometry::from_page_bounds(bounds));
     }
+    let mut diagnosed_group_wipes = HashSet::new();
     let shape_states = identities
         .iter()
         .zip(&mut slide.shapes)
@@ -3616,6 +3648,13 @@ fn apply_timeline_state(
                 let target_transform =
                     target_state.resolved_page_transform(geometry.center(), slide_size);
                 group_transform = target_transform.then(group_transform);
+                if target_state.local_opacity_mask((1.0, 1.0)).is_some()
+                    && diagnosed_group_wipes.insert(*group_id)
+                {
+                    state.diagnostics.push(Diagnostic {
+                        message: format!("group-target soft wipe {group_id} retains the flattened hard-clip fallback; soft masks qualify direct leaf owners"),
+                    });
+                }
                 if let Some(clip) = target_state.clip {
                     group_page_clips.push(group_clip_page_points(clip, geometry, group_transform));
                 }
@@ -3625,6 +3664,7 @@ fn apply_timeline_state(
                 evaluated.visible &= direct_state.visible;
                 evaluated.opacity *= direct_state.opacity;
                 evaluated.clip = intersect_optional_rect(evaluated.clip, direct_state.clip);
+                evaluated.retain_source_wipe(direct_state);
             }
             let (scale_x, scale_y, rotation_deg) = direct_state.map_or(
                 (1.0, 1.0, 0.0),
@@ -3653,18 +3693,23 @@ fn apply_timeline_state(
                 .group_transform
                 .then(page_motion)
                 .then(group_transform);
-            for page_clip in group_page_clips {
-                match page_clip_for_shape(page_clip, &animated_shape) {
-                    Some(clip) => evaluated.push_oriented_clip(clip),
-                    None => state.diagnostics.push(Diagnostic {
-                        message: format!(
-                            "group timeline clip ignored for shape {}",
-                            identity.shape_id.unwrap_or(0)
-                        ),
-                    }),
+            let geometry_is_finite = scale_materialized_timeline_geometry(
+                &mut animated_shape.geometry, scale_x, scale_y,
+            );
+            if geometry_is_finite {
+                for page_clip in group_page_clips {
+                    match page_clip_for_shape(page_clip, &animated_shape) {
+                        Some(clip) => evaluated.push_oriented_clip(clip),
+                        None => state.diagnostics.push(Diagnostic {
+                            message: format!(
+                                "group timeline clip ignored for shape {}",
+                                identity.shape_id.unwrap_or(0)
+                            ),
+                        }),
+                    }
                 }
             }
-            if evaluated.is_finite()
+            if geometry_is_finite && evaluated.is_finite()
                 && [
                     animated_bounds.x,
                     animated_bounds.y,
@@ -4827,7 +4872,11 @@ fn native_pattern_rows(preset: &str) -> Option<&'static [u8; 64]> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use super::{apply_timeline_state, timeline_group_geometries};
+    use crate::timeline::{
+        EvaluatedFrameState, EvaluatedShapeState, TimelinePosition, evaluate_timeline,
+    };
+    use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
 
     use oxml_chart::CT_ChartSpace;
@@ -9738,5 +9787,288 @@ mod tests {
             }
             assert_eq!(fixture.slide, before);
         }
+    }
+
+    #[test]
+    fn native_list_round_rect_text_rectangle_uses_the_preset_owner() {
+        let xml = shape_with_details(
+            None,
+            None,
+            r#"<a:xfrm><a:off x="365760" y="64439"/><a:ext cx="5120640" cy="1003680"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>"#,
+            None,
+        );
+        let fixture = Fixture::new(&xml, "", "");
+        let resolved = fixture.context().resolve_slide((720.0, 540.0)).unwrap();
+        let ResolvedGeometry::Custom {
+            text_rect: Some(rect),
+            ..
+        } = &resolved.shapes[0].geometry
+        else {
+            panic!("preset text rectangle");
+        };
+        // Independent native txXfrm inset. The outer roundRect is retained.
+        assert!((rect.x - 3.857952756).abs() < 0.002);
+        assert!((rect.y - 3.857952756).abs() < 0.002);
+        assert!((rect.width - (403.2 - 2.0 * 3.857952756)).abs() < 0.002);
+    }
+    #[test]
+    fn native_soft_wipe_survives_resolved_leaf_state_publication() {
+        let shape = shape_with_details(None, None, &transform(127_000), None).replacen(
+            "<p:cNvPr/>",
+            "<p:cNvPr id=\"7\" name=\"Hero\"/>",
+            1,
+        );
+        let xml = format!(
+            r#"<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}"><p:cSld>{}</p:cSld><p:timing><p:tnLst><p:animEffect transition="in" filter="wipe(left)"><p:cBhvr><p:cTn id="1" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:animEffect></p:tnLst></p:timing></p:sld>"#,
+            shape_tree(&shape)
+        );
+        let fixture = Fixture::from_xml(&xml, &layout_xml(""), &master_xml(""));
+        let resolved = fixture
+            .context()
+            .resolve_slide_at(
+                (720.0, 540.0),
+                crate::timeline::TimelinePosition {
+                    elapsed_ms: 500,
+                    click_count: 0,
+                },
+            )
+            .unwrap();
+        assert!(
+            resolved.state.shapes[&7]
+                .local_opacity_mask((10.0, 10.0))
+                .is_some()
+        );
+        assert!(
+            resolved.shape_states[0]
+                .local_opacity_mask((10.0, 10.0))
+                .is_some()
+        );
+        assert!(
+            resolved.shape_states[0]
+                .local_clip_paths((10.0, 10.0))
+                .is_empty()
+        );
+    }
+
+    fn native_axis_state(x: f64, y: f64, rotation: f64, ids: &[u32]) -> EvaluatedFrameState {
+        let mut nodes = String::new();
+        for (i, id) in ids.iter().enumerate() {
+            for (axis, attribute, value) in [
+                (0, "ScaleX", x),
+                (1, "ScaleY", y),
+                (2, "style.rotation", rotation),
+            ] {
+                nodes.push_str(&format!(r#"<p:anim from="{value}" to="{value}"><p:cBhvr><p:cTn id="{}" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{id}"/></p:tgtEl><p:attrNameLst><p:attrName>{attribute}</p:attrName></p:attrNameLst></p:cBhvr></p:anim>"#,i*3+axis+1));
+            }
+        }
+        let timing = rpptx_oxml::timing::CT_Timing::from_xml(
+            format!(r#"<p:timing xmlns:p="{P_NS}"><p:tnLst>{nodes}</p:tnLst></p:timing>"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        evaluate_timeline(
+            Some(&timing),
+            None,
+            TimelinePosition {
+                elapsed_ms: 1000,
+                click_count: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn native_scaled_custom_geometry_keeps_cubic_text_picture_and_source_owners() {
+        let geometry = r#"<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="2" t="3" r="25" b="35"/><a:pathLst><a:path w="30" h="40" fill="norm"><a:moveTo><a:pt x="2" y="3"/></a:moveTo><a:lnTo><a:pt x="11" y="7"/></a:lnTo><a:cubicBezTo><a:pt x="13" y="5"/><a:pt x="19" y="27"/><a:pt x="23" y="31"/></a:cubicBezTo><a:close/></a:path></a:pathLst></a:custGeom>"#;
+        let ordinary=shape_with_details(None,None,&format!(r#"<a:xfrm rot="1020000"><a:off x="127000" y="254000"/><a:ext cx="381000" cy="508000"/></a:xfrm>{geometry}<a:solidFill><a:srgbClr val="D63C32"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln><a:effectLst><a:outerShdw blurRad="12700" dist="12700" dir="0"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst>"#),Some(r#"<a:bodyPr lIns="12700" rIns="25400" tIns="38100" bIns="50800"/>"#)).replacen("<p:cNvPr/>","<p:cNvPr id=\"7\" name=\"Cubic text\"/>",1).replace("<a:p/>","<a:p><a:r><a:rPr sz=\"1400\"/><a:t>one owner</a:t></a:r></a:p>");
+        let image = picture("rId2", "", "<a:stretch><a:fillRect/></a:stretch>", 381000)
+            .replacen(
+                "<p:cNvPr/>",
+                "<p:cNvPr id=\"8\" name=\"Custom picture\"/>",
+                1,
+            )
+            .replace(
+                "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom>",
+                geometry,
+            );
+        let grouped = format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="99" name="Parent"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm rot="1800000"><a:off x="139700" y="165100"/><a:ext cx="1524000" cy="1016000"/><a:chOff x="0" y="0"/><a:chExt cx="762000" cy="1016000"/></a:xfrm></p:grpSpPr>{ordinary}{image}</p:grpSp>"#
+        );
+        let fixture = Fixture::new(&grouped, "", "");
+        let media = ScopedMediaIds {
+            slide: HashMap::from([("rId2".to_owned(), MediaId(1))]),
+            ..ScopedMediaIds::default()
+        };
+        let (mut original, _, ids) = fixture
+            .context()
+            .resolve_slide_inner_with_identities((720.0, 540.0), Some(&media), None, None, None)
+            .unwrap();
+        if let ResolvedGeometry::Custom { paths, .. } = &mut original.shapes[1].geometry {
+            paths[0].fill_rule = oxml_layout::FillRule::EvenOdd;
+        }
+        assert_eq!(
+            ids.iter().map(|id| id.shape_id).collect::<Vec<_>>(),
+            [Some(7), Some(8)]
+        );
+        assert!(matches!(
+            original.shapes[1].content,
+            ResolvedContent::Image(_)
+        ));
+        let saved = original.clone();
+        let mut state = native_axis_state(1.5, 0.75, 30.0, &[7, 8]);
+        let mut group_state = EvaluatedShapeState::default();
+        group_state.clip = Some(Rect {
+            x: 0.1,
+            y: 0.2,
+            width: 0.7,
+            height: 0.6,
+        });
+        state.shapes.insert(99, group_state);
+        let result = apply_timeline_state(
+            original.clone(),
+            ids.clone(),
+            state,
+            timeline_group_geometries(&fixture.slide.common_slide_data.shape_tree.children),
+        );
+        assert_eq!(result.identities, ids);
+        assert_eq!(original, saved);
+        for (index, (before, after)) in original.shapes.iter().zip(&result.slide.shapes).enumerate()
+        {
+            let ResolvedGeometry::Custom {
+                paths: bp,
+                text_rect: br,
+            } = &before.geometry
+            else {
+                panic!("actual custom owner {index}")
+            };
+            let ResolvedGeometry::Custom {
+                paths: ap,
+                text_rect: ar,
+            } = &after.geometry
+            else {
+                panic!("scaled custom owner {index}")
+            };
+            let project = |p: Point| Point {
+                x: p.x * 1.5,
+                y: p.y * 0.75,
+            };
+            let expected = bp
+                .iter()
+                .map(|path| oxml_layout::Path {
+                    fill_rule: path.fill_rule,
+                    commands: path
+                        .commands
+                        .iter()
+                        .map(|c| match c {
+                            PathCommand::MoveTo(p) => PathCommand::MoveTo(project(*p)),
+                            PathCommand::LineTo(p) => PathCommand::LineTo(project(*p)),
+                            PathCommand::CurveTo { c1, c2, to } => PathCommand::CurveTo {
+                                c1: project(*c1),
+                                c2: project(*c2),
+                                to: project(*to),
+                            },
+                            PathCommand::Close => PathCommand::Close,
+                        })
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(ap, &expected);
+            assert_eq!(
+                *ar,
+                br.map(|r| Rect {
+                    x: r.x * 1.5,
+                    y: r.y * 0.75,
+                    width: r.width * 1.5,
+                    height: r.height * 0.75
+                })
+            );
+            assert_eq!(
+                after.content, before.content,
+                "font/insets/media owner stays unchanged"
+            );
+            assert_eq!(after.line, before.line);
+            assert_eq!(after.shadow, before.shadow);
+            assert_eq!(after.fill, before.fill);
+            assert_eq!(after.group_transform, before.group_transform);
+            assert_close(after.rotation_deg, before.rotation_deg + 30.0);
+            assert_eq!(
+                result.shape_states[index]
+                    .local_clip_paths((after.bounds.width, after.bounds.height))
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn native_scaled_geometry_identity_signed_fallback_and_overflow_publication() {
+        let xml = shape_with_details(
+            None,
+            None,
+            &format!(
+                r#"{}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+                transform(127000)
+            ),
+            None,
+        )
+        .replacen("<p:cNvPr/>", "<p:cNvPr id=\"7\" name=\"Owner\"/>", 1);
+        let fixture = Fixture::new(&xml, "", "");
+        let (original, _, ids) = fixture
+            .context()
+            .resolve_slide_inner_with_identities((720.0, 540.0), None, None, None, None)
+            .unwrap();
+        let apply = |slide: ResolvedSlide, x, y| {
+            apply_timeline_state(
+                slide,
+                ids.clone(),
+                native_axis_state(x, y, 0.0, &[7]),
+                BTreeMap::new(),
+            )
+        };
+        assert_eq!(apply(original.clone(), 1.0, 1.0).slide, original);
+        for factor in [0.0, -1.5] {
+            let result = apply(original.clone(), factor, 0.75);
+            assert_close(
+                result.slide.shapes[0].bounds.width,
+                original.shapes[0].bounds.width * factor,
+            );
+            let ResolvedGeometry::Custom { paths, .. } = &result.slide.shapes[0].geometry else {
+                panic!("custom")
+            };
+            let PathCommand::LineTo(point) = paths[0].commands[1] else {
+                panic!("line")
+            };
+            assert_close(point.x, original.shapes[0].bounds.width * factor);
+        }
+        for geometry in [
+            ResolvedGeometry::Rectangle,
+            ResolvedGeometry::BoundsFallback,
+        ] {
+            let mut slide = original.clone();
+            slide.shapes[0].geometry = geometry.clone();
+            let result = apply(slide, 1.5, 0.75);
+            assert_eq!(result.slide.shapes[0].geometry, geometry);
+            assert_close(
+                result.slide.shapes[0].bounds.width,
+                original.shapes[0].bounds.width * 1.5,
+            );
+        }
+        let mut extreme = original.clone();
+        if let ResolvedGeometry::Custom { paths, .. } = &mut extreme.shapes[0].geometry {
+            paths[0].commands[0] = PathCommand::MoveTo(Point { x: 1.0e20, y: 1.0 });
+        }
+        let result = apply(extreme.clone(), 1.0e290, 1.0);
+        assert_eq!(
+            result.slide.shapes, extreme.shapes,
+            "entire candidate declined despite finite resized bounds"
+        );
+        assert_eq!(result.shape_states, [EvaluatedShapeState::default()]);
+        assert!(
+            result
+                .state
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("non-finite timeline state"))
+        );
     }
 }

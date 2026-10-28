@@ -26,6 +26,178 @@ fn reset_fx260_word_visits() {
     FX260_WORD_VISITS.with(|cell| cell.set(0));
 }
 
+// Debug builds count the whole-body work that direct reads and body splices
+// avoid, outside the guards that check them against it, so that a test of
+// the extension module proves each call took its direct route.
+#[cfg(debug_assertions)]
+static WORD_INVENTORY_REBUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+static WORD_WHOLE_SOURCE_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+thread_local! {
+    static WORD_GUARDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Count one owner inventory rebuild from the whole document.
+fn note_word_inventory_rebuild() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_INVENTORY_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Count one element read from its whole story source.
+pub(crate) fn note_word_whole_source_read() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_WHOLE_SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Run a debug guard's own whole-body work without counting it.
+#[cfg(debug_assertions)]
+fn guarded<T>(work: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WORD_GUARDING.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(WORD_GUARDING.with(|cell| cell.replace(true)));
+    work()
+}
+
+/// The whole-body work counted so far: owner inventory rebuilds and
+/// whole-source element reads. Debug builds only. Reading resets both.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_whole_body_work")]
+pub(crate) fn word_whole_body_work() -> (usize, usize) {
+    (
+        WORD_INVENTORY_REBUILDS.swap(0, std::sync::atomic::Ordering::Relaxed),
+        WORD_WHOLE_SOURCE_READS.swap(0, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+#[cfg(debug_assertions)]
+static WORD_VISITED_OWNER_RECORDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Count one real owner-record visit in lookup, plan, prepare, commit or index.
+pub(crate) fn note_visited_owner_record() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_VISITED_OWNER_RECORDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(debug_assertions)]
+static WORD_PIECE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Count one body block or story part whose owners are read again.
+fn note_word_piece_read() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_PIECE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Parsed, namespace-scanned, canonicalized and ZIP bytes, then serialized
+/// children and children read. Debug builds only. Reading resets all six.
+/// Child staging is not implemented.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_staging_work")]
+pub(crate) fn staging_work() -> [usize; 6] {
+    rdocx::take_staging_work()
+}
+
+/// ZIP writes, main-part parses, and identifier-part bytes scanned.
+/// Debug builds only. Reading resets all three. Child staging stays on the
+/// six-slot counter.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_reopen_work")]
+pub(crate) fn reopen_work() -> [usize; 3] {
+    rdocx::take_reopen_work()
+}
+
+/// Body children actually scanned for story lookup. Debug builds only.
+/// The count is cumulative and is not reset on read. A whole-part walk
+/// counts every child in that part. The frame scan is not included.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_main_body_block_scans")]
+pub(crate) fn main_body_block_scans() -> usize {
+    rdocx::Document::main_body_block_scans()
+}
+
+/// Body blocks and story parts whose owners were read again. Debug builds
+/// only. Reading resets the count.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_piece_work")]
+pub(crate) fn word_piece_work() -> usize {
+    WORD_PIECE_READS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Visited owner records and serialized XML bytes since the last read.
+/// Debug builds only. Reading resets both.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_splice_work")]
+pub(crate) fn word_splice_work() -> (usize, usize) {
+    (
+        WORD_VISITED_OWNER_RECORDS.swap(0, std::sync::atomic::Ordering::Relaxed),
+        rdocx::take_direct_fragment_bytes(),
+    )
+}
+
+#[cfg(debug_assertions)]
+static SPLICE_PACKET_WORK: [std::sync::atomic::AtomicUsize; 8] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 8];
+
+fn note_splice_packet_work(index: usize) {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        SPLICE_PACKET_WORK[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = index;
+}
+
+/// Native clones/read outputs, then actual slot inserts, repeated scope and
+/// extraction visits, canonical/slot classifications, packet prepare/consume,
+/// mandatory reindex visits and general-publication index visits. Debug only.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_transaction_work")]
+pub(crate) fn word_transaction_work() -> ([usize; 6], [usize; 8]) {
+    (
+        rdocx::Document::take_transaction_work(),
+        std::array::from_fn(|index| {
+            SPLICE_PACKET_WORK[index].swap(0, std::sync::atomic::Ordering::Relaxed)
+        }),
+    )
+}
+
+/// Actual current/restored/normalized/masked outputs and copies by read phase.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_transaction_outputs")]
+pub(crate) fn word_transaction_outputs() -> std::collections::BTreeMap<String, [usize; 2]> {
+    rdocx::Document::take_transaction_outputs()
+}
+
+/// Actual checked child parser/writer attempts and bytes by normalization round.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_scoped_normalization_work")]
+pub(crate) fn scoped_normalization_work() -> std::collections::BTreeMap<String, [usize; 2]> {
+    rdocx::Document::take_scoped_normalization_work()
+}
+
 use oxml_py_support::{
     ContentPath, PathSeg, PreparedRevision, RevisionCounter, RevisionScope, RevisionState,
     StaleElementError, revision_to_pyerr,
@@ -594,6 +766,7 @@ pub struct PyComment {
     pub resolved: Option<bool>,
     pub anchor_text: Option<String>,
     pub anchor: Option<PyStoryRunRange>,
+    pub anchor_issue: Option<String>,
 }
 
 // Preserve the established metadata value equality. Derived anchor snapshots
@@ -615,7 +788,7 @@ impl Eq for PyComment {}
 #[pymethods]
 impl PyComment {
     #[new]
-    #[pyo3(signature = (*, id, author, initials, date, text, parent_id, resolved, anchor_text=None, anchor=None))]
+    #[pyo3(signature = (*, id, author, initials, date, text, parent_id, resolved, anchor_text=None, anchor=None, anchor_issue=None))]
     #[allow(clippy::too_many_arguments)] // Preserve seven original fields plus optional anchor snapshots.
     fn new(
         id: i32,
@@ -627,10 +800,12 @@ impl PyComment {
         resolved: Option<bool>,
         anchor_text: Option<String>,
         anchor: Option<PyRef<'_, PyStoryRunRange>>,
+        anchor_issue: Option<String>,
     ) -> Self {
         Self {
             anchor_text,
             anchor: anchor.map(|range| (*range).clone()),
+            anchor_issue,
             id,
             author,
             initials,
@@ -1641,7 +1816,7 @@ impl PySectionHandle {
             None,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         self.owner = next_owner;
         Ok(())
@@ -1666,7 +1841,7 @@ impl PySectionHandle {
             .set_page_border(edge, style, width, space, color)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         candidate
-            .to_bytes()
+            .saves_as(&candidate)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         let prepared = document.prepare_word_revision(
             py,
@@ -1682,7 +1857,7 @@ impl PySectionHandle {
             None,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         self.owner = next_owner;
         Ok(())
@@ -1750,7 +1925,7 @@ impl PySectionHandle {
             None,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         self.owner = next_owner;
         Ok(())
@@ -1812,7 +1987,7 @@ impl PySectionHandle {
             None,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         self.owner = next_owner;
         Ok(())
@@ -1850,7 +2025,7 @@ impl PySectionHandle {
             None,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         self.owner = next_owner;
         Ok(())
@@ -2068,7 +2243,7 @@ impl PyHeaderFooter {
             )?
             .0;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         Ok(())
     }
@@ -2206,7 +2381,7 @@ impl PyHeaderFooter {
             )?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         Ok(result)
     }
@@ -2300,7 +2475,7 @@ impl PyHeaderFooter {
             )?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         Ok(result)
     }
@@ -2380,7 +2555,7 @@ impl PyNote {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
     #[getter]
@@ -2456,7 +2631,7 @@ impl PyNote {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         Ok(result)
     }
@@ -2500,7 +2675,7 @@ impl PyNote {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         self.path = next;
         Ok(result)
     }
@@ -2549,7 +2724,7 @@ impl PySettings {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
 }
@@ -2843,6 +3018,26 @@ impl PyListLevel {
     }
 }
 
+/// `set_style` line spacing. Omission keeps the stored line and rule.
+/// Explicit None is `Given(None)` and clears both. `add_style` never stores
+/// a clear: None and omission both stay unset on a new style.
+enum StyleLineSpacingArg {
+    Omitted,
+    Given(Option<Py<PyAny>>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for StyleLineSpacingArg {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
+        if obj.is_none() {
+            Ok(Self::Given(None))
+        } else {
+            Ok(Self::Given(Some(obj.to_owned().unbind())))
+        }
+    }
+}
+
 /// The formatting `Document.add_style` gives a new style. Lengths and the
 /// font size are EMU, as `Length` values are, and `None` leaves a property to
 /// the style's base.
@@ -2858,7 +3053,9 @@ struct StyleFormatting {
     right_indent: Option<i64>,
     first_line_indent: Option<i64>,
     alignment: Option<i32>,
-    line_spacing: Option<Py<PyAny>>,
+    /// None omits the write. `Some(None)` clears the line and rule.
+    /// `Some(Some(value))` assigns a length or a line multiple.
+    line_spacing: Option<Option<Py<PyAny>>>,
     underline: Option<Py<PyAny>>,
     keep_with_next: Option<bool>,
     keep_together: Option<bool>,
@@ -2942,19 +3139,28 @@ impl StyleFormatting {
         py: Python<'_>,
         existing: Option<&rdocx::CT_PPr>,
     ) -> PyResult<Option<rdocx::CT_PPr>> {
-        let supplied = self.space_before.is_some()
+        let other = self.space_before.is_some()
             || self.space_after.is_some()
             || self.left_indent.is_some()
             || self.right_indent.is_some()
             || self.first_line_indent.is_some()
             || self.alignment.is_some()
-            || self.line_spacing.is_some()
             || self.keep_with_next.is_some()
             || self.keep_together.is_some()
             || self.page_break_before.is_some()
             || self.borders.is_some()
             || self.shading.is_some()
             || self.tab_stops.is_some();
+        // Clearing a line that is already absent must not create pPr.
+        if !other
+            && self.line_spacing.as_ref().is_some_and(Option::is_none)
+            && existing.is_none_or(|properties| {
+                properties.line_spacing.is_none() && properties.line_rule.is_none()
+            })
+        {
+            return Ok(None);
+        }
+        let supplied = other || self.line_spacing.is_some();
         if !supplied {
             return Ok(None);
         }
@@ -2995,21 +3201,35 @@ impl StyleFormatting {
                 rdocx::Alignment::Justify => rdocx_oxml::ST_Jc::Both,
             });
         }
-        if let Some(value) = &self.line_spacing {
-            let value = value.bind(py);
-            if value.is_instance_of::<PyFloat>() {
-                let multiple = value.extract::<f64>()?;
-                let twip = multiple * 240.0;
-                if !multiple.is_finite() || twip < i32::MIN as f64 || twip > i32::MAX as f64 {
-                    return Err(PyValueError::new_err(
-                        "style line_spacing must be finite and fit signed twips",
-                    ));
+        if let Some(spacing) = &self.line_spacing {
+            match spacing {
+                None => {
+                    properties.line_spacing = None;
+                    properties.line_rule = None;
                 }
-                properties.line_spacing = Some(rdocx::Twips(twip as i32));
-                properties.line_rule = Some("auto".to_owned());
-            } else {
-                properties.line_spacing = Some(twips(value.extract()?)?);
-                properties.line_rule = Some("exact".to_owned());
+                Some(value) => {
+                    let value = value.bind(py);
+                    let message = "style line_spacing requires a numeric line multiple or a Length";
+                    if value.is_instance_of::<PyBool>() {
+                        return Err(PyTypeError::new_err(message));
+                    }
+                    if value.is_instance(&py.import("rdocx")?.getattr("Length")?)? {
+                        properties.line_spacing = Some(twips(value.extract()?)?);
+                        properties.line_rule = Some("exact".to_owned());
+                    } else if value.is_instance_of::<PyInt>() || value.is_instance_of::<PyFloat>() {
+                        let spacing = rdocx::auto_line_spacing(
+                            crate::formatting::require_auto_line_spacing(value)?,
+                        );
+                        let kept = properties.line_rule.is_none()
+                            && properties.line_spacing == Some(spacing);
+                        properties.line_spacing = Some(spacing);
+                        if !kept {
+                            properties.line_rule = Some("auto".to_owned());
+                        }
+                    } else {
+                        return Err(PyTypeError::new_err(message));
+                    }
+                }
             }
         }
         if let Some(value) = self.keep_with_next {
@@ -3456,6 +3676,31 @@ fn length_keyword(
     let twips = i32::try_from(emu / 635)
         .map_err(|_| PyValueError::new_err(format!("{name} must fit signed twips")))?;
     Ok(Some(rdocx::Twips(twips)))
+}
+
+/// A default `line_spacing` keyword. `Length` is an exact pitch. A non-bool
+/// int or float is a line multiple. `None` clears the line and its rule.
+fn line_spacing_keyword(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<(rdocx::Twips, &'static str)>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    let message = "line_spacing requires a numeric line multiple, a Length or None";
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(message));
+    }
+    if value.is_instance(&py.import("rdocx")?.getattr("Length")?)? {
+        return Ok(length_keyword(py, value, "line_spacing")?.map(|twips| (twips, "exact")));
+    }
+    if !value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyFloat>() {
+        return Err(PyTypeError::new_err(message));
+    }
+    Ok(Some((
+        rdocx::auto_line_spacing(crate::formatting::require_auto_line_spacing(value)?),
+        "auto",
+    )))
 }
 
 #[pyclass(name = "CustomProperties")]
@@ -4145,7 +4390,7 @@ impl PyCoreProperties {
 // Only current physical owners are retained. A committed mutation supplies the
 // replacement inventory before any state is published.
 #[derive(Clone)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(any(test, debug_assertions), derive(Debug, PartialEq, Eq))]
 pub(crate) enum WordOwnerLocation {
     Paragraph(rdocx::ContentLocation),
     Run(rdocx::ContentLocation, rdocx_oxml::text::AcceptedRunPath),
@@ -4161,7 +4406,7 @@ pub(crate) enum WordOwnerLocation {
 }
 
 #[derive(Clone, Default)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(any(test, debug_assertions), derive(Debug, PartialEq, Eq))]
 enum WordReadFacts {
     #[default]
     None,
@@ -4170,7 +4415,7 @@ enum WordReadFacts {
     Table(Vec<Vec<usize>>),
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(any(test, debug_assertions), derive(Debug, PartialEq, Eq))]
 struct WordOwnerAddress {
     location: WordOwnerLocation,
     parent: Option<usize>,
@@ -4200,24 +4445,58 @@ pub(crate) enum WordView {
 }
 
 struct WordOwnerIndexes {
-    by_generation: HashMap<u64, usize>,
-    by_route: HashMap<u64, Vec<usize>>,
-    direct_body_paragraphs: HashMap<usize, usize>,
+    by_generation: IndexMap<u64, usize>,
+    by_route: IndexMap<u64, Vec<usize>>,
+    direct_body_paragraphs: IndexMap<usize, usize>,
     body_paragraphs: Option<Vec<Option<rdocx::ContentLocation>>>,
     body_tables: Vec<Option<rdocx::ContentLocation>>,
     cell_paragraphs: HashMap<(usize, usize, usize), Vec<rdocx::ContentLocation>>,
-    paragraphs_by_parent: HashMap<usize, Vec<usize>>,
-    tables_by_parent: HashMap<usize, Vec<usize>>,
+    paragraphs_by_parent: IndexMap<usize, Vec<usize>>,
+    tables_by_parent: IndexMap<usize, Vec<usize>>,
+}
+
+/// A multiply-rotate hasher over machine words, for owner routes and the
+/// owner index maps. Their keys are process-local integers and route
+/// hashes whose bucket members are still compared with `same_route`, so
+/// they need no keyed hash, and a body edit indexes every owner again.
+#[derive(Default)]
+struct IndexHasher(u64);
+
+/// A map of the owner indexes.
+type IndexMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
+
+impl Hasher for IndexHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
 }
 
 impl WordOwnerLocation {
     fn route_hash(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
+        let mut hash = IndexHasher::default();
         std::mem::discriminant(self).hash(&mut hash);
         let mut content = |location: &rdocx::ContentLocation| {
             let story = location.story();
             story.kind().hash(&mut hash);
-            story.part_name().hash(&mut hash);
+            // Equal routes share their part, so its length tells parts apart
+            // well enough for buckets.
+            story.part_name().len().hash(&mut hash);
             story.owner_index().hash(&mut hash);
             location.item_kind().hash(&mut hash);
             location.index_path().hash(&mut hash);
@@ -4246,18 +4525,21 @@ impl WordOwnerLocation {
 }
 
 impl WordOwnerIndexes {
-    fn prepare(owners: &[WordOwner], document: &rdocx::Document) -> PyResult<Self> {
+    fn prepare(owners: &[WordOwner], projections: WordIndexProjections) -> PyResult<Self> {
+        let WordIndexProjections {
+            body_paragraphs,
+            cell_paragraphs,
+            table_slots,
+        } = projections;
         let mut indexes = Self {
-            by_generation: HashMap::new(),
-            by_route: HashMap::new(),
-            direct_body_paragraphs: HashMap::new(),
-            body_paragraphs: document.paragraph_story_locations().ok(),
+            by_generation: IndexMap::default(),
+            by_route: IndexMap::default(),
+            direct_body_paragraphs: IndexMap::default(),
+            body_paragraphs,
             body_tables: Vec::new(),
-            cell_paragraphs: document
-                .cell_paragraph_story_locations()
-                .unwrap_or_default(),
-            paragraphs_by_parent: HashMap::new(),
-            tables_by_parent: HashMap::new(),
+            cell_paragraphs,
+            paragraphs_by_parent: IndexMap::default(),
+            tables_by_parent: IndexMap::default(),
         };
         let fail =
             |_| pyo3::exceptions::PyMemoryError::new_err("Word owner index allocation failed");
@@ -4270,9 +4552,43 @@ impl WordOwnerIndexes {
             .direct_body_paragraphs
             .try_reserve(owners.len())
             .map_err(fail)?;
+        let body_tables = indexes.index_owners(owners, 7);
+        indexes.body_tables = table_slots
+            .into_iter()
+            .map(|slot| slot.and_then(|slot| body_tables.get(&slot).cloned()))
+            .collect();
+        Ok(indexes)
+    }
+
+    /// Index `owners` again after they moved in place, keeping the document
+    /// projections, which the caller moves with them.
+    fn index_owners_again(&mut self, owners: &[WordOwner]) {
+        self.by_generation.clear();
+        self.by_generation.reserve(owners.len());
+        // Route buckets keep their allocations, and those left empty go.
+        self.by_route.values_mut().for_each(Vec::clear);
+        self.by_route
+            .reserve(owners.len().saturating_sub(self.by_route.len()));
+        self.direct_body_paragraphs.clear();
+        self.paragraphs_by_parent.clear();
+        self.tables_by_parent.clear();
+        self.index_owners(owners, 6);
+        self.by_route.retain(|_, bucket| !bucket.is_empty());
+    }
+
+    /// Index every owner, and return the first body table owner of each
+    /// direct body slot.
+    fn index_owners(
+        &mut self,
+        owners: &[WordOwner],
+        counter: usize,
+    ) -> HashMap<usize, rdocx::ContentLocation> {
+        let indexes = self;
         let mut body_tables = HashMap::new();
         for (index, owner) in owners.iter().enumerate() {
+            note_splice_packet_work(counter);
             note_fx260_word(1);
+            note_visited_owner_record();
             indexes
                 .by_generation
                 .insert(owner.owner.generation(), index);
@@ -4314,14 +4630,7 @@ impl WordOwnerIndexes {
                 _ => {}
             }
         }
-        indexes.body_tables = (0..document.table_count())
-            .map(|index| {
-                document
-                    .content_index_of_table(index)
-                    .and_then(|slot| body_tables.get(&slot).cloned())
-            })
-            .collect();
-        Ok(indexes)
+        body_tables
     }
 
     fn find(&self, owners: &[WordOwner], location: &WordOwnerLocation) -> Option<usize> {
@@ -4331,6 +4640,7 @@ impl WordOwnerIndexes {
             .copied()
             .find(|index| {
                 note_fx260_word(1);
+                note_visited_owner_record();
                 owners[*index].location.same_route(location)
             })
     }
@@ -4349,6 +4659,97 @@ pub(crate) struct PreparedWordRevision {
     owners: Vec<WordOwner>,
     indexes: WordOwnerIndexes,
     snapshot_scope: RevisionState,
+    /// Pieces for the candidate, or `None` when this publication did not
+    /// assemble them and the cache must reset.
+    pieces: Option<WordPieces>,
+}
+
+/// Under debug assertions, check a direct read against the whole-source
+/// read: the same bytes up to the root `w14` declaration, which a direct
+/// read decides from the root and the read item alone.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_direct_read(
+    direct: &[u8],
+    whole: impl FnOnce() -> PyResult<Vec<u8>>,
+    owner: &str,
+) {
+    let without_w14 = |xml: &[u8]| {
+        let xml = String::from_utf8_lossy(xml).into_owned();
+        let root = xml.find('>').unwrap_or(xml.len());
+        let declaration = r#" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+        format!(
+            "{}{}",
+            xml[..root].replacen(declaration, "", 1),
+            &xml[root..]
+        )
+    };
+    let whole = guarded(whole).expect("a direct read has a whole-source read");
+    assert_eq!(
+        without_w14(direct),
+        without_w14(&whole),
+        "direct {owner} XML"
+    );
+}
+
+/// Under debug assertions, check a handle's route bound from an owner
+/// inventory against the route the document resolves, story fingerprints
+/// aside.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_indexed_route(
+    indexed: &rdocx::ContentLocation,
+    native: impl FnOnce() -> rdocx::Result<rdocx::ContentLocation>,
+    owner: &str,
+) {
+    #[cfg(test)]
+    let visits = fx260_word_visits();
+    let native = guarded(native).expect("an indexed route resolves in the document");
+    assert_eq!(
+        unfingerprinted_location(indexed),
+        unfingerprinted_location(&native),
+        "indexed {owner} route"
+    );
+    #[cfg(test)]
+    FX260_WORD_VISITS.with(|cell| cell.set(visits));
+}
+
+#[cfg(debug_assertions)]
+fn unfingerprinted_location(location: &rdocx::ContentLocation) -> rdocx::ContentLocation {
+    let story = location.story();
+    rdocx::ContentLocation::new(
+        rdocx::StoryId::new(story.kind(), story.part_name(), story.owner_index()),
+        location.item_kind(),
+        location.index_path().to_vec(),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn unfingerprinted_owner_location(location: &WordOwnerLocation) -> WordOwnerLocation {
+    match location {
+        WordOwnerLocation::Paragraph(location) => {
+            WordOwnerLocation::Paragraph(unfingerprinted_location(location))
+        }
+        WordOwnerLocation::Table(location) => {
+            WordOwnerLocation::Table(unfingerprinted_location(location))
+        }
+        WordOwnerLocation::Run(location, path) => {
+            WordOwnerLocation::Run(unfingerprinted_location(location), path.clone())
+        }
+        WordOwnerLocation::Hyperlink(location, index) => {
+            WordOwnerLocation::Hyperlink(unfingerprinted_location(location), *index)
+        }
+        WordOwnerLocation::Cell {
+            table,
+            row,
+            cell,
+            story,
+        } => WordOwnerLocation::Cell {
+            table: unfingerprinted_location(table),
+            row: *row,
+            cell: *cell,
+            story: rdocx::StoryId::new(story.kind(), story.part_name(), story.owner_index()),
+        },
+        WordOwnerLocation::Section(index) => WordOwnerLocation::Section(*index),
+    }
 }
 
 fn word_owner_capture(
@@ -4361,6 +4762,7 @@ fn word_owner_capture(
     furniture_scope: Option<&RevisionState>,
 ) -> PyResult<(ContentPath, RevisionState)> {
     let (document_scope, removal_scope) = document_scopes;
+    note_visited_owner_record();
     let target = &owners[index];
     // Every structural publisher retires unproved current-owner states. Actual
     // Run handles retain the conservative document epoch and its first cause.
@@ -4527,33 +4929,873 @@ fn word_table_read_facts(
         .unwrap_or_default()
         .into_iter()
         .filter(|item| item.location().item_kind() == rdocx::StoryItemKind::Table)
-        .filter_map(|item| {
-            let table = rdocx_oxml::table::CT_Tbl::from_xml_fragment_checked(item.xml()).ok()?;
-            let rows = table
-                .rows
-                .iter()
-                .map(|row| {
-                    row.cells
-                        .iter()
-                        .map(|cell| cell.paragraphs().len())
-                        .collect()
-                })
-                .collect();
-            Some((item.location().clone(), WordReadFacts::Table(rows)))
-        })
+        .filter_map(|item| Some((item.location().clone(), word_table_facts(item.xml())?)))
         .collect()
+}
+
+/// The facade paragraph count of each modeled cell of a standalone table.
+fn word_table_facts(xml: &[u8]) -> Option<WordReadFacts> {
+    let table = rdocx_oxml::table::CT_Tbl::from_xml_fragment_checked(xml).ok()?;
+    let rows = table
+        .rows
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|cell| cell.paragraphs().len())
+                .collect()
+        })
+        .collect();
+    Some(WordReadFacts::Table(rows))
+}
+
+/// The four owner snapshot families of [`rdocx::Document::story_owner_snapshots`].
+type WordOwnerSnapshots = (
+    Vec<rdocx::StoryItemSnapshot>,
+    Vec<(rdocx::ContentLocation, usize, usize, rdocx::StoryId)>,
+    Vec<(rdocx::ContentLocation, Vec<u8>)>,
+    Vec<(rdocx::ContentLocation, rdocx::LinkInfo)>,
+);
+
+type WordParagraphFacts = (
+    rdocx::ContentLocation,
+    String,
+    Vec<rdocx_oxml::text::AcceptedRunPath>,
+);
+
+/// Owner facts in snapshot order: tables, paragraphs and content controls,
+/// physical cells, range paragraphs, and hyperlink items.
+#[derive(Clone, Default)]
+struct WordOwnerFacts {
+    items: Vec<(rdocx::ContentLocation, Option<usize>, WordReadFacts)>,
+    cells: Vec<(rdocx::ContentLocation, usize, usize, rdocx::StoryId)>,
+    paragraphs: Vec<WordParagraphFacts>,
+    links: Vec<rdocx::ContentLocation>,
+}
+
+fn word_owner_facts(
+    (snapshots, cells, paragraphs, links): WordOwnerSnapshots,
+    table_facts: impl Fn(&rdocx::StoryItemSnapshot) -> Option<WordReadFacts>,
+) -> rdocx::Result<Option<WordOwnerFacts>> {
+    let mut items = Vec::new();
+    for snapshot in snapshots.iter().filter(|snapshot| {
+        matches!(
+            snapshot.location().item_kind(),
+            rdocx::StoryItemKind::Table
+                | rdocx::StoryItemKind::Paragraph
+                | rdocx::StoryItemKind::ContentControl
+        )
+    }) {
+        let read_facts = if snapshot.location().item_kind() == rdocx::StoryItemKind::Table {
+            match table_facts(snapshot) {
+                Some(facts) => facts,
+                None => return Ok(None),
+            }
+        } else {
+            WordReadFacts::None
+        };
+        let slot = snapshot
+            .direct_body_index()
+            .filter(|_| snapshot.is_direct_child());
+        items.push((snapshot.location().clone(), slot, read_facts));
+    }
+    let mut parsed = Vec::new();
+    for (location, xml) in paragraphs {
+        let paragraph = rdocx_oxml::CT_P::from_xml_fragment(&xml)?;
+        parsed.push((
+            location,
+            paragraph.accepted_text(),
+            paragraph.accepted_run_paths(),
+        ));
+    }
+    Ok(Some(WordOwnerFacts {
+        items,
+        cells,
+        paragraphs: parsed,
+        links: links.into_iter().map(|(location, _)| location).collect(),
+    }))
+}
+
+/// Addresses from piece facts. The full path stays [`word_owner_addresses`].
+fn word_piece_owner_addresses(facts: WordOwnerFacts, sections: usize) -> Vec<WordOwnerAddress> {
+    let WordOwnerFacts {
+        items,
+        cells,
+        paragraphs,
+        links,
+    } = facts;
+    let mut result = Vec::new();
+    let mut table_ordinals = HashMap::new();
+    let mut body_slots = HashMap::new();
+    let mut cell_parents = HashMap::new();
+    let mut table_cells = HashMap::<rdocx::ContentLocation, Vec<_>>::new();
+    for (table, row, cell, story) in cells {
+        table_cells
+            .entry(table)
+            .or_default()
+            .push((row, cell, story));
+    }
+    for (location, slot, _) in &items {
+        if location.story().kind() == rdocx::StoryKind::Body
+            && matches!(
+                location.item_kind(),
+                rdocx::StoryItemKind::Paragraph | rdocx::StoryItemKind::ContentControl
+            )
+            && let Some(slot) = slot
+        {
+            body_slots.insert(location.clone(), *slot);
+        }
+    }
+    for (location, slot, read_facts) in items {
+        if location.item_kind() != rdocx::StoryItemKind::Table {
+            continue;
+        }
+        let ordinal = table_ordinals
+            .entry(location.story().clone())
+            .or_insert(0usize);
+        let projection_ordinal = Some(*ordinal);
+        *ordinal += 1;
+        let table_index = result.len();
+        let cells = table_cells.remove(&location).unwrap_or_default();
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Table(location.clone()),
+            parent: None,
+            projection_ordinal,
+            read_facts,
+            body_slot: slot,
+        });
+        for (row, cell, story) in cells {
+            result.push(WordOwnerAddress {
+                location: WordOwnerLocation::Cell {
+                    table: location.clone(),
+                    row,
+                    cell,
+                    story,
+                },
+                parent: Some(table_index),
+                body_slot: None,
+                projection_ordinal: None,
+                read_facts: WordReadFacts::None,
+            });
+        }
+    }
+    for (index, address) in result.iter().enumerate() {
+        if let WordOwnerLocation::Cell { story, .. } = &address.location {
+            cell_parents
+                .entry((
+                    story.kind(),
+                    story.part_name().to_owned(),
+                    story.owner_index(),
+                ))
+                .or_insert(index);
+        }
+    }
+    for address in &mut result {
+        if let WordOwnerLocation::Table(location) = &address.location {
+            let story = location.story();
+            address.parent = cell_parents
+                .get(&(
+                    story.kind(),
+                    story.part_name().to_owned(),
+                    story.owner_index(),
+                ))
+                .copied();
+        }
+    }
+    let mut paragraph_ordinals = HashMap::new();
+    for (location, text, runs) in paragraphs {
+        let story = location.story();
+        let parent = cell_parents
+            .get(&(
+                story.kind(),
+                story.part_name().to_owned(),
+                story.owner_index(),
+            ))
+            .copied();
+        let ordinal = paragraph_ordinals
+            .entry(location.story().clone())
+            .or_insert(0usize);
+        let projection_ordinal = Some(*ordinal);
+        *ordinal += 1;
+        let index = result.len();
+        let body_slot = if location.story().kind() == rdocx::StoryKind::Body {
+            let containing = match location.index_path() {
+                [_] => Some(location.clone()),
+                [control, _] => Some(rdocx::ContentLocation::new(
+                    location.story().clone(),
+                    rdocx::StoryItemKind::ContentControl,
+                    vec![*control],
+                )),
+                _ => None,
+            };
+            containing.and_then(|containing| body_slots.get(&containing).copied())
+        } else {
+            None
+        };
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Paragraph(location.clone()),
+            parent,
+            body_slot,
+            projection_ordinal,
+            read_facts: WordReadFacts::Paragraph(text),
+        });
+        for path in runs {
+            result.push(WordOwnerAddress {
+                location: WordOwnerLocation::Run(location.clone(), path),
+                parent: Some(index),
+                body_slot: None,
+                projection_ordinal: None,
+                read_facts: WordReadFacts::None,
+            });
+        }
+    }
+    for index in 0..sections {
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Section(index),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: None,
+            read_facts: WordReadFacts::None,
+        });
+    }
+    let mut local_indexes = HashMap::<rdocx::ContentLocation, usize>::new();
+    let mut story_indexes = HashMap::<rdocx::StoryId, usize>::new();
+    for location in links {
+        let local = local_indexes.entry(location.clone()).or_default();
+        let position = story_indexes.entry(location.story().clone()).or_default();
+        result.push(WordOwnerAddress {
+            location: WordOwnerLocation::Hyperlink(location.clone(), *local),
+            parent: None,
+            body_slot: None,
+            projection_ordinal: Some(*position),
+            read_facts: WordReadFacts::None,
+        });
+        *local += 1;
+        *position += 1;
+    }
+    result
+}
+
+struct WordIndexProjections {
+    body_paragraphs: Option<Vec<Option<rdocx::ContentLocation>>>,
+    cell_paragraphs: CellParagraphRoutes,
+    table_slots: Vec<Option<usize>>,
+}
+
+type CellParagraphRoutes = HashMap<(usize, usize, usize), Vec<rdocx::ContentLocation>>;
+
+impl WordIndexProjections {
+    fn of(document: &rdocx::Document) -> Self {
+        Self {
+            body_paragraphs: document.paragraph_story_locations().ok(),
+            cell_paragraphs: document
+                .cell_paragraph_story_locations()
+                .unwrap_or_default(),
+            table_slots: (0..document.table_count())
+                .map(|index| document.content_index_of_table(index))
+                .collect(),
+        }
+    }
+}
+
+struct WordBlockOwners {
+    facts: WordOwnerFacts,
+    relationships: Vec<String>,
+    body_items: usize,
+    cell_stories: usize,
+    text_boxes: usize,
+    paragraphs: Vec<Option<Vec<usize>>>,
+    tables: usize,
+    cell_paragraphs: Option<(CellParagraphRoutes, bool)>,
+    holds_field: bool,
+}
+
+fn word_block_owners(
+    document: &rdocx::Document,
+    block: &rdocx_oxml::BodyContent,
+) -> rdocx::Result<Option<WordBlockOwners>> {
+    let rdocx::BodyItemOwners {
+        snapshots,
+        cells,
+        paragraphs,
+        links,
+        cell_stories,
+        text_boxes,
+        paragraph_routes,
+        tables,
+        cell_paragraphs,
+        holds_field,
+    } = document.body_item_owners(block)?;
+    let body = |snapshot: &&rdocx::StoryItemSnapshot| {
+        snapshot.location().story().kind() == rdocx::StoryKind::Body
+    };
+    let direct = snapshots
+        .iter()
+        .filter(body)
+        .filter(|snapshot| snapshot.is_direct_child())
+        .map(rdocx::StoryItemSnapshot::direct_body_index)
+        .collect::<Vec<_>>();
+    if direct.first() != Some(&Some(0)) || direct.len() != 1 {
+        return Ok(None);
+    }
+    let body_items = snapshots.iter().filter(body).count();
+    let relationships = link_relationships(&links);
+    let Some(facts) = word_owner_facts((snapshots, cells, paragraphs, links), |snapshot| {
+        word_table_facts(snapshot.xml())
+    })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(WordBlockOwners {
+        facts,
+        relationships,
+        body_items,
+        cell_stories,
+        text_boxes,
+        paragraphs: paragraph_routes,
+        tables,
+        cell_paragraphs,
+        holds_field,
+    }))
+}
+
+fn link_relationships(links: &[(rdocx::ContentLocation, rdocx::LinkInfo)]) -> Vec<String> {
+    let mut relationships = links
+        .iter()
+        .filter_map(|(_, link)| link.rel_id.clone())
+        .collect::<Vec<_>>();
+    relationships.sort_unstable();
+    relationships.dedup();
+    relationships
+}
+
+fn plain_paragraph_owners(
+    body: &rdocx::StoryId,
+    text: &str,
+    runs: &[rdocx_oxml::text::AcceptedRunPath],
+) -> WordBlockOwners {
+    let location =
+        rdocx::ContentLocation::new(body.clone(), rdocx::StoryItemKind::Paragraph, vec![0]);
+    WordBlockOwners {
+        facts: WordOwnerFacts {
+            items: vec![(location.clone(), Some(0), WordReadFacts::None)],
+            cells: Vec::new(),
+            paragraphs: vec![(location, text.to_owned(), runs.to_vec())],
+            links: Vec::new(),
+        },
+        relationships: Vec::new(),
+        body_items: 1,
+        cell_stories: 0,
+        text_boxes: 0,
+        paragraphs: vec![Some(vec![0])],
+        tables: 0,
+        cell_paragraphs: Some((HashMap::new(), true)),
+        holds_field: false,
+    }
+}
+
+fn table_owners(facts: WordOwnerFacts, cells: usize) -> Option<WordBlockOwners> {
+    let Some((_, _, WordReadFacts::Table(rows))) = facts.items.first() else {
+        return None;
+    };
+    let mut stories = HashMap::new();
+    let mut routes = CellParagraphRoutes::new();
+    for (_, row, cell, story) in &facts.cells {
+        stories.insert(story.owner_index(), (*row, *cell));
+        routes.insert((0, *row, *cell), Vec::new());
+    }
+    for (location, _, _) in &facts.paragraphs {
+        if location.story().kind() == rdocx::StoryKind::TableCell
+            && let Some((row, cell)) = stories.get(&location.story().owner_index())
+        {
+            routes
+                .entry((0, *row, *cell))
+                .or_default()
+                .push(location.clone());
+        }
+    }
+    routes.retain(|(_, row, cell), locations| {
+        rows.get(*row).and_then(|row| row.get(*cell)) == Some(&locations.len())
+    });
+    Some(WordBlockOwners {
+        relationships: Vec::new(),
+        body_items: 1,
+        cell_stories: cells,
+        text_boxes: 0,
+        paragraphs: Vec::new(),
+        tables: 1,
+        cell_paragraphs: Some((routes, true)),
+        facts,
+        holds_field: false,
+    })
+}
+
+fn placed_route(
+    location: &rdocx::ContentLocation,
+    body: &rdocx::StoryId,
+    (items, stories): (usize, (usize, usize)),
+) -> rdocx::ContentLocation {
+    let story = location.story();
+    if story.kind() == rdocx::StoryKind::Body {
+        let mut placed = rdocx::ContentLocation::new(
+            body.clone(),
+            location.item_kind(),
+            location.index_path().to_vec(),
+        );
+        if let Some(head) = location.index_path().first() {
+            placed.set_index_path_head(head + items);
+        }
+        placed
+    } else {
+        rdocx::ContentLocation::new(
+            placed_story(story, stories),
+            location.item_kind(),
+            location.index_path().to_vec(),
+        )
+    }
+}
+
+fn placed_story(story: &rdocx::StoryId, (cells, boxes): (usize, usize)) -> rdocx::StoryId {
+    let mut placed = story.clone();
+    let before = if story.kind() == rdocx::StoryKind::TextBox {
+        boxes
+    } else {
+        cells
+    };
+    placed.set_owner_index(story.owner_index() + before);
+    placed
+}
+
+struct WordBlockPiece {
+    block: rdocx_oxml::BodyContent,
+    owners: Option<WordBlockOwners>,
+}
+
+struct WordPartPiece {
+    kind: rdocx::StoryKind,
+    part_name: String,
+    xml: Vec<u8>,
+    owners: Option<(WordOwnerFacts, Vec<String>)>,
+}
+
+/// Cached body blocks and related story parts.
+#[derive(Clone, Default)]
+pub(crate) struct WordPieces {
+    context: Option<rdocx::BodyItemContext>,
+    blocks: Vec<std::sync::Arc<WordBlockPiece>>,
+    parts: Vec<std::sync::Arc<WordPartPiece>>,
+}
+
+fn aligned_block(piece: &WordBlockPiece, block: &rdocx_oxml::BodyContent) -> bool {
+    piece.block == *block
+}
+
+fn qualified_block(piece: &WordBlockPiece, block: &rdocx_oxml::BodyContent) -> bool {
+    aligned_block(piece, block)
+        && piece
+            .owners
+            .as_ref()
+            .is_some_and(|owners| !owners.holds_field)
+        && piece.block.owner_facts_reusable_by_value()
+        && block.owner_facts_reusable_by_value()
+}
+
+impl WordPieces {
+    fn assemble(
+        &self,
+        document: &rdocx::Document,
+    ) -> (Self, Option<(Vec<WordOwnerAddress>, WordIndexProjections)>) {
+        let context = document.body_item_context();
+        let blocks = document.body_children();
+        let Ok(sources) = document.story_part_sources() else {
+            return (self.clone(), None);
+        };
+        // Sources have already resolved dot segments. OPC physical identity is
+        // case insensitive even when relationship targets retain their spelling.
+        let mut names = std::collections::HashSet::from([context.part_name().to_ascii_lowercase()]);
+        if !sources
+            .iter()
+            .all(|(_, name, _)| names.insert(name.to_ascii_lowercase()))
+        {
+            return (self.clone(), None);
+        }
+        let changed_existing_context = self.context.as_ref().is_some_and(|old| old != &context);
+        let same_context = self.context.as_ref() == Some(&context);
+        let old = if same_context {
+            self.blocks.as_slice()
+        } else {
+            &[]
+        };
+        let prefix = old
+            .iter()
+            .zip(blocks)
+            .take_while(|(piece, block)| aligned_block(piece, block))
+            .count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(blocks[prefix..].iter().rev())
+            .take_while(|(piece, block)| aligned_block(piece, block))
+            .count();
+        let mut pieces = Self {
+            context: Some(context),
+            blocks: Vec::with_capacity(blocks.len()),
+            parts: Vec::new(),
+        };
+        for (piece, block) in old[..prefix].iter().zip(&blocks[..prefix]) {
+            if qualified_block(piece, block) {
+                pieces.blocks.push(std::sync::Arc::clone(piece));
+            } else {
+                note_word_piece_read();
+                let owners = word_block_owners(document, block).ok().flatten();
+                pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
+                    block: block.clone(),
+                    owners,
+                }));
+            }
+        }
+        for block in &blocks[prefix..blocks.len() - suffix] {
+            note_word_piece_read();
+            let owners = word_block_owners(document, block).ok().flatten();
+            pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
+                block: block.clone(),
+                owners,
+            }));
+        }
+        for (piece, block) in old[old.len() - suffix..]
+            .iter()
+            .zip(&blocks[blocks.len() - suffix..])
+        {
+            if qualified_block(piece, block) {
+                pieces.blocks.push(std::sync::Arc::clone(piece));
+            } else {
+                note_word_piece_read();
+                let owners = word_block_owners(document, block).ok().flatten();
+                pieces.blocks.push(std::sync::Arc::new(WordBlockPiece {
+                    block: block.clone(),
+                    owners,
+                }));
+            }
+        }
+        let old_parts = if same_context {
+            self.parts.as_slice()
+        } else {
+            &[]
+        };
+        for (kind, part_name, xml) in sources {
+            if let Some(piece) = old_parts.iter().find(|piece| {
+                piece.owners.is_some()
+                    && piece.kind == kind
+                    && piece.part_name == part_name
+                    && piece.xml == *xml
+            }) {
+                pieces.parts.push(piece.clone());
+                continue;
+            }
+            note_word_piece_read();
+            let owners = document
+                .story_part_owner_snapshots(kind, &part_name, &xml)
+                .ok()
+                .and_then(|snapshots| {
+                    let relationships = link_relationships(&snapshots.3);
+                    word_owner_facts(snapshots, |snapshot| word_table_facts(snapshot.xml()))
+                        .ok()
+                        .flatten()
+                        .map(|facts| (facts, relationships))
+                });
+            pieces.parts.push(std::sync::Arc::new(WordPartPiece {
+                kind,
+                part_name,
+                xml: xml.into_owned(),
+                owners,
+            }));
+        }
+        let inventory = if changed_existing_context {
+            None
+        } else {
+            pieces.inventory(document)
+        };
+        (pieces, inventory)
+    }
+
+    /// Keep body pieces aligned with an in-place splice of `document`.
+    ///
+    /// `removed` pieces at `slot` go. `inserted` is the block now at `slot`.
+    /// A count or slot that does not match the document drops the body pieces
+    /// and leaves related parts in place. Context is unchanged.
+    fn splice(
+        &mut self,
+        document: &rdocx::Document,
+        slot: usize,
+        removed: usize,
+        inserted: Option<WordBlockOwners>,
+    ) {
+        let blocks = document.body_children();
+        let added = usize::from(inserted.is_some());
+        if self.blocks.len() + added != blocks.len() + removed || slot + removed > self.blocks.len()
+        {
+            self.blocks.clear();
+            return;
+        }
+        let piece = inserted.map(|owners| {
+            std::sync::Arc::new(WordBlockPiece {
+                block: blocks[slot].clone(),
+                owners: Some(owners),
+            })
+        });
+        self.blocks.splice(slot..slot + removed, piece);
+    }
+
+    fn inventory(
+        &self,
+        document: &rdocx::Document,
+    ) -> Option<(Vec<WordOwnerAddress>, WordIndexProjections)> {
+        let main = self.context.as_ref()?.part_name();
+        let body = rdocx::StoryId::new(rdocx::StoryKind::Body, main, 0);
+        let mut links = None;
+        let mut facts = WordOwnerFacts::default();
+        let mut cells = WordOwnerFacts::default();
+        let mut projections = WordIndexProjections {
+            body_paragraphs: Some(Vec::new()),
+            cell_paragraphs: HashMap::new(),
+            table_slots: Vec::new(),
+        };
+        let mut cell_paragraphs = Some(HashMap::new());
+        let mut routed = true;
+        let (mut items, mut stories, mut tables) = (0, (0, 0), 0);
+        for (slot, piece) in self.blocks.iter().enumerate() {
+            let owners = piece.owners.as_ref()?;
+            if !owners.relationships.is_empty() {
+                let valid =
+                    links.get_or_insert_with(|| document.story_hyperlink_relationships(main));
+                if !owners
+                    .relationships
+                    .iter()
+                    .all(|relationship| valid.contains(relationship.as_str()))
+                {
+                    return None;
+                }
+            }
+            let place =
+                |location: &rdocx::ContentLocation| placed_route(location, &body, (items, stories));
+            let in_body = |location: &rdocx::ContentLocation| {
+                location.story().kind() == rdocx::StoryKind::Body
+            };
+            for (location, direct, read_facts) in &owners.facts.items {
+                let family = if in_body(location) {
+                    &mut facts.items
+                } else {
+                    &mut cells.items
+                };
+                family.push((place(location), direct.map(|_| slot), read_facts.clone()));
+            }
+            for (table, row, cell, story) in &owners.facts.cells {
+                facts
+                    .cells
+                    .push((place(table), *row, *cell, placed_story(story, stories)));
+            }
+            for (location, text, runs) in &owners.facts.paragraphs {
+                let family = if in_body(location) {
+                    &mut facts.paragraphs
+                } else {
+                    &mut cells.paragraphs
+                };
+                family.push((place(location), text.clone(), runs.clone()));
+            }
+            for location in &owners.facts.links {
+                let family = if in_body(location) {
+                    &mut facts.links
+                } else {
+                    &mut cells.links
+                };
+                family.push(place(location));
+            }
+            if let Some(paragraphs) = &mut projections.body_paragraphs {
+                paragraphs.extend(owners.paragraphs.iter().map(|path| {
+                    path.as_ref().map(|path| {
+                        let mut location = rdocx::ContentLocation::new(
+                            body.clone(),
+                            rdocx::StoryItemKind::Paragraph,
+                            path.clone(),
+                        );
+                        location.set_index_path_head(path[0] + items);
+                        location
+                    })
+                }));
+            }
+            if matches!(piece.block, rdocx_oxml::BodyContent::Table(_)) {
+                projections.table_slots.push(Some(slot));
+            } else {
+                projections
+                    .table_slots
+                    .extend(std::iter::repeat_n(None, owners.tables));
+            }
+            if routed {
+                match &owners.cell_paragraphs {
+                    Some((routes, complete)) => {
+                        if let Some(all) = &mut cell_paragraphs {
+                            for ((table, row, cell), locations) in routes {
+                                all.insert(
+                                    (table + tables, *row, *cell),
+                                    locations.iter().map(&place).collect(),
+                                );
+                            }
+                        }
+                        routed = *complete;
+                    }
+                    None => {
+                        cell_paragraphs = None;
+                        routed = false;
+                    }
+                }
+            }
+            items += owners.body_items;
+            stories.0 += owners.cell_stories;
+            stories.1 += owners.text_boxes;
+            tables += owners.tables;
+        }
+        projections.cell_paragraphs = cell_paragraphs.unwrap_or_default();
+        facts.items.append(&mut cells.items);
+        facts.paragraphs.append(&mut cells.paragraphs);
+        facts.links.append(&mut cells.links);
+        for piece in &self.parts {
+            let (owners, relationships) = piece.owners.as_ref()?;
+            if !relationships.is_empty() {
+                let valid = document.story_hyperlink_relationships(&piece.part_name);
+                if !relationships
+                    .iter()
+                    .all(|relationship| valid.contains(relationship.as_str()))
+                {
+                    return None;
+                }
+            }
+            facts.items.extend_from_slice(&owners.items);
+            facts.cells.extend_from_slice(&owners.cells);
+            facts.paragraphs.extend_from_slice(&owners.paragraphs);
+            facts.links.extend_from_slice(&owners.links);
+        }
+        Some((
+            word_piece_owner_addresses(facts, document.section_count()),
+            projections,
+        ))
+    }
+}
+
+#[cfg(debug_assertions)]
+fn owner_location_without_body(location: &WordOwnerLocation) -> WordOwnerLocation {
+    let content = |location: &rdocx::ContentLocation| {
+        if location.story().kind() == rdocx::StoryKind::Body {
+            unfingerprinted_location(location)
+        } else {
+            location.clone()
+        }
+    };
+    match location {
+        WordOwnerLocation::Paragraph(location) => WordOwnerLocation::Paragraph(content(location)),
+        WordOwnerLocation::Table(location) => WordOwnerLocation::Table(content(location)),
+        WordOwnerLocation::Run(location, path) => {
+            WordOwnerLocation::Run(content(location), path.clone())
+        }
+        WordOwnerLocation::Hyperlink(location, index) => {
+            WordOwnerLocation::Hyperlink(content(location), *index)
+        }
+        WordOwnerLocation::Cell {
+            table,
+            row,
+            cell,
+            story,
+        } => WordOwnerLocation::Cell {
+            table: content(table),
+            row: *row,
+            cell: *cell,
+            story: story.clone(),
+        },
+        WordOwnerLocation::Section(index) => WordOwnerLocation::Section(*index),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn body_unfingerprinted_address(address: &WordOwnerAddress) -> WordOwnerAddress {
+    WordOwnerAddress {
+        location: owner_location_without_body(&address.location),
+        parent: address.parent,
+        body_slot: address.body_slot,
+        projection_ordinal: address.projection_ordinal,
+        read_facts: address.read_facts.clone(),
+    }
+}
+
+/// Debug proof that a piece inventory matches the guarded full inventory.
+/// Body story fingerprints are set aside. Other fields and projections compare
+/// as the full path publishes them.
+#[cfg(debug_assertions)]
+fn assert_word_pieces_rebuild(
+    document: &rdocx::Document,
+    locations: &[WordOwnerAddress],
+    projections: &WordIndexProjections,
+) {
+    let expected = guarded(|| word_owner_locations(document, None))
+        .expect("an inventory from pieces has a rebuild");
+    assert_eq!(
+        locations
+            .iter()
+            .map(body_unfingerprinted_address)
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(body_unfingerprinted_address)
+            .collect::<Vec<_>>(),
+        "Word owner inventory from pieces"
+    );
+    let expected = guarded(|| WordIndexProjections::of(document));
+    let paragraphs = |projections: &WordIndexProjections| {
+        projections.body_paragraphs.as_ref().map(|locations| {
+            locations
+                .iter()
+                .map(|location| location.as_ref().map(unfingerprinted_location))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        paragraphs(projections),
+        paragraphs(&expected),
+        "body paragraph projection from pieces"
+    );
+    assert_eq!(
+        &projections.cell_paragraphs, &expected.cell_paragraphs,
+        "cell paragraph projection from pieces"
+    );
+    assert_eq!(
+        &projections.table_slots, &expected.table_slots,
+        "body table projection from pieces"
+    );
 }
 
 fn word_owner_locations(
     document: &rdocx::Document,
-    mut form_sources: Option<&mut FormSources>,
+    form_sources: Option<&mut FormSources>,
 ) -> rdocx::Result<Vec<WordOwnerAddress>> {
     note_fx260_word(document.content_count().max(1));
+    note_word_inventory_rebuild();
+    let table_facts = word_table_read_facts(document);
+    word_owner_addresses(
+        document.story_owner_snapshots()?,
+        &table_facts,
+        Some(document),
+        form_sources,
+    )
+}
+
+/// The owner inventory of the given snapshots. Sections are those of
+/// `document`, and a snapshot of a detached item has none.
+fn word_owner_addresses(
+    (snapshots, cell_snapshots, paragraph_snapshots, link_snapshots): WordOwnerSnapshots,
+    table_facts: &HashMap<rdocx::ContentLocation, WordReadFacts>,
+    document: Option<&rdocx::Document>,
+    mut form_sources: Option<&mut FormSources>,
+) -> rdocx::Result<Vec<WordOwnerAddress>> {
     let mut result = Vec::new();
     let mut table_ordinals = HashMap::new();
-    let table_facts = word_table_read_facts(document);
-    let (snapshots, cell_snapshots, paragraph_snapshots, link_snapshots) =
-        document.story_owner_snapshots()?;
     if let Some(sources) = form_sources.as_deref_mut() {
         for snapshot in &snapshots {
             if snapshot.location().item_kind() == rdocx::StoryItemKind::Table {
@@ -4726,8 +5968,8 @@ fn word_owner_locations(
             });
         }
     }
-    for index in 0..document.section_count() {
-        if let Some(sources) = form_sources.as_deref_mut() {
+    for index in 0..document.map_or(0, rdocx::Document::section_count) {
+        if let (Some(sources), Some(document)) = (form_sources.as_deref_mut(), document) {
             sources.xml.insert(
                 FormOwnerRoute::Section(index),
                 Some(document.section_properties_xml(index)?),
@@ -4759,10 +6001,1257 @@ fn word_owner_locations(
     Ok(result)
 }
 
+/// One direct body item that a splice inserts, with what the owner
+/// inventory reads for it.
+pub(crate) enum SplicedBodyItem {
+    /// A plain paragraph's accepted text and run paths.
+    Paragraph(String, Vec<rdocx_oxml::text::AcceptedRunPath>),
+    /// A table's namespace-complete XML and its owner snapshots in a body
+    /// that holds only that table.
+    Table(Vec<u8>, WordOwnerSnapshots),
+}
+
+/// Plain direct body paragraphs removed from a body slot, or one item
+/// inserted at it.
+pub(crate) struct BodySplice {
+    pub(crate) slot: usize,
+    pub(crate) removed: usize,
+    pub(crate) inserted: Option<SplicedBodyItem>,
+}
+
+/// A splice of the current owner inventory for one direct body edit.
+///
+/// The inserted item is one body story item, a plain paragraph or a table
+/// with no nested table, text box or link, and the removed items are plain
+/// paragraphs. So only body routes after the slot move, by the items inserted
+/// less those removed, and only the cell stories after an inserted table,
+/// by its cells. Every other owner keeps its place in the inventory.
+pub(crate) struct BodySplicePlan {
+    slot: usize,
+    removed: usize,
+    // The body story item index of the splice slot.
+    first: usize,
+    // The inserted owners, in blocks that each precede a current inventory
+    // index, with next-inventory parents.
+    blocks: Vec<(usize, Vec<WordOwnerAddress>)>,
+    // The current inventory range of the removed paragraphs and their runs.
+    removed_owners: std::ops::Range<usize>,
+    // Cell story owners from the first index on move by the second.
+    cells: (usize, usize),
+    inserted_paragraph: bool,
+    inserted_table: bool,
+    // The facade paragraph and table indexes of the splice slot.
+    pub(crate) paragraph: usize,
+    pub(crate) table: usize,
+    // The inserted table's route and the routes of its cell paragraphs.
+    table_entry: Option<(rdocx::ContentLocation, Vec<CellParagraphs>)>,
+    piece: Option<WordBlockOwners>,
+    kept_scopes: usize,
+}
+
+/// The facade coordinates of a cell and the routes of its paragraphs.
+type CellParagraphs = ((usize, usize), Vec<rdocx::ContentLocation>);
+
+impl BodySplicePlan {
+    fn added(&self) -> usize {
+        self.blocks.iter().map(|(_, block)| block.len()).sum()
+    }
+
+    /// The body story item index that `item` moves to.
+    fn moved(&self, item: usize) -> usize {
+        if item >= self.first + self.removed {
+            item + usize::from(self.inserted_paragraph || self.inserted_table) - self.removed
+        } else {
+            item
+        }
+    }
+
+    /// The next inventory index of current owner `index`, unless removed.
+    fn next_index(&self, index: usize) -> Option<usize> {
+        if self.removed_owners.contains(&index) {
+            return None;
+        }
+        let mut next = index;
+        if index >= self.removed_owners.end {
+            next -= self.removed_owners.len();
+        }
+        for (at, block) in &self.blocks {
+            note_visited_owner_record();
+            if index >= *at {
+                next += block.len();
+            }
+        }
+        Some(next)
+    }
+
+    /// The next inventory, in order: kept current owners and inserted ones.
+    fn next_owners(&self, current: usize) -> impl Iterator<Item = NextWordOwner<'_>> + '_ {
+        (0..=current).flat_map(move |index| {
+            self.blocks
+                .iter()
+                .filter(move |(at, _)| *at == index)
+                .flat_map(|(_, block)| {
+                    block.iter().map(|address| {
+                        note_visited_owner_record();
+                        NextWordOwner::Inserted(address)
+                    })
+                })
+                .chain(
+                    (index < current && !self.removed_owners.contains(&index)).then(|| {
+                        note_visited_owner_record();
+                        NextWordOwner::Kept(index)
+                    }),
+                )
+        })
+    }
+
+    /// Move the cell stories of a kept owner's routes.
+    fn move_cell_stories(&self, location: &mut WordOwnerLocation, part: &str) {
+        let (first, count) = self.cells;
+        if count == 0 {
+            return;
+        }
+        let route = |location: &mut rdocx::ContentLocation| {
+            let story = location.story();
+            if story.kind() == rdocx::StoryKind::TableCell
+                && story.part_name() == part
+                && story.owner_index() >= first
+            {
+                let mut story = story.clone();
+                story.set_owner_index(story.owner_index() + count);
+                *location = rdocx::ContentLocation::new(
+                    story,
+                    location.item_kind(),
+                    location.index_path().to_vec(),
+                );
+            }
+        };
+        match location {
+            WordOwnerLocation::Paragraph(location)
+            | WordOwnerLocation::Table(location)
+            | WordOwnerLocation::Run(location, _)
+            | WordOwnerLocation::Hyperlink(location, _) => route(location),
+            WordOwnerLocation::Cell { table, story, .. } => {
+                route(table);
+                if story.kind() == rdocx::StoryKind::TableCell
+                    && story.part_name() == part
+                    && story.owner_index() >= first
+                {
+                    story.set_owner_index(story.owner_index() + count);
+                }
+            }
+            WordOwnerLocation::Section(_) => {}
+        }
+    }
+}
+
+/// One owner of the next inventory.
+enum NextWordOwner<'a> {
+    Kept(usize),
+    Inserted(&'a WordOwnerAddress),
+}
+
+/// A prepared body splice: its revision and the scope states of the next
+/// inventory, in order.
+pub(crate) struct PreparedBodySplice {
+    pub(crate) revision: PreparedRevision,
+    pub(crate) plan: BodySplicePlan,
+    states: Vec<RevisionState>,
+    inserted: Vec<WordOwner>,
+    // The index in `states` of the first inserted owner's scopes.
+    inserted_state: usize,
+    snapshot_scope: RevisionState,
+}
+
+/// The body story item index of an owner's content route.
+fn word_owner_body_item(location: &WordOwnerLocation) -> Option<usize> {
+    let route = match location {
+        WordOwnerLocation::Paragraph(location)
+        | WordOwnerLocation::Table(location)
+        | WordOwnerLocation::Run(location, _)
+        | WordOwnerLocation::Hyperlink(location, _) => location,
+        WordOwnerLocation::Cell { table, .. } => table,
+        WordOwnerLocation::Section(_) => return None,
+    };
+    (route.story().kind() == rdocx::StoryKind::Body)
+        .then(|| route.index_path().first().copied())
+        .flatten()
+}
+
+/// Move the body story item index of an owner's content route.
+fn move_word_owner_body_item(location: &mut WordOwnerLocation, item: usize) {
+    match location {
+        WordOwnerLocation::Paragraph(location)
+        | WordOwnerLocation::Table(location)
+        | WordOwnerLocation::Run(location, _)
+        | WordOwnerLocation::Hyperlink(location, _)
+        | WordOwnerLocation::Cell {
+            table: location, ..
+        } => location.set_index_path_head(item),
+        WordOwnerLocation::Section(_) => {}
+    }
+}
+
+/// Binary search that counts each probed projection record.
+fn counted_partition_point(
+    items: &[Option<rdocx::ContentLocation>],
+    mut pred: impl FnMut(&Option<rdocx::ContentLocation>) -> bool,
+) -> usize {
+    let mut left = 0;
+    let mut right = items.len();
+    while left < right {
+        let mid = left + (right - left) / 2;
+        note_visited_owner_record();
+        if pred(&items[mid]) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+    left
+}
+
+/// The story of an owner's content route.
+fn word_owner_story(location: &WordOwnerLocation) -> Option<&rdocx::StoryId> {
+    match location {
+        WordOwnerLocation::Paragraph(location)
+        | WordOwnerLocation::Table(location)
+        | WordOwnerLocation::Run(location, _)
+        | WordOwnerLocation::Hyperlink(location, _) => Some(location.story()),
+        WordOwnerLocation::Cell { table, .. } => Some(table.story()),
+        WordOwnerLocation::Section(_) => None,
+    }
+}
+
+impl PyDocument {
+    /// Plan `splice` from the current inventory alone. `None` keeps the
+    /// rebuild for every case this does not prove, and debug builds check
+    /// each committed splice against the rebuild.
+    pub(crate) fn plan_body_splice(&self, splice: BodySplice) -> PyResult<Option<BodySplicePlan>> {
+        let Some(body_paragraphs) = &self.indexes.body_paragraphs else {
+            return Ok(None);
+        };
+        let content_count = self.inner.content_count();
+        let Some(end_slot) = splice.slot.checked_add(splice.removed) else {
+            return Ok(None);
+        };
+        let inserted_table = matches!(splice.inserted, Some(SplicedBodyItem::Table(..)));
+        if end_slot > content_count || (splice.removed == 0) == splice.inserted.is_none() {
+            return Ok(None);
+        }
+        let mut tables_indexed = true;
+        if inserted_table {
+            for location in &self.indexes.body_tables {
+                note_visited_owner_record();
+                if location.is_none() {
+                    tables_indexed = false;
+                    break;
+                }
+            }
+        }
+        if !tables_indexed
+            || !(splice.slot..end_slot).all(|slot| self.inner.plain_removable_paragraph(slot))
+        {
+            return Ok(None);
+        }
+        let mut story = None;
+        let mut current_slot_item = None;
+        let mut previous_slot_item = None;
+        let mut kept_scopes = 0;
+        let mut family = 0;
+        let mut table = None;
+        let mut paragraph = None;
+        let mut body_item = Some(0);
+        for (index, owner) in self.owners.iter().enumerate() {
+            note_visited_owner_record();
+            note_splice_packet_work(3);
+            kept_scopes += owner.location.scopes().len();
+            let (next, parent) = match &owner.location {
+                WordOwnerLocation::Table(_) => {
+                    table = Some(index);
+                    (0, owner.parent)
+                }
+                WordOwnerLocation::Cell { .. } => (0, table),
+                WordOwnerLocation::Paragraph(location) => {
+                    paragraph = Some(index);
+                    if location.story().kind() == rdocx::StoryKind::Body {
+                        let item = location.index_path().first().copied();
+                        if body_item.is_none() || item < body_item {
+                            return Ok(None);
+                        }
+                        body_item = item;
+                    } else {
+                        body_item = None;
+                    }
+                    (1, owner.parent)
+                }
+                WordOwnerLocation::Run(..) => (1, paragraph),
+                WordOwnerLocation::Section(_) => (2, None),
+                WordOwnerLocation::Hyperlink(..) => (3, None),
+            };
+            let child = matches!(
+                owner.location,
+                WordOwnerLocation::Cell { .. } | WordOwnerLocation::Run(..)
+            );
+            if next < family || (child && (parent.is_none() || owner.parent != parent)) {
+                return Ok(None);
+            }
+            family = next;
+            if let WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location) =
+                &owner.location
+                && location.story().kind() == rdocx::StoryKind::Body
+            {
+                story.get_or_insert(location.story());
+                if let (Some(slot), Some(item)) = (owner.body_slot, location.index_path().first()) {
+                    if slot == splice.slot {
+                        current_slot_item.get_or_insert(*item);
+                    }
+                    if splice.slot > 0 && slot == splice.slot - 1 {
+                        previous_slot_item.get_or_insert(*item);
+                    }
+                }
+            }
+        }
+        note_fx260_word(1);
+        let Some(story) = story.cloned() else {
+            return Ok(None);
+        };
+        let part = story.part_name().to_owned();
+        let first = if let Some(item) = current_slot_item {
+            item
+        } else if splice.removed == 0 && splice.slot > 0 {
+            let Some(previous) = previous_slot_item else {
+                return Ok(None);
+            };
+            let Some(count) = self
+                .inner
+                .direct_body_story_item_count(splice.slot - 1)
+                .ok()
+                .flatten()
+            else {
+                return Ok(None);
+            };
+            previous + count
+        } else {
+            return Ok(None);
+        };
+        // Each removed slot is the direct paragraph owner at its own item.
+        for offset in 0..splice.removed {
+            note_visited_owner_record();
+            let Some(owner) = self
+                .indexes
+                .direct_body_paragraphs
+                .get(&(splice.slot + offset))
+                .and_then(|index| self.owners.get(*index))
+            else {
+                return Ok(None);
+            };
+            match &owner.location {
+                WordOwnerLocation::Paragraph(location)
+                    if location.index_path() == [first + offset] => {}
+                _ => return Ok(None),
+            }
+        }
+        let Some(cells_before) = (if inserted_table {
+            self.cell_stories_before(first, &part)
+        } else {
+            Some(0)
+        }) else {
+            return Ok(None);
+        };
+        let removed_items = first..first + splice.removed;
+        let mut removed_owners = None::<std::ops::Range<usize>>;
+        let mut paragraph_at = None;
+        let mut table_at = None;
+        let mut cells_at = None;
+        let mut paragraph_ordinal = 0;
+        let mut table_ordinal = 0;
+        for (index, owner) in self.owners.iter().enumerate() {
+            note_fx260_word(1);
+            note_visited_owner_record();
+            let item = word_owner_body_item(&owner.location);
+            let story = word_owner_story(&owner.location);
+            let body = story.is_some_and(|story| story.kind() == rdocx::StoryKind::Body);
+            let (paragraph, table) = match &owner.location {
+                WordOwnerLocation::Paragraph(_) => (true, false),
+                WordOwnerLocation::Table(_) => (false, true),
+                _ => (false, false),
+            };
+            let later = matches!(
+                owner.location,
+                WordOwnerLocation::Section(_) | WordOwnerLocation::Hyperlink(..)
+            );
+            if paragraph_at.is_none() && (later || (paragraph && !(body && item < Some(first)))) {
+                paragraph_at = Some(index);
+            }
+            if table_at.is_none()
+                && (later
+                    || paragraph
+                    || matches!(owner.location, WordOwnerLocation::Run(..))
+                    || (table && !(body && item < Some(first))))
+            {
+                table_at = Some(index);
+            }
+            let later_cell_story = story.is_some_and(|story| {
+                story.part_name() != part
+                    || (story.kind() == rdocx::StoryKind::TableCell
+                        && story.owner_index() >= cells_before)
+            });
+            if cells_at.is_none() && (later || (paragraph && later_cell_story)) {
+                cells_at = Some(index);
+            }
+            if item.is_some_and(|item| removed_items.contains(&item)) {
+                // Only the removed paragraphs and their runs, contiguously.
+                let contiguous = removed_owners
+                    .as_ref()
+                    .is_none_or(|range| range.end == index);
+                if !contiguous
+                    || !matches!(
+                        owner.location,
+                        WordOwnerLocation::Paragraph(_) | WordOwnerLocation::Run(..)
+                    )
+                {
+                    return Ok(None);
+                }
+                removed_owners =
+                    Some(removed_owners.map_or(index..index + 1, |range| range.start..index + 1));
+                continue;
+            }
+            if owner.parent.is_some_and(|parent| {
+                removed_owners
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&parent))
+            }) {
+                return Ok(None);
+            }
+            if body && item < Some(first) {
+                paragraph_ordinal += usize::from(paragraph);
+                table_ordinal += usize::from(table);
+            }
+        }
+        if splice.removed > 0 && removed_owners.is_none() {
+            return Ok(None);
+        }
+        let current = self.owners.len();
+        // Facade paragraphs and body tables keep source order, so the splice
+        // is one contiguous run of their entries.
+        let head = |location: &Option<rdocx::ContentLocation>| {
+            location
+                .as_ref()
+                .and_then(|location| location.index_path().first().copied())
+        };
+        let paragraph = self.inner.paragraph_count_before_content(splice.slot);
+        let Some(after) = body_paragraphs.get(paragraph..) else {
+            return Ok(None);
+        };
+        for (offset, location) in after.iter().enumerate() {
+            note_visited_owner_record();
+            let fits = if offset < splice.removed {
+                location.as_ref().map(rdocx::ContentLocation::index_path) == Some(&[first + offset])
+            } else {
+                location.is_none() || head(location) >= Some(removed_items.end)
+            };
+            if !fits {
+                return Ok(None);
+            }
+        }
+        if body_paragraphs[..paragraph].iter().any(|location| {
+            note_visited_owner_record();
+            location.is_some() && head(location) >= Some(first)
+        }) {
+            return Ok(None);
+        }
+        let table = counted_partition_point(&self.indexes.body_tables, |location| {
+            head(location) < Some(first)
+        });
+        for location in &self.indexes.body_tables {
+            note_visited_owner_record();
+            if location.as_ref().is_some_and(|location| {
+                location.story().kind() == rdocx::StoryKind::Body
+                    && removed_items.contains(&location.index_path()[0])
+            }) {
+                return Ok(None);
+            }
+        }
+        let mut plan = BodySplicePlan {
+            slot: splice.slot,
+            removed: splice.removed,
+            first,
+            blocks: Vec::new(),
+            removed_owners: removed_owners.unwrap_or(0..0),
+            cells: (cells_before, 0),
+            inserted_paragraph: false,
+            inserted_table: false,
+            paragraph,
+            table,
+            table_entry: None,
+            piece: None,
+            kept_scopes,
+        };
+        match splice.inserted {
+            None => {}
+            Some(SplicedBodyItem::Paragraph(text, runs)) => {
+                plan.piece = Some(plain_paragraph_owners(&story, &text, &runs));
+                let at = paragraph_at.unwrap_or(current);
+                let location = rdocx::ContentLocation::new(
+                    story,
+                    rdocx::StoryItemKind::Paragraph,
+                    vec![first],
+                );
+                let mut block = vec![WordOwnerAddress {
+                    location: WordOwnerLocation::Paragraph(location.clone()),
+                    parent: None,
+                    body_slot: Some(splice.slot),
+                    projection_ordinal: Some(paragraph_ordinal),
+                    read_facts: WordReadFacts::Paragraph(text),
+                }];
+                block.extend(runs.into_iter().map(|path| WordOwnerAddress {
+                    location: WordOwnerLocation::Run(location.clone(), path),
+                    parent: Some(at),
+                    body_slot: None,
+                    projection_ordinal: None,
+                    read_facts: WordReadFacts::None,
+                }));
+                plan.blocks.push((at, block));
+                plan.inserted_paragraph = true;
+            }
+            Some(SplicedBodyItem::Table(xml, snapshots)) => {
+                let table_at = table_at.unwrap_or(current);
+                let cells_at = cells_at.unwrap_or(current);
+                let Some((blocks, cells, entry, piece)) = spliced_table_blocks(
+                    xml,
+                    snapshots,
+                    &story,
+                    (splice.slot, first, table_ordinal),
+                    (table_at, cells_at, cells_before),
+                ) else {
+                    return Ok(None);
+                };
+                plan.blocks = blocks;
+                plan.cells = (cells_before, cells);
+                plan.inserted_table = true;
+                plan.table_entry = Some(entry);
+                plan.piece = piece;
+            }
+        }
+        Ok(Some(plan))
+    }
+
+    /// The number of cell stories of the main part before body story item
+    /// `first`, when the inventory holds every cell story of that part and
+    /// can place each one: no text box story, and every cell under a body
+    /// table, so that cell story owner indexes count exactly those cells.
+    fn cell_stories_before(&self, first: usize, part: &str) -> Option<usize> {
+        let mut cells = Vec::new();
+        let mut referenced = std::collections::HashSet::new();
+        for owner in &self.owners {
+            note_fx260_word(1);
+            note_visited_owner_record();
+            if let Some(story) = word_owner_story(&owner.location)
+                && story.part_name() == part
+            {
+                match story.kind() {
+                    rdocx::StoryKind::TextBox => return None,
+                    rdocx::StoryKind::TableCell => {
+                        referenced.insert(story.owner_index());
+                    }
+                    _ => {}
+                }
+            }
+            let WordOwnerLocation::Cell { story, .. } = &owner.location else {
+                continue;
+            };
+            if story.part_name() != part {
+                continue;
+            }
+            // The body table that holds this cell, through nested tables.
+            let mut table = owner.parent;
+            let root = loop {
+                note_visited_owner_record();
+                let holder = self.owners.get(table?)?;
+                match &holder.location {
+                    WordOwnerLocation::Table(location)
+                        if location.story().kind() == rdocx::StoryKind::Body =>
+                    {
+                        break location.index_path().first().copied()?;
+                    }
+                    WordOwnerLocation::Table(_) => {
+                        let parent = holder.parent?;
+                        note_visited_owner_record();
+                        table = self.owners.get(parent)?.parent;
+                    }
+                    _ => return None,
+                }
+            };
+            cells.push((story.owner_index(), root));
+        }
+        cells.sort_unstable();
+        let mut dense = true;
+        for (index, (owner_index, _)) in cells.iter().enumerate() {
+            note_visited_owner_record();
+            if index != *owner_index {
+                dense = false;
+                break;
+            }
+        }
+        let mut referenced_known = true;
+        for owner_index in &referenced {
+            note_visited_owner_record();
+            if *owner_index >= cells.len() {
+                referenced_known = false;
+                break;
+            }
+        }
+        let mut before = 0;
+        for (_, root) in &cells {
+            note_visited_owner_record();
+            if *root < first {
+                before += 1;
+            }
+        }
+        let mut ordered = true;
+        for (owner_index, root) in &cells {
+            note_visited_owner_record();
+            if (*root < first) != (*owner_index < before) {
+                ordered = false;
+                break;
+            }
+        }
+        (dense && referenced_known && ordered).then_some(before)
+    }
+
+    /// Prepare a conservative or append publication of `plan`, with the
+    /// retirements and births, in inventory order, that the rebuild would
+    /// give, before the native edit.
+    pub(crate) fn prepare_body_splice(
+        &mut self,
+        plan: BodySplicePlan,
+        operation: &'static str,
+        publication: &WordPublication,
+    ) -> PyResult<PreparedBodySplice> {
+        // An append keeps every owner. A conservative publication retires
+        // every owner and gives the next inventory new scopes.
+        let keep = match publication {
+            WordPublication::AppendBody => true,
+            WordPublication::Conservative => false,
+            _ => return Err(PyValueError::new_err("body splice publication")),
+        };
+        let fail =
+            |_| pyo3::exceptions::PyMemoryError::new_err("Word owner splice allocation failed");
+        let current = self.owners.len();
+        let scopes = |next: &NextWordOwner<'_>| match next {
+            NextWordOwner::Kept(index) => self.owners[*index].location.scopes().len(),
+            NextWordOwner::Inserted(address) => address.location.scopes().len(),
+        };
+        let kept_scopes = plan.kept_scopes;
+        let mut inserted_scopes = 0;
+        for (_, block) in &plan.blocks {
+            for address in block {
+                note_visited_owner_record();
+                inserted_scopes += address.location.scopes().len();
+            }
+        }
+        let mut births = Vec::new();
+        births
+            .try_reserve(inserted_scopes + if keep { 0 } else { kept_scopes } + 1)
+            .map_err(fail)?;
+        let mut retired = Vec::new();
+        retired
+            .try_reserve(if keep { 1 } else { kept_scopes + 1 })
+            .map_err(fail)?;
+        if !keep {
+            for owner in &self.owners {
+                note_visited_owner_record();
+                retired.extend(owner.scope_states().cloned());
+            }
+        }
+        for next in plan.next_owners(current) {
+            note_fx260_word(1);
+            match next {
+                NextWordOwner::Kept(_) if keep => {}
+                NextWordOwner::Kept(index) => {
+                    births.extend_from_slice(self.owners[index].location.scopes());
+                }
+                NextWordOwner::Inserted(address) => {
+                    births.extend_from_slice(address.location.scopes());
+                }
+            }
+        }
+        retired.push(self.snapshot_scope.clone());
+        births.push(RevisionScope::Text);
+        let revision = self
+            .revisions
+            .prepare_scopes(operation, &retired, &births)
+            .map_err(revision_to_pyerr)?;
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(inserted_scopes + kept_scopes)
+            .map_err(fail)?;
+        let mut inserted = Vec::new();
+        inserted.try_reserve_exact(plan.added()).map_err(fail)?;
+        let mut born = 0;
+        let mut inserted_state = None;
+        for next in plan.next_owners(current) {
+            let start = states.len();
+            let count = scopes(&next);
+            match next {
+                NextWordOwner::Kept(index) if keep => {
+                    for state in self.owners[index].scope_states() {
+                        note_visited_owner_record();
+                        states.push(state.clone());
+                    }
+                    continue;
+                }
+                NextWordOwner::Inserted(_) => {
+                    inserted_state.get_or_insert(states.len());
+                }
+                NextWordOwner::Kept(_) => {}
+            }
+            for _ in 0..count {
+                states.push(revision.born(born).expect("prepared owner birth"));
+                born += 1;
+            }
+            if let NextWordOwner::Inserted(address) = next {
+                inserted.extend(word_owners_with_states(
+                    vec![WordOwnerAddress {
+                        location: address.location.clone(),
+                        parent: address.parent,
+                        body_slot: address.body_slot,
+                        projection_ordinal: address.projection_ordinal,
+                        read_facts: address.read_facts.clone(),
+                    }],
+                    &states[start..start + count],
+                ));
+            }
+        }
+        let snapshot_scope = revision.born(born).expect("prepared snapshot birth");
+        // Capacity for the commit, which moves owners and indexes them again.
+        let added = plan.added();
+        self.owners.try_reserve(added).map_err(fail)?;
+        if let Some(paragraphs) = &mut self.indexes.body_paragraphs {
+            paragraphs.try_reserve(1).map_err(fail)?;
+        }
+        self.indexes.body_tables.try_reserve(1).map_err(fail)?;
+        note_splice_packet_work(4);
+        Ok(PreparedBodySplice {
+            revision,
+            plan,
+            states,
+            inserted,
+            inserted_state: inserted_state.unwrap_or(0),
+            snapshot_scope,
+        })
+    }
+
+    /// Capture the first owner a prepared splice inserts, the paragraph or
+    /// table it places, as [`Self::capture_prepared_owner`] captures a
+    /// prepared owner.
+    pub(crate) fn capture_prepared_splice_owner(
+        &self,
+        prepared: &PreparedBodySplice,
+        segments: smallvec::SmallVec<[PathSeg; 5]>,
+    ) -> PyResult<(ContentPath, RevisionState)> {
+        self.revisions
+            .capture_prepared(&prepared.revision, smallvec![])
+            .map_err(revision_to_pyerr)?;
+        let unbound = || PyValueError::new_err("element has no current checked physical owner");
+        let address = prepared
+            .plan
+            .blocks
+            .first()
+            .and_then(|(_, block)| block.first())
+            .filter(|address| address.parent.is_none())
+            .ok_or_else(unbound)?;
+        let at = prepared.inserted_state;
+        let states = prepared
+            .states
+            .get(at..at + address.location.scopes().len())
+            .ok_or_else(unbound)?;
+        let owners = word_owners_with_states(
+            vec![WordOwnerAddress {
+                location: address.location.clone(),
+                parent: None,
+                body_slot: address.body_slot,
+                projection_ordinal: address.projection_ordinal,
+                read_facts: WordReadFacts::None,
+            }],
+            states,
+        );
+        let (mut path, owner) = word_owner_capture(
+            &self.revisions,
+            &owners,
+            (prepared.revision.document_scope(), &self.removal_scope),
+            0,
+            segments,
+            WordView::Owner,
+            None,
+        )?;
+        path.revision = prepared.revision.committed_serial();
+        Ok((path, owner))
+    }
+
+    /// Publish a prepared splice after its native edit: move the kept owners
+    /// in place, place the inserted ones, and index the inventory again.
+    pub(crate) fn commit_body_splice(
+        &mut self,
+        prepared: PreparedBodySplice,
+        publication: &WordPublication,
+    ) -> PyResult<()> {
+        #[cfg(debug_assertions)]
+        if matches!(publication, WordPublication::AppendBody) {
+            self.assert_body_append_matches(&prepared.plan, publication);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = publication;
+        let PreparedBodySplice {
+            revision,
+            mut plan,
+            states,
+            inserted,
+            snapshot_scope,
+            ..
+        } = prepared;
+        self.revisions
+            .commit_scopes(revision)
+            .map_err(revision_to_pyerr)?;
+        let mut part = String::new();
+        for owner in &self.owners {
+            note_visited_owner_record();
+            if let Some(story) = word_owner_story(&owner.location)
+                .filter(|story| story.kind() == rdocx::StoryKind::Body)
+            {
+                part = story.part_name().to_owned();
+                break;
+            }
+        }
+        self.owners.drain(plan.removed_owners.clone());
+        let mut inserted = inserted.into_iter();
+        let mut spans = Vec::with_capacity(plan.blocks.len());
+        let mut placed = 0;
+        for (at, block) in &plan.blocks {
+            let start = *at + placed;
+            self.owners
+                .splice(start..start, inserted.by_ref().take(block.len()));
+            spans.push(start..start + block.len());
+            placed += block.len();
+        }
+        let after = plan.first + plan.removed;
+        let paragraph_delta = isize::from(plan.inserted_paragraph) - plan.removed as isize;
+        let moved_ordinal = |ordinal: usize, delta: isize| ordinal.saturating_add_signed(delta);
+        // Kept owners take their next states, in inventory order, by move.
+        let mut states = states.into_iter();
+        for (index, owner) in self.owners.iter_mut().enumerate() {
+            note_fx260_word(1);
+            note_visited_owner_record();
+            let mut inserted_here = false;
+            for span in &spans {
+                note_visited_owner_record();
+                if span.contains(&index) {
+                    inserted_here = true;
+                    break;
+                }
+            }
+            if inserted_here {
+                for _ in 0..owner.location.scopes().len() {
+                    states.next();
+                }
+                continue;
+            }
+            let item = word_owner_body_item(&owner.location);
+            let body_route = matches!(
+                &owner.location,
+                WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location)
+                    if location.story().kind() == rdocx::StoryKind::Body
+            );
+            if let Some(item) = item.filter(|item| *item >= after) {
+                move_word_owner_body_item(&mut owner.location, plan.moved(item));
+                if body_route {
+                    let delta = match owner.location {
+                        WordOwnerLocation::Paragraph(_) => paragraph_delta,
+                        _ => isize::from(plan.inserted_table),
+                    };
+                    owner.projection_ordinal = owner
+                        .projection_ordinal
+                        .map(|ordinal| moved_ordinal(ordinal, delta));
+                }
+            }
+            if body_route {
+                owner.body_slot = owner.body_slot.map(|slot| {
+                    if slot >= plan.slot + plan.removed {
+                        slot + usize::from(plan.inserted_paragraph || plan.inserted_table)
+                            - plan.removed
+                    } else {
+                        slot
+                    }
+                });
+            }
+            plan.move_cell_stories(&mut owner.location, &part);
+            owner.parent = owner.parent.map(|parent| {
+                plan.next_index(parent)
+                    .expect("a kept owner's parent is kept")
+            });
+            let mut next = || states.next().expect("a prepared state for every scope");
+            owner.owner = next();
+            for state in [&mut owner.content, &mut owner.properties, &mut owner.grid]
+                .into_iter()
+                .flatten()
+            {
+                *state = next();
+            }
+        }
+        self.indexes.index_owners_again(&self.owners);
+        let moved = |location: &mut rdocx::ContentLocation| {
+            if location.story().kind() == rdocx::StoryKind::Body {
+                let item = location.index_path()[0];
+                location.set_index_path_head(plan.moved(item));
+            }
+        };
+        if let Some(paragraphs) = &mut self.indexes.body_paragraphs {
+            paragraphs.drain(plan.paragraph..plan.paragraph + plan.removed);
+            for location in paragraphs.iter_mut().flatten() {
+                note_visited_owner_record();
+                moved(location);
+            }
+            if plan.inserted_paragraph
+                && let Some(WordOwnerLocation::Paragraph(location)) = plan
+                    .blocks
+                    .first()
+                    .and_then(|(_, block)| block.first())
+                    .map(|address| &address.location)
+            {
+                paragraphs.insert(plan.paragraph, Some(location.clone()));
+            }
+        }
+        for location in self.indexes.body_tables.iter_mut().flatten() {
+            note_visited_owner_record();
+            moved(location);
+        }
+        if let Some((location, cells)) = &plan.table_entry {
+            self.indexes
+                .body_tables
+                .insert(plan.table, Some(location.clone()));
+            let mut shifted =
+                HashMap::with_capacity(self.indexes.cell_paragraphs.len() + cells.len());
+            for ((table, row, cell), mut locations) in self.indexes.cell_paragraphs.drain() {
+                note_visited_owner_record();
+                for location in &mut locations {
+                    note_visited_owner_record();
+                    let mut route = WordOwnerLocation::Paragraph(location.clone());
+                    plan.move_cell_stories(&mut route, &part);
+                    if let WordOwnerLocation::Paragraph(route) = route {
+                        *location = route;
+                    }
+                }
+                let table = if table >= plan.table {
+                    table + 1
+                } else {
+                    table
+                };
+                shifted.insert((table, row, cell), locations);
+            }
+            for ((row, cell), locations) in cells {
+                shifted.insert((plan.table, *row, *cell), locations.clone());
+            }
+            self.indexes.cell_paragraphs = shifted;
+        }
+        self.snapshot_scope = snapshot_scope;
+        let inserted = plan.piece.take();
+        self.pieces
+            .splice(&self.inner, plan.slot, plan.removed, inserted);
+        #[cfg(debug_assertions)]
+        self.assert_word_inventory_rebuilds();
+        note_splice_packet_work(5);
+        Ok(())
+    }
+
+    /// Under debug assertions, prove that an append keeps exactly the owners
+    /// the rebuild's matcher keeps. Runs after the native edit.
+    #[cfg(debug_assertions)]
+    fn assert_body_append_matches(&self, plan: &BodySplicePlan, publication: &WordPublication) {
+        #[cfg(test)]
+        let visits = fx260_word_visits();
+        let rebuilt = guarded(|| word_owner_locations(&self.inner, None))
+            .expect("a spliced inventory has a rebuild");
+        let mut expected = vec![None; self.owners.len() + plan.added()];
+        for index in 0..self.owners.len() {
+            if let Some(next) = plan.next_index(index) {
+                expected[next] = Some(index);
+            }
+        }
+        assert_eq!(
+            indexed_inventory_matches(&self.owners, &rebuilt, publication),
+            expected,
+            "spliced Word owner matches"
+        );
+        #[cfg(test)]
+        FX260_WORD_VISITS.with(|cell| cell.set(visits));
+    }
+
+    /// Under debug assertions, prove the inventory and its document indexes
+    /// equal their rebuild from the current document, story fingerprints
+    /// aside, which local edits leave stale in the inventory too.
+    #[cfg(debug_assertions)]
+    fn assert_word_inventory_rebuilds(&self) {
+        #[cfg(test)]
+        let visits = fx260_word_visits();
+        let address = |location: &WordOwnerLocation,
+                       parent: Option<usize>,
+                       body_slot: Option<usize>,
+                       projection_ordinal: Option<usize>,
+                       read_facts: &WordReadFacts| WordOwnerAddress {
+            location: unfingerprinted_owner_location(location),
+            parent,
+            body_slot,
+            projection_ordinal,
+            read_facts: read_facts.clone(),
+        };
+        let actual = self
+            .owners
+            .iter()
+            .map(|owner| {
+                address(
+                    &owner.location,
+                    owner.parent,
+                    owner.body_slot,
+                    owner.projection_ordinal,
+                    &owner.read_facts,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = guarded(|| word_owner_locations(&self.inner, None))
+            .expect("a spliced inventory has a rebuild")
+            .iter()
+            .map(|owner| {
+                address(
+                    &owner.location,
+                    owner.parent,
+                    owner.body_slot,
+                    owner.projection_ordinal,
+                    &owner.read_facts,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "spliced Word owner inventory");
+        let indexes = guarded(|| {
+            WordOwnerIndexes::prepare(&self.owners, WordIndexProjections::of(&self.inner))
+        })
+        .expect("a spliced inventory has rebuilt indexes");
+        let locations = |locations: &[Option<rdocx::ContentLocation>]| {
+            locations
+                .iter()
+                .map(|location| location.as_ref().map(unfingerprinted_location))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            self.indexes.body_paragraphs.as_deref().map(locations),
+            indexes.body_paragraphs.as_deref().map(locations),
+            "spliced body paragraph index"
+        );
+        assert_eq!(
+            locations(&self.indexes.body_tables),
+            locations(&indexes.body_tables),
+            "spliced body table index"
+        );
+        let cells = |cells: &HashMap<(usize, usize, usize), Vec<rdocx::ContentLocation>>| {
+            cells
+                .iter()
+                .map(|(key, locations)| {
+                    (
+                        *key,
+                        locations
+                            .iter()
+                            .map(unfingerprinted_location)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            cells(&self.indexes.cell_paragraphs),
+            cells(&indexes.cell_paragraphs),
+            "spliced cell paragraph index"
+        );
+        assert_eq!(
+            self.indexes.direct_body_paragraphs, indexes.direct_body_paragraphs,
+            "spliced direct body paragraph index"
+        );
+        #[cfg(test)]
+        FX260_WORD_VISITS.with(|cell| cell.set(visits));
+    }
+}
+
+/// The inserted blocks of a detached table placed at body story item
+/// `first` of slot `slot`: the table and its cells before current owner
+/// `table_at`, its cell paragraphs and runs before `cells_at`, with cell
+/// story owners counted from `cells_before`. Also the number of cells, and
+/// the table route with the routes of each cell's paragraphs.
+#[allow(clippy::type_complexity)] // The blocks, the cell count and the index entry of one table.
+fn spliced_table_blocks(
+    xml: Vec<u8>,
+    snapshots: WordOwnerSnapshots,
+    story: &rdocx::StoryId,
+    (slot, first, ordinal): (usize, usize, usize),
+    (table_at, cells_at, cells_before): (usize, usize, usize),
+) -> Option<(
+    Vec<(usize, Vec<WordOwnerAddress>)>,
+    usize,
+    (rdocx::ContentLocation, Vec<CellParagraphs>),
+    Option<WordBlockOwners>,
+)> {
+    // The detached body holds this table as its only item.
+    let table_location = {
+        let mut items = snapshots
+            .0
+            .iter()
+            .filter(|item| item.location().story().kind() == rdocx::StoryKind::Body);
+        let item = items.next()?;
+        if items.next().is_some()
+            || item.location().item_kind() != rdocx::StoryItemKind::Table
+            || item.location().index_path() != [0]
+        {
+            return None;
+        }
+        item.location().clone()
+    };
+    let piece_facts = word_table_facts(&xml).and_then(|rows| {
+        let mut facts = WordOwnerFacts {
+            cells: snapshots.1.clone(),
+            ..WordOwnerFacts::default()
+        };
+        facts.items.push((table_location.clone(), Some(0), rows));
+        for (location, paragraph_xml) in &snapshots.2 {
+            let paragraph = rdocx_oxml::CT_P::from_xml_fragment(paragraph_xml).ok()?;
+            facts.paragraphs.push((
+                location.clone(),
+                paragraph.accepted_text(),
+                paragraph.accepted_run_paths(),
+            ));
+        }
+        Some(facts)
+    });
+    let facts = word_table_facts(&xml)
+        .map(|facts| (table_location, facts))
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let addresses = word_owner_addresses(snapshots, &facts, None, None).ok()?;
+    let cells = addresses
+        .iter()
+        .skip(1)
+        .take_while(|address| matches!(address.location, WordOwnerLocation::Cell { .. }))
+        .count();
+    // The table, its cells in story order, then only their paragraphs and runs.
+    let cell_story = |address: &WordOwnerAddress| match &address.location {
+        WordOwnerLocation::Cell { story, .. } => Some(story.owner_index()),
+        _ => None,
+    };
+    let in_cells = |location: &rdocx::ContentLocation| {
+        location.story().kind() == rdocx::StoryKind::TableCell
+            && location.story().owner_index() < cells
+    };
+    let cell_parent =
+        |parent: Option<usize>| parent.is_some_and(|parent| (1..=cells).contains(&parent));
+    let shaped = matches!(addresses.first()?.location, WordOwnerLocation::Table(_))
+        && addresses[1..=cells]
+            .iter()
+            .enumerate()
+            .all(|(index, address)| {
+                cell_story(address) == Some(index) && address.parent == Some(0)
+            })
+        && addresses[cells + 1..]
+            .iter()
+            .all(|address| match &address.location {
+                WordOwnerLocation::Paragraph(location) => {
+                    in_cells(location) && cell_parent(address.parent)
+                }
+                WordOwnerLocation::Run(location, _) => {
+                    in_cells(location) && address.parent.is_some_and(|parent| parent > cells)
+                }
+                _ => false,
+            });
+    if !shaped {
+        return None;
+    }
+    // Detached owner `index` takes this next-inventory index.
+    let next = |index: usize| {
+        if index <= cells {
+            table_at + index
+        } else {
+            cells_at + index
+        }
+    };
+    let moved = |location: &rdocx::ContentLocation| {
+        let mut story = location.story().clone();
+        story.set_owner_index(story.owner_index() + cells_before);
+        rdocx::ContentLocation::new(story, location.item_kind(), location.index_path().to_vec())
+    };
+    let table =
+        rdocx::ContentLocation::new(story.clone(), rdocx::StoryItemKind::Table, vec![first]);
+    let mut entries = Vec::with_capacity(cells);
+    let mut head = Vec::with_capacity(cells + 1);
+    let mut tail = Vec::with_capacity(addresses.len() - cells - 1);
+    for (index, address) in addresses.into_iter().enumerate() {
+        let parent = address.parent.map(next);
+        let location = match &address.location {
+            WordOwnerLocation::Table(_) => WordOwnerLocation::Table(table.clone()),
+            WordOwnerLocation::Cell {
+                row, cell, story, ..
+            } => {
+                let mut story = story.clone();
+                story.set_owner_index(story.owner_index() + cells_before);
+                entries.push(((*row, *cell), Vec::new()));
+                WordOwnerLocation::Cell {
+                    table: table.clone(),
+                    row: *row,
+                    cell: *cell,
+                    story,
+                }
+            }
+            WordOwnerLocation::Paragraph(location) => {
+                let location = moved(location);
+                entries[address.parent? - 1].1.push(location.clone());
+                WordOwnerLocation::Paragraph(location)
+            }
+            WordOwnerLocation::Run(location, path) => {
+                WordOwnerLocation::Run(moved(location), path.clone())
+            }
+            _ => return None,
+        };
+        let address = if index == 0 {
+            WordOwnerAddress {
+                location,
+                parent: None,
+                body_slot: Some(slot),
+                projection_ordinal: Some(ordinal),
+                read_facts: address.read_facts,
+            }
+        } else {
+            WordOwnerAddress {
+                location,
+                parent,
+                ..address
+            }
+        };
+        if index <= cells {
+            head.push(address);
+        } else {
+            tail.push(address);
+        }
+    }
+    let mut blocks = vec![(table_at, head)];
+    if !tail.is_empty() {
+        blocks.push((cells_at, tail));
+    }
+    let piece = piece_facts.and_then(|facts| table_owners(facts, cells));
+    Some((blocks, cells, (table, entries), piece))
+}
+
 #[derive(Clone)]
 pub(crate) enum WordPublication {
     Conservative,
     FormValues,
+    /// Metadata and form publication that may keep comment and text-box
+    /// owners when their physical part is proved unchanged.
+    ModernFormValues,
     Signing,
     AppendBody,
     HeaderFooterAppend(usize),
@@ -4781,6 +7270,7 @@ fn form_owner_certificates(
     matched: &[Option<usize>],
     before: &FormSources,
     after: &FormSources,
+    eligible_parts: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<(usize, usize)> {
     let mut old_routes = HashMap::<FormOwnerRoute, Vec<usize>>::new();
     let mut new_routes = HashMap::<FormOwnerRoute, Vec<usize>>::new();
@@ -4834,7 +7324,11 @@ fn form_owner_certificates(
                 FormOwnerRoute::Paragraph(key) | FormOwnerRoute::Table(key)
                     if matches!(key.0, rdocx::StoryKind::Comment | rdocx::StoryKind::TextBox) =>
                 {
-                    false
+                    eligible_parts.contains(&key.1)
+                        && matches!(
+                            (before.xml.get(&route), after.xml.get(&route)),
+                            (Some(Some(a)), Some(Some(b))) if a == b
+                        )
                 }
                 _ => {
                     matches!((before.xml.get(&route), after.xml.get(&route)), (Some(Some(a)), Some(Some(b))) if a == b)
@@ -4870,7 +7364,14 @@ fn signing_owner_certificates(
     before: &FormSources,
     after: &FormSources,
 ) -> std::collections::HashSet<(usize, usize)> {
-    let mut proved = form_owner_certificates(old, new, matched, before, after);
+    let mut proved = form_owner_certificates(
+        old,
+        new,
+        matched,
+        before,
+        after,
+        &std::collections::HashSet::new(),
+    );
     let mut paragraphs = HashMap::<FormSourceKey, Vec<(usize, usize)>>::new();
     for &(previous, next) in &proved {
         if let WordOwnerLocation::Paragraph(location) = &new[next].location {
@@ -4904,6 +7405,136 @@ fn signing_owner_certificates(
         }
     }
     proved
+}
+
+/// Comment and text-box certificates still need the ordinary owner proof.
+/// A run survives only when that proof already covers its paragraph.
+fn modern_form_owner_certificates(
+    old: &[WordOwner],
+    new: &[WordOwnerAddress],
+    matched: &[Option<usize>],
+    before: &FormSources,
+    after: &FormSources,
+    eligible_parts: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<(usize, usize)> {
+    let mut proved = form_owner_certificates(old, new, matched, before, after, eligible_parts);
+    for (next, address) in new.iter().enumerate() {
+        let Some(previous) = matched[next] else {
+            continue;
+        };
+        let survives = match (&old[previous].location, &address.location) {
+            (WordOwnerLocation::Run(a, left), WordOwnerLocation::Run(b, right)) => {
+                left == right
+                    && form_source_key(a) == form_source_key(b)
+                    && matches!(
+                        (old[previous].parent, address.parent),
+                        (Some(a), Some(b)) if proved.contains(&(a, b))
+                    )
+            }
+            _ => false,
+        };
+        if survives {
+            proved.insert((previous, next));
+        }
+    }
+    proved
+}
+
+fn related_owner_part(location: &WordOwnerLocation) -> Option<String> {
+    let content = match location {
+        WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location) => location,
+        _ => return None,
+    };
+    if !matches!(
+        content.story().kind(),
+        rdocx::StoryKind::Comment | rdocx::StoryKind::TextBox
+    ) {
+        return None;
+    }
+    Some(content.story().part_name().to_owned())
+}
+
+/// One inventory name, or none when case-insensitive lookup is missing or repeated.
+fn unique_part_name<'a>(names: &'a [String], route: &str) -> Option<&'a str> {
+    let mut found = names.iter().filter(|name| name.eq_ignore_ascii_case(route));
+    match (found.next(), found.next()) {
+        (Some(name), None) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Unchanged comment and text-box parts, plus whether content snapshots match.
+///
+/// `part_xml` is the save-equivalent XML text. A UTF-8 BOM is stripped, so
+/// this is not a ZIP byte proof. `part_names`, `stories` and `part_xml` each
+/// stage the package. One part is proved once. That cost is whole-package
+/// validation, not a constant-time claim. A helper error is not equality.
+fn unchanged_related_owner_parts(
+    old: &rdocx::Document,
+    new: &rdocx::Document,
+    old_owners: &[WordOwner],
+    new_addresses: &[WordOwnerAddress],
+) -> rdocx::Result<(std::collections::HashSet<String>, bool)> {
+    let mut requested = Vec::new();
+    for part in old_owners
+        .iter()
+        .filter_map(|owner| related_owner_part(&owner.location))
+        .chain(
+            new_addresses
+                .iter()
+                .filter_map(|address| related_owner_part(&address.location)),
+        )
+    {
+        if !requested.iter().any(|seen: &String| seen == &part) {
+            requested.push(part);
+        }
+    }
+    let old_names = old.part_names()?;
+    let new_names = new.part_names()?;
+    let old_stories = old.stories()?;
+    let new_stories = new.stories()?;
+    let mut eligible = std::collections::HashSet::new();
+    for part in &requested {
+        let distinct = requested
+            .iter()
+            .filter(|candidate| candidate.eq_ignore_ascii_case(part))
+            .count();
+        if distinct != 1 {
+            continue;
+        }
+        let Some(actual_old) = unique_part_name(&old_names, part) else {
+            continue;
+        };
+        let Some(actual_new) = unique_part_name(&new_names, part) else {
+            continue;
+        };
+        if actual_old != actual_new || actual_old != part {
+            continue;
+        }
+        let old_part = old_stories
+            .iter()
+            .filter(|story| story.part_name() == actual_old)
+            .cloned()
+            .collect::<Vec<_>>();
+        let new_part = new_stories
+            .iter()
+            .filter(|story| story.part_name() == actual_new)
+            .cloned()
+            .collect::<Vec<_>>();
+        if old_part != new_part {
+            continue;
+        }
+        match (old.part_xml(actual_old), new.part_xml(actual_new)) {
+            (Ok(before), Ok(after)) if before == after => {
+                eligible.insert(actual_old.to_owned());
+            }
+            (Ok(_), Ok(_)) => {}
+            (Err(_), _) | (_, Err(_)) => {}
+        }
+    }
+    let preserve =
+        old_stories == new_stories && old.story_item_snapshots()? == new.story_item_snapshots()?;
+    Ok((eligible, preserve))
 }
 
 fn same_inventory_route(
@@ -5451,17 +8082,15 @@ fn indexed_inventory_matches(
 
 impl WordOwner {
     fn states(&self) -> Vec<RevisionState> {
-        let mut states = vec![self.owner.clone()];
-        if let Some(content) = &self.content {
-            states.push(content.clone());
-        }
-        if let Some(properties) = &self.properties {
-            states.push(properties.clone());
-        }
-        if let Some(grid) = &self.grid {
-            states.push(grid.clone());
-        }
-        states
+        self.scope_states().cloned().collect()
+    }
+
+    /// The owner's scope states, in [`WordOwnerLocation::scopes`] order.
+    fn scope_states(&self) -> impl Iterator<Item = &RevisionState> {
+        std::iter::once(&self.owner)
+            .chain(&self.content)
+            .chain(&self.properties)
+            .chain(&self.grid)
     }
 }
 
@@ -5473,6 +8102,7 @@ fn word_owners_with_states(
     locations
         .into_iter()
         .map(|address| {
+            note_visited_owner_record();
             let WordOwnerAddress {
                 location,
                 parent,
@@ -5513,6 +8143,9 @@ pub struct PyDocument {
     indexes: WordOwnerIndexes,
     removal_scope: RevisionState,
     snapshot_scope: RevisionState,
+    pieces: WordPieces,
+    /// Installed by the next `install_inner` after a successful publication.
+    pending_pieces: Option<WordPieces>,
 }
 
 #[pyclass(name = "FragmentConflictPolicy", frozen, skip_from_py_object)]
@@ -5655,10 +8288,16 @@ pub struct PyLegacyFormField {
     value: Py<PyAny>,
     #[pyo3(get)]
     choices: Py<PyTuple>,
+    #[pyo3(get)]
+    default_value: Py<PyAny>,
 }
 
 impl PyLegacyFormField {
-    fn from_info(py: Python<'_>, field: rdocx::LegacyFormFieldInfo) -> PyResult<Self> {
+    fn from_info(
+        py: Python<'_>,
+        field: rdocx::LegacyFormFieldInfo,
+        default_value: Option<rdocx::LegacyFormFieldValue>,
+    ) -> PyResult<Self> {
         let value = match field.value {
             rdocx::LegacyFormFieldValue::Text(value) => {
                 value.into_pyobject(py)?.into_any().unbind()
@@ -5683,8 +8322,1466 @@ impl PyLegacyFormField {
             },
             value,
             choices: PyTuple::new(py, field.choices)?.unbind(),
+            default_value: match default_value {
+                Some(value) => legacy_value_to_py(py, &value)?,
+                None => py.None(),
+            },
         })
     }
+}
+
+fn legacy_value_to_py(py: Python<'_>, value: &rdocx::LegacyFormFieldValue) -> PyResult<Py<PyAny>> {
+    match value {
+        rdocx::LegacyFormFieldValue::Text(value) => {
+            Ok(value.into_pyobject(py)?.into_any().unbind())
+        }
+        rdocx::LegacyFormFieldValue::Checked(value) => {
+            Ok(value.into_pyobject(py)?.to_owned().into_any().unbind())
+        }
+        rdocx::LegacyFormFieldValue::SelectedIndex(value) => {
+            Ok(value.into_pyobject(py)?.into_any().unbind())
+        }
+    }
+}
+
+fn strict_flag(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    require_exact_bool(value, "flag")
+}
+
+fn strict_index(value: &Bound<'_, PyAny>) -> PyResult<usize> {
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err("index requires an integer"));
+    }
+    ensure_nonnegative(value, "index cannot be negative")?;
+    value.extract()
+}
+
+fn require_exact_bool(value: &Bound<'_, PyAny>, label: &str) -> PyResult<bool> {
+    if !value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!("{label} requires bool")));
+    }
+    value.extract()
+}
+
+fn optional_info_text(
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<rdocx::LegacyFormInfoText>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    let (kind, text) = value
+        .extract::<(String, String)>()
+        .map_err(|_| PyTypeError::new_err("help and status must be a (kind, text) pair or None"))?;
+    match kind.as_str() {
+        "text" => Ok(Some(rdocx::LegacyFormInfoText::Text(text))),
+        "autoText" => Ok(Some(rdocx::LegacyFormInfoText::AutoText(text))),
+        _ => Err(PyValueError::new_err(
+            "help and status kind must be text or autoText",
+        )),
+    }
+}
+
+fn checkbox_size(value: Option<&Bound<'_, PyAny>>) -> PyResult<rdocx::LegacyCheckBoxSize> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(rdocx::LegacyCheckBoxSize::Auto);
+    };
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(
+            "checkbox size requires an integer half-point count or None",
+        ));
+    }
+    ensure_nonnegative(value, "checkbox size cannot be negative")?;
+    Ok(rdocx::LegacyCheckBoxSize::HalfPoints(
+        value.extract::<u64>()?,
+    ))
+}
+
+fn copied_choices(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    if value.is_instance_of::<PyString>() || value.is_instance_of::<PyBytes>() {
+        return Err(PyTypeError::new_err(
+            "choices must be a sequence of str, not str or bytes",
+        ));
+    }
+    let mut choices = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        if !item.is_instance_of::<PyString>() {
+            return Err(PyTypeError::new_err("each drop-down choice must be str"));
+        }
+        choices.push(item.extract()?);
+    }
+    Ok(choices)
+}
+
+fn text_input_type(value: &str) -> PyResult<rdocx::LegacyTextInputType> {
+    Ok(match value {
+        "regular" => rdocx::LegacyTextInputType::Regular,
+        "number" => rdocx::LegacyTextInputType::Number,
+        "date" => rdocx::LegacyTextInputType::Date,
+        "currentTime" => rdocx::LegacyTextInputType::CurrentTime,
+        "currentDate" => rdocx::LegacyTextInputType::CurrentDate,
+        "calculated" => rdocx::LegacyTextInputType::Calculated,
+        _ => {
+            return Err(PyValueError::new_err(
+                "text input type must be regular, number, date, currentTime, currentDate, or calculated",
+            ));
+        }
+    })
+}
+
+fn optional_bounded_length(
+    value: Option<&Bound<'_, PyAny>>,
+    label: &str,
+) -> PyResult<Option<usize>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(format!(
+            "{label} requires an integer or None"
+        )));
+    }
+    ensure_nonnegative(value, &format!("{label} cannot be negative"))?;
+    Ok(Some(value.extract::<usize>()?))
+}
+
+fn ensure_nonnegative(value: &Bound<'_, PyAny>, message: &str) -> PyResult<()> {
+    if value.lt(0)? {
+        return Err(PyValueError::new_err(message.to_owned()));
+    }
+    Ok(())
+}
+
+fn optional_exact_bool(value: Option<&Bound<'_, PyAny>>, label: &str) -> PyResult<Option<bool>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    Ok(Some(require_exact_bool(value, label)?))
+}
+
+fn optional_u32(value: Option<&Bound<'_, PyAny>>, label: &str) -> PyResult<Option<u32>> {
+    let Some(value) = value.filter(|value| !value.is_none()) else {
+        return Ok(None);
+    };
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(format!(
+            "{label} requires an integer or None"
+        )));
+    }
+    ensure_nonnegative(value, &format!("{label} cannot be negative"))?;
+    Ok(Some(value.extract()?))
+}
+
+/// Frozen authoring payload for one legacy form field.
+#[pyclass(name = "LegacyFormFieldDefinition", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyLegacyFormFieldDefinition {
+    field: rdocx::Field,
+}
+
+impl PyLegacyFormFieldDefinition {
+    pub(crate) fn field(&self) -> rdocx::Field {
+        self.field.clone()
+    }
+
+    fn checked(
+        py: Python<'_>,
+        options: rdocx::LegacyFormFieldOptions,
+        definition: rdocx::LegacyFormFieldDefinition,
+    ) -> PyResult<Self> {
+        let field = rdocx::Field::from_legacy_form(options, definition)
+            .map_err(|error| rdocx_to_pyerr(py, rdocx::Error::Oxml(error)))?;
+        Ok(Self { field })
+    }
+
+    fn shared_options(
+        name: Option<String>,
+        enabled: bool,
+        calculate_on_exit: bool,
+        help_text: Option<&Bound<'_, PyAny>>,
+        status_text: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<rdocx::LegacyFormFieldOptions> {
+        Ok(rdocx::LegacyFormFieldOptions {
+            name,
+            enabled,
+            calculate_on_exit,
+            help_text: optional_info_text(help_text)?,
+            status_text: optional_info_text(status_text)?,
+        })
+    }
+}
+
+#[pymethods]
+impl PyLegacyFormFieldDefinition {
+    #[new]
+    fn new(_private: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Err(PyTypeError::new_err(
+            "LegacyFormFieldDefinition cannot be constructed directly",
+        ))
+    }
+
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        *,
+        value="",
+        default=None,
+        input_type="regular",
+        max_length=None,
+        format=None,
+        name=None,
+        enabled=true,
+        calculate_on_exit=false,
+        help_text=None,
+        status_text=None
+    ))]
+    fn text_input(
+        py: Python<'_>,
+        value: &str,
+        default: Option<&Bound<'_, PyAny>>,
+        input_type: &str,
+        max_length: Option<&Bound<'_, PyAny>>,
+        format: Option<String>,
+        name: Option<String>,
+        #[pyo3(from_py_with = strict_flag)] enabled: bool,
+        #[pyo3(from_py_with = strict_flag)] calculate_on_exit: bool,
+        help_text: Option<&Bound<'_, PyAny>>,
+        status_text: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let default = match default.filter(|value| !value.is_none()) {
+            Some(value) if value.is_instance_of::<PyString>() => Some(value.extract::<String>()?),
+            Some(_) => return Err(PyTypeError::new_err("text default requires str or None")),
+            None => None,
+        };
+        Self::checked(
+            py,
+            Self::shared_options(name, enabled, calculate_on_exit, help_text, status_text)?,
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: text_input_type(input_type)?,
+                default,
+                value: value.to_owned(),
+                max_length: optional_bounded_length(max_length, "max_length")?,
+                format,
+            },
+        )
+    }
+
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        *,
+        checked=false,
+        default=false,
+        size_half_points=None,
+        name=None,
+        enabled=true,
+        calculate_on_exit=false,
+        help_text=None,
+        status_text=None
+    ))]
+    fn checkbox(
+        py: Python<'_>,
+        #[pyo3(from_py_with = strict_flag)] checked: bool,
+        #[pyo3(from_py_with = strict_flag)] default: bool,
+        size_half_points: Option<&Bound<'_, PyAny>>,
+        name: Option<String>,
+        #[pyo3(from_py_with = strict_flag)] enabled: bool,
+        #[pyo3(from_py_with = strict_flag)] calculate_on_exit: bool,
+        help_text: Option<&Bound<'_, PyAny>>,
+        status_text: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Self::checked(
+            py,
+            Self::shared_options(name, enabled, calculate_on_exit, help_text, status_text)?,
+            rdocx::LegacyFormFieldDefinition::CheckBox {
+                size: checkbox_size(size_half_points)?,
+                default,
+                checked,
+            },
+        )
+    }
+
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        choices,
+        *,
+        selected_index=0,
+        default_index=0,
+        name=None,
+        enabled=true,
+        calculate_on_exit=false,
+        help_text=None,
+        status_text=None
+    ))]
+    fn drop_down_list(
+        py: Python<'_>,
+        choices: &Bound<'_, PyAny>,
+        #[pyo3(from_py_with = strict_index)] selected_index: usize,
+        #[pyo3(from_py_with = strict_index)] default_index: usize,
+        name: Option<String>,
+        #[pyo3(from_py_with = strict_flag)] enabled: bool,
+        #[pyo3(from_py_with = strict_flag)] calculate_on_exit: bool,
+        help_text: Option<&Bound<'_, PyAny>>,
+        status_text: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Self::checked(
+            py,
+            Self::shared_options(name, enabled, calculate_on_exit, help_text, status_text)?,
+            rdocx::LegacyFormFieldDefinition::DropDownList {
+                choices: copied_choices(choices)?,
+                default_index,
+                selected_index,
+            },
+        )
+    }
+}
+
+fn refuse_direct(class_name: &str) -> PyErr {
+    PyTypeError::new_err(format!("{class_name} cannot be constructed directly"))
+}
+
+fn protection_mode(value: &str) -> PyResult<rdocx::ProtectionMode> {
+    match value {
+        "readOnly" => Ok(rdocx::ProtectionMode::ReadOnly),
+        "comments" => Ok(rdocx::ProtectionMode::Comments),
+        "trackedChanges" => Ok(rdocx::ProtectionMode::TrackedChanges),
+        "forms" => Ok(rdocx::ProtectionMode::Forms),
+        _ => Err(PyValueError::new_err(
+            "document protection mode must be readOnly, comments, trackedChanges, or forms",
+        )),
+    }
+}
+
+fn crypt_provider(value: &str) -> PyResult<rdocx::CryptProviderType> {
+    match value {
+        "rsaAES" => Ok(rdocx::CryptProviderType::RsaAes),
+        "rsaFull" => Ok(rdocx::CryptProviderType::RsaFull),
+        "custom" => Ok(rdocx::CryptProviderType::Custom),
+        _ => Err(PyValueError::new_err(
+            "document protection provider_type must be rsaAES, rsaFull, or custom",
+        )),
+    }
+}
+
+fn crypt_algorithm_class(value: &str) -> PyResult<rdocx::CryptAlgorithmClass> {
+    match value {
+        "hash" => Ok(rdocx::CryptAlgorithmClass::Hash),
+        "custom" => Ok(rdocx::CryptAlgorithmClass::Custom),
+        _ => Err(PyValueError::new_err(
+            "document protection algorithm_class must be hash or custom",
+        )),
+    }
+}
+
+fn crypt_algorithm_type(value: &str) -> PyResult<rdocx::CryptAlgorithmType> {
+    match value {
+        "typeAny" => Ok(rdocx::CryptAlgorithmType::Any),
+        "custom" => Ok(rdocx::CryptAlgorithmType::Custom),
+        _ => Err(PyValueError::new_err(
+            "document protection algorithm_type must be typeAny or custom",
+        )),
+    }
+}
+
+/// Frozen tag or legacy identity for one form field.
+#[pyclass(name = "FormFieldTarget", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyFormFieldTarget {
+    inner: rdocx::FormFieldTarget,
+}
+
+#[pymethods]
+impl PyFormFieldTarget {
+    #[new]
+    fn new(_private: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Err(refuse_direct("FormFieldTarget"))
+    }
+
+    #[staticmethod]
+    fn content_control_tag(tag: String) -> Self {
+        Self {
+            inner: rdocx::FormFieldTarget::ContentControlTag(tag),
+        }
+    }
+
+    #[staticmethod]
+    fn legacy(source_part: String, #[pyo3(from_py_with = strict_index)] ordinal: usize) -> Self {
+        Self {
+            inner: rdocx::FormFieldTarget::Legacy {
+                source_part,
+                ordinal,
+            },
+        }
+    }
+}
+
+/// Frozen typed value for one form field.
+#[pyclass(name = "FormFieldValue", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyFormFieldValue {
+    inner: rdocx::FormFieldValue,
+}
+
+#[pymethods]
+impl PyFormFieldValue {
+    #[new]
+    fn new(_private: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Err(refuse_direct("FormFieldValue"))
+    }
+
+    #[staticmethod]
+    fn text(py: Python<'_>, value: String) -> PyResult<Self> {
+        Ok(Self {
+            inner: rdocx::FormFieldValue::Text(checked_form_text(py, value)?),
+        })
+    }
+
+    #[staticmethod]
+    fn checked(#[pyo3(from_py_with = strict_flag)] value: bool) -> Self {
+        Self {
+            inner: rdocx::FormFieldValue::Checked(value),
+        }
+    }
+
+    #[staticmethod]
+    fn selected_index(#[pyo3(from_py_with = strict_index)] value: usize) -> Self {
+        Self {
+            inner: rdocx::FormFieldValue::SelectedIndex(value),
+        }
+    }
+}
+
+/// Frozen reset payload. A value and a placeholder are separate factories.
+#[pyclass(name = "FormResetValue", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyFormResetValue {
+    inner: rdocx::FormResetValue,
+}
+
+#[pymethods]
+impl PyFormResetValue {
+    #[new]
+    fn new(_private: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Err(refuse_direct("FormResetValue"))
+    }
+
+    #[staticmethod]
+    fn value(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let value = value
+            .cast::<PyFormFieldValue>()
+            .map_err(|_| PyTypeError::new_err("reset value requires FormFieldValue"))?
+            .get()
+            .inner
+            .clone();
+        Ok(Self {
+            inner: rdocx::FormResetValue::Value(value),
+        })
+    }
+
+    #[staticmethod]
+    fn placeholder(py: Python<'_>, text: String) -> PyResult<Self> {
+        Ok(Self {
+            inner: rdocx::FormResetValue::Placeholder {
+                text: checked_form_text(py, text)?,
+            },
+        })
+    }
+}
+
+/// One transient validation and reset rule.
+#[pyclass(name = "FormFieldRule", frozen, skip_from_py_object)]
+pub struct PyFormFieldRule {
+    #[pyo3(get)]
+    target: Py<PyFormFieldTarget>,
+    #[pyo3(get)]
+    reset: Py<PyFormResetValue>,
+    #[pyo3(get)]
+    required: bool,
+}
+
+#[pymethods]
+impl PyFormFieldRule {
+    #[new]
+    #[pyo3(
+        signature = (*, target, reset, required = false),
+        text_signature = "(*, target, reset, required=False)"
+    )]
+    fn new(
+        py: Python<'_>,
+        target: &Bound<'_, PyAny>,
+        reset: &Bound<'_, PyAny>,
+        #[pyo3(from_py_with = strict_flag)] required: bool,
+    ) -> PyResult<Self> {
+        let target = copied_target(py, target)?;
+        let reset = copied_reset(py, reset)?;
+        Ok(Self {
+            target,
+            reset,
+            required,
+        })
+    }
+}
+
+/// One value to publish for a target that a rule already names.
+#[pyclass(name = "FormFieldAssignment", frozen, skip_from_py_object)]
+pub struct PyFormFieldAssignment {
+    #[pyo3(get)]
+    target: Py<PyFormFieldTarget>,
+    #[pyo3(get)]
+    value: Py<PyFormFieldValue>,
+}
+
+#[pymethods]
+impl PyFormFieldAssignment {
+    #[new]
+    #[pyo3(
+        signature = (*, target, value),
+        text_signature = "(*, target, value)"
+    )]
+    fn new(py: Python<'_>, target: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            target: copied_target(py, target)?,
+            value: copied_value(py, value)?,
+        })
+    }
+}
+
+/// One current-state problem for one physical control or legacy field.
+#[pyclass(name = "FormValidationIssue", frozen, skip_from_py_object)]
+pub struct PyFormValidationIssue {
+    #[pyo3(get)]
+    target: Py<PyFormFieldTarget>,
+    #[pyo3(get)]
+    source_part: String,
+    #[pyo3(get)]
+    ordinal: usize,
+    #[pyo3(get)]
+    message: String,
+}
+
+#[pymethods]
+impl PyFormValidationIssue {
+    #[new]
+    fn new(_private: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Err(refuse_direct("FormValidationIssue"))
+    }
+}
+
+/// Caller-supplied `w:documentProtection` metadata. No password is derived.
+#[pyclass(name = "DocumentProtection", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyDocumentProtection {
+    inner: rdocx::DocumentProtection,
+}
+
+#[pymethods]
+impl PyDocumentProtection {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(
+        signature = (
+            *,
+            mode,
+            enforcement=None,
+            formatting=None,
+            provider_type=None,
+            algorithm_class=None,
+            algorithm_type=None,
+            algorithm_sid=None,
+            spin_count=None,
+            hash=None,
+            salt=None
+        ),
+        text_signature = "(*, mode, enforcement=None, formatting=None, provider_type=None, algorithm_class=None, algorithm_type=None, algorithm_sid=None, spin_count=None, hash=None, salt=None)"
+    )]
+    fn new(
+        mode: &str,
+        enforcement: Option<&Bound<'_, PyAny>>,
+        formatting: Option<&Bound<'_, PyAny>>,
+        provider_type: Option<&str>,
+        algorithm_class: Option<&str>,
+        algorithm_type: Option<&str>,
+        algorithm_sid: Option<&Bound<'_, PyAny>>,
+        spin_count: Option<&Bound<'_, PyAny>>,
+        hash: Option<String>,
+        salt: Option<String>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: rdocx::DocumentProtection {
+                mode: protection_mode(mode)?,
+                enforcement: optional_exact_bool(enforcement, "enforcement")?,
+                formatting: optional_exact_bool(formatting, "formatting")?,
+                provider_type: provider_type.map(crypt_provider).transpose()?,
+                algorithm_class: algorithm_class.map(crypt_algorithm_class).transpose()?,
+                algorithm_type: algorithm_type.map(crypt_algorithm_type).transpose()?,
+                algorithm_sid: optional_u32(algorithm_sid, "algorithm_sid")?,
+                spin_count: optional_u32(spin_count, "spin_count")?,
+                hash,
+                salt,
+            },
+        })
+    }
+
+    #[getter]
+    fn mode(&self) -> &'static str {
+        match self.inner.mode {
+            rdocx::ProtectionMode::ReadOnly => "readOnly",
+            rdocx::ProtectionMode::Comments => "comments",
+            rdocx::ProtectionMode::TrackedChanges => "trackedChanges",
+            rdocx::ProtectionMode::Forms => "forms",
+        }
+    }
+
+    #[getter]
+    fn enforcement(&self) -> Option<bool> {
+        self.inner.enforcement
+    }
+
+    #[getter]
+    fn formatting(&self) -> Option<bool> {
+        self.inner.formatting
+    }
+
+    #[getter]
+    fn provider_type(&self) -> Option<&'static str> {
+        self.inner.provider_type.map(|value| match value {
+            rdocx::CryptProviderType::RsaAes => "rsaAES",
+            rdocx::CryptProviderType::RsaFull => "rsaFull",
+            rdocx::CryptProviderType::Custom => "custom",
+        })
+    }
+
+    #[getter]
+    fn algorithm_class(&self) -> Option<&'static str> {
+        self.inner.algorithm_class.map(|value| match value {
+            rdocx::CryptAlgorithmClass::Hash => "hash",
+            rdocx::CryptAlgorithmClass::Custom => "custom",
+        })
+    }
+
+    #[getter]
+    fn algorithm_type(&self) -> Option<&'static str> {
+        self.inner.algorithm_type.map(|value| match value {
+            rdocx::CryptAlgorithmType::Any => "typeAny",
+            rdocx::CryptAlgorithmType::Custom => "custom",
+        })
+    }
+
+    #[getter]
+    fn algorithm_sid(&self) -> Option<u32> {
+        self.inner.algorithm_sid
+    }
+
+    #[getter]
+    fn spin_count(&self) -> Option<u32> {
+        self.inner.spin_count
+    }
+
+    #[getter]
+    fn hash(&self) -> Option<&str> {
+        self.inner.hash.as_deref()
+    }
+
+    #[getter]
+    fn salt(&self) -> Option<&str> {
+        self.inner.salt.as_deref()
+    }
+}
+
+fn checked_form_text(py: Python<'_>, value: String) -> PyResult<String> {
+    rdocx_oxml::CT_SdtPr::default()
+        .prepare_text_value(&value)
+        .map_err(|error| rdocx_to_pyerr(py, rdocx::Error::Oxml(error)))?;
+    Ok(value)
+}
+
+fn empty_py_tuple() -> Py<PyAny> {
+    Python::attach(|py| PyTuple::empty(py).into_any().unbind())
+}
+
+fn true_py_bool() -> Py<PyAny> {
+    Python::attach(|py| PyBool::new(py, true).to_owned().into_any().unbind())
+}
+
+fn exact_str<'a>(value: &'a Bound<'a, PyAny>, label: &str) -> PyResult<std::borrow::Cow<'a, str>> {
+    if !value.is_exact_instance_of::<PyString>() {
+        return Err(PyTypeError::new_err(format!("{label} must be str")));
+    }
+    value
+        .cast::<PyString>()
+        .map_err(|_| PyTypeError::new_err(format!("{label} must be str")))?
+        .to_cow()
+        .map_err(|_| PyTypeError::new_err(format!("{label} must be str")))
+}
+
+fn extract_strict_bool(value: &Bound<'_, PyAny>, label: &str) -> PyResult<bool> {
+    if !value.is_exact_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!("{label} must be bool")));
+    }
+    value.extract()
+}
+
+fn extract_optional_bool(value: Option<&Bound<'_, PyAny>>, label: &str) -> PyResult<Option<bool>> {
+    match value {
+        None => Ok(None),
+        Some(value) if value.is_none() => Ok(None),
+        Some(value) => Ok(Some(extract_strict_bool(value, label)?)),
+    }
+}
+
+fn extract_optional_text(
+    value: Option<&Bound<'_, PyAny>>,
+    label: &str,
+) -> PyResult<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(value) if value.is_none() => Ok(None),
+        Some(value) => Ok(Some(exact_str(value, label)?.into_owned())),
+    }
+}
+
+fn extract_u32_value(value: &Bound<'_, PyAny>, label: &str) -> PyResult<u32> {
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(format!("{label} must be an int")));
+    }
+    if value.lt(0).unwrap_or(false) {
+        return Err(PyValueError::new_err(format!(
+            "{label} must be zero or positive"
+        )));
+    }
+    value.extract::<u32>()
+}
+
+fn extract_optional_i32(value: Option<&Bound<'_, PyAny>>, label: &str) -> PyResult<Option<i32>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+        return Err(PyTypeError::new_err(format!("{label} must be an int")));
+    }
+    let negative = value.lt(0).unwrap_or(false);
+    match value.extract::<i32>() {
+        Ok(number) => Ok(Some(number)),
+        Err(_) if negative => Err(PyValueError::new_err(format!(
+            "{label} is below the i32 range"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+fn bounded_sequence_len(value: &Bound<'_, PyAny>, cap: usize, label: &str) -> PyResult<usize> {
+    let reported = value.len()?;
+    if reported > cap {
+        return Err(PyValueError::new_err(format!(
+            "{label} exceeds the mail-merge table limit"
+        )));
+    }
+    Ok(reported)
+}
+
+fn parse_main_document_type(value: Option<&str>) -> PyResult<Option<rdocx::MailMergeDocumentType>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    Ok(Some(match value {
+        "catalog" => rdocx::MailMergeDocumentType::Catalog,
+        "envelopes" => rdocx::MailMergeDocumentType::Envelopes,
+        "mailingLabels" => rdocx::MailMergeDocumentType::MailingLabels,
+        "formLetters" => rdocx::MailMergeDocumentType::FormLetters,
+        "email" => rdocx::MailMergeDocumentType::Email,
+        "fax" => rdocx::MailMergeDocumentType::Fax,
+        _ => {
+            return Err(PyValueError::new_err(
+                "main_document_type is not a mail-merge document type",
+            ));
+        }
+    }))
+}
+
+fn main_document_type_name(value: rdocx::MailMergeDocumentType) -> &'static str {
+    match value {
+        rdocx::MailMergeDocumentType::Catalog => "catalog",
+        rdocx::MailMergeDocumentType::Envelopes => "envelopes",
+        rdocx::MailMergeDocumentType::MailingLabels => "mailingLabels",
+        rdocx::MailMergeDocumentType::FormLetters => "formLetters",
+        rdocx::MailMergeDocumentType::Email => "email",
+        rdocx::MailMergeDocumentType::Fax => "fax",
+    }
+}
+
+fn parse_destination(value: Option<&str>) -> PyResult<Option<rdocx::MailMergeDestination>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    Ok(Some(match value {
+        "newDocument" => rdocx::MailMergeDestination::NewDocument,
+        "printer" => rdocx::MailMergeDestination::Printer,
+        "email" => rdocx::MailMergeDestination::Email,
+        "fax" => rdocx::MailMergeDestination::Fax,
+        _ => {
+            return Err(PyValueError::new_err(
+                "destination is not a mail-merge destination",
+            ));
+        }
+    }))
+}
+
+fn destination_name(value: rdocx::MailMergeDestination) -> &'static str {
+    match value {
+        rdocx::MailMergeDestination::NewDocument => "newDocument",
+        rdocx::MailMergeDestination::Printer => "printer",
+        rdocx::MailMergeDestination::Email => "email",
+        rdocx::MailMergeDestination::Fax => "fax",
+    }
+}
+
+fn default_mail_merge_settings() -> rdocx::MailMerge {
+    rdocx::MailMerge {
+        main_document_type: Some(rdocx::MailMergeDocumentType::FormLetters),
+        data_type: Some("textFile".to_owned()),
+        ..rdocx::MailMerge::default()
+    }
+}
+
+fn embedded_package_source(
+    py: Python<'_>,
+    columns: &Bound<'_, PyAny>,
+    records: &Bound<'_, PyAny>,
+) -> PyResult<rdocx::MailMergePackageSource> {
+    require_carrier_sequence(columns, "columns")?;
+    require_carrier_sequence(records, "records")?;
+    let column_len = bounded_sequence_len(columns, 1024, "columns")?;
+    let row_len = bounded_sequence_len(records, 100_000, "records")?;
+    let mut budget = rdocx::MailMergeTableBudget::new();
+    let mut owned_columns = Vec::with_capacity(column_len);
+    for item in columns.try_iter()? {
+        let item = item?;
+        let name = exact_str(&item, "column")?;
+        budget
+            .add_column(&name)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        owned_columns.push(name.into_owned());
+    }
+    let mut owned_records = Vec::with_capacity(row_len);
+    for row in records.try_iter()? {
+        let row = row?;
+        require_carrier_sequence(&row, "record")?;
+        let cell_len = row.len()?.min(owned_columns.len());
+        budget
+            .begin_record()
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let mut owned_row = Vec::with_capacity(cell_len);
+        for cell in row.try_iter()? {
+            let cell = cell?;
+            let text = exact_str(&cell, "cell")?;
+            budget
+                .add_cell(&text)
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            owned_row.push(text.into_owned());
+        }
+        budget
+            .end_record()
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        owned_records.push(owned_row);
+    }
+    budget.finish().map_err(|error| rdocx_to_pyerr(py, error))?;
+    Ok(rdocx::MailMergePackageSource::Embedded {
+        columns: owned_columns,
+        records: owned_records,
+    })
+}
+
+fn copied_mappings(value: &Bound<'_, PyAny>) -> PyResult<Vec<rdocx::MailMergeFieldMapping>> {
+    require_carrier_sequence(value, "mappings")?;
+    let mut mappings = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        let mapping = item.cast::<PyMailMergeFieldMapping>().map_err(|_| {
+            PyTypeError::new_err("mappings must be a sequence of MailMergeFieldMapping")
+        })?;
+        mappings.push(mapping.borrow().inner.clone());
+    }
+    Ok(mappings)
+}
+
+fn copied_recipients(value: &Bound<'_, PyAny>) -> PyResult<Vec<rdocx::MailMergeRecipient>> {
+    require_carrier_sequence(value, "recipients")?;
+    let mut recipients = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        let recipient = item.cast::<PyMailMergeRecipient>().map_err(|_| {
+            PyTypeError::new_err("recipients must be a sequence of MailMergeRecipient")
+        })?;
+        recipients.push(recipient.borrow().inner.clone());
+    }
+    Ok(recipients)
+}
+
+fn copied_external_rows(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<BTreeMap<String, String>>> {
+    let mapping = py.import("collections.abc")?.getattr("Mapping")?;
+    let mut rows = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        if item.is_instance_of::<PyString>() || !item.is_instance(&mapping)? {
+            return Err(PyTypeError::new_err(
+                "external record must be a mapping of str to str",
+            ));
+        }
+        let mut row = BTreeMap::new();
+        for pair in item.call_method0("items")?.try_iter()? {
+            let pair = pair?;
+            let pair = pair
+                .cast::<PyTuple>()
+                .map_err(|_| PyTypeError::new_err("external record items must be pairs"))?;
+            let key_item = pair.get_item(0)?;
+            let value_item = pair.get_item(1)?;
+            let key = exact_str(&key_item, "external record key")?;
+            let cell = exact_str(&value_item, "external record value")?;
+            row.insert(key.into_owned(), cell.into_owned());
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn string_tuple<'py>(py: Python<'py>, values: &[String]) -> PyResult<Bound<'py, PyTuple>> {
+    PyTuple::new(py, values.iter().map(String::as_str))
+}
+
+#[pyclass(frozen, name = "MailMergePackageSource")]
+pub(crate) struct PyMailMergePackageSource {
+    inner: rdocx::MailMergePackageSource,
+}
+
+#[pymethods]
+impl PyMailMergePackageSource {
+    #[staticmethod]
+    #[pyo3(signature = (columns, records), text_signature = "(columns, records)")]
+    fn embedded(
+        py: Python<'_>,
+        columns: &Bound<'_, PyAny>,
+        records: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: embedded_package_source(py, columns, records)?,
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (uri,), text_signature = "(uri)")]
+    fn external(py: Python<'_>, uri: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let uri = exact_str(uri, "uri")?;
+        rdocx::validate_mail_merge_external_uri(&uri).map_err(|error| rdocx_to_pyerr(py, error))?;
+        Ok(Self {
+            inner: rdocx::MailMergePackageSource::External {
+                uri: uri.into_owned(),
+            },
+        })
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner {
+            rdocx::MailMergePackageSource::Embedded { .. } => "embedded",
+            rdocx::MailMergePackageSource::External { .. } => "external",
+        }
+    }
+
+    #[getter]
+    fn columns<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        match &self.inner {
+            rdocx::MailMergePackageSource::Embedded { columns, .. } => string_tuple(py, columns),
+            rdocx::MailMergePackageSource::External { .. } => Ok(PyTuple::empty(py)),
+        }
+    }
+
+    #[getter]
+    fn records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        match &self.inner {
+            rdocx::MailMergePackageSource::Embedded { records, .. } => {
+                let mut rows = Vec::with_capacity(records.len());
+                for record in records {
+                    rows.push(string_tuple(py, record)?.into_any());
+                }
+                PyTuple::new(py, rows)
+            }
+            rdocx::MailMergePackageSource::External { .. } => Ok(PyTuple::empty(py)),
+        }
+    }
+
+    #[getter]
+    fn uri(&self) -> Option<&str> {
+        match &self.inner {
+            rdocx::MailMergePackageSource::External { uri } => Some(uri),
+            rdocx::MailMergePackageSource::Embedded { .. } => None,
+        }
+    }
+}
+
+#[pyclass(frozen, name = "MailMergeSettings")]
+pub(crate) struct PyMailMergeSettings {
+    inner: rdocx::MailMerge,
+}
+
+#[pymethods]
+impl PyMailMergeSettings {
+    #[new]
+    #[pyo3(
+        signature = (
+            *,
+            main_document_type = Some("formLetters"),
+            link_to_query = None,
+            data_type = Some("textFile"),
+            connect_string = None,
+            query = None,
+            do_not_suppress_blank_lines = None,
+            destination = None,
+            address_field_name = None,
+            mail_subject = None,
+            mail_as_attachment = None,
+            view_merged_data = None,
+            active_record = None,
+            check_errors = None,
+        ),
+        text_signature = "(*, main_document_type='formLetters', link_to_query=None, data_type='textFile', connect_string=None, query=None, do_not_suppress_blank_lines=None, destination=None, address_field_name=None, mail_subject=None, mail_as_attachment=None, view_merged_data=None, active_record=None, check_errors=None)"
+    )]
+    #[allow(clippy::too_many_arguments)] // The approved settings carrier keeps thirteen explicit operands.
+    fn new(
+        main_document_type: Option<&str>,
+        link_to_query: Option<&Bound<'_, PyAny>>,
+        data_type: Option<&str>,
+        connect_string: Option<&str>,
+        query: Option<&str>,
+        do_not_suppress_blank_lines: Option<&Bound<'_, PyAny>>,
+        destination: Option<&str>,
+        address_field_name: Option<&str>,
+        mail_subject: Option<&str>,
+        mail_as_attachment: Option<&Bound<'_, PyAny>>,
+        view_merged_data: Option<&Bound<'_, PyAny>>,
+        active_record: Option<&Bound<'_, PyAny>>,
+        check_errors: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: rdocx::MailMerge {
+                main_document_type: parse_main_document_type(main_document_type)?,
+                link_to_query: extract_optional_bool(link_to_query, "link_to_query")?,
+                data_type: data_type.map(str::to_owned),
+                connect_string: connect_string.map(str::to_owned),
+                query: query.map(str::to_owned),
+                do_not_suppress_blank_lines: extract_optional_bool(
+                    do_not_suppress_blank_lines,
+                    "do_not_suppress_blank_lines",
+                )?,
+                destination: parse_destination(destination)?,
+                address_field_name: address_field_name.map(str::to_owned),
+                mail_subject: mail_subject.map(str::to_owned),
+                mail_as_attachment: extract_optional_bool(
+                    mail_as_attachment,
+                    "mail_as_attachment",
+                )?,
+                view_merged_data: extract_optional_bool(view_merged_data, "view_merged_data")?,
+                active_record: extract_optional_i32(active_record, "active_record")?,
+                check_errors: extract_optional_i32(check_errors, "check_errors")?,
+            },
+        })
+    }
+
+    #[getter]
+    fn main_document_type(&self) -> Option<&'static str> {
+        self.inner.main_document_type.map(main_document_type_name)
+    }
+    #[getter]
+    fn link_to_query(&self) -> Option<bool> {
+        self.inner.link_to_query
+    }
+    #[getter]
+    fn data_type(&self) -> Option<&str> {
+        self.inner.data_type.as_deref()
+    }
+    #[getter]
+    fn connect_string(&self) -> Option<&str> {
+        self.inner.connect_string.as_deref()
+    }
+    #[getter]
+    fn query(&self) -> Option<&str> {
+        self.inner.query.as_deref()
+    }
+    #[getter]
+    fn do_not_suppress_blank_lines(&self) -> Option<bool> {
+        self.inner.do_not_suppress_blank_lines
+    }
+    #[getter]
+    fn destination(&self) -> Option<&'static str> {
+        self.inner.destination.map(destination_name)
+    }
+    #[getter]
+    fn address_field_name(&self) -> Option<&str> {
+        self.inner.address_field_name.as_deref()
+    }
+    #[getter]
+    fn mail_subject(&self) -> Option<&str> {
+        self.inner.mail_subject.as_deref()
+    }
+    #[getter]
+    fn mail_as_attachment(&self) -> Option<bool> {
+        self.inner.mail_as_attachment
+    }
+    #[getter]
+    fn view_merged_data(&self) -> Option<bool> {
+        self.inner.view_merged_data
+    }
+    #[getter]
+    fn active_record(&self) -> Option<i32> {
+        self.inner.active_record
+    }
+    #[getter]
+    fn check_errors(&self) -> Option<i32> {
+        self.inner.check_errors
+    }
+}
+
+#[pyclass(frozen, name = "MailMergeFieldMapping")]
+pub(crate) struct PyMailMergeFieldMapping {
+    inner: rdocx::MailMergeFieldMapping,
+}
+
+#[pymethods]
+impl PyMailMergeFieldMapping {
+    #[new]
+    #[pyo3(
+        signature = (column, source_name, mapped_name, *, language = None, dynamic_address = None),
+        text_signature = "(column, source_name, mapped_name, *, language=None, dynamic_address=None)"
+    )]
+    fn new(
+        column: &Bound<'_, PyAny>,
+        source_name: &Bound<'_, PyAny>,
+        mapped_name: &Bound<'_, PyAny>,
+        language: Option<&Bound<'_, PyAny>>,
+        dynamic_address: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: rdocx::MailMergeFieldMapping {
+                column: extract_u32_value(column, "column")?,
+                source_name: exact_str(source_name, "source_name")?.into_owned(),
+                mapped_name: exact_str(mapped_name, "mapped_name")?.into_owned(),
+                language: extract_optional_text(language, "language")?,
+                dynamic_address: extract_optional_bool(dynamic_address, "dynamic_address")?,
+            },
+        })
+    }
+
+    #[getter]
+    fn column(&self) -> u32 {
+        self.inner.column
+    }
+    #[getter]
+    fn source_name(&self) -> &str {
+        &self.inner.source_name
+    }
+    #[getter]
+    fn mapped_name(&self) -> &str {
+        &self.inner.mapped_name
+    }
+    #[getter]
+    fn language(&self) -> Option<&str> {
+        self.inner.language.as_deref()
+    }
+    #[getter]
+    fn dynamic_address(&self) -> Option<bool> {
+        self.inner.dynamic_address
+    }
+}
+
+#[pyclass(frozen, name = "MailMergeRecipient")]
+pub(crate) struct PyMailMergeRecipient {
+    inner: rdocx::MailMergeRecipient,
+}
+
+#[pymethods]
+impl PyMailMergeRecipient {
+    #[new]
+    #[pyo3(
+        signature = (column, unique_tag, *, active = true_py_bool()),
+        text_signature = "(column, unique_tag, *, active=True)"
+    )]
+    fn new(
+        column: &Bound<'_, PyAny>,
+        unique_tag: &Bound<'_, PyAny>,
+        active: Py<PyAny>,
+    ) -> PyResult<Self> {
+        let py = unique_tag.py();
+        if !unique_tag.is_exact_instance_of::<PyBytes>() {
+            return Err(PyTypeError::new_err("unique_tag must be bytes"));
+        }
+        Ok(Self {
+            inner: rdocx::MailMergeRecipient {
+                column: extract_u32_value(column, "column")?,
+                unique_tag: unique_tag
+                    .cast::<PyBytes>()
+                    .map_err(|_| PyTypeError::new_err("unique_tag must be bytes"))?
+                    .as_bytes()
+                    .to_vec(),
+                active: extract_strict_bool(active.bind(py), "active")?,
+            },
+        })
+    }
+
+    #[getter]
+    fn column(&self) -> u32 {
+        self.inner.column
+    }
+    #[getter]
+    fn unique_tag<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.inner.unique_tag)
+    }
+    #[getter]
+    fn active(&self) -> bool {
+        self.inner.active
+    }
+}
+
+#[pyclass(frozen, name = "MailMergePackageOptions")]
+pub(crate) struct PyMailMergePackageOptions {
+    inner: rdocx::MailMergePackageOptions,
+}
+
+#[pymethods]
+impl PyMailMergePackageOptions {
+    #[new]
+    #[pyo3(
+        signature = (source, *, settings = None, mappings = empty_py_tuple(), recipients = empty_py_tuple()),
+        text_signature = "(source, *, settings=None, mappings=(), recipients=())"
+    )]
+    fn new(
+        source: &Bound<'_, PyMailMergePackageSource>,
+        settings: Option<&Bound<'_, PyMailMergeSettings>>,
+        mappings: Py<PyAny>,
+        recipients: Py<PyAny>,
+    ) -> PyResult<Self> {
+        let py = source.py();
+        Ok(Self {
+            inner: rdocx::MailMergePackageOptions {
+                source: source.borrow().inner.clone(),
+                settings: settings
+                    .map(|settings| settings.borrow().inner.clone())
+                    .unwrap_or_else(default_mail_merge_settings),
+                mappings: copied_mappings(mappings.bind(py))?,
+                recipients: copied_recipients(recipients.bind(py))?,
+            },
+        })
+    }
+
+    #[getter]
+    fn source(&self) -> PyMailMergePackageSource {
+        PyMailMergePackageSource {
+            inner: self.inner.source.clone(),
+        }
+    }
+
+    #[getter]
+    fn settings(&self) -> PyMailMergeSettings {
+        PyMailMergeSettings {
+            inner: self.inner.settings.clone(),
+        }
+    }
+
+    #[getter]
+    fn mappings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let mut items = Vec::with_capacity(self.inner.mappings.len());
+        for mapping in &self.inner.mappings {
+            items.push(
+                PyMailMergeFieldMapping {
+                    inner: mapping.clone(),
+                }
+                .into_pyobject(py)?,
+            );
+        }
+        PyTuple::new(py, items)
+    }
+
+    #[getter]
+    fn recipients<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let mut items = Vec::with_capacity(self.inner.recipients.len());
+        for recipient in &self.inner.recipients {
+            items.push(
+                PyMailMergeRecipient {
+                    inner: recipient.clone(),
+                }
+                .into_pyobject(py)?,
+            );
+        }
+        PyTuple::new(py, items)
+    }
+}
+
+#[pyclass(frozen, name = "MailMergePackageDiagnostic")]
+pub(crate) struct PyMailMergePackageDiagnostic {
+    inner: rdocx::MailMergePackageDiagnostic,
+}
+
+#[pymethods]
+impl PyMailMergePackageDiagnostic {
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner.kind {
+            rdocx::MailMergePackageDiagnosticKind::ExternalSourceBlocked => {
+                "external_source_blocked"
+            }
+            rdocx::MailMergePackageDiagnosticKind::ExternalSourceUnavailable => {
+                "external_source_unavailable"
+            }
+            rdocx::MailMergePackageDiagnosticKind::UnsupportedSource => "unsupported_source",
+        }
+    }
+
+    #[getter]
+    fn message(&self) -> &str {
+        &self.inner.message
+    }
+}
+
+#[pyclass(frozen, name = "MailMergePreparedData")]
+pub(crate) struct PyMailMergePreparedData {
+    inner: rdocx::MailMergePreparedData,
+}
+
+#[pymethods]
+impl PyMailMergePreparedData {
+    #[getter]
+    fn records<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let mut items = Vec::with_capacity(self.inner.records.len());
+        for record in &self.inner.records {
+            let dict = PyDict::new(py);
+            for (key, value) in record {
+                dict.set_item(key, value)?;
+            }
+            items.push(dict.into_any());
+        }
+        PyTuple::new(py, items)
+    }
+
+    #[getter]
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let mut items = Vec::with_capacity(self.inner.diagnostics.len());
+        for diagnostic in &self.inner.diagnostics {
+            items.push(
+                PyMailMergePackageDiagnostic {
+                    inner: diagnostic.clone(),
+                }
+                .into_pyobject(py)?,
+            );
+        }
+        PyTuple::new(py, items)
+    }
+}
+
+fn require_carrier_sequence(value: &Bound<'_, PyAny>, label: &str) -> PyResult<()> {
+    let abc = value.py().import("collections.abc")?;
+    if value.is_instance_of::<PyString>()
+        || value.is_instance_of::<PyBytes>()
+        || value.is_instance(&abc.getattr("Mapping")?)?
+        || value.is_instance(&abc.getattr("Set")?)?
+    {
+        return Err(PyTypeError::new_err(format!(
+            "{label} must be a sequence, not str, bytes, mapping, or set"
+        )));
+    }
+    if !value.is_instance(&abc.getattr("Sequence")?)? {
+        return Err(PyTypeError::new_err(format!("{label} must be a sequence")));
+    }
+    Ok(())
+}
+
+fn copied_rules(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<rdocx::FormFieldRule>> {
+    require_carrier_sequence(value, "rules")?;
+    let mut rules = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        let rule = item
+            .cast::<PyFormFieldRule>()
+            .map_err(|_| PyTypeError::new_err("rules must be a sequence of FormFieldRule"))?;
+        let rule = rule.borrow();
+        rules.push(rdocx::FormFieldRule {
+            target: rule.target.bind(py).borrow().inner.clone(),
+            required: rule.required,
+            reset: rule.reset.bind(py).borrow().inner.clone(),
+        });
+    }
+    Ok(rules)
+}
+
+fn copied_assignments(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<rdocx::FormFieldAssignment>> {
+    require_carrier_sequence(value, "assignments")?;
+    let mut assignments = Vec::new();
+    for item in value.try_iter()? {
+        let item = item?;
+        let assignment = item.cast::<PyFormFieldAssignment>().map_err(|_| {
+            PyTypeError::new_err("assignments must be a sequence of FormFieldAssignment")
+        })?;
+        let assignment = assignment.borrow();
+        assignments.push(rdocx::FormFieldAssignment {
+            target: assignment.target.bind(py).borrow().inner.clone(),
+            value: assignment.value.bind(py).borrow().inner.clone(),
+        });
+    }
+    Ok(assignments)
+}
+
+fn issue_to_py(
+    py: Python<'_>,
+    issue: rdocx::FormValidationIssue,
+) -> PyResult<PyFormValidationIssue> {
+    Ok(PyFormValidationIssue {
+        target: Py::new(
+            py,
+            PyFormFieldTarget {
+                inner: issue.target,
+            },
+        )?,
+        source_part: issue.source_part,
+        ordinal: issue.ordinal,
+        message: issue.message,
+    })
+}
+
+fn copied_target(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyFormFieldTarget>> {
+    let inner = value
+        .cast::<PyFormFieldTarget>()
+        .map_err(|_| PyTypeError::new_err("target requires FormFieldTarget"))?
+        .get()
+        .inner
+        .clone();
+    Py::new(py, PyFormFieldTarget { inner })
+}
+
+fn copied_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyFormFieldValue>> {
+    let inner = value
+        .cast::<PyFormFieldValue>()
+        .map_err(|_| PyTypeError::new_err("value requires FormFieldValue"))?
+        .get()
+        .inner
+        .clone();
+    Py::new(py, PyFormFieldValue { inner })
+}
+
+fn copied_reset(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyFormResetValue>> {
+    let inner = value
+        .cast::<PyFormResetValue>()
+        .map_err(|_| PyTypeError::new_err("reset requires FormResetValue"))?
+        .get()
+        .inner
+        .clone();
+    Py::new(py, PyFormResetValue { inner })
 }
 
 /// Type payload for `Document.set_content_control_type`.
@@ -6066,58 +10163,81 @@ impl PyDocument {
 
     fn indexed_owner(&self, state: &RevisionState) -> Option<(usize, &WordOwner)> {
         note_fx260_word(1);
+        note_visited_owner_record();
         let index = *self.indexes.by_generation.get(&state.generation())?;
         let owner = self.owners.get(index)?;
         owner.owner.same_state(state).then_some((index, owner))
     }
 
+    /// The route of the physical owner of a paragraph handle's location,
+    /// from the inventory of `prepared` when given, or the current one.
     pub(crate) fn indexed_paragraph_location(
         &self,
         location: &ParagraphLocation,
+        prepared: Option<&PreparedWordRevision>,
     ) -> Option<rdocx::ContentLocation> {
         note_fx260_word(1);
+        let (owners, indexes) = prepared.map_or((&self.owners, &self.indexes), |prepared| {
+            (&prepared.owners, &prepared.indexes)
+        });
         let native = match location {
-            ParagraphLocation::Body(index) => self
-                .indexes
-                .body_paragraphs
-                .as_ref()?
-                .get(*index)?
-                .as_ref()?,
+            ParagraphLocation::Body(index) => {
+                indexes.body_paragraphs.as_ref()?.get(*index)?.as_ref()?
+            }
             ParagraphLocation::Cell {
                 table,
                 row,
                 cell,
                 paragraph,
-            } => self
-                .indexes
+            } => indexes
                 .cell_paragraphs
                 .get(&(*table, *row, *cell))?
                 .get(*paragraph)?,
             ParagraphLocation::Related(location) => location,
         };
-        let index = self
-            .indexes
-            .find(&self.owners, &WordOwnerLocation::Paragraph(native.clone()))?;
-        let WordOwnerLocation::Paragraph(location) = &self.owners[index].location else {
+        let index = indexes.find(owners, &WordOwnerLocation::Paragraph(native.clone()))?;
+        let WordOwnerLocation::Paragraph(location) = &owners[index].location else {
             return None;
         };
         Some(location.clone())
+    }
+
+    /// The route of the physical owner of a paragraph handle's location in
+    /// the current document, or in `candidate` as `prepared` publishes it:
+    /// from that inventory, which holds the route the document resolves, or
+    /// as the document resolves it.
+    pub(crate) fn paragraph_route(
+        &self,
+        location: &ParagraphLocation,
+        prepared: Option<(&PreparedWordRevision, &rdocx::Document)>,
+    ) -> rdocx::Result<rdocx::ContentLocation> {
+        let document = prepared.map_or(&self.inner, |(_, candidate)| candidate);
+        match self.indexed_paragraph_location(location, prepared.map(|(prepared, _)| prepared)) {
+            Some(indexed) => {
+                #[cfg(debug_assertions)]
+                assert_indexed_route(&indexed, || location.native(document), "paragraph");
+                Ok(indexed)
+            }
+            None => location.native(document),
+        }
     }
 
     pub(crate) fn indexed_table_location(
         &self,
         index: usize,
         related: &Option<rdocx::ContentLocation>,
+        prepared: Option<&PreparedWordRevision>,
     ) -> Option<rdocx::ContentLocation> {
         note_fx260_word(1);
+        let (owners, indexes) = prepared.map_or((&self.owners, &self.indexes), |prepared| {
+            (&prepared.owners, &prepared.indexes)
+        });
         let native = match related {
             Some(location) => location,
-            None => self.indexes.body_tables.get(index)?.as_ref()?,
+            None => indexes.body_tables.get(index)?.as_ref()?,
         };
-        let index = self
-            .indexes
-            .find(&self.owners, &WordOwnerLocation::Table(native.clone()))?;
-        let WordOwnerLocation::Table(location) = &self.owners[index].location else {
+        let index = indexes.find(owners, &WordOwnerLocation::Table(native.clone()))?;
+        let WordOwnerLocation::Table(location) = &owners[index].location else {
             return None;
         };
         Some(location.clone())
@@ -6185,6 +10305,83 @@ impl PyDocument {
         .map(|(path, _)| path)
     }
 
+    /// The direct body slot of a current paragraph owner, from the inventory.
+    pub(crate) fn direct_body_paragraph_slot(&self, state: &RevisionState) -> Option<usize> {
+        let (_, owner) = self.indexed_owner(state)?;
+        match &owner.location {
+            WordOwnerLocation::Paragraph(location)
+                if location.story().kind() == rdocx::StoryKind::Body
+                    && location.index_path().len() == 1 =>
+            {
+                owner.body_slot
+            }
+            _ => None,
+        }
+    }
+
+    /// The direct body slot of a current run owner's paragraph, and the run
+    /// route in it, from the inventory.
+    pub(crate) fn direct_body_run_slot(
+        &self,
+        state: &RevisionState,
+    ) -> Option<(usize, rdocx_oxml::text::AcceptedRunPath)> {
+        let (_, owner) = self.indexed_owner(state)?;
+        let WordOwnerLocation::Run(location, path) = &owner.location else {
+            return None;
+        };
+        let paragraph = self.owners.get(owner.parent?)?;
+        match &paragraph.location {
+            WordOwnerLocation::Paragraph(parent)
+                if parent.story().kind() == rdocx::StoryKind::Body
+                    && parent.index_path().len() == 1
+                    && parent.index_path() == location.index_path() =>
+            {
+                Some((paragraph.body_slot?, path.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The direct body slot of a current cell owner's table, and the cell
+    /// coordinates, from the inventory.
+    pub(crate) fn direct_body_cell_slot(
+        &self,
+        state: &RevisionState,
+    ) -> Option<(usize, usize, usize)> {
+        let (_, owner) = self.indexed_owner(state)?;
+        let WordOwnerLocation::Cell {
+            table, row, cell, ..
+        } = &owner.location
+        else {
+            return None;
+        };
+        let parent = self.owners.get(owner.parent?)?;
+        match &parent.location {
+            WordOwnerLocation::Table(location)
+                if location.story().kind() == rdocx::StoryKind::Body
+                    && location.index_path().len() == 1
+                    && location.index_path() == table.index_path() =>
+            {
+                Some((parent.body_slot?, *row, *cell))
+            }
+            _ => None,
+        }
+    }
+
+    /// The direct body slot of a current table owner, from the inventory.
+    pub(crate) fn direct_body_table_slot(&self, state: &RevisionState) -> Option<usize> {
+        let (_, owner) = self.indexed_owner(state)?;
+        match &owner.location {
+            WordOwnerLocation::Table(location)
+                if location.story().kind() == rdocx::StoryKind::Body
+                    && location.index_path().len() == 1 =>
+            {
+                owner.body_slot
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn cached_paragraph_text(&self, state: &RevisionState) -> Option<&str> {
         let (_, owner) = self.indexed_owner(state)?;
         match &owner.read_facts {
@@ -6221,7 +10418,7 @@ impl PyDocument {
         if let Some(paragraph) = paragraph {
             self.owners[paragraph].read_facts = WordReadFacts::Paragraph(text);
         }
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -6482,6 +10679,7 @@ impl PyDocument {
         self.indexes.direct_body_paragraphs.remove(&slot);
         self.removal_scope = removal_scope;
         self.snapshot_scope = snapshot_scope;
+        self.pieces.splice(&self.inner, slot, 1, None);
         Ok(())
     }
 
@@ -6736,12 +10934,31 @@ impl PyDocument {
     ) -> PyResult<PreparedWordRevision> {
         let forms = matches!(
             publication,
-            WordPublication::FormValues | WordPublication::Signing
+            WordPublication::FormValues
+                | WordPublication::ModernFormValues
+                | WordPublication::Signing
         );
+        let modern = matches!(publication, WordPublication::ModernFormValues);
         let mut old_sources = FormSources::default();
         let mut new_sources = FormSources::default();
-        let locations = word_owner_locations(candidate, forms.then_some(&mut new_sources))
-            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let (piece_cache, inventory) = if forms {
+            (None, None)
+        } else {
+            let (pieces, inventory) = self.pieces.assemble(candidate);
+            (Some(pieces), inventory)
+        };
+        let (locations, projections) = match inventory {
+            Some((locations, projections)) => {
+                #[cfg(debug_assertions)]
+                assert_word_pieces_rebuild(candidate, &locations, &projections);
+                (locations, Some(projections))
+            }
+            None => (
+                word_owner_locations(candidate, forms.then_some(&mut new_sources))
+                    .map_err(|error| rdocx_to_pyerr(py, error))?,
+                None,
+            ),
+        };
         if forms {
             word_owner_locations(&self.inner, Some(&mut old_sources))
                 .map_err(|error| rdocx_to_pyerr(py, error))?;
@@ -6782,6 +10999,7 @@ impl PyDocument {
             publication,
             WordPublication::Conservative
                 | WordPublication::FormValues
+                | WordPublication::ModernFormValues
                 | WordPublication::Signing
                 | WordPublication::AppendBody
         ) && selected_index.is_none()
@@ -6790,7 +11008,19 @@ impl PyDocument {
                 "checked XML owner has no current physical authority",
             ));
         }
-        let matches = indexed_inventory_matches(&self.owners, &locations, &publication);
+        // Conservative publication retires every old scope. Matching those
+        // owners cannot certify any retention and only clones unused routes.
+        let matches = if matches!(publication, WordPublication::Conservative) {
+            vec![None; locations.len()]
+        } else {
+            indexed_inventory_matches(&self.owners, &locations, &publication)
+        };
+        let (eligible_parts, modern_snapshot) = if modern {
+            unchanged_related_owner_parts(&self.inner, candidate, &self.owners, &locations)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+        } else {
+            (std::collections::HashSet::new(), false)
+        };
         let form_certificates = if matches!(publication, WordPublication::Signing) {
             signing_owner_certificates(
                 &self.owners,
@@ -6799,6 +11029,15 @@ impl PyDocument {
                 &old_sources,
                 &new_sources,
             )
+        } else if modern {
+            modern_form_owner_certificates(
+                &self.owners,
+                &locations,
+                &matches,
+                &old_sources,
+                &new_sources,
+                &eligible_parts,
+            )
         } else if forms {
             form_owner_certificates(
                 &self.owners,
@@ -6806,25 +11045,27 @@ impl PyDocument {
                 &matches,
                 &old_sources,
                 &new_sources,
+                &std::collections::HashSet::new(),
             )
         } else {
             std::collections::HashSet::new()
         };
-        let preserve_snapshot = matches!(publication, WordPublication::Signing)
-            && self
-                .inner
-                .stories()
-                .map_err(|error| rdocx_to_pyerr(py, error))?
-                == candidate
+        let preserve_snapshot = modern_snapshot
+            || matches!(publication, WordPublication::Signing)
+                && self
+                    .inner
                     .stories()
                     .map_err(|error| rdocx_to_pyerr(py, error))?
-            && self
-                .inner
-                .story_item_snapshots()
-                .map_err(|error| rdocx_to_pyerr(py, error))?
-                == candidate
+                    == candidate
+                        .stories()
+                        .map_err(|error| rdocx_to_pyerr(py, error))?
+                && self
+                    .inner
                     .story_item_snapshots()
-                    .map_err(|error| rdocx_to_pyerr(py, error))?;
+                    .map_err(|error| rdocx_to_pyerr(py, error))?
+                    == candidate
+                        .story_item_snapshots()
+                        .map_err(|error| rdocx_to_pyerr(py, error))?;
         let mut retained = Vec::new();
         let mut births = Vec::new();
         for (index, address) in locations.iter().enumerate() {
@@ -6894,6 +11135,7 @@ impl PyDocument {
                             publication,
                             WordPublication::Conservative
                                 | WordPublication::FormValues
+                                | WordPublication::ModernFormValues
                                 | WordPublication::Signing
                         )
                         && !descendant
@@ -6936,9 +11178,15 @@ impl PyDocument {
             retired.push(self.snapshot_scope.clone());
             births.push(RevisionScope::Text);
         }
+        // A run handle also carries the document epoch. Modern publication
+        // keeps that epoch with the same local commit Signing uses. A proved
+        // run then stays current. An unproved owner state still retires it.
         let revision = if matches!(
             publication,
-            WordPublication::ElementXml(_) | WordPublication::RunText(_) | WordPublication::Signing
+            WordPublication::ElementXml(_)
+                | WordPublication::RunText(_)
+                | WordPublication::Signing
+                | WordPublication::ModernFormValues
         ) {
             self.revisions
                 .prepare_local_scopes(operation, &retired, &births)
@@ -6963,12 +11211,14 @@ impl PyDocument {
             revision.born(born).expect("prepared snapshot birth")
         };
         let owners = word_owners_with_states(locations, &states);
-        let indexes = WordOwnerIndexes::prepare(&owners, candidate)?;
+        let projections = projections.unwrap_or_else(|| WordIndexProjections::of(candidate));
+        let indexes = WordOwnerIndexes::prepare(&owners, projections)?;
         Ok(PreparedWordRevision {
             revision,
             owners,
             indexes,
             snapshot_scope,
+            pieces: piece_cache,
         })
     }
 
@@ -6979,29 +11229,36 @@ impl PyDocument {
         self.owners = prepared.owners;
         self.indexes = prepared.indexes;
         self.snapshot_scope = prepared.snapshot_scope;
+        self.pending_pieces = Some(prepared.pieces.unwrap_or_default());
         Ok(())
+    }
+
+    pub(crate) fn install_inner(&mut self, candidate: rdocx::Document) {
+        if let Some(pieces) = self.pending_pieces.take() {
+            self.pieces = pieces;
+        } else {
+            self.pieces = WordPieces::default();
+        }
+        self.inner = candidate;
     }
 
     pub(crate) fn publish_owner_candidate(
         &mut self,
         py: Python<'_>,
-        mut candidate: rdocx::Document,
+        candidate: rdocx::Document,
         operation: &'static str,
         publication: WordPublication,
     ) -> PyResult<()> {
-        let before = self
+        if self
             .inner
-            .to_bytes()
-            .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let after = candidate
-            .to_bytes()
-            .map_err(|error| rdocx_to_pyerr(py, error))?;
-        if before == after {
+            .saves_as(&candidate)
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+        {
             return Ok(());
         }
         let prepared = self.prepare_word_revision(py, &candidate, operation, publication)?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -7014,13 +11271,26 @@ impl PyDocument {
         candidate: rdocx::Document,
         operation: &'static str,
     ) -> PyResult<()> {
-        let locations =
-            word_owner_locations(&candidate, None).map_err(|error| rdocx_to_pyerr(py, error))?;
+        let (pieces, inventory) = self.pieces.assemble(&candidate);
+        let (locations, projections) = match inventory {
+            Some((locations, projections)) => {
+                #[cfg(debug_assertions)]
+                assert_word_pieces_rebuild(&candidate, &locations, &projections);
+                (locations, Some(projections))
+            }
+            None => (
+                word_owner_locations(&candidate, None)
+                    .map_err(|error| rdocx_to_pyerr(py, error))?,
+                None,
+            ),
+        };
         if let Some(owners) = relocated_property_owners(&self.owners, &locations) {
-            let indexes = WordOwnerIndexes::prepare(&owners, &candidate)?;
+            let projections = projections.unwrap_or_else(|| WordIndexProjections::of(&candidate));
+            let indexes = WordOwnerIndexes::prepare(&owners, projections)?;
+            self.pending_pieces = Some(pieces);
             self.owners = owners;
             self.indexes = indexes;
-            self.inner = candidate;
+            self.install_inner(candidate);
             return Ok(());
         }
         self.publish_owner_candidate(py, candidate, operation, WordPublication::Conservative)
@@ -7063,12 +11333,14 @@ impl PyDocument {
     fn publish_api_candidate(
         &mut self,
         py: Python<'_>,
-        mut candidate: rdocx::Document,
+        candidate: rdocx::Document,
         operation: &'static str,
     ) -> PyResult<()> {
-        let before = self.inner.to_bytes().map_err(|e| rdocx_to_pyerr(py, e))?;
-        let after = candidate.to_bytes().map_err(|e| rdocx_to_pyerr(py, e))?;
-        if before == after {
+        if self
+            .inner
+            .saves_as(&candidate)
+            .map_err(|e| rdocx_to_pyerr(py, e))?
+        {
             return Ok(());
         }
         let prepared = self.prepare_word_revision(
@@ -7078,24 +11350,26 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
     fn publish_form_candidate(
         &mut self,
         py: Python<'_>,
-        mut candidate: rdocx::Document,
+        candidate: rdocx::Document,
         operation: &'static str,
+        publication: WordPublication,
     ) -> PyResult<()> {
-        let before = self.inner.to_bytes().map_err(|e| rdocx_to_pyerr(py, e))?;
-        let after = candidate.to_bytes().map_err(|e| rdocx_to_pyerr(py, e))?;
-        if before == after {
+        if self
+            .inner
+            .saves_as(&candidate)
+            .map_err(|e| rdocx_to_pyerr(py, e))?
+        {
             return Ok(());
         }
-        let prepared =
-            self.prepare_word_revision(py, &candidate, operation, WordPublication::FormValues)?;
+        let prepared = self.prepare_word_revision(py, &candidate, operation, publication)?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
     fn set_control_value(
@@ -7207,13 +11481,23 @@ impl PyDocument {
             },
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
     fn from_document(inner: rdocx::Document, py: Python<'_>) -> PyResult<Self> {
-        let locations =
-            word_owner_locations(&inner, None).map_err(|error| rdocx_to_pyerr(py, error))?;
+        let (pieces, inventory) = WordPieces::default().assemble(&inner);
+        let (locations, projections) = match inventory {
+            Some((locations, projections)) => {
+                #[cfg(debug_assertions)]
+                assert_word_pieces_rebuild(&inner, &locations, &projections);
+                (locations, Some(projections))
+            }
+            None => (
+                word_owner_locations(&inner, None).map_err(|error| rdocx_to_pyerr(py, error))?,
+                None,
+            ),
+        };
         let mut scopes = locations
             .iter()
             .flat_map(|address| address.location.scopes().iter().copied())
@@ -7227,7 +11511,8 @@ impl PyDocument {
         let removal_scope = states.last().expect("removal epoch allocated").clone();
         let snapshot_scope = states[states.len() - 2].clone();
         let owners = word_owners_with_states(locations, &states[..states.len() - 2]);
-        let indexes = WordOwnerIndexes::prepare(&owners, &inner)?;
+        let projections = projections.unwrap_or_else(|| WordIndexProjections::of(&inner));
+        let indexes = WordOwnerIndexes::prepare(&owners, projections)?;
         Ok(Self {
             inner,
             revisions,
@@ -7235,6 +11520,8 @@ impl PyDocument {
             snapshot_scope,
             removal_scope,
             indexes,
+            pieces,
+            pending_pieces: None,
         })
     }
 
@@ -7412,25 +11699,17 @@ impl PyDocument {
             return Err(PyIndexError::new_err("content index out of range"));
         }
         let story = self.body_story(py)?;
-        let snapshots = if indices.iter().all(|index| *index == content_count) {
-            Vec::new()
-        } else {
-            self.inner
-                .story_item_snapshots()
-                .map_err(|error| rdocx_to_pyerr(py, error))?
-        };
         let mut locations = Vec::with_capacity(indices.len());
         for index in indices {
             if *index == content_count {
                 locations.push(rdocx::ContentLocation::end(story.clone()));
                 continue;
             }
-            let location = snapshots
-                .iter()
-                .find(|item| {
-                    item.location().story() == &story && item.direct_body_index() == Some(*index)
-                })
-                .map(|item| item.location().clone())
+            let location = self
+                .inner
+                .direct_body_item_location(*index)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+                .filter(|location| location.story() == &story)
                 .ok_or_else(|| {
                     rdocx_to_pyerr(
                         py,
@@ -7605,7 +11884,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(boundary)
     }
@@ -7635,7 +11914,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(count)
     }
@@ -7667,25 +11946,27 @@ impl PyDocument {
     ) -> PyResult<usize>
     where
         F: FnOnce(
-                &mut rdocx::Document,
-            ) -> rdocx::Result<Result<usize, rdocx::ReplacementCountMismatch>>
-            + Send,
+                rdocx::Document,
+            ) -> rdocx::Result<
+                Result<Option<(rdocx::Document, usize)>, rdocx::ReplacementCountMismatch>,
+            > + Send,
     {
-        let mut candidate = self.inner.clone_for_staging();
-        let count = py
-            .detach(|| mutation(&mut candidate))
+        let candidate = self.inner.clone_for_staging();
+        let changed = py
+            .detach(|| mutation(candidate))
             .map_err(|error| rdocx_to_pyerr(py, error))?
             .map_err(|mismatch| crate::replacement_count_to_pyerr(py, &mismatch, false))?;
-        if count > 0 {
-            let prepared = self.prepare_word_revision(
-                py,
-                &candidate,
-                operation,
-                crate::document::WordPublication::Conservative,
-            )?;
-            self.commit_word_revision(prepared)?;
-            self.inner = candidate;
-        }
+        let Some((candidate, count)) = changed else {
+            return Ok(0);
+        };
+        let prepared = self.prepare_word_revision(
+            py,
+            &candidate,
+            operation,
+            crate::document::WordPublication::Conservative,
+        )?;
+        self.commit_word_revision(prepared)?;
+        self.install_inner(candidate);
         Ok(count)
     }
 
@@ -8077,7 +12358,7 @@ impl PyDocument {
         let prepared =
             self.prepare_word_revision(py, &candidate, "Document.sign", WordPublication::Signing)?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(result)
     }
 
@@ -8272,9 +12553,177 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(count)
+    }
+
+    fn validate_form<'py>(
+        &self,
+        py: Python<'py>,
+        rules: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let rules = copied_rules(py, rules)?;
+        let issues = self
+            .inner
+            .validate_form(&rules)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let issues = issues
+            .into_iter()
+            .map(|issue| issue_to_py(py, issue))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, issues)
+    }
+
+    fn fill_form(
+        &mut self,
+        py: Python<'_>,
+        rules: &Bound<'_, PyAny>,
+        assignments: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyTuple>> {
+        let rules = copied_rules(py, rules)?;
+        let assignments = copied_assignments(py, assignments)?;
+        let mut candidate = self.inner.clone_for_staging();
+        let counts = candidate
+            .fill_form(&rules, &assignments)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let result = PyTuple::new(py, counts)?.unbind();
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.fill_form",
+            WordPublication::ModernFormValues,
+        )?;
+        Ok(result)
+    }
+
+    fn reset_form(&mut self, py: Python<'_>, rules: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
+        let rules = copied_rules(py, rules)?;
+        let mut candidate = self.inner.clone_for_staging();
+        let counts = candidate
+            .reset_form(&rules)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let result = PyTuple::new(py, counts)?.unbind();
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.reset_form",
+            WordPublication::ModernFormValues,
+        )?;
+        Ok(result)
+    }
+
+    fn protect_form(
+        &mut self,
+        py: Python<'_>,
+        rules: &Bound<'_, PyAny>,
+        protection: &PyDocumentProtection,
+    ) -> PyResult<()> {
+        let rules = copied_rules(py, rules)?;
+        let protection = protection.inner.clone();
+        let mut candidate = self.inner.clone_for_staging();
+        candidate
+            .protect_form(&rules, protection)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.protect_form",
+            WordPublication::ModernFormValues,
+        )?;
+        Ok(())
+    }
+
+    #[getter]
+    fn document_protection(&self) -> Option<PyDocumentProtection> {
+        self.inner
+            .document_protection()
+            .cloned()
+            .map(|inner| PyDocumentProtection { inner })
+    }
+
+    fn set_document_protection(
+        &mut self,
+        py: Python<'_>,
+        value: &PyDocumentProtection,
+    ) -> PyResult<()> {
+        let value = value.inner.clone();
+        let mut candidate = self.inner.clone_for_staging();
+        candidate
+            .set_document_protection(value)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.set_document_protection",
+            WordPublication::ModernFormValues,
+        )?;
+        Ok(())
+    }
+
+    fn remove_document_protection(
+        &mut self,
+        py: Python<'_>,
+    ) -> PyResult<Option<Py<PyDocumentProtection>>> {
+        // Py::new runs before publication. Allocation failure here is a source
+        // ordering counterfactual, not an observed allocation RED.
+        let snapshot = self
+            .inner
+            .document_protection()
+            .cloned()
+            .map(|inner| Py::new(py, PyDocumentProtection { inner }))
+            .transpose()?;
+        let mut candidate = self.inner.clone_for_staging();
+        let removed = candidate
+            .remove_document_protection()
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        if removed.is_none() {
+            return Ok(None);
+        }
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.remove_document_protection",
+            WordPublication::ModernFormValues,
+        )?;
+        Ok(snapshot)
+    }
+
+    #[pyo3(
+        signature = (range, *, editor=None, group=None),
+        text_signature = "($self, range, *, editor=None, group=None)"
+    )]
+    fn add_story_permission_range(
+        &mut self,
+        py: Python<'_>,
+        range: &Bound<'_, PyAny>,
+        editor: Option<String>,
+        group: Option<String>,
+    ) -> PyResult<Py<PyInt>> {
+        let range = range
+            .cast::<PyStoryRunRange>()
+            .map_err(|_| PyTypeError::new_err("range must be a StoryRunRange"))?;
+        let range = range.borrow();
+        let start = rdocx::StoryRunPosition {
+            location: self.native_location(py, &range.start.item)?,
+            run_index: range.start.run_index,
+        };
+        let end = rdocx::StoryRunPosition {
+            location: self.native_location(py, &range.end.item)?,
+            run_index: range.end.run_index,
+        };
+        drop(range);
+        let mut candidate = self.inner.clone_for_staging();
+        let id = candidate
+            .add_story_permission_range(
+                editor.as_deref(),
+                group.as_deref(),
+                rdocx::StoryRunRange { start, end },
+            )
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let id = id.into_pyobject(py)?.unbind();
+        self.publish_api_candidate(py, candidate, "Document.add_story_permission_range")?;
+        Ok(id)
     }
 
     fn bind_content_controls(
@@ -8291,20 +12740,48 @@ impl PyDocument {
             .detach(|| candidate.bind_content_controls(&values))
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         let result = count.into_pyobject(py)?.unbind();
-        self.publish_form_candidate(py, candidate, "Document.bind_content_controls")?;
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.bind_content_controls",
+            WordPublication::FormValues,
+        )?;
         Ok(result)
     }
 
     fn legacy_form_fields<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let fields = self
             .inner
-            .legacy_form_fields()
+            .legacy_form_fields_with_defaults()
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         let fields = fields
             .into_iter()
-            .map(|field| Py::new(py, PyLegacyFormField::from_info(py, field)?))
+            .map(|(field, default_value)| {
+                Py::new(py, PyLegacyFormField::from_info(py, field, default_value)?)
+            })
             .collect::<PyResult<Vec<_>>>()?;
         PyTuple::new(py, fields)
+    }
+
+    fn insert_legacy_form_field(
+        &mut self,
+        py: Python<'_>,
+        position: &Bound<'_, PyAny>,
+        definition: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let definition = definition.cast::<PyLegacyFormFieldDefinition>()?.borrow();
+        let position = position.cast::<PyStoryRunPosition>()?.borrow();
+        let field = definition.field();
+        let mut candidate = self.inner.clone_for_staging();
+        let location = self.native_location(py, &position.item)?;
+        let native = rdocx::StoryRunPosition {
+            location,
+            run_index: position.run_index,
+        };
+        py.detach(|| candidate.insert_field(&native, field))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.publish_api_candidate(py, candidate, "Document.insert_legacy_form_field")?;
+        Ok(())
     }
 
     #[pyo3(signature = (name, value, *, source_part=None, ordinal=None))]
@@ -8383,9 +12860,26 @@ impl PyDocument {
                 candidate.set_legacy_form_field_value(&field.source_part, field.ordinal, value)
             })
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        let result = Py::new(py, PyLegacyFormField::from_info(py, reopened)?)?;
-        self.publish_form_candidate(py, candidate, "Document.set_legacy_form_field_value")?;
-        Ok(result)
+        let default_value = candidate
+            .legacy_form_fields_with_defaults()
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+            .into_iter()
+            .find(|(info, _)| {
+                info.source_part == reopened.source_part && info.ordinal == reopened.ordinal
+            })
+            .map(|(_, default_value)| default_value)
+            .ok_or_else(|| PyValueError::new_err("legacy form identity did not survive reopen"))?;
+        let prepared = Py::new(
+            py,
+            PyLegacyFormField::from_info(py, reopened, default_value)?,
+        )?;
+        self.publish_form_candidate(
+            py,
+            candidate,
+            "Document.set_legacy_form_field_value",
+            WordPublication::FormValues,
+        )?;
+        Ok(prepared)
     }
 
     fn content_controls<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
@@ -8842,7 +13336,7 @@ impl PyDocument {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -8912,7 +13406,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -8992,7 +13486,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             document.commit_word_revision(prepared)?;
-            document.inner = candidate;
+            document.install_inner(candidate);
         }
         Ok(boundary)
     }
@@ -9413,7 +13907,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(result)
     }
@@ -9425,7 +13919,7 @@ impl PyDocument {
         let this = slf.borrow();
         let mut anchors = this
             .inner
-            .comment_anchor_snapshots()
+            .comment_anchor_snapshot_results()
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         let mut items = this
             .inner
@@ -9439,24 +13933,37 @@ impl PyDocument {
             .comments()
             .into_iter()
             .map(|comment| {
-                let (range, anchor_text) = anchors.remove(&comment.id()).ok_or_else(|| {
+                let snapshot = anchors.remove(&comment.id()).ok_or_else(|| {
                     PyValueError::new_err(
                         "comment snapshot is missing its checked ownership record",
                     )
                 })?;
-                let anchor = range
-                    .map(|range| -> PyResult<PyStoryRunRange> {
-                        Ok(PyStoryRunRange {
-                            start: this.comment_story_position(
-                                py,
-                                &range.start,
-                                &mut items,
-                                &owner,
-                            )?,
-                            end: this.comment_story_position(py, &range.end, &mut items, &owner)?,
-                        })
-                    })
-                    .transpose()?;
+                // A comment whose anchor cannot be read or placed keeps its
+                // record. The reason is that comment's issue.
+                let (anchor, anchor_text, anchor_issue) = match snapshot
+                    .map_err(|error| error.to_string())
+                    .and_then(|(range, text)| {
+                        range
+                            .map(|range| -> PyResult<PyStoryRunRange> {
+                                Ok(PyStoryRunRange {
+                                    start: this.comment_story_position(
+                                        py,
+                                        &range.start,
+                                        &mut items,
+                                        &owner,
+                                    )?,
+                                    end: this.comment_story_position(
+                                        py, &range.end, &mut items, &owner,
+                                    )?,
+                                })
+                            })
+                            .transpose()
+                            .map(|anchor| (anchor, text))
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok((anchor, text)) => (anchor, text, None),
+                    Err(issue) => (None, None, Some(issue)),
+                };
                 Ok(PyComment {
                     id: comment.id(),
                     author: comment.author().map(str::to_owned),
@@ -9467,6 +13974,7 @@ impl PyDocument {
                     resolved: comment.resolved(),
                     anchor_text,
                     anchor,
+                    anchor_issue,
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -9730,7 +14238,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -9746,7 +14254,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -9763,7 +14271,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -9796,7 +14304,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -9840,7 +14348,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -9859,7 +14367,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -9983,7 +14491,7 @@ impl PyDocument {
             alignment,
             line_spacing: line_spacing
                 .filter(|v| !v.is_none())
-                .map(|v| v.clone().unbind()),
+                .map(|v| Some(v.clone().unbind())),
             underline: underline
                 .filter(|v| !v.is_none())
                 .map(|v| v.clone().unbind()),
@@ -10057,7 +14565,7 @@ impl PyDocument {
         right_indent = None,
         first_line_indent = None,
         alignment = None,
-        line_spacing = None,
+        line_spacing = StyleLineSpacingArg::Omitted,
         underline = None,
         keep_with_next = None,
         keep_together = None,
@@ -10084,7 +14592,7 @@ impl PyDocument {
         right_indent: Option<i64>,
         first_line_indent: Option<i64>,
         alignment: Option<i32>,
-        line_spacing: Option<&Bound<'_, PyAny>>,
+        line_spacing: StyleLineSpacingArg,
         underline: Option<&Bound<'_, PyAny>>,
         keep_with_next: Option<bool>,
         keep_together: Option<bool>,
@@ -10133,9 +14641,10 @@ impl PyDocument {
             right_indent,
             first_line_indent,
             alignment,
-            line_spacing: line_spacing
-                .filter(|v| !v.is_none())
-                .map(|v| v.clone().unbind()),
+            line_spacing: match line_spacing {
+                StyleLineSpacingArg::Omitted => None,
+                StyleLineSpacingArg::Given(value) => Some(value),
+            },
             underline: underline
                 .filter(|v| !v.is_none())
                 .map(|v| v.clone().unbind()),
@@ -10229,13 +14738,22 @@ impl PyDocument {
             let Some(value) = kwargs.get_item(name)? else {
                 continue;
             };
-            let twips = length_keyword(py, &value, name)?;
             match name {
-                "space_before" => next.space_before = twips,
-                "space_after" => next.space_after = twips,
+                "space_before" => next.space_before = length_keyword(py, &value, name)?,
+                "space_after" => next.space_after = length_keyword(py, &value, name)?,
                 "line_spacing" => {
-                    next.line_spacing = twips;
-                    next.line_rule = twips.map(|_| "exact".to_owned());
+                    let line = line_spacing_keyword(py, &value)?;
+                    // A missing rule already means auto, so the same multiple
+                    // writes back without adding one.
+                    let kept = line.is_some_and(|(twips, rule)| {
+                        rule == "auto"
+                            && next.line_rule.is_none()
+                            && next.line_spacing == Some(twips)
+                    });
+                    next.line_spacing = line.map(|(twips, _)| twips);
+                    if !kept {
+                        next.line_rule = line.map(|(_, rule)| rule.to_owned());
+                    }
                 }
                 _ => unreachable!("keyword was checked above"),
             }
@@ -10503,7 +15021,7 @@ impl PyDocument {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -10543,7 +15061,7 @@ impl PyDocument {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -10584,7 +15102,7 @@ impl PyDocument {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -10702,7 +15220,7 @@ impl PyDocument {
         snapshot.binding = Some(self.capture_prepared_snapshot(&prepared, smallvec![])?);
         let result = Py::new(py, snapshot)?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(result)
     }
 
@@ -10730,7 +15248,7 @@ impl PyDocument {
         snapshot.binding = Some(self.capture_prepared_snapshot(&prepared, smallvec![])?);
         let result = Py::new(py, snapshot)?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(result)
     }
 
@@ -10756,7 +15274,7 @@ impl PyDocument {
         snapshot.binding = Some(self.capture_prepared_snapshot(&prepared, smallvec![])?);
         let result = Py::new(py, snapshot)?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(result)
     }
 
@@ -10871,7 +15389,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -10886,7 +15404,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -10907,7 +15425,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -10929,7 +15447,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -10986,9 +15504,9 @@ impl PyDocument {
             Some(location) => location.story().clone(),
             None => self.body_story(py)?,
         };
-        let mut candidate = self.inner.clone_for_staging();
-        let location = candidate
-            .insert_picture_to_story_with_options(
+        let candidate = self.inner.clone_for_staging();
+        let (candidate, location) = candidate
+            .insert_picture_to_story_with_options_owned(
                 &story,
                 after.as_ref(),
                 &data,
@@ -11018,7 +15536,7 @@ impl PyDocument {
             },
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(result)
     }
 
@@ -11065,7 +15583,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(id)
     }
 
@@ -11096,7 +15614,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(id)
     }
 
@@ -11125,7 +15643,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -11148,7 +15666,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -11172,7 +15690,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(id)
     }
 
@@ -11190,7 +15708,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(updated)
     }
@@ -11208,7 +15726,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(removed)
     }
@@ -11359,7 +15877,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(result)
     }
@@ -11455,7 +15973,7 @@ impl PyDocument {
     ) -> PyResult<usize> {
         let location = self.native_location(py, item)?;
         self.scoped_replacement(py, "Document.replace_text_at", |document| {
-            document.try_replace_text_at(&location, old, new, expect)
+            document.try_replace_text_at_owned(&location, old, new, expect)
         })
     }
 
@@ -11482,7 +16000,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(counts[0])
     }
@@ -11525,7 +16043,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(result)
     }
@@ -11746,7 +16264,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(updated)
     }
@@ -11779,7 +16297,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(result)
     }
@@ -11803,7 +16321,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(())
     }
 
@@ -11868,8 +16386,39 @@ impl PyDocument {
         style: Option<&str>,
     ) -> PyResult<Py<PyTable>> {
         let mut document = slf.borrow_mut(py);
+        let index = document.inner.table_count();
+        document.refuse_unsavable_body_edit(py)?;
+        // A style may add its definition, so only a plain table splices.
+        if style.is_none() {
+            let appended = rdocx::Document::detached_table(rows, cols);
+            let slot = document.inner.content_count();
+            if let Ok((xml, snapshots)) = document.inner.detached_table_owner_snapshots(&appended)
+                && let Some(plan) = document.plan_body_splice(BodySplice {
+                    slot,
+                    removed: 0,
+                    inserted: Some(SplicedBodyItem::Table(xml, snapshots)),
+                })?
+            {
+                // Every fallible step precedes the in-place native append.
+                let publication = crate::document::WordPublication::AppendBody;
+                let prepared =
+                    document.prepare_body_splice(plan, "Document.add_table", &publication)?;
+                let path = document
+                    .revisions
+                    .capture_prepared(&prepared.revision, smallvec![PathSeg::Body(index)])
+                    .map_err(revision_to_pyerr)?;
+                let result = Py::new(
+                    py,
+                    PyTable::new(slf.clone_ref(py), path)
+                        .bind_prepared_splice(&document, &prepared)?,
+                )?;
+                document.inner.add_table(rows, cols);
+                debug_assert_eq!(prepared.plan.table, index);
+                document.commit_body_splice(prepared, &publication)?;
+                return Ok(result);
+            }
+        }
         let mut candidate = document.inner.clone_for_staging();
-        let index = candidate.table_count();
         let style = style
             .map(|value| crate::table::checked_table_style(py, &mut candidate, value))
             .transpose()?;
@@ -11893,7 +16442,7 @@ impl PyDocument {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -11909,6 +16458,22 @@ impl PyDocument {
             }
             return Ok(removed);
         }
+        if let Some(plan) = self.plan_body_splice(BodySplice {
+            slot: index,
+            removed: 1,
+            inserted: None,
+        })? {
+            let publication = crate::document::WordPublication::Conservative;
+            let prepared =
+                self.prepare_body_splice(plan, "Document.remove_content", &publication)?;
+            let removed = py
+                .detach(|| self.inner.try_remove_content(index))
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            if removed {
+                self.commit_body_splice(prepared, &publication)?;
+            }
+            return Ok(removed);
+        }
         let mut candidate = self.inner.clone_for_staging();
         let removed = py
             .detach(|| candidate.try_remove_content(index))
@@ -11921,7 +16486,7 @@ impl PyDocument {
                 crate::document::WordPublication::Conservative,
             )?;
             self.commit_word_revision(prepared)?;
-            self.inner = candidate;
+            self.install_inner(candidate);
         }
         Ok(removed)
     }
@@ -11942,6 +16507,20 @@ impl PyDocument {
         if start == end {
             return Ok(0);
         }
+        if let Some(plan) = self.plan_body_splice(BodySplice {
+            slot: start,
+            removed: end - start,
+            inserted: None,
+        })? {
+            let publication = crate::document::WordPublication::Conservative;
+            let prepared =
+                self.prepare_body_splice(plan, "Document.remove_content_range", &publication)?;
+            let removed = py
+                .detach(|| self.inner.remove_content_range(start, end))
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            self.commit_body_splice(prepared, &publication)?;
+            return Ok(removed);
+        }
         let mut candidate = self.inner.clone_for_staging();
         let removed = py
             .detach(|| candidate.remove_content_range(start, end))
@@ -11953,7 +16532,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         self.commit_word_revision(prepared)?;
-        self.inner = candidate;
+        self.install_inner(candidate);
         Ok(removed)
     }
 
@@ -11990,17 +16569,60 @@ impl PyDocument {
     ) -> PyResult<Py<PyParagraph>> {
         let result = {
             let mut document = slf.borrow_mut(py);
-            let mut candidate = document.inner.clone_for_staging();
-            if index > candidate.content_count() {
+            if index > document.inner.content_count() {
                 return Err(PyIndexError::new_err("content index out of range"));
             }
             let style = style
-                .map(|value| style_id_of_type(&candidate, value, rdocx::StyleType::Paragraph))
+                .map(|value| style_id_of_type(&document.inner, value, rdocx::StyleType::Paragraph))
                 .transpose()?;
-            let mut inserted = candidate.insert_paragraph(index, text);
-            if let Some(style) = style {
-                inserted.set_style(&style);
+            document.refuse_non_xml_paragraph_text(py, text)?;
+            document.refuse_unsavable_body_edit(py)?;
+            // The same edit builds the paragraph read for the inventory and
+            // the paragraph placed.
+            let edit = |paragraph: &mut rdocx::Paragraph<'_>| {
+                if let Some(style) = &style {
+                    paragraph.set_style(style);
+                }
+            };
+            let mut inserted = rdocx::Document::detached_text_paragraph(text);
+            edit(&mut rdocx::Paragraph::detached(&mut inserted));
+            let splice = document.inner.direct_body_paragraph_facts(&inserted);
+            if let Ok(Some(facts)) = splice
+                && let Some(plan) = document.plan_body_splice(BodySplice {
+                    slot: index,
+                    removed: 0,
+                    inserted: Some(SplicedBodyItem::Paragraph(facts.0, facts.1)),
+                })?
+            {
+                // Every fallible step precedes the in-place native insertion.
+                let publication = crate::document::WordPublication::Conservative;
+                let prepared = document.prepare_body_splice(
+                    plan,
+                    "Document.insert_paragraph",
+                    &publication,
+                )?;
+                let path = document
+                    .revisions
+                    .capture_prepared(
+                        &prepared.revision,
+                        smallvec![PathSeg::Body(0), PathSeg::Para(prepared.plan.paragraph)],
+                    )
+                    .map_err(revision_to_pyerr)?;
+                let result = Py::new(
+                    py,
+                    PyParagraph::new(slf.clone_ref(py), path)
+                        .bind_prepared_splice(&document, &prepared)?,
+                )?;
+                edit(&mut document.inner.insert_paragraph(index, text));
+                debug_assert_eq!(
+                    document.inner.paragraph_index_of_content(index),
+                    Some(prepared.plan.paragraph)
+                );
+                document.commit_body_splice(prepared, &publication)?;
+                return Ok(result);
             }
+            let mut candidate = document.inner.clone_for_staging();
+            edit(&mut candidate.insert_paragraph(index, text));
             let paragraph = candidate
                 .paragraph_index_of_content(index)
                 .expect("an inserted body paragraph has a paragraph index");
@@ -12023,7 +16645,7 @@ impl PyDocument {
                     .bind_prepared(py, &document, &prepared, &candidate, None)?,
             )?;
             document.commit_word_revision(prepared)?;
-            document.inner = candidate;
+            document.install_inner(candidate);
             result
         };
         Ok(result)
@@ -12039,10 +16661,43 @@ impl PyDocument {
     ) -> PyResult<Py<PyTable>> {
         let result = {
             let mut document = slf.borrow_mut(py);
-            let mut candidate = document.inner.clone_for_staging();
-            if index > candidate.content_count() {
+            if index > document.inner.content_count() {
                 return Err(PyIndexError::new_err("content index out of range"));
             }
+            document.refuse_unsavable_body_edit(py)?;
+            let inserted = rdocx::Document::detached_table(rows, cols);
+            if let Ok((xml, snapshots)) = document.inner.detached_table_owner_snapshots(&inserted)
+                && let Some(plan) = document.plan_body_splice(BodySplice {
+                    slot: index,
+                    removed: 0,
+                    inserted: Some(SplicedBodyItem::Table(xml, snapshots)),
+                })?
+            {
+                // Every fallible step precedes the in-place native insertion.
+                let publication = crate::document::WordPublication::Conservative;
+                let prepared =
+                    document.prepare_body_splice(plan, "Document.insert_table", &publication)?;
+                let path = document
+                    .revisions
+                    .capture_prepared(
+                        &prepared.revision,
+                        smallvec![PathSeg::Body(prepared.plan.table)],
+                    )
+                    .map_err(revision_to_pyerr)?;
+                let result = Py::new(
+                    py,
+                    PyTable::new(slf.clone_ref(py), path)
+                        .bind_prepared_splice(&document, &prepared)?,
+                )?;
+                document.inner.insert_table(index, rows, cols);
+                debug_assert_eq!(
+                    document.inner.content_index_of_table(prepared.plan.table),
+                    Some(index)
+                );
+                document.commit_body_splice(prepared, &publication)?;
+                return Ok(result);
+            }
+            let mut candidate = document.inner.clone_for_staging();
             candidate.insert_table(index, rows, cols);
             // Preserve the direct body table ordinal while capturing its physical owner.
             let table = (0..candidate.table_count())
@@ -12064,7 +16719,7 @@ impl PyDocument {
                     .bind_prepared(py, &document, &prepared, &candidate, None)?,
             )?;
             document.commit_word_revision(prepared)?;
-            document.inner = candidate;
+            document.install_inner(candidate);
             result
         };
         Ok(result)
@@ -12098,7 +16753,7 @@ impl PyDocument {
         )?;
         let result = Py::new(py, PyContentFragment { inner: fragment })?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -12133,7 +16788,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
 
@@ -12166,7 +16821,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
 
@@ -12199,7 +16854,7 @@ impl PyDocument {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
 
@@ -12333,6 +16988,76 @@ impl PyDocument {
             .set_save_subset_fonts(value)
             .map_err(|e| rdocx_to_pyerr(py, e))?;
         self.publish_api_candidate(py, candidate, "Document.set_save_subset_fonts")
+    }
+
+    fn set_mail_merge_package(
+        &mut self,
+        py: Python<'_>,
+        options: &Bound<'_, PyMailMergePackageOptions>,
+    ) -> PyResult<()> {
+        let mut candidate = self.inner.clone_for_staging();
+        candidate
+            .set_mail_merge_package(options.borrow().inner.clone())
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.publish_api_candidate(py, candidate, "Document.set_mail_merge_package")
+    }
+
+    fn mail_merge_package(&self, py: Python<'_>) -> PyResult<Option<PyMailMergePackageOptions>> {
+        Ok(self
+            .inner
+            .mail_merge_package()
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+            .map(|inner| PyMailMergePackageOptions { inner }))
+    }
+
+    fn remove_mail_merge_package(&mut self, py: Python<'_>) -> PyResult<bool> {
+        let mut candidate = self.inner.clone_for_staging();
+        let removed = candidate
+            .remove_mail_merge_package()
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.publish_api_candidate(py, candidate, "Document.remove_mail_merge_package")?;
+        Ok(removed)
+    }
+
+    #[pyo3(
+        signature = (*, policy = "offline", external_records = None),
+        text_signature = "($self, *, policy='offline', external_records=None)"
+    )]
+    fn prepare_mail_merge_data(
+        &self,
+        py: Python<'_>,
+        policy: &str,
+        external_records: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMailMergePreparedData> {
+        let native_policy = match policy {
+            "offline" => rdocx::MailMergeSourcePolicy::Offline,
+            "caller_supplied" => rdocx::MailMergeSourcePolicy::CallerSupplied,
+            _ => {
+                return Err(PyValueError::new_err(
+                    "policy must be 'offline' or 'caller_supplied'",
+                ));
+            }
+        };
+        let prepared = if let Some(external_records) = external_records {
+            require_carrier_sequence(external_records, "external_records")?;
+            let probe = self
+                .inner
+                .prepare_mail_merge_data(native_policy, Some(&[]))
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            if !probe.diagnostics.is_empty() {
+                probe
+            } else {
+                let rows = copied_external_rows(py, external_records)?;
+                self.inner
+                    .prepare_mail_merge_data(native_policy, Some(&rows))
+                    .map_err(|error| rdocx_to_pyerr(py, error))?
+            }
+        } else {
+            self.inner
+                .prepare_mail_merge_data(native_policy, None)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+        };
+        Ok(PyMailMergePreparedData { inner: prepared })
     }
 }
 
@@ -13309,6 +18034,194 @@ fn fx237_control_table() -> rdocx_oxml::content_control::CT_Sdt {
     *control
 }
 
+#[cfg(test)]
+fn fx268_piece_context_input(py: Python<'_>, header_target: Option<&str>) -> rdocx::Document {
+    let scope = PyDict::new(py);
+    scope
+        .set_item(
+            "seed",
+            PyBytes::new(py, &rdocx::Document::new().to_bytes().unwrap()),
+        )
+        .unwrap();
+    scope.set_item("target", header_target).unwrap();
+    py.run(c"import io, zipfile, xml.etree.ElementTree as ET\nw='http://schemas.openxmlformats.org/wordprocessingml/2006/main'\nr='http://schemas.openxmlformats.org/officeDocument/2006/relationships'\np='http://schemas.openxmlformats.org/package/2006/relationships'\nc='http://schemas.openxmlformats.org/package/2006/content-types'\nwith zipfile.ZipFile(io.BytesIO(seed)) as z:\n    parts={name:z.read(name) for name in z.namelist()}\nsection='<w:sectPr/>'\nif target is not None:\n    section='<w:sectPr><w:headerReference w:type=\"default\" r:id=\"pieceH1\"/><w:headerReference w:type=\"first\" r:id=\"pieceH2\"/></w:sectPr>'\n    rels=ET.fromstring(parts['word/_rels/document.xml.rels'])\n    for key,name in [('pieceH1','header1.xml'),('pieceH2',target)]:\n        ET.SubElement(rels,'{'+p+'}Relationship',{'Id':key,'Type':r+'/header','Target':name})\n    parts['word/_rels/document.xml.rels']=ET.tostring(rels)\n    parts['word/header1.xml']=('<w:hdr xmlns:w=\"'+w+'\"><w:p><w:r><w:t>shared header</w:t></w:r></w:p></w:hdr>').encode()\n    types=ET.fromstring(parts['[Content_Types].xml'])\n    ET.SubElement(types,'{'+c+'}Override',{'PartName':'/word/header1.xml','ContentType':'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'})\n    parts['[Content_Types].xml']=ET.tostring(types)\nparts['word/document.xml']=('<w:document xmlns:w=\"'+w+'\" xmlns:r=\"'+r+'\"><w:body><w:p><w:r><w:t>one</w:t></w:r></w:p><w:p><w:r><w:t>two</w:t></w:r></w:p>'+section+'</w:body></w:document>').encode()\noutput=io.BytesIO()\nwith zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as z:\n    for name,value in parts.items(): z.writestr(name,value)\nresult=output.getvalue()", Some(&scope), Some(&scope)).unwrap();
+    let bytes = scope
+        .get_item("result")
+        .unwrap()
+        .unwrap()
+        .extract::<Vec<u8>>()
+        .unwrap();
+    rdocx::Document::from_bytes(&bytes).unwrap()
+}
+
+#[test]
+fn fx268_changed_existing_context_uses_full_inventory_before_publication() {
+    Python::initialize();
+    Python::attach(|py| {
+        let inner = fx268_piece_context_input(py, None);
+        let owner = Py::new(py, PyDocument::from_document(inner, py).unwrap()).unwrap();
+        let held = owner
+            .bind(py)
+            .getattr("paragraphs")
+            .unwrap()
+            .get_item(0)
+            .unwrap();
+        let document = owner.borrow_mut(py);
+        let before = document.inner.body_item_context();
+        assert_eq!(document.pieces.context.as_ref(), Some(&before));
+        // Adopt a new native source through the existing live Python document.
+        // The candidate keeps the two physical paragraphs and changes its root frame.
+        let mut candidate = rdocx::Document::new();
+        candidate.add_paragraph("changed context");
+        candidate.add_paragraph("two");
+        let expected_xml = candidate.to_bytes().unwrap();
+        assert_ne!(
+            candidate.body_item_context(),
+            before,
+            "fixture must change the native context on the existing candidate"
+        );
+        let (_, cold_inventory) = WordPieces::default().assemble(&candidate);
+        assert!(
+            cold_inventory.is_some(),
+            "an absent old context is a distinct positive control"
+        );
+        assert!(document.pieces.assemble(&candidate).1.is_none());
+        let expected = word_owner_locations(&candidate, None).unwrap();
+        word_whole_body_work();
+        let prepared = document
+            .prepare_word_revision(
+                py,
+                &candidate,
+                "F-X268.context",
+                WordPublication::Conservative,
+            )
+            .unwrap();
+        assert!(
+            word_whole_body_work().0 > 0,
+            "changed existing context must actually invoke the authoritative inventory"
+        );
+        for (actual, expected) in prepared.owners.iter().zip(&expected) {
+            assert_eq!(actual.location, expected.location);
+            assert_eq!(actual.parent, expected.parent);
+            assert_eq!(actual.body_slot, expected.body_slot);
+            assert_eq!(actual.projection_ordinal, expected.projection_ordinal);
+            assert_eq!(actual.read_facts, expected.read_facts);
+        }
+        assert_eq!(prepared.owners.len(), expected.len());
+        drop(document);
+        assert_eq!(
+            held.getattr("text").unwrap().extract::<String>().unwrap(),
+            "one",
+            "preparation cannot publish"
+        );
+        let mut document = owner.borrow_mut(py);
+        document.commit_word_revision(prepared).unwrap();
+        document.install_inner(candidate);
+        assert_eq!(document.inner.to_bytes().unwrap(), expected_xml);
+        let mut stable = document.inner.clone_for_staging();
+        stable
+            .paragraph_mut(0)
+            .unwrap()
+            .set_text("stable context")
+            .unwrap();
+        stable.to_bytes().unwrap();
+        assert_eq!(
+            stable.body_item_context(),
+            document.inner.body_item_context()
+        );
+        word_whole_body_work();
+        FX237_ROUTE_WORK.set([0; 8]);
+        let prepared = document
+            .prepare_word_revision(py, &stable, "F-X268.stable", WordPublication::Conservative)
+            .unwrap();
+        assert_eq!(
+            FX237_ROUTE_WORK.get(),
+            [0; 8],
+            "fully conservative publication must not match scopes it always retires"
+        );
+        assert_eq!(
+            word_whole_body_work(),
+            (0, 0),
+            "stable existing context must admit the piece inventory"
+        );
+        document.commit_word_revision(prepared).unwrap();
+        document.install_inner(stable);
+        let saved = document.inner.to_bytes().unwrap();
+        assert_eq!(
+            rdocx::Document::from_bytes(&saved)
+                .unwrap()
+                .paragraph(0)
+                .unwrap()
+                .text(),
+            "stable context"
+        );
+        drop(document);
+        assert!(
+            held.getattr("text").is_err(),
+            "conservative publication retains causal staleness"
+        );
+        let fresh = owner
+            .bind(py)
+            .getattr("paragraphs")
+            .unwrap()
+            .get_item(0)
+            .unwrap();
+        assert_eq!(
+            fresh.getattr("text").unwrap().extract::<String>().unwrap(),
+            "stable context"
+        );
+    });
+}
+
+#[test]
+fn fx268_case_equivalent_story_parts_use_the_full_inventory() {
+    Python::initialize();
+    Python::attach(|py| {
+        for (target, duplicate) in [("header1.xml", false), ("Header1.xml", true)] {
+            let mut inner = fx268_piece_context_input(py, Some(target));
+            let sources = inner.story_part_sources().unwrap();
+            assert_eq!(sources.len(), if duplicate { 2 } else { 1 });
+            assert!(sources.iter().all(|(_, _, xml)| {
+                xml.windows(b"shared header".len())
+                    .any(|word| word == b"shared header")
+            }));
+            let (pieces, inventory) = WordPieces::default().assemble(&inner);
+            assert_eq!(inventory.is_none(), duplicate, "target={target}");
+            if !duplicate {
+                assert!(pieces.inventory(&inner).is_some());
+            }
+            let expected = word_owner_locations(&inner, None).unwrap();
+            word_whole_body_work();
+            let mut document = PyDocument::from_document(inner.clone_for_staging(), py).unwrap();
+            assert_eq!(word_whole_body_work().0 > 0, duplicate, "target={target}");
+            assert_eq!(document.owners.len(), expected.len());
+            for (owner, expected) in document.owners.iter().zip(expected) {
+                let actual = WordOwnerAddress {
+                    location: owner.location.clone(),
+                    parent: owner.parent,
+                    body_slot: owner.body_slot,
+                    projection_ordinal: owner.projection_ordinal,
+                    read_facts: owner.read_facts.clone(),
+                };
+                assert_eq!(
+                    body_unfingerprinted_address(&actual),
+                    body_unfingerprinted_address(&expected)
+                );
+            }
+            let before = inner.to_bytes().unwrap();
+            assert_eq!(document.inner.to_bytes().unwrap(), before);
+            assert_eq!(
+                rdocx::Document::from_bytes(&before)
+                    .unwrap()
+                    .story_part_sources()
+                    .unwrap()
+                    .len(),
+                if duplicate { 2 } else { 1 }
+            );
+        }
+    });
+}
+
 #[test]
 fn fx237_combined_registry_matches_legacy_success_and_refusal() {
     Python::initialize();
@@ -13681,7 +18594,14 @@ fn fx241_form_certificates_require_unique_routes_and_unchanged_source() {
     let old = fx237_test_owners(word_owner_locations(&document, Some(&mut before)).unwrap());
     let new = word_owner_locations(&candidate, Some(&mut after)).unwrap();
     let matched = indexed_inventory_matches(&old, &new, &WordPublication::FormValues);
-    let certificates = form_owner_certificates(&old, &new, &matched, &before, &after);
+    let certificates = form_owner_certificates(
+        &old,
+        &new,
+        &matched,
+        &before,
+        &after,
+        &std::collections::HashSet::new(),
+    );
     let paragraph_indexes = new
         .iter()
         .enumerate()
@@ -13696,8 +18616,15 @@ fn fx241_form_certificates_require_unique_routes_and_unchanged_source() {
     let route = form_owner_route(&new[unchanged].location).unwrap();
     before.xml.insert(route.clone(), None);
     assert!(
-        !form_owner_certificates(&old, &new, &matched, &before, &after)
-            .contains(&(matched[unchanged].unwrap(), unchanged))
+        !form_owner_certificates(
+            &old,
+            &new,
+            &matched,
+            &before,
+            &after,
+            &std::collections::HashSet::new(),
+        )
+        .contains(&(matched[unchanged].unwrap(), unchanged))
     );
     // A duplicated actual owner route must not inherit the matcher's first index.
     let mut before = FormSources::default();
@@ -13714,12 +18641,99 @@ fn fx241_form_certificates_require_unique_routes_and_unchanged_source() {
     let matched = indexed_inventory_matches(&duplicate, &new, &WordPublication::FormValues);
     assert!(matched[unchanged].is_some());
     assert!(
-        !form_owner_certificates(&duplicate, &new, &matched, &before, &after)
-            .contains(&(matched[unchanged].unwrap(), unchanged))
+        !form_owner_certificates(
+            &duplicate,
+            &new,
+            &matched,
+            &before,
+            &after,
+            &std::collections::HashSet::new(),
+        )
+        .contains(&(matched[unchanged].unwrap(), unchanged))
+    );
+}
+
+#[test]
+fn fx289_related_owner_needs_unique_part_and_eligible_source() {
+    use std::collections::HashSet;
+    let story = |part: &str| {
+        rdocx::ContentLocation::new(
+            rdocx::StoryId::new(rdocx::StoryKind::Comment, part, 0),
+            rdocx::StoryItemKind::Paragraph,
+            vec![0],
+        )
+    };
+    let address = |part: &str| WordOwnerAddress {
+        location: WordOwnerLocation::Paragraph(story(part)),
+        parent: None,
+        body_slot: None,
+        projection_ordinal: Some(0),
+        read_facts: WordReadFacts::None,
+    };
+    let old = fx237_test_owners(vec![address("/word/comments.xml")]);
+    let new = vec![address("/word/comments.xml")];
+    let matched = indexed_inventory_matches(&old, &new, &WordPublication::ModernFormValues);
+    assert_eq!(
+        matched,
+        indexed_inventory_matches(&old, &new, &WordPublication::FormValues)
+    );
+    let route = form_owner_route(&new[0].location).unwrap();
+    let mut before = FormSources::default();
+    let mut after = FormSources::default();
+    before.xml.insert(route.clone(), Some(b"<w:p/>".to_vec()));
+    after.xml.insert(route, Some(b"<w:p/>".to_vec()));
+    let empty = HashSet::new();
+    assert!(
+        !form_owner_certificates(&old, &new, &matched, &before, &after, &empty).contains(&(0, 0))
+    );
+    let mut eligible = HashSet::new();
+    eligible.insert("/word/comments.xml".to_owned());
+    assert!(
+        form_owner_certificates(&old, &new, &matched, &before, &after, &eligible).contains(&(0, 0))
+    );
+    let other = vec![address("/word/comments2.xml")];
+    let crossed = indexed_inventory_matches(&old, &other, &WordPublication::ModernFormValues);
+    assert!(crossed[0].is_none());
+    let duplicate = fx237_test_owners(vec![
+        address("/word/comments.xml"),
+        address("/word/comments.xml"),
+    ]);
+    let duplicated = indexed_inventory_matches(&duplicate, &new, &WordPublication::FormValues);
+    assert!(
+        !modern_form_owner_certificates(&duplicate, &new, &duplicated, &before, &after, &eligible)
+            .contains(&(duplicated[0].unwrap(), 0))
+    );
+    let names = vec![
+        "/word/comments.xml".to_owned(),
+        "/word/Comments.xml".to_owned(),
+    ];
+    assert!(unique_part_name(&names, "/word/comments.xml").is_none());
+    assert_eq!(
+        unique_part_name(&["/word/comments.xml".to_owned()], "/WORD/comments.xml"),
+        Some("/word/comments.xml")
     );
 }
 
 impl PyDocument {
+    fn refuse_unsavable_body_edit(&self, py: Python<'_>) -> PyResult<()> {
+        match self.inner.unsavable_body_edit() {
+            Some(error) => Err(rdocx_to_pyerr(py, rdocx::Error::Other(error.to_owned()))),
+            None => Ok(()),
+        }
+    }
+
+    /// XML 1.0 text before the namespace refusal. Index stays a Python
+    /// `IndexError` at the insert callers. A namespace `Other` is left for
+    /// [`Self::refuse_unsavable_body_edit`] so the diagnostic stays one path.
+    fn refuse_non_xml_paragraph_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        match self.inner.preflight_checked_paragraph(None, text) {
+            Err(rdocx::Error::Oxml(error)) => Err(rdocx_to_pyerr(py, rdocx::Error::Oxml(error))),
+            Err(rdocx::Error::Other(_)) => Ok(()),
+            Err(error) => Err(rdocx_to_pyerr(py, error)),
+            Ok(()) => Ok(()),
+        }
+    }
+
     fn append_paragraph_candidate(
         slf: Py<Self>,
         py: Python<'_>,
@@ -13728,18 +18742,56 @@ impl PyDocument {
         page_break: bool,
     ) -> PyResult<Py<PyParagraph>> {
         let mut document = slf.borrow_mut(py);
-        let mut candidate = document.inner.clone_for_staging();
-        let index = candidate.paragraph_count();
+        let index = document.inner.paragraph_count();
         let style = style
-            .map(|value| style_id_of_type(&candidate, value, rdocx::StyleType::Paragraph))
+            .map(|value| style_id_of_type(&document.inner, value, rdocx::StyleType::Paragraph))
             .transpose()?;
-        let mut paragraph = candidate.add_paragraph(text);
-        if let Some(style) = style {
-            paragraph.set_style(&style);
+        document.refuse_non_xml_paragraph_text(py, text)?;
+        document.refuse_unsavable_body_edit(py)?;
+        // The same edit builds the paragraph read for the inventory and the
+        // paragraph placed.
+        let edit = |paragraph: &mut rdocx::Paragraph<'_>| {
+            if let Some(style) = &style {
+                paragraph.set_style(style);
+            }
+            if page_break {
+                paragraph.add_run("").add_break(rdocx::BreakKind::Page);
+            }
+        };
+        let mut appended = rdocx::Document::detached_text_paragraph(text);
+        edit(&mut rdocx::Paragraph::detached(&mut appended));
+        let slot = document.inner.content_count();
+        let splice = document.inner.direct_body_paragraph_facts(&appended);
+        if let Ok(Some(facts)) = splice
+            && let Some(plan) = document.plan_body_splice(BodySplice {
+                slot,
+                removed: 0,
+                inserted: Some(SplicedBodyItem::Paragraph(facts.0, facts.1)),
+            })?
+        {
+            // Every fallible step precedes the in-place native append.
+            let publication = crate::document::WordPublication::AppendBody;
+            let prepared =
+                document.prepare_body_splice(plan, "Document.add_paragraph", &publication)?;
+            let path = document
+                .revisions
+                .capture_prepared(
+                    &prepared.revision,
+                    smallvec![PathSeg::Body(0), PathSeg::Para(index)],
+                )
+                .map_err(revision_to_pyerr)?;
+            let result = Py::new(
+                py,
+                PyParagraph::new(slf.clone_ref(py), path)
+                    .bind_prepared_splice(&document, &prepared)?,
+            )?;
+            edit(&mut document.inner.add_paragraph(text));
+            debug_assert_eq!(prepared.plan.paragraph, index);
+            document.commit_body_splice(prepared, &publication)?;
+            return Ok(result);
         }
-        if page_break {
-            paragraph.add_run("").add_break(rdocx::BreakKind::Page);
-        }
+        let mut candidate = document.inner.clone_for_staging();
+        edit(&mut candidate.add_paragraph(text));
         let prepared = document.prepare_word_revision(
             py,
             &candidate,
@@ -13759,7 +18811,7 @@ impl PyDocument {
                 .bind_prepared(py, &document, &prepared, &candidate, None)?,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 }
@@ -13976,7 +19028,9 @@ fn issue398_route_hash_collisions_preserve_exact_first_match() {
         ])
         .unwrap();
     let owners = word_owners_with_states(addresses, &states);
-    let mut indexes = WordOwnerIndexes::prepare(&owners, &rdocx::Document::new()).unwrap();
+    let mut indexes =
+        WordOwnerIndexes::prepare(&owners, WordIndexProjections::of(&rdocx::Document::new()))
+            .unwrap();
     assert_eq!(
         indexes.find(&owners, &WordOwnerLocation::Section(0)),
         Some(0)

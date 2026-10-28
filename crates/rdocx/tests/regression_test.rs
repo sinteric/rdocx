@@ -31248,7 +31248,7 @@ fn assert_raw_package_has_no_selector(bytes: &[u8], selector: &str) {
     for part in package.parts.values() {
         absent(part, selector);
         if part.starts_with(b"PK\x03\x04") {
-            let nested = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(part))
+            let nested = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(part.as_slice()))
                 .expect("nested package");
             absent(
                 &nested
@@ -31530,7 +31530,7 @@ fn redacted_package_preserves_unrelated_parts_and_relationships() {
         if !edited_parts.contains(part_name.as_str()) {
             assert_eq!(
                 after.get_part(part_name).unwrap(),
-                bytes,
+                bytes.as_slice(),
                 "untouched part changed: {part_name}"
             );
         }
@@ -38790,12 +38790,12 @@ fn f236_package_bytes_with_producer_literals(mut package: oxml_opc::OpcPackage) 
                     .any(|character| matches!(character, '\u{1}' | '\u{FFFE}'))
             })
         })
-        .map(|(name, data)| (name.trim_start_matches('/').to_owned(), data.clone()))
+        .map(|(name, data)| (name.trim_start_matches('/').to_owned(), data.to_vec()))
         .collect::<BTreeMap<_, _>>();
     for name in literal.keys() {
         package
             .parts
-            .insert(format!("/{name}"), b"<placeholder/>".to_vec());
+            .insert(format!("/{name}"), b"<placeholder/>".to_vec().into());
     }
     let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, data) in zip_entries(&f236_package_bytes(package)) {
@@ -48987,7 +48987,7 @@ fn fragment_import_remaps_note_companions_atomically() {
         package
             .parts
             .values()
-            .any(|bytes| bytes == &f_x204_picture_fixture(b"f276-note-image")[..])
+            .any(|bytes| bytes.as_slice() == &f_x204_picture_fixture(b"f276-note-image")[..])
     );
     let reopened = Document::from_bytes(&saved).unwrap();
     assert_eq!(reopened.footnotes().len(), 3);
@@ -49142,7 +49142,7 @@ fn full_story_fragment_import_covers_every_supported_owner_pair() {
                 .parts
                 .iter()
                 .find_map(|(name, bytes)| {
-                    (bytes == &f_x204_picture_fixture(image.as_bytes())).then_some(name)
+                    (**bytes == f_x204_picture_fixture(image.as_bytes())).then_some(name)
                 })
                 .unwrap();
             assert!(
@@ -49577,7 +49577,7 @@ fn fragment_import_rejects_integrity_bound_reachable_signature_atomically() {
     let image = package
         .parts
         .iter()
-        .find_map(|(name, bytes)| (bytes == b"signature graph owner").then(|| name.clone()))
+        .find_map(|(name, bytes)| (**bytes == b"signature graph owner").then(|| name.clone()))
         .unwrap();
     package.set_part(
         "/_xmlsignatures/reachable.xml",
@@ -60572,7 +60572,7 @@ fn comment_removal_preserves_selective_relocated_companions_and_opaque_parts() {
         ]
         .contains(&part.as_str())
         {
-            assert_eq!(saved.get_part(part).unwrap(), original, "{part}");
+            assert_eq!(saved.get_part(part).unwrap(), original.as_slice(), "{part}");
         }
     }
 }
@@ -61223,6 +61223,101 @@ fn comment_anchor_source_projection_keeps_controls_revisions_and_empty_paragraph
     }
 }
 
+/// A readable comment and a malformed one share one inventory.
+///
+/// The strict listing fails. The tolerant listing keeps both records, and the
+/// malformed record's error names that comment. Reading either listing does
+/// not write the package.
+#[test]
+fn comment_anchor_snapshot_results_keep_a_malformed_range() {
+    let mut document = Document::new();
+    document.add_paragraph("kept");
+    document.add_paragraph("broken");
+    let kept = document
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "kept remark",
+        )
+        .unwrap();
+    let broken = document
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 1,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 1,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "broken remark",
+        )
+        .unwrap();
+    let strict = document.comment_anchor_snapshots().unwrap();
+    let tolerant = document.comment_anchor_snapshot_results().unwrap();
+    assert_eq!(strict.len(), 2);
+    assert_eq!(tolerant.len(), 2);
+    assert_eq!(strict[&kept].1.as_deref(), Some("kept"));
+    assert_eq!(tolerant[&kept].as_ref().unwrap().1.as_deref(), Some("kept"));
+    assert_eq!(strict[&broken].1.as_deref(), Some("broken"));
+    assert_eq!(
+        tolerant[&broken].as_ref().unwrap().1.as_deref(),
+        Some("broken")
+    );
+    let start = format!(r#"<w:commentRangeStart w:id="{broken}"/>"#);
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
+            .unwrap();
+    let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    assert_eq!(main.matches(start.as_str()).count(), 1);
+    package.set_part(
+        "/word/document.xml",
+        main.replacen(&start, &format!("{start}{start}"), 1)
+            .into_bytes(),
+    );
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    let mut document = Document::from_bytes(output.get_ref()).unwrap();
+    let before = document.to_bytes().unwrap();
+    let anchor_error = document.comment_anchor(broken).unwrap_err().to_string();
+    assert!(anchor_error.contains(&broken.to_string()), "{anchor_error}");
+    assert_eq!(
+        document
+            .comment_anchor_text(broken)
+            .unwrap_err()
+            .to_string(),
+        anchor_error
+    );
+    assert!(document.comment_anchor_snapshots().is_err());
+    assert_eq!(
+        document.comment_anchor_text(kept).unwrap().as_deref(),
+        Some("kept")
+    );
+    let listed = document.comment_anchor_snapshot_results().unwrap();
+    assert_eq!(listed[&kept].as_ref().unwrap().1.as_deref(), Some("kept"));
+    assert_eq!(
+        listed[&broken].as_ref().unwrap_err().to_string(),
+        anchor_error
+    );
+    let kept_range = listed[&kept].as_ref().unwrap().0.clone().unwrap();
+    assert!(document.move_comment(broken, kept_range).is_err());
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
 #[test]
 fn comment_anchor_refuses_malformed_or_unrepresentable_without_losing_source() {
     let mut seed = Document::new();
@@ -61335,6 +61430,14 @@ fn comment_anchor_related_block_paths_aliases_and_cross_owner_refusal() {
         if cross_owner {
             assert!(document.comment_anchor(id).is_err());
             assert!(document.comment_anchor_text(id).is_err());
+            // The pair leaves its part. Story ranges stay a hard error, and
+            // the strict listing fails with that comment. The tolerant map
+            // keeps the comment's own error.
+            assert!(document.story_ranges().is_err());
+            assert!(document.comment_anchor_snapshots().is_err());
+            let listed = document.comment_anchor_snapshot_results().unwrap();
+            let issue = listed[&id].as_ref().unwrap_err().to_string();
+            assert!(issue.contains(&id.to_string()), "{issue}");
         } else {
             assert_eq!(
                 document.comment_anchor_text(id).unwrap().as_deref(),
@@ -405674,7 +405777,7 @@ fn fx261_media(bytes: &[u8]) -> Vec<Vec<u8>> {
         .parts
         .iter()
         .filter(|(name, _)| name.contains("/media/"))
-        .map(|(_, data)| data.clone())
+        .map(|(_, data)| data.to_vec())
         .collect::<Vec<_>>();
     payloads.sort();
     payloads
@@ -406424,4 +406527,1895 @@ fn toc_outline_switch_stays_within_the_heading_range() {
             "reopened {instruction}"
         );
     }
+}
+
+fn f_x264_line_attr(xml: &str) -> String {
+    let key = "w:line=\"";
+    let Some(start) = xml.find(key) else {
+        return "missing".to_owned();
+    };
+    let rest = &xml[start + key.len()..];
+    let end = rest.find('"').unwrap_or(rest.len());
+    rest[..end].to_owned()
+}
+
+fn f_x264_comment_seed() -> (Vec<u8>, i32) {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    let id = seed
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "source",
+        )
+        .unwrap();
+    (seed.to_bytes().unwrap(), id)
+}
+
+fn f_x264_open_main(seed: &[u8], main: String) -> Document {
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed)).unwrap();
+    package.set_part("/word/document.xml", main.into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    Document::from_bytes(output.get_ref()).unwrap()
+}
+
+fn f_x264_cross_owner_fixture(extra: &str) -> (Document, i32) {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    seed.set_header("header");
+    let id = seed
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "source",
+        )
+        .unwrap();
+    let header = f254_story(&seed, StoryKind::Header).part_name().to_owned();
+    let seed_bytes = seed.to_bytes().unwrap();
+    let field = |target: &str| {
+        format!(
+            r#"<w:p><w:fldSimple w:instr=" REF {target} "><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>"#
+        )
+    };
+    let f_field = r#"<w:p><w:fldSimple w:instr=" REF header_across \f "><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>"#;
+    let body = format!(
+        r#"<w:p><w:bookmarkStart w:id="3" w:name="into"/><w:r><w:t>before</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:bookmarkEnd w:id="3"/><w:bookmarkStart w:id="1" w:name="across"/><w:permStart w:id="0" w:ed="ada"/><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r><w:permEnd w:id="0"/><w:bookmarkEnd w:id="1"/></w:p></w:tc></w:tr></w:tbl><w:p><w:commentRangeStart w:id="{id}"/><w:r><w:t>body</w:t></w:r><w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r></w:p>{}{}{f_field}<w:p><w:r><w:t>one</w:t></w:r></w:p><w:p><w:r><w:t>two</w:t></w:r></w:p><w:p><w:r><w:t>three</w:t></w:r></w:p>{extra}"#,
+        field("across"),
+        field("header_across"),
+    );
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed_bytes)).unwrap();
+    let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let head = main.find("<w:body>").unwrap() + "<w:body>".len();
+    let main = format!(
+        "{}{body}{}",
+        &main[..head],
+        &main[main.find("<w:sectPr").unwrap()..]
+    );
+    package.set_part("/word/document.xml", main.into_bytes());
+    package.set_part(
+        &header,
+        format!(
+            r#"<w:hdr xmlns:w="{W_NS}"><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id="2" w:name="header_across"/><w:r><w:t>H1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>H2</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p></w:tc></w:tr></w:tbl></w:hdr>"#
+        )
+        .into_bytes(),
+    );
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    (Document::from_bytes(output.get_ref()).unwrap(), id)
+}
+
+fn f_x264_original_cross_owner_fixture(extra: &str) -> (Document, i32) {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    seed.set_header("header");
+    let id = seed
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "source",
+        )
+        .unwrap();
+    let header = f254_story(&seed, StoryKind::Header).part_name().to_owned();
+    let seed_bytes = seed.to_bytes().unwrap();
+    let field = |target: &str| {
+        format!(
+            r#"<w:p><w:fldSimple w:instr=" REF {target} "><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>"#
+        )
+    };
+    let f_field = r#"<w:p><w:fldSimple w:instr=" REF header_across \f "><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>"#;
+    let body = format!(
+        r#"<w:p><w:bookmarkStart w:id="3" w:name="into"/><w:r><w:t>before</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id="1" w:name="across"/><w:permStart w:id="0" w:ed="ada"/><w:r><w:t>A</w:t></w:r><w:bookmarkEnd w:id="3"/></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r><w:permEnd w:id="0"/><w:bookmarkEnd w:id="1"/></w:p></w:tc></w:tr></w:tbl><w:p><w:commentRangeStart w:id="{id}"/><w:r><w:t>body</w:t></w:r><w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r></w:p>{}{}{f_field}<w:p><w:r><w:t>one</w:t></w:r></w:p><w:p><w:r><w:t>two</w:t></w:r></w:p><w:p><w:r><w:t>three</w:t></w:r></w:p>{extra}"#,
+        field("across"),
+        field("header_across"),
+    );
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed_bytes)).unwrap();
+    let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let head = main.find("<w:body>").unwrap() + "<w:body>".len();
+    let main = format!(
+        "{}{body}{}",
+        &main[..head],
+        &main[main.find("<w:sectPr").unwrap()..]
+    );
+    package.set_part("/word/document.xml", main.into_bytes());
+    package.set_part(
+        &header,
+        format!(
+            r#"<w:hdr xmlns:w="{W_NS}"><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id="2" w:name="header_across"/><w:r><w:t>H1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>H2</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p></w:tc></w:tr></w:tbl></w:hdr>"#
+        )
+        .into_bytes(),
+    );
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    (Document::from_bytes(output.get_ref()).unwrap(), id)
+}
+
+fn f_x264_paragraph_range(document: &Document, text: &str) -> StoryRunRange {
+    let location = document
+        .story_item_snapshots()
+        .unwrap()
+        .into_iter()
+        .find(|item| {
+            item.location().story().kind() == StoryKind::Body
+                && item.location().item_kind() == StoryItemKind::Paragraph
+                && item.text() == Some(text)
+        })
+        .unwrap_or_else(|| panic!("missing body paragraph {text}"))
+        .location()
+        .clone();
+    StoryRunRange {
+        start: StoryRunPosition {
+            location: location.clone(),
+            run_index: 0,
+        },
+        end: StoryRunPosition {
+            location,
+            run_index: 1,
+        },
+    }
+}
+
+fn f_x264_part_mismatches(document: &mut Document) -> Vec<String> {
+    let mut failures = Vec::new();
+    let names = match document.part_names() {
+        Ok(names) => names,
+        Err(error) => return vec![format!("part_names: {error}")],
+    };
+    let saved_bytes = match document.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => return vec![format!("to_bytes: {error}")],
+    };
+    let saved = zip_entries(&saved_bytes);
+    let expected = saved
+        .keys()
+        .map(|entry| format!("/{entry}"))
+        .collect::<Vec<_>>();
+    if names != expected {
+        failures.push(format!("names != zip entries\n{names:?}\n{expected:?}"));
+    }
+    for name in [
+        "/[Content_Types].xml",
+        "/_rels/.rels",
+        "/word/_rels/document.xml.rels",
+    ] {
+        if !names.iter().any(|listed| listed == name) {
+            failures.push(format!("missing {name}"));
+        }
+    }
+    for (entry, bytes) in &saved {
+        if entry.ends_with(".xml") || entry.ends_with(".rels") {
+            match document.part_xml(&format!("/{entry}")) {
+                Ok(xml) if xml.as_bytes() == bytes.as_slice() => {}
+                Ok(_) => failures.push(format!("{entry} bytes differ")),
+                Err(error) => failures.push(format!("{entry}: {error}")),
+            }
+        }
+    }
+    if saved.contains_key("[Content_Types].xml") {
+        match document.part_xml("[content_types].xml") {
+            Ok(xml) if xml.as_bytes() == saved["[Content_Types].xml"].as_slice() => {}
+            Ok(_) => failures.push("content types case lookup bytes differ".to_owned()),
+            Err(error) => failures.push(format!("content types case lookup: {error}")),
+        }
+    }
+    match document.part_xml("/word/_rels/absent.xml.rels") {
+        Err(error) if error.to_string().contains("is missing") => {}
+        other => failures.push(format!("missing rel lookup: {other:?}")),
+    }
+    failures
+}
+
+/// Issue 402: stored-grid multiples round-trip, including an absent line rule.
+#[test]
+fn line_spacing_grid_boundaries_round_trip_without_line_rule() {
+    let mut failures = Vec::new();
+    for line in [123_i32, -123, 259, i32::MAX, i32::MIN] {
+        let mut document = Document::new();
+        document
+            .add_paragraph("grid")
+            .set_line_spacing_multiple(f64::from(line) / 240.0);
+        let xml = document_xml(&mut document);
+        let stored = f_x264_line_attr(&xml);
+        if stored != line.to_string() {
+            failures.push(format!("stored {stored} for {line}"));
+        }
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let read = reopened.paragraphs()[0].line_spacing_multiple();
+        let expected = f64::from(line) / 240.0;
+        if read != Some(expected) {
+            failures.push(format!("read {read:?} for {line}, expected {expected}"));
+        }
+    }
+    let mut off = Document::new();
+    off.add_paragraph("off").set_line_spacing_multiple(1.0021);
+    let off_xml = document_xml(&mut off);
+    if !off_xml.contains(r#"w:line="240""#) {
+        failures.push(format!("1.0021 stored {}", f_x264_line_attr(&off_xml)));
+    }
+    off.add_paragraph("neg").set_line_spacing_multiple(-1.0021);
+    let off_xml = document_xml(&mut off);
+    if !off_xml.contains(r#"w:line="-240""#) {
+        failures.push(format!("-1.0021 xml missing -240: {off_xml}"));
+    }
+
+    let mut document = Document::new();
+    document.add_paragraph("holder");
+    let bytes = document.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let at = xml.find("<w:r>").expect("holder run");
+    let xml = format!(
+        r#"{}<w:pPr><w:spacing w:line="123"/></w:pPr>{}"#,
+        &xml[..at],
+        &xml[at..]
+    );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    let mut document = Document::from_bytes(output.get_ref()).unwrap();
+    let before = document.to_bytes().unwrap();
+    document
+        .paragraph_mut(0)
+        .unwrap()
+        .set_line_spacing_multiple(123.0 / 240.0);
+    let after = document.to_bytes().unwrap();
+    let saved = document_xml(&mut document);
+    if after != before || !saved.contains(r#"w:line="123""#) || saved.contains("lineRule") {
+        failures.push(format!(
+            "absent rule changed={} line={} has_rule={}",
+            after != before,
+            f_x264_line_attr(&saved),
+            saved.contains("lineRule")
+        ));
+    }
+    if rdocx::auto_line_spacing(f64::NAN) != rdocx::Twips(0) {
+        failures.push(format!("nan {:?}", rdocx::auto_line_spacing(f64::NAN)));
+    }
+    for (multiple, line) in [
+        (123.0 / 240.0, 123),
+        (-123.0 / 240.0, -123),
+        (259.0 / 240.0, 259),
+        (f64::from(i32::MAX) / 240.0, i32::MAX),
+        (f64::from(i32::MIN) / 240.0, i32::MIN),
+        (1.0021, 240),
+        (-1.0021, -240),
+    ] {
+        let stored = rdocx::auto_line_spacing(multiple);
+        if stored != rdocx::Twips(line) {
+            failures.push(format!(
+                "helper {multiple} stored {} expected {line}",
+                stored.0
+            ));
+        }
+    }
+    let mut at_least = Document::new();
+    at_least.add_paragraph("least");
+    let bytes = at_least.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let at = xml.find("<w:r>").expect("at least run");
+    let xml = format!(
+        r#"{}<w:pPr><w:spacing w:line="240" w:lineRule="atLeast"/></w:pPr>{}"#,
+        &xml[..at],
+        &xml[at..]
+    );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    let mut at_least = Document::from_bytes(output.get_ref()).unwrap();
+    at_least
+        .paragraph_mut(0)
+        .unwrap()
+        .set_line_spacing_multiple(1.0);
+    let saved = document_xml(&mut at_least);
+    if !saved.contains(r#"w:line="240""#) || !saved.contains(r#"w:lineRule="auto""#) {
+        failures.push(format!("atLeast assignment stored {saved}"));
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Preserved native cast domain for `auto_line_spacing`.
+///
+/// These controls are the infallible Rust cast, including saturation.
+/// They are not a Python refusal and not a claim that old source newly failed.
+#[test]
+fn auto_line_spacing_matches_native_cast() {
+    let mut failures = Vec::new();
+    let cases = [
+        (f64::NAN, 0),
+        (f64::INFINITY, i32::MAX),
+        (f64::MAX, i32::MAX),
+        (f64::NEG_INFINITY, i32::MIN),
+        (-f64::MAX, i32::MIN),
+        (1.0e20, i32::MAX),
+        (-1.0e20, i32::MIN),
+        (1.0021, 240),
+        (-1.0021, -240),
+    ];
+    for (multiple, line) in cases {
+        let stored = rdocx::auto_line_spacing(multiple);
+        let cast = rdocx::Twips((multiple * 240.0) as i32);
+        if stored != cast || stored != rdocx::Twips(line) {
+            failures.push(format!(
+                "helper {multiple:?} stored {} cast {} expected {line}",
+                stored.0, cast.0
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Issue 406: part names and part XML are the ZIP entries `to_bytes` writes.
+#[test]
+fn part_xml_matches_zip_entry() {
+    let mut failures = Vec::new();
+    let mut plain = Document::new();
+    plain.add_paragraph("x");
+    failures.extend(f_x264_part_mismatches(&mut plain));
+
+    let mut document = Document::new();
+    document.add_paragraph("linked and remarked");
+    document.set_header("header");
+    let header = f254_story(&document, StoryKind::Header);
+    if let Err(error) =
+        document.add_hyperlink_to_story(&header, "header link", "https://example.invalid/header")
+    {
+        failures.push(format!("header link: {error}"));
+    }
+    let body = f254_story(&document, StoryKind::Body);
+    if let Err(error) =
+        document.add_hyperlink_to_story(&body, "body link", "https://example.invalid/body")
+    {
+        failures.push(format!("body link: {error}"));
+    }
+    let png = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    document.add_picture(&png, "pixel.png", Length::pt(1.0), Length::pt(1.0));
+    if let Err(error) = document.add_comment_on_text("remarked", 0, "Ada", None, "Note", None) {
+        failures.push(format!("comment: {error}"));
+    }
+    let media = document
+        .part_names()
+        .ok()
+        .and_then(|names| names.into_iter().find(|name| name.contains("/media/")));
+    match media {
+        Some(name) => match document.part_xml(&name) {
+            Err(error) if error.to_string().contains("not UTF-8") => {}
+            other => failures.push(format!("binary media: {other:?}")),
+        },
+        None => failures.push("picture media part missing".to_owned()),
+    }
+    failures.extend(f_x264_part_mismatches(&mut document));
+    match document.part_xml("word/_rels/header1.xml.rels") {
+        Ok(xml) if xml.contains("https://example.invalid/header") => {}
+        other => failures.push(format!("header rels: {other:?}")),
+    }
+    match document.part_xml("word/_rels/document.xml.rels") {
+        Ok(xml) if xml.contains("https://example.invalid/body") => {}
+        other => failures.push(format!("body rels: {other:?}")),
+    }
+    document.add_paragraph("edited");
+    failures.extend(f_x264_part_mismatches(&mut document));
+
+    let saved_entries = zip_entries(&document.to_bytes().unwrap());
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(&mut cursor);
+    for (entry, bytes) in &saved_entries {
+        writer
+            .start_file(entry.as_str(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        let bytes = if entry == "[Content_Types].xml" || entry.ends_with(".rels") {
+            String::from_utf8(bytes.clone())
+                .unwrap()
+                .replacen("?>", "?><!-- issue 406 producer -->", 1)
+                .into_bytes()
+        } else {
+            bytes.clone()
+        };
+        std::io::Write::write_all(&mut writer, &bytes).unwrap();
+    }
+    writer.finish().unwrap();
+    let mut opened = Document::from_bytes(cursor.get_ref()).unwrap();
+    failures.extend(f_x264_part_mismatches(&mut opened));
+    for name in [
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "word/_rels/header1.xml.rels",
+    ] {
+        match opened.part_xml(&format!("/{name}")) {
+            Ok(xml) if xml.contains("issue 406 producer") => {}
+            other => failures.push(format!("reopened {name}: {other:?}")),
+        }
+    }
+
+    let mut refused = Document::new();
+    refused.add_paragraph("tab\tand\u{1}");
+    let save = refused.to_bytes().unwrap_err().to_string();
+    let names = refused.part_names().unwrap_err().to_string();
+    let unrelated = refused
+        .part_xml("/[Content_Types].xml")
+        .unwrap_err()
+        .to_string();
+    if names != save || unrelated != save {
+        failures.push(format!(
+            "save failure diverges names={names} xml={unrelated} save={save}"
+        ));
+    }
+
+    let mut bad_seed = Document::new();
+    bad_seed.add_paragraph("bad");
+    let saved = bad_seed.to_bytes().unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(saved)).unwrap();
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let name = entry.name().unwrap().into_owned();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+        if name == "[Content_Types].xml" {
+            let text = String::from_utf8(data).unwrap();
+            data = text
+                .replace(
+                    "</Types>",
+                    r#"<Override PartName="/word/bad.xml" ContentType="application/xml"/></Types>"#,
+                )
+                .into_bytes();
+        }
+        writer
+            .start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, &data).unwrap();
+    }
+    writer
+        .start_file("word/bad.xml", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut writer, b"<bad>\x01</bad>").unwrap();
+    let bad_bytes = writer.finish().unwrap().into_inner();
+    match Document::from_bytes(&bad_bytes) {
+        Ok(mut bad) => {
+            let names = bad.part_names().err().map(|error| error.to_string());
+            let save = bad.to_bytes().err().map(|error| error.to_string());
+            if names.is_none() != save.is_none() {
+                failures.push(format!(
+                    "unrelated invalid part diverges names={names:?} save={save:?}"
+                ));
+            }
+        }
+        Err(error) => failures.push(format!("bad part did not open: {error}")),
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A same-part cross-owner bookmark stays occupied and leaves `story_ranges`.
+#[test]
+fn cross_cell_range_stays_in_one_owner() {
+    let mut failures = Vec::new();
+    let (duplicate, _) = f_x264_cross_owner_fixture(
+        r#"<w:p><w:bookmarkStart w:id="9" w:name="across"/><w:r><w:t>dup</w:t></w:r><w:bookmarkEnd w:id="9"/></w:p>"#,
+    );
+    match duplicate.story_ranges() {
+        Err(error) if error.to_string().contains("duplicat") => {}
+        other => failures.push(format!("duplicate bookmark: {other:?}")),
+    }
+    let (mut document, id) = f_x264_cross_owner_fixture("");
+    match document.story_ranges() {
+        Ok(ranges) => {
+            let foreign = ranges
+                .iter()
+                .filter(|entry| {
+                    !matches!(
+                        entry.kind(),
+                        rdocx::StoryRangeKind::Comment { id: found } if *found == id
+                    )
+                })
+                .count();
+            if foreign != 0 {
+                failures.push(format!(
+                    "cross-owner pairs stayed in story_ranges: {foreign}"
+                ));
+            }
+        }
+        Err(error) => failures.push(format!("story_ranges: {error}")),
+    }
+    for name in ["across", "into", "header_across"] {
+        match document.add_story_bookmark(name, f_x264_paragraph_range(&document, "one")) {
+            Err(error) if error.to_string().contains("already exists") => {}
+            other => failures.push(format!("name {name}: {other:?}")),
+        }
+    }
+    match document.remove_story_bookmark(1) {
+        Err(error) if error.to_string().contains("across story owners") => {}
+        other => failures.push(format!("remove across bookmark: {other:?}")),
+    }
+    if let Err(error) =
+        document.add_story_bookmark("fresh", f_x264_paragraph_range(&document, "one"))
+    {
+        failures.push(format!("fresh bookmark: {error}"));
+    }
+    match document.add_story_permission_range(
+        Some("ben"),
+        None,
+        f_x264_paragraph_range(&document, "two"),
+    ) {
+        Ok(permission) if permission != 0 => {}
+        other => failures.push(format!("permission: {other:?}")),
+    }
+    if let Err(error) = document.add_story_comment(
+        f_x264_paragraph_range(&document, "three"),
+        "Ben",
+        None,
+        "story",
+    ) {
+        failures.push(format!("story comment: {error}"));
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Moving or removing a cross-owner comment or bookmark refuses and keeps bytes.
+#[test]
+fn cross_owner_bookmark_and_comment_move_refuse() {
+    let (seed, id) = f_x264_comment_seed();
+    let start = format!(r#"<w:commentRangeStart w:id="{id}"/>"#);
+    let end =
+        format!(r#"<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#);
+    let xml = format!(
+        "<w:tbl><w:tr><w:tc><w:p>{start}<w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r>{end}</w:p></w:tc></w:tr></w:tbl>"
+    );
+    let mut document = f_x264_open_main(&seed, wrap_word_body(&xml));
+    let before = document.to_bytes().unwrap();
+    let move_error = match document.comment_anchor(id) {
+        Ok(Some(range)) => match document.move_comment(id, range.clone()) {
+            Ok(()) => "move succeeded".to_owned(),
+            Err(error) => error.to_string(),
+        },
+        Ok(None) => "anchor missing".to_owned(),
+        Err(error) => format!("anchor: {error}"),
+    };
+    let after_move = document.to_bytes().unwrap();
+    assert_eq!(after_move, before, "move changed bytes");
+    assert!(move_error.contains("across story owners"), "{move_error}");
+    let (mut bookmarks, _) = f_x264_cross_owner_fixture("");
+    let bookmark_before = bookmarks.to_bytes().unwrap();
+    let remove_error = match bookmarks.remove_story_bookmark(1) {
+        Ok(removed) => format!("removed {removed}"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(bookmarks.to_bytes().unwrap(), bookmark_before);
+    assert!(
+        remove_error.contains("across story owners"),
+        "{remove_error}"
+    );
+}
+
+/// Reversed and crossing omissions stay errors. Valid unique cross-owner pairs stay omitted.
+#[test]
+fn story_range_order_rejects_reversed_and_crossing_omissions() {
+    let (seed, _) = f_x264_comment_seed();
+    let open = |body: &str| f_x264_open_main(&seed, wrap_word_body(body));
+    let cells = |left: &str, right: &str| {
+        format!(
+            "<w:tbl><w:tr><w:tc><w:p>{left}</w:p></w:tc><w:tc><w:p>{right}</w:p></w:tc></w:tr></w:tbl>"
+        )
+    };
+    let textbox = |inner: &str| {
+        format!(
+            "<w:r><w:pict><v:shape xmlns:v=\"urn:schemas-microsoft-com:vml\"><v:textbox><w:txbxContent><w:p>{inner}</w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"
+        )
+    };
+    let mut failures = Vec::new();
+    let bookmark_names = |document: &Document| -> Result<Vec<String>, String> {
+        document
+            .story_ranges()
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .filter_map(|entry| match entry.kind() {
+                        rdocx::StoryRangeKind::Bookmark { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    };
+    let expect_error = |label: &str, body: String, failures: &mut Vec<String>| {
+        let mut document = open(&body);
+        match document.story_ranges() {
+            Err(error) if error.to_string().contains("paired marker") => {}
+            other => failures.push(format!("{label} inventory: {other:?}")),
+        }
+        let before = document.to_bytes().unwrap();
+        let authored = document
+            .add_story_bookmark("fresh", f_x264_paragraph_range(&document, "one"))
+            .map(|id| id.to_string())
+            .unwrap_or_else(|error| error.to_string());
+        if !authored.contains("paired marker") {
+            failures.push(format!("{label} authoring: {authored}"));
+        }
+        if document.to_bytes().unwrap() != before {
+            failures.push(format!("{label} authoring changed bytes"));
+        }
+    };
+    expect_error(
+        "reversed bookmark",
+        format!(
+            "{}<w:p><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(
+                r#"<w:bookmarkEnd w:id="1"/>"#,
+                r#"<w:bookmarkStart w:id="1" w:name="rev"/>"#,
+            )
+        ),
+        &mut failures,
+    );
+    expect_error(
+        "reversed comment",
+        format!(
+            "{}<w:p><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(
+                r#"<w:commentRangeEnd w:id="4"/>"#,
+                r#"<w:commentRangeStart w:id="4"/>"#,
+            )
+        ),
+        &mut failures,
+    );
+    expect_error(
+        "reversed permission",
+        format!(
+            "{}<w:p><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(
+                r#"<w:permEnd w:id="5"/>"#,
+                r#"<w:permStart w:id="5" w:ed="ada"/>"#,
+            )
+        ),
+        &mut failures,
+    );
+    expect_error(
+        "crossed omissions",
+        format!(
+            "{}<w:p><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(
+                r#"<w:bookmarkStart w:id="1" w:name="a"/><w:bookmarkStart w:id="2" w:name="b"/>"#,
+                r#"<w:bookmarkEnd w:id="1"/><w:bookmarkEnd w:id="2"/>"#,
+            )
+        ),
+        &mut failures,
+    );
+    expect_error(
+        "omission crosses local",
+        format!(
+            "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"local\"/></w:p>{}<w:p><w:bookmarkEnd w:id=\"1\"/><w:bookmarkEnd w:id=\"2\"/><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(r#"<w:bookmarkStart w:id="2" w:name="across"/>"#, "")
+        ),
+        &mut failures,
+    );
+    expect_error(
+        "proofing leaves its owner",
+        format!(
+            "{}<w:p><w:proofErr w:type=\"spellEnd\"/><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(r#"<w:proofErr w:type="spellStart"/>"#, "")
+        ),
+        &mut failures,
+    );
+    expect_error(
+        "textbox end before outer start",
+        format!(
+            "<w:p>{}<w:bookmarkStart w:id=\"1\" w:name=\"boxrev\"/><w:r><w:t>one</w:t></w:r></w:p>",
+            textbox(r#"<w:bookmarkEnd w:id="1"/>"#)
+        ),
+        &mut failures,
+    );
+
+    let expect_omitted = |label: &str, body: String, name: &str, failures: &mut Vec<String>| {
+        let mut document = open(&body);
+        match bookmark_names(&document) {
+            Ok(names) if !names.iter().any(|found| found == name) => {}
+            other => failures.push(format!("{label} ranges: {other:?}")),
+        }
+        match document.add_story_bookmark(name, f_x264_paragraph_range(&document, "one")) {
+            Err(error) if error.to_string().contains("already exists") => {}
+            other => failures.push(format!("{label} reserve: {other:?}")),
+        }
+    };
+    expect_omitted(
+        "cell to later body",
+        format!(
+            "{}<w:p><w:bookmarkEnd w:id=\"1\"/><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(r#"<w:bookmarkStart w:id="1" w:name="cellbody"/>"#, "")
+        ),
+        "cellbody",
+        &mut failures,
+    );
+    expect_omitted(
+        "body to cell",
+        format!(
+            "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"bodycell\"/></w:p>{}<w:p><w:r><w:t>one</w:t></w:r></w:p>",
+            cells(r#"<w:bookmarkEnd w:id="1"/>"#, "")
+        ),
+        "bodycell",
+        &mut failures,
+    );
+    expect_omitted(
+        "nested table",
+        "<w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id=\"1\" w:name=\"nest\"/></w:p><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id=\"2\" w:name=\"local\"/><w:r><w:t>inner</w:t></w:r><w:bookmarkEnd w:id=\"2\"/><w:bookmarkEnd w:id=\"1\"/></w:p></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl><w:p><w:r><w:t>one</w:t></w:r></w:p>".to_owned(),
+        "nest",
+        &mut failures,
+    );
+    match bookmark_names(&open(
+        "<w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id=\"1\" w:name=\"nest\"/></w:p><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id=\"2\" w:name=\"local\"/><w:r><w:t>inner</w:t></w:r><w:bookmarkEnd w:id=\"2\"/><w:bookmarkEnd w:id=\"1\"/></w:p></w:tc></w:tr></w:tbl></w:tc></w:tr></w:tbl><w:p><w:r><w:t>one</w:t></w:r></w:p>",
+    )) {
+        Ok(names) if names == ["local".to_owned()] => {}
+        other => failures.push(format!("nested local: {other:?}")),
+    }
+    expect_omitted(
+        "textbox start then outer end",
+        format!(
+            "<w:p>{}<w:bookmarkEnd w:id=\"1\"/><w:r><w:t>one</w:t></w:r></w:p>",
+            textbox(r#"<w:bookmarkStart w:id="1" w:name="boxbody"/>"#)
+        ),
+        "boxbody",
+        &mut failures,
+    );
+    match bookmark_names(&open(&format!(
+        "<w:p><w:bookmarkStart w:id=\"2\" w:name=\"outer\"/>{}<w:bookmarkEnd w:id=\"2\"/><w:r><w:t>one</w:t></w:r></w:p>",
+        textbox(
+            r#"<w:bookmarkStart w:id="1" w:name="inner"/><w:r><w:t>in</w:t></w:r><w:bookmarkEnd w:id="1"/>"#
+        )
+    ))) {
+        Ok(mut names) => {
+            names.sort();
+            if names != ["inner".to_owned(), "outer".to_owned()] {
+                failures.push(format!("nested textbox ranges: {names:?}"));
+            }
+        }
+        Err(error) => failures.push(format!("nested textbox: {error}")),
+    }
+    match bookmark_names(&open(
+        "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"visible\"/><w:smartTag><w:bookmarkEnd w:id=\"9\"/><w:bookmarkStart w:id=\"9\" w:name=\"hidden\"/></w:smartTag><w:r><w:t>one</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>",
+    )) {
+        Ok(names) if names == ["visible".to_owned()] => {}
+        other => failures.push(format!("hidden smartTag: {other:?}")),
+    }
+
+    let long = "x".repeat(2400);
+    let namespace_positive = format!(
+        "<w:p xmlns:q=\"urn:{long}\" q:producer=\"keep\">{inner}<w:bookmarkEnd w:id=\"1\"/></w:p><w:p><w:r><w:t>one</w:t></w:r></w:p>",
+        inner = textbox(
+            "<w:bookmarkStart w:id=\"1\" w:name=\"shifted\"/><w:bookmarkStart w:id=\"2\" w:name=\"inside\"/><w:r><w:t>in</w:t></w:r><w:bookmarkEnd w:id=\"2\"/>"
+        )
+    );
+    let mut shifted = open(&namespace_positive);
+    match bookmark_names(&shifted) {
+        Ok(names) if names == ["inside".to_owned()] => {}
+        other => failures.push(format!("namespace delta ranges: {other:?}")),
+    }
+    match shifted.add_story_bookmark("shifted", f_x264_paragraph_range(&shifted, "one")) {
+        Err(error) if error.to_string().contains("already exists") => {}
+        other => failures.push(format!("namespace delta reserve: {other:?}")),
+    }
+    expect_error(
+        "namespace reversed roles",
+        format!(
+            "<w:p xmlns:q=\"urn:{long}\" q:producer=\"keep\">{inner}<w:bookmarkStart w:id=\"1\" w:name=\"shifted\"/></w:p><w:p><w:r><w:t>one</w:t></w:r></w:p>",
+            inner = textbox(r#"<w:bookmarkEnd w:id="1"/>"#)
+        ),
+        &mut failures,
+    );
+
+    let (mut related, _) = f_x264_cross_owner_fixture("");
+    let related_rows = f_x264_ref_rows(&related);
+    let related_body = related_rows
+        .iter()
+        .find(|row| row.instruction.contains("across") && !row.instruction.contains("header"));
+    let related_header = related_rows
+        .iter()
+        .find(|row| row.instruction.contains("header_across") && !row.instruction.contains('\\'));
+    match (related_body, related_header) {
+        (Some(body), Some(header))
+            if matches!(&body.outcome, FieldOutcome::Resolved(text) if text.contains("A\nB") && !text.contains("OLD"))
+                && body.cached_result == "OLD"
+                && matches!(&header.outcome, FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("runs across story owners"))
+                && header.cached_result == "OLD" => {}
+        other => failures.push(format!("valid related REF: {other:?}")),
+    }
+    if let Err(error) = related.update_fields(&FieldEvaluationContext::default()) {
+        failures.push(format!("valid related update: {error}"));
+    } else {
+        let updated = f_x264_ref_rows(&related);
+        let body = updated
+            .iter()
+            .find(|row| row.instruction.contains("across") && !row.instruction.contains("header"));
+        let header = updated.iter().find(|row| {
+            row.instruction.contains("header_across") && !row.instruction.contains('\\')
+        });
+        match (body, header) {
+            (Some(body), Some(header))
+                if body.cached_result.contains("A\nB")
+                    && !body.cached_result.contains("OLD")
+                    && header.cached_result == "OLD"
+                    && matches!(&header.outcome, FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("runs across story owners")) =>
+                {}
+            other => failures.push(format!("valid related after update: {other:?}")),
+        }
+    }
+
+    let mut kept = Document::new();
+    kept.add_paragraph("seed");
+    kept.set_header("header");
+    let header_part = f254_story(&kept, StoryKind::Header).part_name().to_owned();
+    let kept_bytes = kept.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(kept_bytes)).unwrap();
+    let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let body = "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"BodyKeep\"/><w:r><w:t>ALPHA</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p><w:p><w:fldSimple w:instr=\" REF BodyKeep \"><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr=\" REF BadRelated \"><w:r><w:t>old-related</w:t></w:r></w:fldSimple></w:p>";
+    let head = main.find("<w:body>").unwrap() + "<w:body>".len();
+    let main = format!(
+        "{}{body}{}",
+        &main[..head],
+        &main[main.find("<w:sectPr").unwrap()..]
+    );
+    package.set_part("/word/document.xml", main.into_bytes());
+    package.set_part(
+        &header_part,
+        format!(
+            "<w:hdr xmlns:w=\"{W_NS}\"><w:tbl><w:tr><w:tc><w:p><w:bookmarkEnd w:id=\"9\"/></w:p></w:tc><w:tc><w:p><w:bookmarkStart w:id=\"9\" w:name=\"BadRelated\"/></w:p></w:tc></w:tr></w:tbl></w:hdr>"
+        )
+        .into_bytes(),
+    );
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    let mut mixed = Document::from_bytes(output.get_ref()).unwrap();
+    match mixed.story_ranges() {
+        Err(error) if error.to_string().contains("paired marker") => {}
+        other => failures.push(format!("invalid related inventory: {other:?}")),
+    }
+    let mixed_rows = f_x264_ref_rows(&mixed);
+    let mixed_body = mixed_rows
+        .iter()
+        .find(|row| row.instruction.contains("BodyKeep"));
+    let mixed_bad = mixed_rows
+        .iter()
+        .find(|row| row.instruction.contains("BadRelated"));
+    match (mixed_body, mixed_bad) {
+        (Some(body), Some(bad))
+            if matches!(&body.outcome, FieldOutcome::Resolved(text) if text == "ALPHA")
+                && matches!(&bad.outcome, FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("not found") && !diagnostic.contains("runs across story owners"))
+                && bad.cached_result == "old-related" => {}
+        other => failures.push(format!("invalid related REF: {other:?}")),
+    }
+    if let Err(error) = mixed.update_fields(&FieldEvaluationContext::default()) {
+        failures.push(format!("invalid related update: {error}"));
+    } else {
+        let updated = f_x264_ref_rows(&mixed);
+        let body = updated
+            .iter()
+            .find(|row| row.instruction.contains("BodyKeep"));
+        let bad = updated
+            .iter()
+            .find(|row| row.instruction.contains("BadRelated"));
+        match (body, bad) {
+            (Some(body), Some(bad))
+                if body.cached_result == "ALPHA"
+                    && bad.cached_result == "old-related"
+                    && matches!(&bad.outcome, FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("not found")) =>
+                {}
+            other => failures.push(format!("invalid related after update: {other:?}")),
+        }
+        let saved = document_xml(&mut mixed);
+        let bad_marker = saved
+            .find(r#"w:instr="REF BadRelated""#)
+            .or_else(|| saved.find(r#"w:instr=" REF BadRelated ""#));
+        match bad_marker {
+            Some(start) => {
+                let rest = &saved[start..];
+                let end = rest
+                    .find("</w:fldSimple>")
+                    .or_else(|| rest.find("</w:p>"))
+                    .unwrap_or(rest.len());
+                if !rest[..end].contains("<w:t>old-related</w:t>") {
+                    failures.push(format!("invalid related saved cache: {}", &rest[..end]));
+                }
+            }
+            None => failures.push(format!("invalid related field missing in {saved}")),
+        }
+    }
+
+    let mut same = Document::new();
+    same.add_paragraph("seed");
+    same.set_header("header");
+    let same_header = f254_story(&same, StoryKind::Header).part_name().to_owned();
+    let same_bytes = same.to_bytes().unwrap();
+    let mut same_package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(same_bytes)).unwrap();
+    let same_main = String::from_utf8(
+        same_package
+            .get_part("/word/document.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let same_body = "<w:p><w:bookmarkStart w:id=\"1\" w:name=\"SAME\"/><w:r><w:t>ALPHA</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p><w:p><w:fldSimple w:instr=\" REF SAME \"><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>";
+    let same_head = same_main.find("<w:body>").unwrap() + "<w:body>".len();
+    let same_main = format!(
+        "{}{same_body}{}",
+        &same_main[..same_head],
+        &same_main[same_main.find("<w:sectPr").unwrap()..]
+    );
+    same_package.set_part("/word/document.xml", same_main.into_bytes());
+    same_package.set_part(
+        &same_header,
+        format!(
+            "<w:hdr xmlns:w=\"{W_NS}\"><w:p><w:bookmarkStart w:id=\"2\" w:name=\"SAME\"/><w:r><w:t>OTHER</w:t></w:r><w:bookmarkEnd w:id=\"2\"/></w:p></w:hdr>"
+        )
+        .into_bytes(),
+    );
+    let mut same_output = std::io::Cursor::new(Vec::new());
+    same_package.write_to(&mut same_output).unwrap();
+    let mut same_document = Document::from_bytes(same_output.get_ref()).unwrap();
+    match same_document.story_ranges() {
+        Err(error) if error.to_string().contains("duplicat") => {}
+        other => failures.push(format!("duplicate name inventory: {other:?}")),
+    }
+    let same_row = f_x264_ref_rows(&same_document)
+        .into_iter()
+        .find(|row| row.instruction.contains("SAME"));
+    match same_row {
+        Some(row)
+            if matches!(&row.outcome, FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("not found") && !diagnostic.contains("runs across story owners"))
+                && row.cached_result == "OLD" => {}
+        other => failures.push(format!("duplicate name REF: {other:?}")),
+    }
+    if let Err(error) = same_document.update_fields(&FieldEvaluationContext::default()) {
+        failures.push(format!("duplicate name update: {error}"));
+    } else {
+        let updated = f_x264_ref_rows(&same_document)
+            .into_iter()
+            .find(|row| row.instruction.contains("SAME"));
+        match updated {
+            Some(row)
+                if row.cached_result == "OLD"
+                    && matches!(&row.outcome, FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("not found")) =>
+                {}
+            other => failures.push(format!("duplicate name after update: {other:?}")),
+        }
+    }
+
+    let (mut original, _) = f_x264_original_cross_owner_fixture("");
+    let original_before = original.to_bytes().unwrap();
+    match original.story_ranges() {
+        Err(error) if error.to_string().contains("paired marker") => {}
+        other => failures.push(format!("original crossing inventory: {other:?}")),
+    }
+    let authored = original
+        .add_story_bookmark("fresh", f_x264_paragraph_range(&original, "one"))
+        .map(|id| id.to_string())
+        .unwrap_or_else(|error| error.to_string());
+    if !authored.contains("paired marker") {
+        failures.push(format!("original crossing authoring: {authored}"));
+    }
+    if original.to_bytes().unwrap() != original_before {
+        failures.push("original crossing authoring changed bytes".to_owned());
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+fn f_x264_field_slice<'a>(xml: &'a str, instruction: &str) -> &'a str {
+    let marker = format!(r#"w:instr="{instruction}""#);
+    let start = xml
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing {marker}"));
+    let rest = &xml[start..];
+    let end = rest
+        .find("</w:fldSimple>")
+        .or_else(|| rest.find("</w:p>"))
+        .unwrap_or_else(|| panic!("open field {marker}"));
+    &rest[..end]
+}
+
+fn f_x264_ref_rows(document: &Document) -> Vec<rdocx::FieldEvaluation> {
+    document
+        .evaluate_fields(&FieldEvaluationContext::default())
+        .unwrap_or_else(|error| panic!("evaluate: {error}"))
+}
+
+fn f_x264_assert_ref_outcomes(rows: &[rdocx::FieldEvaluation]) {
+    let outcomes = rows
+        .iter()
+        .map(|evaluation| evaluation.outcome.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        rows.first()
+            .is_some_and(|row| row.instruction.contains("across")
+                && !row.instruction.contains("header")
+                && !row.instruction.contains('\\')),
+        "{outcomes:?}"
+    );
+    assert!(
+        matches!(&outcomes.first(), Some(FieldOutcome::Resolved(text)) if text.contains('A') && text.contains('B') && !text.contains("OLD")),
+        "body bookmark: {outcomes:?}"
+    );
+    assert!(
+        rows.get(1).is_some_and(
+            |row| row.instruction.contains("header_across") && !row.instruction.contains('\\')
+        ),
+        "{outcomes:?}"
+    );
+    assert!(
+        matches!(&outcomes.get(1), Some(FieldOutcome::KeepStored { diagnostic }) if diagnostic.contains("runs across story owners")),
+        "related REF: {outcomes:?}"
+    );
+    assert!(
+        !matches!(outcomes.get(1), Some(FieldOutcome::Resolved(_))),
+        "related REF resolved: {outcomes:?}"
+    );
+    assert!(
+        rows.get(2).is_some_and(
+            |row| row.instruction.contains("header_across") && row.instruction.contains('\\')
+        ),
+        "{:?}",
+        rows.get(2).map(|row| &row.instruction)
+    );
+    match outcomes.get(2) {
+        Some(FieldOutcome::KeepStored { diagnostic })
+            if diagnostic.contains("across story owners")
+                || diagnostic.contains("could not be resolved") => {}
+        Some(FieldOutcome::Resolved(_)) => panic!("REF f resolved: {outcomes:?}"),
+        other => panic!("REF f: {other:?} in {outcomes:?}"),
+    }
+    assert_eq!(rows[1].cached_result, "OLD", "{outcomes:?}");
+    assert_eq!(rows[2].cached_result, "OLD", "{outcomes:?}");
+}
+
+fn f_x264_assert_ref_package(xml: &str) {
+    let across = f_x264_field_slice(xml, "REF across");
+    let related = f_x264_field_slice(xml, "REF header_across");
+    let refused = f_x264_field_slice(xml, r" REF header_across \f ");
+    assert!(
+        across.contains('A') && across.contains('B') && !across.contains("OLD"),
+        "{across}"
+    );
+    assert!(related.contains("<w:t>OLD</w:t>"), "{related}");
+    assert!(refused.contains("<w:t>OLD</w:t>"), "{refused}");
+    assert_eq!(xml.matches("<w:t>OLD</w:t>").count(), 2, "{xml}");
+}
+
+/// Retained run edits publish through comment text, both snapshot maps, and reopen.
+#[test]
+fn comment_anchor_text_tracks_retained_run_edits() {
+    let mut failures = Vec::new();
+    for (label, expected, edit) in [
+        ("tab", "anchor\t", 0_u8),
+        ("text", "changed", 1),
+        ("break", "anchor\n", 2),
+    ] {
+        let mut document = Document::new();
+        document.add_paragraph("anchor");
+        let id = match document.add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "note",
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                failures.push(format!("{label} add: {error}"));
+                continue;
+            }
+        };
+        let held = match document.comment_anchor_text(id) {
+            Ok(Some(text)) => text,
+            other => {
+                failures.push(format!("{label} held: {other:?}"));
+                continue;
+            }
+        };
+        if held != "anchor" {
+            failures.push(format!("{label} held text {held:?}"));
+            continue;
+        }
+        {
+            let mut paragraph = document.paragraph_mut(0).unwrap();
+            let mut run = paragraph.run_mut(0).unwrap();
+            match edit {
+                0 => run.add_tab(),
+                1 => run.set_text("changed"),
+                _ => run.add_break(BreakKind::Line),
+            }
+        }
+        if held != "anchor" {
+            failures.push(format!("{label} held snapshot changed to {held:?}"));
+        }
+        let fresh = document.comment_anchor_text(id).ok().flatten();
+        let strict = document
+            .comment_anchor_snapshots()
+            .ok()
+            .and_then(|mut map| map.remove(&id))
+            .map(|(_, text)| text);
+        let tolerant = document
+            .comment_anchor_snapshot_results()
+            .ok()
+            .and_then(|mut map| map.remove(&id))
+            .and_then(|result| result.ok())
+            .map(|(_, text)| text);
+        let strict_text = strict.as_ref().and_then(|text| text.as_deref());
+        let tolerant_text = tolerant.as_ref().and_then(|text| text.as_deref());
+        if fresh.as_deref() != Some(expected)
+            || strict_text != Some(expected)
+            || tolerant_text != Some(expected)
+        {
+            failures.push(format!(
+                "{label} fresh={fresh:?} strict={strict:?} tolerant={tolerant:?}"
+            ));
+        }
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let reopened_text = reopened.comment_anchor_text(id).ok().flatten();
+        let reopened_strict = reopened
+            .comment_anchor_snapshots()
+            .ok()
+            .and_then(|mut map| map.remove(&id))
+            .map(|(_, text)| text);
+        let reopened_tolerant = reopened
+            .comment_anchor_snapshot_results()
+            .ok()
+            .and_then(|mut map| map.remove(&id))
+            .and_then(|result| result.ok())
+            .map(|(_, text)| text);
+        let reopened_strict_text = reopened_strict.as_ref().and_then(|text| text.as_deref());
+        let reopened_tolerant_text = reopened_tolerant.as_ref().and_then(|text| text.as_deref());
+        if reopened_text.as_deref() != Some(expected)
+            || reopened_strict_text != Some(expected)
+            || reopened_tolerant_text != Some(expected)
+        {
+            failures.push(format!(
+                "{label} reopen text={reopened_text:?} strict={reopened_strict:?} tolerant={reopened_tolerant:?}"
+            ));
+        }
+        if held != "anchor" {
+            failures.push(format!("{label} held after reopen {held:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A related REF whose bookmark crosses owners keeps the old cache.
+#[test]
+fn ref_cross_owner_keeps_old_cache() {
+    let (mut document, _) = f_x264_cross_owner_fixture("");
+    let before = f_x264_ref_rows(&document);
+    f_x264_assert_ref_outcomes(&before);
+    assert_eq!(
+        before[0].cached_result, "OLD",
+        "{}",
+        before[0].cached_result
+    );
+    document
+        .update_fields(&FieldEvaluationContext::default())
+        .unwrap_or_else(|error| panic!("update: {error}"));
+    let updated = f_x264_ref_rows(&document);
+    f_x264_assert_ref_outcomes(&updated);
+    assert!(
+        updated[0].cached_result.contains('A')
+            && updated[0].cached_result.contains('B')
+            && !updated[0].cached_result.contains("OLD"),
+        "{}",
+        updated[0].cached_result
+    );
+    f_x264_assert_ref_package(&document_xml(&mut document));
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    let reopened_rows = f_x264_ref_rows(&reopened);
+    f_x264_assert_ref_outcomes(&reopened_rows);
+    assert!(
+        reopened_rows[0].cached_result.contains('A')
+            && reopened_rows[0].cached_result.contains('B')
+            && !reopened_rows[0].cached_result.contains("OLD"),
+        "{}",
+        reopened_rows[0].cached_result
+    );
+    f_x264_assert_ref_package(&document_xml(&mut reopened));
+}
+
+/// `add_comment` from a `RunRange` flushes before a later move reads the part.
+#[test]
+fn run_range_comment_move_flushes_model() {
+    let mut failures = Vec::new();
+    for reopen in [false, true] {
+        for to_text in [false, true] {
+            let mut document = Document::new();
+            document.add_paragraph("the commented paragraph");
+            document.add_paragraph("the paragraph the comment moves to");
+            let id = document
+                .add_comment(
+                    RunRange {
+                        start: RunPosition {
+                            body_index: 0,
+                            run_index: 0,
+                        },
+                        end: RunPosition {
+                            body_index: 0,
+                            run_index: 1,
+                        },
+                    },
+                    "Reviewer",
+                    None,
+                    "a remark",
+                )
+                .unwrap();
+            if reopen {
+                document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            }
+            let expected = if to_text {
+                match document.move_comment_to_text(id, "moves", 0) {
+                    Ok(()) => "moves",
+                    Err(error) => {
+                        failures.push(format!("reopen={reopen} text: {error}"));
+                        continue;
+                    }
+                }
+            } else {
+                let location = document.paragraph_story_location(1).unwrap().unwrap();
+                match document.move_comment(
+                    id,
+                    StoryRunRange {
+                        start: StoryRunPosition {
+                            location: location.clone(),
+                            run_index: 0,
+                        },
+                        end: StoryRunPosition {
+                            location,
+                            run_index: 1,
+                        },
+                    },
+                ) {
+                    Ok(()) => "the paragraph the comment moves to",
+                    Err(error) => {
+                        failures.push(format!("reopen={reopen} range: {error}"));
+                        continue;
+                    }
+                }
+            };
+            match document.comment_anchor_text(id) {
+                Ok(Some(text)) if text == expected => {}
+                other => failures.push(format!("reopen={reopen} to_text={to_text}: {other:?}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A neighboring self-closing paragraph stays in the header, footer, and note inventory.
+#[test]
+fn self_closing_story_paragraph_fields_evaluate() {
+    fn attribute<'a>(element: &'a str, name: &str) -> &'a str {
+        let key = format!("{name}=\"");
+        let start = element
+            .find(&key)
+            .unwrap_or_else(|| panic!("missing {name} in {element}"))
+            + key.len();
+        let end = element[start..]
+            .find('"')
+            .unwrap_or_else(|| panic!("unterminated {name}"));
+        &element[start..start + end]
+    }
+    fn relationship_id(document: &Document, file_name: &str, type_suffix: &str) -> String {
+        let xml = document
+            .part_xml("/word/_rels/document.xml.rels")
+            .unwrap_or_else(|error| panic!("document relationships: {error}"));
+        let mut rest = xml.as_str();
+        let mut found = None;
+        while let Some(start) = rest.find("<Relationship ") {
+            let slice = &rest[start..];
+            let end = slice
+                .find("/>")
+                .unwrap_or_else(|| panic!("unclosed relationship in {xml}"));
+            let element = &slice[..end];
+            rest = &slice[end + 2..];
+            let target = attribute(element, "Target");
+            let rel_type = attribute(element, "Type");
+            let target_file = target.rsplit('/').next().unwrap_or(target);
+            if target_file == file_name && rel_type.ends_with(type_suffix) {
+                assert!(
+                    found.is_none(),
+                    "duplicate {type_suffix} target {file_name}: {xml}"
+                );
+                found = Some(attribute(element, "Id").to_owned());
+            }
+        }
+        found.unwrap_or_else(|| panic!("no {type_suffix} relationship for {file_name}: {xml}"))
+    }
+
+    let mut seed = Document::new();
+    seed.add_paragraph("BODY");
+    seed.set_header("HEAD");
+    seed.set_footer("FOOT");
+    let footnote_id = seed.add_footnote("FNOTE");
+    let body = seed.paragraph_story_location(0).unwrap().unwrap();
+    let endnote_id = seed.create_endnote(&body, "ENOTE").unwrap();
+    let stories = seed.stories().unwrap();
+    let header_file = stories
+        .iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap()
+        .part_name()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let footer_file = stories
+        .iter()
+        .find(|story| story.kind() == StoryKind::Footer)
+        .unwrap()
+        .part_name()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let header_owner = rdocx_layout::WordStory::Header {
+        relationship_id: relationship_id(&seed, &header_file, "/header"),
+    };
+    let footer_owner = rdocx_layout::WordStory::Footer {
+        relationship_id: relationship_id(&seed, &footer_file, "/footer"),
+    };
+    let footnote_owner = rdocx_layout::WordStory::Footnote { id: footnote_id };
+    let endnote_owner = rdocx_layout::WordStory::Endnote { id: endnote_id };
+    let seed_bytes = seed.to_bytes().unwrap();
+    let mut referenced = Document::from_bytes(&seed_bytes).unwrap();
+    let footnotes_before = referenced.part_xml("/word/footnotes.xml").unwrap();
+    referenced
+        .paragraph_mut(0)
+        .unwrap()
+        .add_footnote_ref(footnote_id);
+    let referenced_bytes = referenced.to_bytes().unwrap();
+    let referenced = Document::from_bytes(&referenced_bytes).unwrap();
+    assert_eq!(
+        referenced.part_xml("/word/footnotes.xml").unwrap(),
+        footnotes_before,
+        "referenced clone changed the footnote part"
+    );
+    assert!(
+        referenced
+            .part_xml("/word/document.xml")
+            .unwrap()
+            .contains(&format!(r#"w:id="{footnote_id}""#)),
+        "referenced clone did not keep the original footnote id"
+    );
+    fn page_model_dirty(xml: &str) -> Result<Option<bool>, String> {
+        let bytes = xml.as_bytes();
+        let mut search = 0usize;
+        let mut dirty = None;
+        while search < xml.len() {
+            let Some(relative) = xml[search..].find("<w:p") else {
+                break;
+            };
+            let start = search + relative;
+            let boundary = bytes.get(start + 4).copied();
+            if !matches!(boundary, Some(b'>' | b' ' | b'/' | b'\t' | b'\r' | b'\n')) {
+                search = start + 4;
+                continue;
+            }
+            if xml[start..].starts_with("<w:p/>") {
+                search = start + 5;
+                continue;
+            }
+            let mut depth = 0usize;
+            let mut cursor = start;
+            let mut end = None;
+            while cursor < xml.len() {
+                if xml[cursor..].starts_with("<w:p") {
+                    let next = bytes.get(cursor + 4).copied();
+                    if matches!(next, Some(b'>' | b' ' | b'/' | b'\t' | b'\r' | b'\n')) {
+                        if xml[cursor..].starts_with("<w:p/>") {
+                            cursor += 5;
+                            continue;
+                        }
+                        depth += 1;
+                        cursor += 4;
+                        continue;
+                    }
+                }
+                if xml[cursor..].starts_with("</w:p>") {
+                    depth = depth.saturating_sub(1);
+                    cursor += 6;
+                    if depth == 0 {
+                        end = Some(cursor);
+                        break;
+                    }
+                    continue;
+                }
+                cursor += 1;
+            }
+            let Some(end) = end else {
+                break;
+            };
+            let mut fragment = xml[start..end].to_owned();
+            let root_end = fragment.find('>').unwrap_or(fragment.len());
+            if !fragment[..root_end].contains("xmlns:w=") {
+                fragment.insert_str(4, &format!(" xmlns:w=\"{W_NS}\""));
+            }
+            if let Ok(paragraph) = rdocx_oxml::text::CT_P::from_xml_fragment(fragment.as_bytes()) {
+                for run in &paragraph.runs {
+                    for content in &run.content {
+                        if let rdocx_oxml::text::RunContent::Field(field) = content
+                            && field.effective_instruction().name == "PAGE"
+                        {
+                            dirty = Some(field.dirty);
+                        }
+                    }
+                }
+            }
+            search = end;
+        }
+        dirty.ok_or_else(|| "no PAGE field in parsed paragraphs".to_owned())
+    }
+
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed_bytes)).unwrap();
+    let mut parts = Vec::new();
+    for (kind, marker, owner, placed) in [
+        (StoryKind::Header, "HEAD", header_owner, true),
+        (StoryKind::Footer, "FOOT", footer_owner, true),
+        (StoryKind::Footnote, "FNOTE", footnote_owner.clone(), false),
+        (StoryKind::Endnote, "ENOTE", endnote_owner, true),
+    ] {
+        let story = stories.iter().find(|story| story.kind() == kind).unwrap();
+        let xml = String::from_utf8(package.get_part(story.part_name()).unwrap().to_vec()).unwrap();
+        assert!(
+            xml.contains(marker),
+            "{} missing {marker}",
+            story.part_name()
+        );
+        parts.push((
+            story.part_name().to_owned(),
+            marker.to_owned(),
+            xml,
+            owner,
+            seed_bytes.clone(),
+            placed,
+        ));
+    }
+    let footnote = parts
+        .iter()
+        .find(|part| part.1 == "FNOTE")
+        .expect("original footnote part")
+        .clone();
+    parts.push((
+        footnote.0,
+        footnote.1,
+        footnote.2,
+        footnote.3,
+        referenced_bytes,
+        true,
+    ));
+    let page = r#"<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#;
+    let retain = "Word preserves dynamic header and footer caches on update and save";
+    let unplaced = "source did not reach pagination";
+    let mut failures = Vec::new();
+    for (shape, children) in [
+        ("<w:p/>", &[2usize][..]),
+        (
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>",
+            &[3][..],
+        ),
+        ("<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>", &[2][..]),
+    ] {
+        for (part_name, marker, xml, owner, case_seed, placed) in &parts {
+            let end = xml[xml.find(marker).unwrap()..].find("</w:p>").unwrap()
+                + xml.find(marker).unwrap()
+                + "</w:p>".len();
+            let rewritten = format!("{}{shape}{page}{}", &xml[..end], &xml[end..]);
+            let mut package =
+                oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(case_seed)).unwrap();
+            package.set_part(part_name, rewritten.into_bytes());
+            let mut output = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut output).unwrap();
+            let mut document = Document::from_bytes(output.get_ref()).unwrap();
+            let before = document.to_bytes().unwrap();
+            let label = format!("{shape} in {part_name} placed={placed}");
+            let evaluations = match document.evaluate_fields(&FieldEvaluationContext::default()) {
+                Ok(evaluations) => evaluations,
+                Err(error) => {
+                    failures.push(format!("{label}: {error}"));
+                    continue;
+                }
+            };
+            if evaluations.len() != 1 {
+                failures.push(format!("{label}: {} fields", evaluations.len()));
+                continue;
+            }
+            let evaluation = &evaluations[0];
+            if evaluation.field_index != 0
+                || evaluation.instruction.trim() != "PAGE"
+                || evaluation.cached_result != "9"
+                || evaluation.outcome != FieldOutcome::DeferredPagination
+            {
+                failures.push(format!("{label}: evaluation {evaluation:?}"));
+                continue;
+            }
+            let layout = match document.layout_deterministic() {
+                Ok(layout) => layout,
+                Err(error) => {
+                    failures.push(format!("{label} layout: {error}"));
+                    continue;
+                }
+            };
+            let placements = layout.field_placements();
+            if *placed {
+                if placements.len() != 1 {
+                    failures.push(format!("{label}: {} placements", placements.len()));
+                    continue;
+                }
+                let placement = &placements[0];
+                let path = layout.source_node(placement.source.node);
+                let path_matches = path.is_some_and(|path| {
+                    path.story == *owner && path.children.as_slice() == children
+                });
+                if placement.physical_page != 1
+                    || placement.displayed_page != 1
+                    || placement.source.index != 0
+                    || !path_matches
+                {
+                    failures.push(format!(
+                        "{label}: placement {placement:?} path {path:?} expected {owner:?} children {children:?}"
+                    ));
+                    continue;
+                }
+            } else if !placements.is_empty() {
+                failures.push(format!("{label}: unreferenced placements {placements:?}"));
+                continue;
+            }
+            if document.to_bytes().unwrap() != before {
+                failures.push(format!("{label}: evaluate or layout changed bytes"));
+                continue;
+            }
+            match document.update_fields(&FieldEvaluationContext::default()) {
+                Ok(1) => {}
+                Ok(count) => {
+                    failures.push(format!("{label}: ordinary update wrote {count}"));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!("{label} update: {error}"));
+                    continue;
+                }
+            }
+            if document.to_bytes().unwrap() == before {
+                failures.push(format!("{label}: ordinary update was a byte no-op"));
+                continue;
+            }
+            match document.evaluate_fields(&FieldEvaluationContext::default()) {
+                Ok(rows)
+                    if rows.len() == 1
+                        && rows[0].cached_result == "9"
+                        && rows[0].instruction.trim() == "PAGE"
+                        && rows[0].outcome == FieldOutcome::DeferredPagination => {}
+                Ok(rows) => {
+                    failures.push(format!("{label}: cache after ordinary update {rows:?}"));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!("{label}: reread {error}"));
+                    continue;
+                }
+            }
+            let ordinary_part = match document.part_xml(part_name) {
+                Ok(xml) => xml,
+                Err(error) => {
+                    failures.push(format!("{label}: ordinary part {error}"));
+                    continue;
+                }
+            };
+            if !ordinary_part.contains("<w:t>9</w:t>") {
+                failures.push(format!("{label}: ordinary update replaced cached 9"));
+                continue;
+            }
+            match page_model_dirty(&ordinary_part) {
+                Ok(Some(true)) => {}
+                other => {
+                    failures.push(format!("{label}: ordinary dirty {other:?}"));
+                    continue;
+                }
+            }
+            let report = match document.update_layout_backed_fields() {
+                Ok(report) => report,
+                Err(error) => {
+                    failures.push(format!("{label} layout update: {error}"));
+                    continue;
+                }
+            };
+            if report.num_pages_fields != 0
+                || report.page_reference_fields != 0
+                || report.section_fields != 0
+                || report.section_pages_fields != 0
+            {
+                failures.push(format!("{label}: unrelated counts {report:?}"));
+                continue;
+            }
+            let header_or_footer = matches!(
+                owner,
+                rdocx_layout::WordStory::Header { .. } | rdocx_layout::WordStory::Footer { .. }
+            );
+            let expected_cache = if header_or_footer || !*placed {
+                "9"
+            } else {
+                "1"
+            };
+            let expected_dirty = if header_or_footer || !*placed {
+                Some(true)
+            } else {
+                Some(false)
+            };
+            if header_or_footer {
+                let expected_diagnostic = format!("PAGE field 0 retained cache: {retain}");
+                if report.page_fields != 0
+                    || report.diagnostics != [expected_diagnostic.clone()]
+                    || report
+                        .diagnostics
+                        .iter()
+                        .any(|item| item.contains(unplaced))
+                {
+                    failures.push(format!("{label}: header retention {report:?}"));
+                    continue;
+                }
+            } else if !*placed {
+                let expected_diagnostic = format!("PAGE field 0 retained cache: {unplaced}");
+                if report.page_fields != 0 || report.diagnostics != [expected_diagnostic.clone()] {
+                    failures.push(format!("{label}: unplaced note {report:?}"));
+                    continue;
+                }
+            } else if report.page_fields != 1
+                || report.diagnostics.iter().any(|item| {
+                    item.contains("PAGE") || item.contains(unplaced) || item.contains("retained")
+                })
+            {
+                failures.push(format!("{label}: note page update {report:?}"));
+                continue;
+            }
+            match document.evaluate_fields(&FieldEvaluationContext::default()) {
+                Ok(rows)
+                    if rows.len() == 1
+                        && rows[0].cached_result == expected_cache
+                        && rows[0].instruction.trim() == "PAGE"
+                        && rows[0].outcome == FieldOutcome::DeferredPagination => {}
+                Ok(rows) => {
+                    failures.push(format!("{label}: cache after layout update {rows:?}"));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!("{label}: layout reread {error}"));
+                    continue;
+                }
+            }
+            let cache_tag = format!("<w:t>{expected_cache}</w:t>");
+            let saved_part = match document.part_xml(part_name) {
+                Ok(xml) => xml,
+                Err(error) => {
+                    failures.push(format!("{label}: saved part {error}"));
+                    continue;
+                }
+            };
+            if !saved_part.contains(&cache_tag)
+                || (expected_cache == "1" && saved_part.contains("<w:t>9</w:t>"))
+            {
+                failures.push(format!("{label}: saved cache xml missing {cache_tag}"));
+                continue;
+            }
+            match page_model_dirty(&saved_part) {
+                Ok(dirty) if dirty == expected_dirty => {}
+                other => {
+                    failures.push(format!(
+                        "{label}: saved dirty {other:?} expected {expected_dirty:?}"
+                    ));
+                    continue;
+                }
+            }
+            let saved = document.to_bytes().unwrap();
+            let reopened = match Document::from_bytes(&saved) {
+                Ok(document) => document,
+                Err(error) => {
+                    failures.push(format!("{label}: reopen {error}"));
+                    continue;
+                }
+            };
+            match reopened.evaluate_fields(&FieldEvaluationContext::default()) {
+                Ok(rows)
+                    if rows.len() == 1
+                        && rows[0].cached_result == expected_cache
+                        && rows[0].instruction.trim() == "PAGE"
+                        && rows[0].outcome == FieldOutcome::DeferredPagination => {}
+                Ok(rows) => {
+                    failures.push(format!("{label}: reopened evaluation {rows:?}"));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!("{label}: reopened evaluation {error}"));
+                    continue;
+                }
+            }
+            let reopened_layout = match reopened.layout_deterministic() {
+                Ok(layout) => layout,
+                Err(error) => {
+                    failures.push(format!("{label}: reopened layout {error}"));
+                    continue;
+                }
+            };
+            let reopened_placements = reopened_layout.field_placements();
+            let reopened_path = reopened_placements
+                .first()
+                .and_then(|placement| reopened_layout.source_node(placement.source.node));
+            let reopened_ok = if *placed {
+                reopened_placements.len() == 1
+                    && reopened_placements[0].physical_page == 1
+                    && reopened_placements[0].displayed_page == 1
+                    && reopened_placements[0].source.index == 0
+                    && reopened_path.is_some_and(|path| {
+                        path.story == *owner && path.children.as_slice() == children
+                    })
+            } else {
+                reopened_placements.is_empty()
+            };
+            if !reopened_ok {
+                failures.push(format!(
+                    "{label}: reopened placement {reopened_placements:?} path {reopened_path:?}"
+                ));
+                continue;
+            }
+            match reopened.part_xml(part_name) {
+                Ok(xml)
+                    if xml.contains(&cache_tag) && page_model_dirty(&xml) == Ok(expected_dirty) => {
+                }
+                Ok(xml) => failures.push(format!(
+                    "{label}: reopened part cache={cache_tag} dirty={:?}",
+                    page_model_dirty(&xml)
+                )),
+                Err(error) => failures.push(format!("{label}: reopened part {error}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Accepted text of a body range around a table includes the cell paragraphs.
+#[test]
+fn body_range_across_table_includes_cell_text() {
+    let (seed, id) = f_x264_comment_seed();
+    let start = format!(r#"<w:commentRangeStart w:id="{id}"/>"#);
+    let end =
+        format!(r#"<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#);
+    let paragraph = |head: &str, text: &str, tail: &str| {
+        format!("<w:p>{head}<w:r><w:t>{text}</w:t></w:r>{tail}</w:p>")
+    };
+    let row = |left: String, right: String| {
+        format!("<w:tr><w:tc>{left}</w:tc><w:tc>{right}</w:tc></w:tr>")
+    };
+    let table = |rows: String| format!("<w:tbl>{rows}</w:tbl>");
+    let goog = format!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="-346012225"/><w:tag w:val="goog_rdk_0"/></w:sdtPr><w:sdtContent>{start}</w:sdtContent></w:sdt>"#
+    );
+    let cases = [
+        (
+            "plain start",
+            table(row(
+                paragraph(&start, "Preconditions and test data", ""),
+                paragraph("", "the second cell", &end),
+            )),
+            "Preconditions and test data\nthe second cell",
+        ),
+        (
+            "goog_rdk start",
+            table(row(
+                paragraph(&goog, "Preconditions and test data", ""),
+                paragraph("", "the second cell", &end),
+            )),
+            "Preconditions and test data\nthe second cell",
+        ),
+        (
+            "next row",
+            table(
+                row(paragraph("", "A", ""), paragraph(&start, "B", ""))
+                    + &row(paragraph("", "C", &end), paragraph("", "D", "")),
+            ),
+            "B\nC",
+        ),
+        (
+            "body into cell",
+            paragraph(&start, "before", "")
+                + &table(row(paragraph("", "A", ""), paragraph("", "B", &end)))
+                + &paragraph("", "after", ""),
+            "before\nA\nB",
+        ),
+        (
+            "cell into body",
+            paragraph("", "before", "")
+                + &table(row(paragraph("", "A", ""), paragraph(&start, "B", "")))
+                + &paragraph("", "after", &end),
+            "B\nafter",
+        ),
+        (
+            "body around a table",
+            paragraph(&start, "before", "")
+                + &table(row(paragraph("", "A", ""), paragraph("", "B", "")))
+                + &paragraph("", "after", &end),
+            "before\nA\nB\nafter",
+        ),
+        (
+            "nested table",
+            table(row(
+                paragraph(&start, "A", "")
+                    + &table(row(paragraph("", "N", ""), paragraph("", "M", "")))
+                    + &paragraph("", "A2", ""),
+                paragraph("", "B", &end),
+            )),
+            "A\nN\nM\nA2\nB",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (label, xml, expected) in cases {
+        let document = f_x264_open_main(&seed, wrap_word_body(&xml));
+        match document.comment_anchor_text(id) {
+            Ok(Some(text)) if text == expected => {}
+            Ok(other) => failures.push(format!("{label}: {other:?}")),
+            Err(error) => failures.push(format!("{label}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }

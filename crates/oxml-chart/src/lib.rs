@@ -17831,7 +17831,7 @@ mod tests {
     fn oxml_chart_is_an_explicit_publication_candidate() {
         let manifest = include_str!("../Cargo.toml");
         assert!(manifest.contains("name = \"oxml-chart\""));
-        assert!(manifest.contains("version = \"0.14.3\""));
+        assert!(manifest.contains("version = \"0.14.4\""));
         assert!(manifest.contains("publish = true"));
         for dependency in [
             "oxml-core.workspace",
@@ -19060,7 +19060,7 @@ mod tests {
                     if part != chart_part && part != &workbook_part {
                         assert_eq!(
                             reopened.get_part(part).unwrap(),
-                            source,
+                            source.as_slice(),
                             "{deck}/{label}: {part}"
                         );
                     }
@@ -19080,7 +19080,7 @@ mod tests {
                     if part != "/xl/worksheets/sheet1.xml" && part != "/xl/styles.xml" {
                         assert_eq!(
                             new_book.get_part(part).unwrap(),
-                            source,
+                            source.as_slice(),
                             "{deck}/{label}: workbook {part}"
                         );
                     }

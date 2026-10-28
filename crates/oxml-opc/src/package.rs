@@ -1,8 +1,12 @@
 //! OPC Package reader and writer for ZIP-based OOXML packages.
 
+use std::borrow::Cow;
+#[cfg(debug_assertions)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use zip::ZipWriter;
 use zip::read::ZipArchive;
@@ -31,7 +35,7 @@ pub struct PackagePart {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ContentTypesSource {
     xml: Vec<u8>,
     content_types: ContentTypes,
@@ -71,9 +75,13 @@ pub struct OpcPackage {
     /// Key is the part name (e.g. "/word/document.xml"),
     /// value is the parsed relationships.
     pub part_rels: HashMap<String, Relationships>,
-    /// All parts keyed by their URI (e.g. "/word/document.xml").
-    pub parts: HashMap<String, Vec<u8>>,
+    /// All parts keyed by their URI (e.g. "/word/document.xml"). The bytes
+    /// are shared, so cloning a package copies pointers, not part content.
+    pub parts: HashMap<String, Arc<Vec<u8>>>,
     content_types_source: Option<ContentTypesSource>,
+    /// Set only by a byte read or a reread of such a package. A hand-built
+    /// package is not a baseline, and reread then uses the ZIP.
+    trusted_baseline: bool,
     /// The bytes of each XML entry that was read already holding a character
     /// XML 1.0 cannot carry, keyed by ZIP entry name. Such producer bytes
     /// are written back verbatim, while no writer can add such a character.
@@ -236,7 +244,7 @@ impl OpcPackage {
             } else {
                 format!("/{name}")
             };
-            parts.insert(normalized, data.clone());
+            parts.insert(normalized, Arc::new(data.clone()));
         }
 
         let malformed_source_entries = raw_parts
@@ -257,6 +265,7 @@ impl OpcPackage {
                 xml: ct_xml.clone(),
                 content_types: ContentTypes::from_xml(ct_xml)?,
             }),
+            trusted_baseline: true,
         })
     }
 
@@ -280,43 +289,237 @@ impl OpcPackage {
 
     /// Write the OPC package to any writer.
     pub fn write_to<W: Write + Seek>(&self, writer: W) -> Result<()> {
-        Self::write_serialized(writer, self.serialize()?)
-    }
-
-    fn write_serialized<W: Write + Seek>(
-        writer: W,
-        serialized: SerializedPackage<'_>,
-    ) -> Result<()> {
+        // Serialize before the ZIP writer exists: a failure then writes nothing.
+        let entries = self.zip_entries()?;
         let mut zip = ZipWriter::new(writer);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-        // Write [Content_Types].xml
-        zip.start_file("[Content_Types].xml", options)?;
-        zip.write_all(&serialized.content_types)?;
-
-        // Write _rels/.rels
-        zip.start_file("_rels/.rels", options)?;
-        zip.write_all(&serialized.package_relationships)?;
-
-        // Write part-level .rels files. Both loops iterate in sorted order so
-        // that saving the same package twice produces byte-identical output;
-        // a HashMap's order would vary between runs.
-        for (rels_path, rels_xml) in serialized.part_relationships {
-            zip.start_file(&rels_path, options)?;
-            zip.write_all(&rels_xml)?;
+        for (name, data) in entries {
+            zip.start_file(name, options)?;
+            zip.write_all(&data)?;
         }
-
-        // Write all parts
-        for (name, data) in serialized.parts {
-            // Strip leading "/" for ZIP entry name
-            let zip_name = name.strip_prefix('/').unwrap_or(name);
-            zip.start_file(zip_name, options)?;
-            zip.write_all(data)?;
-        }
-
         zip.finish()?;
         Ok(())
+    }
+
+    /// Gives the package that writing this one with [`OpcPackage::write_to`]
+    /// and reading the bytes back gives, or the error the write raises,
+    /// without building the ZIP when the fast path is proved.
+    ///
+    /// Precondition: `read` is still the unmodified package a read or an
+    /// earlier reread produced, and this package is the candidate edited
+    /// from that baseline. A later edit of `read` is not a baseline. The
+    /// trusted flag records that read or reread provenance. It does not
+    /// detect an edit made after the read, and it does not detect an
+    /// arbitrary public part-map edit. A hand-built package starts
+    /// untrusted, so the known hand-built fallback is the ZIP path because
+    /// the flag is false, not because the flag inspected the map. The parts this package
+    /// still shares with `read` are taken to pass the checks of a write
+    /// because a read or an earlier reread made them: with a `read` built
+    /// in memory, a shared part holding a character XML 1.0 forbids rereads
+    /// where a write fails. Relationships and content types that still hold
+    /// what they were read from are kept as they are, and only what changed
+    /// is serialized and parsed again. A package with a name a write would
+    /// store under another entry name, a part too large for a plain ZIP
+    /// entry, or producer bytes holding a forbidden character goes through
+    /// the ZIP.
+    #[doc(hidden)]
+    pub fn reread(mut self, read: &OpcPackage) -> Result<Self> {
+        let renamed_part = |name: &String| {
+            !written_as_is(name)
+                || name
+                    .len()
+                    .checked_sub(".rels".len())
+                    .is_some_and(|start| name.as_bytes()[start..].eq_ignore_ascii_case(b".rels"))
+                || name.eq_ignore_ascii_case("/[Content_Types].xml")
+        };
+        if !read.trusted_baseline
+            || !self.malformed_source_entries.is_empty()
+            || !read.malformed_source_entries.is_empty()
+            || self.parts.keys().any(renamed_part)
+            || self.part_rels.keys().any(|owner| !written_as_is(owner))
+            || self
+                .parts
+                .values()
+                .any(|data| data.len() >= u32::MAX as usize)
+        {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            // Count the fallback write even when `write_to` returns an error.
+            // Other `write_to` callers count themselves. The fast path below
+            // does not call this note.
+            note_reread_zip_write();
+            self.write_to(&mut bytes)?;
+            bytes.set_position(0);
+            return Self::from_reader(bytes);
+        }
+
+        // The checks of `serialize`, in its order, on the entries that may
+        // differ from what was read: relationships equal to those read were
+        // checked when read. With no renamed entry, the ZIP entry names
+        // cannot collide once the part and relationship maps hold no two
+        // equivalent names.
+        self.validate_graph()?;
+        let content_types = self.content_types_bytes()?;
+        let package_relationships = self.package_rels.to_xml()?;
+        let mut owners = self
+            .part_rels
+            .iter()
+            .filter(|(owner, relationships)| {
+                !read
+                    .part_rels
+                    .get(*owner)
+                    .is_some_and(|read| read.same_as(relationships))
+            })
+            .map(|(owner, _)| owner.clone())
+            .collect::<Vec<_>>();
+        owners.sort();
+        let mut part_relationships = Vec::with_capacity(owners.len());
+        for owner in owners {
+            let xml = self.part_rels[&owner].to_xml()?;
+            part_relationships.push((owner, xml));
+        }
+        // A part read as an XML entry held no character XML 1.0 forbids, so
+        // a shared part is checked again only when its content type may have
+        // made it one.
+        let retyped_overrides = self
+            .content_types
+            .overrides
+            .iter()
+            .filter(|(name, content_type)| {
+                read.content_types.overrides.get(*name) != Some(content_type)
+            })
+            .chain(
+                read.content_types
+                    .overrides
+                    .iter()
+                    .filter(|(name, _)| !self.content_types.overrides.contains_key(*name)),
+            )
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        let retyped = |name: &str| {
+            self.content_types.defaults != read.content_types.defaults
+                || retyped_overrides
+                    .iter()
+                    .any(|retyped| retyped.eq_ignore_ascii_case(name))
+        };
+        let mut parts = self
+            .parts
+            .iter()
+            .filter(|(name, data)| {
+                let shared = read
+                    .parts
+                    .get(*name)
+                    .is_some_and(|read| Arc::ptr_eq(read, data));
+                (!shared || retyped(name))
+                    && is_xml_entry(&self.content_types, name)
+                    && !(shared && is_xml_entry(&read.content_types, name))
+            })
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect::<Vec<_>>();
+        parts.sort_by_key(|(name, _)| *name);
+        self.reject_written_xml_characters("[Content_Types].xml", &content_types)?;
+        self.reject_written_xml_characters("_rels/.rels", &package_relationships)?;
+        for (owner, xml) in &part_relationships {
+            self.reject_written_xml_characters(&part_name_to_rels_path(owner), xml)?;
+        }
+        for (name, data) in parts {
+            self.reject_written_xml_characters(name, data)?;
+        }
+
+        // What reading the written entries back parses.
+        if !self
+            .content_types_source
+            .as_ref()
+            .is_some_and(|source| source.content_types == self.content_types)
+        {
+            self.content_types = ContentTypes::from_xml(&content_types)?;
+            self.content_types_source = Some(ContentTypesSource {
+                content_types: ContentTypes::from_xml(&content_types)?,
+                xml: content_types,
+            });
+        }
+        if !self.package_rels.is_as_read() {
+            self.package_rels = Relationships::from_xml(&package_relationships)?;
+        }
+        for (owner, xml) in part_relationships {
+            if !self.part_rels[&owner].is_as_read() {
+                self.part_rels.insert(owner, Relationships::from_xml(&xml)?);
+            }
+        }
+        self.trusted_baseline = true;
+        Ok(self)
+    }
+
+    /// Whether two packages hold the same parts, relationships and content
+    /// types, and keep the same bytes they were read from.
+    ///
+    /// Precondition: each package is a normalized read or a reread. A read
+    /// normalizes part names. A reread has the same shape when the fast path
+    /// holds or after the ZIP fallback. Under that precondition the packages
+    /// are the same exactly when the bytes written for them are. This does
+    /// not compare an arbitrary hand-built package, and it does not detect
+    /// a public map edit made after the read.
+    #[doc(hidden)]
+    pub fn same_package_as(&self, other: &OpcPackage) -> bool {
+        self.content_types == other.content_types
+            && self.content_types_source == other.content_types_source
+            && self.malformed_source_entries == other.malformed_source_entries
+            && self.package_rels.same_as(&other.package_rels)
+            && self.part_rels.len() == other.part_rels.len()
+            && self.part_rels.iter().all(|(owner, relationships)| {
+                other
+                    .part_rels
+                    .get(owner)
+                    .is_some_and(|other| relationships.same_as(other))
+            })
+            && self.parts.len() == other.parts.len()
+            && self.parts.iter().all(|(name, data)| {
+                other
+                    .parts
+                    .get(name)
+                    .is_some_and(|other| Arc::ptr_eq(data, other) || data == other)
+            })
+    }
+
+    /// The ZIP entries [`Self::write_to`] writes, in its order, each as the
+    /// exact entry-name string the writer emits and its bytes.
+    ///
+    /// `[Content_Types].xml` and `_rels/.rels` come first, then one
+    /// relationship part per relationship owner, sorted by owner part name,
+    /// then the parts, sorted by part name. An ordinary part drops at most
+    /// one leading slash from the first authored stored key. Metadata and
+    /// relationship names use the existing serializer mappings. Metadata
+    /// bytes are owned. Ordinary part bytes are borrowed from the package.
+    /// The same package always yields the same entries, and a package that
+    /// cannot be saved returns that save error.
+    pub fn zip_entries(&self) -> Result<Vec<(String, Cow<'_, [u8]>)>> {
+        let serialized = self.serialize()?;
+        let mut entries =
+            Vec::with_capacity(2 + serialized.part_relationships.len() + serialized.parts.len());
+        entries.push((
+            "[Content_Types].xml".to_owned(),
+            Cow::Owned(serialized.content_types),
+        ));
+        entries.push((
+            "_rels/.rels".to_owned(),
+            Cow::Owned(serialized.package_relationships),
+        ));
+        entries.extend(
+            serialized
+                .part_relationships
+                .into_iter()
+                .map(|(rels_path, rels_xml)| (rels_path, Cow::Owned(rels_xml))),
+        );
+        entries.extend(serialized.parts.into_iter().map(|(name, data)| {
+            (
+                name.strip_prefix('/').unwrap_or(name).to_owned(),
+                Cow::Borrowed(data),
+            )
+        }));
+        for (name, _) in &entries {
+            reject_zip_local_entry_name(name)?;
+        }
+        Ok(entries)
     }
 
     /// Append a password-protected CFB envelope around the deterministic OPC ZIP.
@@ -333,7 +536,7 @@ impl OpcPackage {
     /// Get raw bytes of a part by its URI.
     pub fn get_part(&self, part_name: &str) -> Option<&[u8]> {
         let key = deterministic_part_key(&self.parts, part_name)?;
-        self.parts.get(key).map(Vec::as_slice)
+        self.parts.get(key).map(|data| data.as_slice())
     }
 
     /// Return whether a case-equivalent normalized part name exists.
@@ -346,16 +549,17 @@ impl OpcPackage {
         deterministic_part_key(&self.parts, part_name).map(String::as_str)
     }
 
-    /// Set (or replace) a part's raw bytes.
-    pub fn set_part(&mut self, part_name: &str, data: Vec<u8>) {
+    /// Set (or replace) a part's raw bytes, owned or already shared.
+    pub fn set_part(&mut self, part_name: &str, data: impl Into<Arc<Vec<u8>>>) {
         let key = deterministic_part_key(&self.parts, part_name)
             .cloned()
             .unwrap_or_else(|| part_name.to_owned());
-        self.parts.insert(key, data);
+        self.parts.insert(key, data.into());
     }
 
-    /// Remove and return a case-equivalent normalized part.
-    pub fn remove_part(&mut self, part_name: &str) -> Option<Vec<u8>> {
+    /// Remove and return a case-equivalent normalized part, with the bytes
+    /// it may still share with a clone of this package.
+    pub fn remove_part(&mut self, part_name: &str) -> Option<Arc<Vec<u8>>> {
         let key = deterministic_part_key(&self.parts, part_name)?.clone();
         self.parts.remove(&key)
     }
@@ -484,6 +688,7 @@ impl OpcPackage {
             parts: HashMap::new(),
             content_types_source: None,
             malformed_source_entries: HashMap::new(),
+            trusted_baseline: false,
         }
     }
 
@@ -693,8 +898,60 @@ fn deterministic_part_key<'a, T>(
     let identity = part_identity(part_name);
     values
         .keys()
-        .filter(|candidate| part_identity(candidate) == identity)
+        .filter(|candidate| has_part_identity(candidate, &identity))
         .min()
+}
+
+/// Debug-only note invoked once immediately before `reread`'s fallback
+/// `write_to`. The note runs when that write returns an error. It does not
+/// run on the fast path and it does not run for any other `write_to` caller.
+/// `None` clears the note. The note must not call `reread`.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn set_reread_zip_note(note: Option<fn()>) {
+    REREAD_ZIP_NOTE.set(note);
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static REREAD_ZIP_NOTE: Cell<Option<fn()>> = const { Cell::new(None) };
+}
+
+fn note_reread_zip_write() {
+    #[cfg(debug_assertions)]
+    if let Some(note) = REREAD_ZIP_NOTE.get() {
+        note();
+    }
+}
+
+/// Whether a write stores the part or relationship owner `name` under a ZIP
+/// entry that reading it back names `name` again: an absolute name with no
+/// empty or dot segment and no trailing backslash, which the reader takes
+/// for a directory. The ordinary entry name and the relationship entry name
+/// must both pass `reject_zip_local_entry_name`. A failure there is not a
+/// fast-path error. `reread` takes the ZIP fallback, and `write_to` keeps
+/// its existing validation order.
+fn written_as_is(name: &str) -> bool {
+    let canonical = name.starts_with('/')
+        && !name.ends_with('\\')
+        && name
+            .split('/')
+            .skip(1)
+            .all(|segment| !matches!(segment, "" | "." | ".."));
+    canonical
+        && reject_zip_local_entry_name(name.strip_prefix('/').unwrap_or(name)).is_ok()
+        && reject_zip_local_entry_name(&part_name_to_rels_path(name)).is_ok()
+}
+
+/// Whether `candidate` names the part `identity` names. A name that is its
+/// own normalized form, as nearly every stored name is, is compared without
+/// normalizing it, so a lookup allocates nothing per stored name.
+fn has_part_identity(candidate: &str, identity: &str) -> bool {
+    let normalized = candidate.starts_with('/')
+        && !candidate.ends_with('/')
+        && !candidate.contains("//")
+        && !candidate.contains("/.");
+    candidate.eq_ignore_ascii_case(identity) || !normalized && part_identity(candidate) == identity
 }
 
 fn validate_part_map_identities<T>(values: &HashMap<String, T>) -> Result<()> {
@@ -1136,6 +1393,25 @@ fn rels_path_to_part_name(rels_path: &str) -> String {
     }
 }
 
+/// Refuse a ZIP entry name that pinned `zip` 9.0.3 `ZipWriter::start_file`
+/// rejects before it writes the payload.
+///
+/// The local-header types are private. `SimpleFileOptions::default` adds no
+/// extra field, and the fixed local header is the 30-byte ZIP local file
+/// header. Their sum with the file name must stay below `u16::MAX`. The
+/// boundary is pinned by `zip_entries_and_write_to_share_pinned_zip_name_limit`
+/// against that writer, not against this constant alone.
+fn reject_zip_local_entry_name(name: &str) -> Result<()> {
+    const LOCAL_HEADER_WITHOUT_NAME_OR_EXTRA: usize = 30;
+    if LOCAL_HEADER_WITHOUT_NAME_OR_EXTRA.saturating_add(name.len()) >= usize::from(u16::MAX) {
+        return Err(zip::result::ZipError::InvalidArchive(
+            "ZipLocalBlock + filename + extra fields must be less than 64KiB when combined".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Convert a part name to its .rels file path.
 /// e.g. "/word/document.xml" → "word/_rels/document.xml.rels"
 fn part_name_to_rels_path(part_name: &str) -> String {
@@ -1262,6 +1538,195 @@ mod tests {
     }
 
     #[test]
+    fn zip_entries_own_metadata_borrow_parts_and_follow_write_order() {
+        let mut package = OpcPackage::new();
+        package.set_part("/word/b.xml", b"<b/>".to_vec());
+        package.set_part("/word/a.xml", b"<a/>".to_vec());
+        package
+            .content_types
+            .add_override("/word/a.xml", "application/xml");
+        package
+            .content_types
+            .add_override("/word/b.xml", "application/xml");
+        let mut rels_a = Relationships::new();
+        rels_a.add("urn:test", "target-a");
+        let mut rels_b = Relationships::new();
+        rels_b.add("urn:test", "target-b");
+        package.part_rels.insert("/word/b.xml".to_owned(), rels_b);
+        package.part_rels.insert("/word/a.xml".to_owned(), rels_a);
+
+        let entries = package.zip_entries().unwrap();
+        let names = entries
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "[Content_Types].xml",
+                "_rels/.rels",
+                "word/_rels/a.xml.rels",
+                "word/_rels/b.xml.rels",
+                "word/a.xml",
+                "word/b.xml",
+            ]
+        );
+        assert!(names.iter().all(|name| !name.starts_with('/')));
+        assert!(matches!(entries[0].1, Cow::Owned(_)));
+        assert!(matches!(entries[1].1, Cow::Owned(_)));
+        assert!(matches!(entries[2].1, Cow::Owned(_)));
+        assert!(matches!(entries[3].1, Cow::Owned(_)));
+        assert!(matches!(
+            &entries[4].1,
+            Cow::Borrowed(data) if std::ptr::eq(*data, package.get_part("/word/a.xml").unwrap())
+        ));
+        assert!(matches!(
+            &entries[5].1,
+            Cow::Borrowed(data) if std::ptr::eq(*data, package.get_part("/word/b.xml").unwrap())
+        ));
+
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        let mut archive = ZipArchive::new(std::io::Cursor::new(output.into_inner())).unwrap();
+        assert_eq!(archive.len(), entries.len());
+        for (index, (name, data)) in entries.iter().enumerate() {
+            let mut file = archive.by_index(index).unwrap();
+            assert_eq!(file.name().unwrap(), name.as_str());
+            let mut saved = Vec::new();
+            file.read_to_end(&mut saved).unwrap();
+            assert_eq!(saved, data.as_ref());
+        }
+        drop(entries);
+
+        for (authored, payload, expected_part, expected_rels, alias) in [
+            (
+                "/word/a.xml",
+                &b"<canonical/>"[..],
+                "word/a.xml",
+                "word/_rels/a.xml.rels",
+                "/word/a.xml",
+            ),
+            (
+                "//word/a.xml",
+                &b"<alias/>"[..],
+                "/word/a.xml",
+                "/word/_rels/a.xml.rels",
+                "/word/a.xml",
+            ),
+            (
+                "/word/./a.xml",
+                &b"<dotted/>"[..],
+                "word/./a.xml",
+                "word/./_rels/a.xml.rels",
+                "/word/a.xml",
+            ),
+        ] {
+            let mut fresh = OpcPackage::new();
+            fresh.set_part(authored, payload.to_vec());
+            let mut rels = Relationships::new();
+            rels.add("urn:test", "target");
+            fresh.part_rels.insert(authored.to_owned(), rels);
+            let preserved = fresh.zip_entries().unwrap();
+            let preserved_names = preserved
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                preserved_names,
+                [
+                    "[Content_Types].xml",
+                    "_rels/.rels",
+                    expected_rels,
+                    expected_part,
+                ],
+                "{authored}"
+            );
+            assert!(matches!(preserved[0].1, Cow::Owned(_)), "{authored}");
+            assert!(matches!(preserved[1].1, Cow::Owned(_)), "{authored}");
+            assert!(matches!(preserved[2].1, Cow::Owned(_)), "{authored}");
+            assert!(
+                matches!(
+                    &preserved[3].1,
+                    Cow::Borrowed(data) if std::ptr::eq(*data, fresh.get_part(alias).unwrap())
+                        && std::ptr::eq(*data, fresh.get_part(authored).unwrap())
+                        && *data == payload
+                ),
+                "{authored}"
+            );
+            let mut preserved_output = std::io::Cursor::new(Vec::new());
+            fresh.write_to(&mut preserved_output).unwrap();
+            let mut preserved_archive =
+                ZipArchive::new(std::io::Cursor::new(preserved_output.into_inner())).unwrap();
+            assert_eq!(preserved_archive.len(), preserved.len(), "{authored}");
+            for (index, (name, data)) in preserved.iter().enumerate() {
+                let mut file = preserved_archive.by_index(index).unwrap();
+                assert_eq!(file.name().unwrap(), name.as_str(), "{authored}");
+                let mut saved = Vec::new();
+                file.read_to_end(&mut saved).unwrap();
+                assert_eq!(saved, data.as_ref(), "{authored}");
+            }
+        }
+
+        package.set_part("/word/a.xml", b"<\x01/>".to_vec());
+        let inspection = package.zip_entries().unwrap_err().to_string();
+        let mut ignored = std::io::Cursor::new(Vec::new());
+        let save = package.write_to(&mut ignored).unwrap_err().to_string();
+        assert_eq!(inspection, save);
+        assert!(save.contains("U+0001"), "{save}");
+    }
+
+    fn deflated_writer_result(name: &str) -> std::result::Result<(), String> {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = ZipWriter::new(&mut cursor);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file(name, options)
+            .map_err(|error| error.to_string())?;
+        zip.write_all(b"x").map_err(|error| error.to_string())?;
+        zip.finish().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn zip_entries_and_write_to_share_pinned_zip_name_limit() {
+        let accepted = "n".repeat(65_504);
+        let rejected = "n".repeat(65_505);
+        assert!(deflated_writer_result("word/document.xml").is_ok());
+        assert!(
+            deflated_writer_result(&accepted).is_ok(),
+            "pinned ZipWriter rejected the near-boundary name"
+        );
+        let writer_error = deflated_writer_result(&rejected).unwrap_err();
+        assert!(
+            writer_error.contains("ZipLocalBlock + filename + extra fields"),
+            "{writer_error}"
+        );
+
+        let mut fits = OpcPackage::new();
+        fits.set_part(&accepted, b"x".to_vec());
+        assert!(fits.zip_entries().is_ok());
+        let mut output = std::io::Cursor::new(Vec::new());
+        fits.write_to(&mut output).unwrap();
+
+        let mut oversized = OpcPackage::new();
+        oversized.set_part(&rejected, b"x".to_vec());
+        let inspection = match oversized.zip_entries() {
+            Ok(_) => panic!("zip_entries accepted a name the pinned writer rejects"),
+            Err(error) => error.to_string(),
+        };
+        let mut ignored = std::io::Cursor::new(Vec::new());
+        let save = match oversized.write_to(&mut ignored) {
+            Ok(_) => panic!("write_to accepted a name the pinned writer rejects"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(inspection, save, "inspection={inspection} save={save}");
+        assert!(
+            inspection.contains("ZipLocalBlock + filename + extra fields"),
+            "{inspection}"
+        );
+    }
+
+    #[test]
     fn zip9_ordinary_writer_header_is_deterministic_version_twenty() {
         let mut package = OpcPackage::new();
         package.set_part("opaque.bin", b"opaque\0\xff".to_vec());
@@ -1378,8 +1843,8 @@ mod tests {
         );
         assert!(package.remove_part_rels("/word/document.xml").is_some());
         assert_eq!(
-            package.remove_part("/word/document.xml"),
-            Some(b"second".to_vec())
+            package.remove_part("/word/document.xml").as_deref(),
+            Some(&b"second".to_vec())
         );
     }
 
@@ -1388,10 +1853,10 @@ mod tests {
         let mut package = OpcPackage::new();
         package
             .parts
-            .insert("/WORD/DOCUMENT.XML".to_owned(), b"first".to_vec());
+            .insert("/WORD/DOCUMENT.XML".to_owned(), b"first".to_vec().into());
         package
             .parts
-            .insert("/word/document.xml".to_owned(), b"second".to_vec());
+            .insert("/word/document.xml".to_owned(), b"second".to_vec().into());
         let mut output = std::io::Cursor::new(Vec::new());
         assert!(matches!(
             package.write_to(&mut output),
@@ -2417,5 +2882,278 @@ mod tests {
             Some(b"<document/>".as_slice())
         );
         assert!(pkg2.main_document_part().is_some());
+    }
+
+    #[test]
+    fn remove_part_returns_shared_bytes() {
+        let mut package = OpcPackage::new();
+        let bytes = Arc::new(b"shared-part".to_vec());
+        package.set_part("/ppt/slides/slide1.xml", Arc::clone(&bytes));
+        let cloned = package.clone();
+        let removed = package.remove_part("/ppt/slides/slide1.xml").unwrap();
+        assert!(Arc::ptr_eq(&removed, &bytes));
+        assert!(Arc::ptr_eq(
+            &removed,
+            cloned
+                .get_part("/ppt/slides/slide1.xml")
+                .map(|_| &cloned.parts["/ppt/slides/slide1.xml"])
+                .unwrap()
+        ));
+        package.set_part("/ppt/slides/slide1.xml", Arc::clone(&removed));
+        assert!(Arc::ptr_eq(
+            &package.parts["/ppt/slides/slide1.xml"],
+            &removed
+        ));
+        assert_eq!(
+            package.get_part("/ppt/slides/slide1.xml"),
+            Some(bytes.as_slice())
+        );
+    }
+
+    fn written_and_read(package: &OpcPackage) -> Result<OpcPackage> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes)?;
+        bytes.set_position(0);
+        OpcPackage::from_reader(bytes)
+    }
+
+    /// Rereading in memory gives what a write and a read give, or the same
+    /// error.
+    fn assert_rereads_as_written(package: &OpcPackage, read: &OpcPackage) {
+        match (package.clone().reread(read), written_and_read(package)) {
+            (Ok(reread), Ok(written)) => assert!(
+                reread.same_package_as(&written),
+                "reread {reread:?}, written {written:?}"
+            ),
+            (Err(reread), Err(written)) => assert_eq!(reread.to_string(), written.to_string()),
+            (reread, written) => panic!("reread {reread:?}, written {written:?}"),
+        }
+    }
+
+    fn read_pptx() -> OpcPackage {
+        let mut package = pptx_package();
+        package.content_types.add_default("png", "image/png");
+        package.set_part("/ppt/media/image1.png", vec![0x89, 0x50, 0x0b]);
+        package.set_part("/ppt/data.bin", vec![0, 1, 0x0b]);
+        package
+            .get_or_create_part_rels("/ppt/slides/slide1.xml")
+            .add(rel_types::IMAGE, "../media/image1.png");
+        written_and_read(&package).unwrap()
+    }
+
+    /// Entry lengths are the names `zip_entries` emits. Relationship lengths
+    /// come from `part_name_to_rels_path`, not from a fixed owner offset.
+    #[test]
+    fn reread_matches_shared_zip_name_limits() {
+        let read = read_pptx();
+
+        let ordinary = |entry_len: usize| {
+            let mut stem = "x".repeat(entry_len - ".bin".len());
+            stem.push_str(".bin");
+            let key = format!("/{stem}");
+            assert_eq!(key.strip_prefix('/').unwrap().len(), entry_len);
+            let mut candidate = read.clone();
+            candidate
+                .content_types
+                .add_default("bin", "application/octet-stream");
+            candidate.set_part(&key, vec![1, 2, 3]);
+            candidate
+        };
+        assert_rereads_as_written(&ordinary(65_504), &read);
+        assert_rereads_as_written(&ordinary(65_505), &read);
+
+        let relationship = |entry_len: usize| {
+            let mut owner = format!("/{}", "r".repeat(entry_len));
+            let mapped = part_name_to_rels_path(&owner);
+            assert!(mapped.len() >= entry_len);
+            owner.truncate(owner.len() - (mapped.len() - entry_len));
+            assert_eq!(part_name_to_rels_path(&owner).len(), entry_len);
+            let mut candidate = read.clone();
+            candidate
+                .get_or_create_part_rels(&owner)
+                .add(rel_types::IMAGE, "../media/image1.png");
+            candidate
+        };
+        assert_rereads_as_written(&relationship(65_504), &read);
+        assert_rereads_as_written(&relationship(65_505), &read);
+
+        let mut invalid = ordinary(65_505);
+        let key = invalid
+            .parts
+            .keys()
+            .find(|name| {
+                name.strip_prefix('/')
+                    .is_some_and(|entry| entry.len() == 65_505)
+            })
+            .unwrap()
+            .clone();
+        invalid.content_types.add_override(&key, "application/xml");
+        invalid.set_part(&key, b"<\x01/>".to_vec());
+        assert_rereads_as_written(&invalid, &read);
+        let error = invalid.clone().reread(&read).unwrap_err().to_string();
+        assert!(error.contains("U+0001"), "{error}");
+        assert!(!error.contains("ZipLocalBlock"), "{error}");
+    }
+
+    #[test]
+    fn reread_matches_write_and_read() {
+        let read = read_pptx();
+        assert_rereads_as_written(&read, &read);
+        assert!(read.clone().reread(&read).unwrap().same_package_as(&read));
+
+        let mut edited = read.clone();
+        edited.set_part(
+            "/ppt/slides/slide1.xml",
+            b"<p:sld><p:cSld/></p:sld>".to_vec(),
+        );
+        edited.set_part("/ppt/slides/slide2.xml", b"<p:sld/>".to_vec());
+        edited
+            .content_types
+            .add_override("/ppt/slides/slide2.xml", crate::content_types::SLIDE);
+        edited
+            .get_or_create_part_rels("/ppt/presentation.xml")
+            .add(rel_types::SLIDE, "slides/slide2.xml");
+        edited
+            .get_or_create_part_rels("/ppt/slides/slide2.xml")
+            .add(rel_types::SLIDE_LAYOUT, "../slideLayouts/slideLayout1.xml");
+        edited.remove_part("/ppt/media/image1.png");
+        assert_rereads_as_written(&edited, &read);
+        let reread = edited.clone().reread(&read).unwrap();
+        for (name, data) in &edited.parts {
+            assert!(Arc::ptr_eq(data, &reread.parts[name]), "{name} was copied");
+        }
+
+        // Removing the highest identifier resets the counter a read sets.
+        let mut removed = read.clone();
+        let relationships = removed.get_part_rels_mut("/ppt/slides/slide1.xml").unwrap();
+        relationships.items.pop();
+        assert_rereads_as_written(&removed, &read);
+        let mut added_then_removed = read.clone();
+        let relationships = added_then_removed
+            .get_part_rels_mut("/ppt/slides/slide1.xml")
+            .unwrap();
+        relationships.add(rel_types::IMAGE, "../media/image9.png");
+        relationships.items.pop();
+        assert_rereads_as_written(&added_then_removed, &read);
+
+        let mut defaults = read.clone();
+        defaults.content_types.add_default("gif", "image/gif");
+        defaults.set_part("/ppt/media/image2.gif", vec![1]);
+        assert_rereads_as_written(&defaults, &read);
+
+        // Names a write would rename, or that the reader takes for a
+        // directory, go through the ZIP.
+        for name in [
+            "ppt/slides/slide3.xml",
+            "/ppt/./slides/slide3.xml",
+            "/ppt/x.rels",
+            "/ppt/b\\",
+        ] {
+            let mut renamed = read.clone();
+            renamed
+                .parts
+                .insert(name.to_owned(), Arc::new(b"<p:sld/>".to_vec()));
+            assert_rereads_as_written(&renamed, &read);
+        }
+        let mut owner = read.clone();
+        owner
+            .get_or_create_part_rels("ppt/slides/slide1.xml")
+            .add(rel_types::IMAGE, "../media/image1.png");
+        assert_rereads_as_written(&owner, &read);
+    }
+
+    #[test]
+    fn reread_raises_the_error_a_write_raises() {
+        // A root `.rels` entry reads as the relationships of owner "/",
+        // whose entry every write refuses as a second `_rels/.rels`.
+        let stray = OpcPackage::from_reader(package_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="a.xml"/></Relationships>"#,
+            ),
+            (
+                ".rels",
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+            ),
+            ("a.xml", b"<a/>"),
+        ]))
+        .unwrap();
+        assert!(stray.part_rels.contains_key("/"));
+        let mut edited = stray.clone();
+        edited.set_part("/a.xml", b"<a>edited</a>".to_vec());
+        assert_rereads_as_written(&edited, &stray);
+        assert!(matches!(
+            edited.reread(&stray),
+            Err(OpcError::DuplicatePartName(name)) if name == "_rels/.rels"
+        ));
+
+        let read = read_pptx();
+
+        let mut invalid = read.clone();
+        invalid.set_part("/ppt/slides/slide1.xml", b"<p:sld>\x01</p:sld>".to_vec());
+        assert_rereads_as_written(&invalid, &read);
+        assert!(matches!(
+            invalid.reread(&read),
+            Err(OpcError::InvalidXmlCharacter { .. })
+        ));
+
+        // A shared part becomes an XML entry when its content type changes.
+        let mut retyped = read.clone();
+        retyped
+            .content_types
+            .add_override("/ppt/data.bin", crate::content_types::SLIDE);
+        assert_rereads_as_written(&retyped, &read);
+        assert!(retyped.reread(&read).is_err());
+        let mut retyped = read.clone();
+        retyped
+            .content_types
+            .add_default("bin", "application/vnd.ms-office.activeX+xml");
+        assert_rereads_as_written(&retyped, &read);
+        assert!(retyped.reread(&read).is_err());
+
+        let mut duplicate = read.clone();
+        duplicate.parts.insert(
+            "/PPT/slides/slide1.xml".to_owned(),
+            Arc::new(b"<p:sld/>".to_vec()),
+        );
+        assert_rereads_as_written(&duplicate, &read);
+        let mut relationships = read.clone();
+        relationships
+            .get_part_rels_mut("/ppt/slides/slide1.xml")
+            .unwrap()
+            .add_with_id("rId1", rel_types::IMAGE, "x.png");
+        relationships
+            .get_part_rels_mut("/ppt/slides/slide1.xml")
+            .unwrap()
+            .items
+            .push(crate::relationship::Relationship {
+                id: "rId1".to_owned(),
+                rel_type: rel_types::IMAGE.to_owned(),
+                target: "y.png".to_owned(),
+                target_mode: None,
+            });
+        assert_rereads_as_written(&relationships, &read);
+    }
+
+    #[test]
+    fn part_lookups_match_names_by_normalized_identity() {
+        let mut package = OpcPackage::new();
+        package
+            .parts
+            .insert("/a/B.xml".to_owned(), Arc::new(vec![1]));
+        package
+            .parts
+            .insert("a/./c.xml".to_owned(), Arc::new(vec![2]));
+        package
+            .parts
+            .insert("/a//c.xml".to_owned(), Arc::new(vec![3]));
+        assert_eq!(package.get_part("/A/b.xml"), Some([1].as_slice()));
+        assert_eq!(package.get_part("/a/b/../B.xml"), Some([1].as_slice()));
+        assert_eq!(package.get_part("/a/c.xml"), Some([3].as_slice()));
+        assert_eq!(package.get_part("/a/d.xml"), None);
     }
 }

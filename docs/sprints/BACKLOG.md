@@ -39,9 +39,9 @@ regenerated, never hand-edited.
 | M21, Presentation depth | 15 | 15 | 0 | 0 |
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
-| M24, Modern DOCX authoring completeness | 54 | 29 | 0 | 25 |
-| X, Cross-cutting | 277 | 268 | 0 | 5 |
-| **Total** | **608** | **547** | **0** | **57** |
+| M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
+| X, Cross-cutting | 284 | 274 | 0 | 6 |
+| **Total** | **615** | **556** | **0** | **55** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -518,9 +518,9 @@ regenerated, never hand-edited.
 | F-285 | Content control creation and lifecycle | S95.3 | L | done |
 | F-286 | Rich, repeating, and typed content controls | S95.3 | L | done |
 | F-287 | Custom XML stores and data binding authoring | S95.3 | L | done |
-| F-288 | Legacy form field creation | S95.4 | M | pending |
-| F-289 | Modern Word form authoring | S95.4 | L | pending |
-| F-290 | Mail-merge package and data-source authoring | S95.4 | M | pending |
+| F-288 | Legacy form field creation | S95.4 | M | done |
+| F-289 | Modern Word form authoring | S95.4 | L | done |
+| F-290 | Mail-merge package and data-source authoring | S95.4 | M | done |
 | F-291 | Tracked insertion and deletion authoring | S97 | L | pending |
 | F-292 | Property revisions and move ranges | S97 | L | pending |
 | F-293 | Complete comments and modern comment metadata | S97 | L | pending |
@@ -832,4 +832,11 @@ HLD14 contract before adopting contributor changes.
 | F-X261 | Resolve Word package preservation and inspection contributions | S95.3 | L | done |
 | F-X262 | Resolve PowerPoint authoring and table-render contributions | S95.3 | L | done |
 | F-X263 | Prepare Word 0.16.3 and PowerPoint 0.14.3 patch releases | S95.3 | L | done |
+| F-X264 | Repair Word defaults package inspection and comment projection | S95.4 | L | done |
+| F-X265 | Preserve fragment relationship targets and duplicate styles | S95.4 | M | done |
+| F-X266 | Bound Word body reads and structural edit cost | S95.4 | L | done |
+| F-X267 | Bound PowerPoint mutation cost across public publishers | S95.4 | L | done |
+| F-X268 | Bound Word owner inventory and unchanged package staging | S95.4 | L | done |
+| F-X269 | Qualify PowerPoint shadow falloff and wipe paint domains | S96 | M | pending |
+| F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | S95.4 | L | done |
 <!-- AUTOGEN:backlog-MX END -->

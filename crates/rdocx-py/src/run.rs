@@ -102,8 +102,8 @@ impl PyRun {
             || paragraph_location(&self.path),
             |location| Ok(ParagraphLocation::Related(location.clone())),
         )?;
-        let location = paragraph
-            .native(candidate)
+        let location = document
+            .paragraph_route(&paragraph, Some((prepared, candidate)))
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
         let (path, owner) = document.capture_prepared_owner(
             prepared,
@@ -195,11 +195,31 @@ impl PyRun {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("run XML owner route is unsupported"))?;
-        let (location, path) = document.current_run_owner(owner)?;
-        let bytes = document
-            .inner
-            .run_element_xml(&location, &path)
-            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let (location, path) = document.current_run_owner(owner)?;
+            document
+                .inner
+                .run_element_xml(&location, &path)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))
+        };
+        // A run of a direct body paragraph serializes with that paragraph alone.
+        let bytes = match document
+            .direct_body_run_slot(owner)
+            .and_then(|(slot, path)| {
+                document
+                    .inner
+                    .direct_body_run_xml(slot, &path)
+                    .ok()
+                    .flatten()
+            }) {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "run");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
@@ -340,7 +360,7 @@ impl PyRun {
             },
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(result)
     }
 
@@ -410,7 +430,35 @@ impl PyRun {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
+        Ok(())
+    }
+
+    fn add_legacy_form_field(&self, py: Python<'_>, definition: &Bound<'_, PyAny>) -> PyResult<()> {
+        let definition = definition
+            .cast::<crate::document::PyLegacyFormFieldDefinition>()?
+            .borrow();
+        let field = definition.field();
+        let (location, _) = self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let mut candidate = document.inner.clone_for_staging();
+        location
+            .edit(&mut candidate, |paragraph| {
+                let mut added = Ok(());
+                paragraph.edit_run(&self.run_path, |run| {
+                    added = run.add_field_value(field);
+                })?;
+                added
+            })
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let prepared = document.prepare_word_revision(
+            py,
+            &candidate,
+            "Run.add_legacy_form_field",
+            crate::document::WordPublication::Conservative,
+        )?;
+        document.commit_word_revision(prepared)?;
+        document.install_inner(candidate);
         Ok(())
     }
 
@@ -429,7 +477,7 @@ impl PyRun {
             crate::document::WordPublication::Conservative,
         )?;
         document.commit_word_revision(prepared)?;
-        document.inner = candidate;
+        document.install_inner(candidate);
         Ok(())
     }
 

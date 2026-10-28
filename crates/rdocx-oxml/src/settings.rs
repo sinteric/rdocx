@@ -2760,7 +2760,8 @@ pub const SUPPORTED_SETTINGS: &[&str] = &[
 const SETTINGS_REPEATABLE: &[&[&str]] = &[&["docVars", "docVar"], &["compat", "compatSetting"]];
 
 /// `CT_MailMerge` child order, including the three preservation-only members.
-const MAIL_MERGE_ORDER: &[&[u8]] = &[
+#[doc(hidden)]
+pub const MAIL_MERGE_ORDER: &[&[u8]] = &[
     b"mainDocumentType",
     b"linkToQuery",
     b"dataType",
@@ -2778,6 +2779,23 @@ const MAIL_MERGE_ORDER: &[&[u8]] = &[
     b"checkErrors",
     b"odso",
 ];
+
+/// `CT_Odso` child order. `fieldMapData` children are `xs:all` and are not this table.
+#[doc(hidden)]
+pub const ODSO_ORDER: &[&[u8]] = &[
+    b"udl",
+    b"table",
+    b"src",
+    b"colDelim",
+    b"type",
+    b"fHdr",
+    b"fieldMapData",
+    b"recipientData",
+];
+
+/// `CT_RecipientData` child order.
+#[doc(hidden)]
+pub const RECIPIENT_DATA_ORDER: &[&[u8]] = &[b"active", b"column", b"uniqueTag"];
 
 /// The bounded `w:mailMerge` children this model authors, in schema order.
 pub const MAIL_MERGE_MEMBERS: &[&str] = &[

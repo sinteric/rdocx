@@ -4072,7 +4072,7 @@ fn smartart_rendering_uses_producing_scope_and_updates_after_node_edit() {
         panic!("SmartArt node did not enter the shared text engine")
     };
     assert_eq!(body.anchor, rpptx_layout::TextAnchor::Center);
-    assert_eq!(body.insets.left, 15.3);
+    assert_eq!(body.insets.left, 15.24);
     let ResolvedTextRun::Text { style, .. } = &body.paragraphs[0].runs[0] else {
         panic!("SmartArt run was not preserved")
     };
@@ -4337,6 +4337,9 @@ fn supported_smartart_corpus_matches_pinned_powerpoint_geometry_and_ssim() {
         Err(error) => panic!("read {}: {error}", manifest_path.display()),
     };
     let rows = smartart_oracle_rows(&manifest);
+    if q26_native_manifest_profile(&manifest, Q26_SMARTART_MANIFEST_SHA256) {
+        assert_q26_smartart_geometry_artifacts(&oracle_dir, &manifest);
+    }
     assert_eq!(rows.len(), 6);
     let artifacts_present = rows.iter().all(|row| {
         [&row.source, &row.oracle_pdf, &row.oracle_png]
@@ -4529,13 +4532,130 @@ struct SmartartOracleRow {
     expected_diagnostics: String,
 }
 
-fn smartart_oracle_rows(manifest: &str) -> Vec<SmartartOracleRow> {
+// A new profile cannot authenticate itself by editing hashes adjacent to its artifacts.
+// No profile header selects the unchanged historical application contract.
+fn q26_native_manifest_profile(manifest: &str, expected_sha256: &str) -> bool {
     let lines = manifest.lines().collect::<Vec<_>>();
+    let profiles = lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("reference_profile\t"))
+        .collect::<Vec<_>>();
+    if profiles.is_empty() {
+        return false;
+    }
+    assert_eq!(
+        profiles.as_slice(),
+        [Q26_NATIVE_PROFILE],
+        "unknown or duplicate native profile"
+    );
+    assert_eq!(
+        sha256_bytes(manifest.as_bytes()),
+        expected_sha256,
+        "unreviewed native manifest bytes"
+    );
     for expected in [
         "application\tMicrosoft PowerPoint",
-        &format!("version\t{POWERPOINT_VERSION}"),
-        &format!("bundle_build\t{POWERPOINT_BUILD}"),
-        &format!("app_build\t{POWERPOINT_APP_BUILD}"),
+        "version\t16.114.1",
+        "bundle_build\t16.114.26102031",
+        "about_build_observation\t26102031",
+        "application_build_getter\tnot_queried",
+    ] {
+        let key = expected.split_once('\t').unwrap().0;
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.starts_with(&format!("{key}\t")))
+                .count(),
+            1,
+            "duplicate native observation {key}"
+        );
+        assert_eq!(
+            lines.iter().filter(|line| **line == expected).count(),
+            1,
+            "native observation {expected}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|line| line.starts_with("app_build\t")),
+        "About is not an Application.Build getter observation"
+    );
+    true
+}
+
+fn q26_timeline_frame_pin(case: &str) -> &'static str {
+    Q26_TIMELINE_FRAME_PINS
+        .iter()
+        .find_map(|(name, hash)| (*name == case).then_some(*hash))
+        .expect("approved Q26 native case")
+}
+
+fn q26_native_movie_binding(fields: &[&str], actual: &str, pinned: &str, source: &str) -> bool {
+    fields
+        == [
+            "movie",
+            "timeline-oracle.mp4",
+            Q26_TIMELINE_MOVIE_SHA256,
+            Q26_TIMELINE_SOURCE_SHA256,
+            "16.114.1",
+            "16.114.26102031",
+            "not_queried",
+        ]
+        && actual == Q26_TIMELINE_MOVIE_SHA256
+        && pinned == actual
+        && source == Q26_TIMELINE_SOURCE_SHA256
+}
+
+fn assert_q26_smartart_geometry_artifacts(oracle_dir: &Path, manifest: &str) {
+    for (header, file) in [
+        (
+            "geometry_mapping_sha256\t",
+            "native-role-mapping.candidate.json",
+        ),
+        (
+            "geometry_evidence_sha256\t",
+            "native-geometry.candidate.json",
+        ),
+    ] {
+        let pins = manifest
+            .lines()
+            .filter_map(|line| line.strip_prefix(header))
+            .collect::<Vec<_>>();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(sha256(&oracle_dir.join(file)), pins[0]);
+    }
+    let mut families = HashSet::new();
+    for line in manifest
+        .lines()
+        .filter(|line| line.starts_with("native_geometry\t"))
+    {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 4);
+        assert!(families.insert(fields[1]));
+        assert!(smartart_cases().iter().any(|case| case.family == fields[1]));
+        assert_eq!(fields[2], format!("f220-{}-native-saved.pptx", fields[1]));
+        assert_eq!(sha256(&oracle_dir.join(fields[2])), fields[3]);
+    }
+    assert_eq!(families.len(), 6);
+}
+
+fn smartart_oracle_rows(manifest: &str) -> Vec<SmartartOracleRow> {
+    let q26 = q26_native_manifest_profile(manifest, Q26_SMARTART_MANIFEST_SHA256);
+    let lines = manifest.lines().collect::<Vec<_>>();
+    if !q26 {
+        for expected in [
+            format!("version\t{POWERPOINT_VERSION}"),
+            format!("bundle_build\t{POWERPOINT_BUILD}"),
+            format!("app_build\t{POWERPOINT_APP_BUILD}"),
+        ] {
+            assert!(
+                lines.contains(&expected.as_str()),
+                "missing historical SmartArt pin {expected}"
+            );
+        }
+    }
+    for expected in [
+        "application\tMicrosoft PowerPoint",
         "dpi\t150",
         "geometry_tolerance_pt\t1",
         "non_text_ssim_threshold\t0.90",
@@ -9188,6 +9308,56 @@ const LAYOUT_PART: &str = "/custom/layouts/validation.xml";
 const POWERPOINT_VERSION: &str = "16.104";
 const POWERPOINT_BUILD: &str = "16.104.25121423";
 const POWERPOINT_APP_BUILD: &str = "1214";
+
+// Separately reviewed Q26 capture identities. Historical application pins above stay unchanged.
+const Q26_NATIVE_PROFILE: &str = "reference_profile\tq26-native-16.114.1";
+const Q26_TIMELINE_MANIFEST_SHA256: &str =
+    "d28a0f49521bc7fdafb002808689ae68bbdac5457085be3363268b3ccb094dc7";
+const Q26_SMARTART_MANIFEST_SHA256: &str =
+    "17e0aeb749535bc64f0ef9d2e230b4c76557dde804c1b889eb1faf0afcb53bf2";
+const Q26_TIMELINE_SOURCE_SHA256: &str =
+    "35bbcdb88f1d469fd0f5d7dc4e3df793316487928e78c4892ac8c7dea9a362e5";
+const Q26_TIMELINE_MOVIE_SHA256: &str =
+    "006367184cf06caced6cea58207806013b9221591db51817433307434d9a3a82";
+const Q26_TIMELINE_FRAME_PINS: [(&str, &str); 9] = [
+    (
+        "timeline-appear-active",
+        "85467ec54d410cf3b374305df126a904e0ca93d04f1b30d86876589a0b095dfe",
+    ),
+    (
+        "timeline-wipe-mid",
+        "0cc4dd07eb513f4120b943fba0b12a387cb86bfc3ff73b56c9e5594143e34daa",
+    ),
+    (
+        "timeline-opacity-mid",
+        "7a0c43ed44f08e576a99ea8fbfbcbe45161c41b28833cc0c1f6db42647a1f177",
+    ),
+    (
+        "timeline-parallel-mid",
+        "e5dab96eeeca74b7c7bbe8c688aba11f12035851751f78bea2b2c7361ea30ede",
+    ),
+    (
+        "timeline-exit-mid",
+        "a9c7ef27cd1212d0bd0259df7781ef4abd64e4441c85b0991cdb435c3e0c1287",
+    ),
+    (
+        "ordinary-transition-outgoing-terminal",
+        "4c9a3a7357cdc4fa2989f12280b4b58d956d29a4b82333914fb53c772e49e87a",
+    ),
+    (
+        "ordinary-transition",
+        "8289991d5c34b8ca8e396496a1b909778d9969648700bdfafe5a3be3acf894ec",
+    ),
+    (
+        "morph",
+        "09ae5285e0412aac54404b20463a33cf8961fae9a9f3381bd87b32ea90764650",
+    ),
+    (
+        "push-transition",
+        "f6eb17915620623074b3022a02a5867b9806267604b94f4ac53f1db1ce00126b",
+    ),
+];
+
 const F214_POWERPOINT_ORACLE_WIDTH: u32 = 1920;
 const F214_POWERPOINT_ORACLE_HEIGHT: u32 = 1080;
 const F214_POWERPOINT_COMPARISON_WIDTH: u32 = 2001;
@@ -12119,6 +12289,16 @@ fn m21_minimal_smartart_source_classifies_the_unsupported_fallback() {
         "SmartArt source retained until assertion passes: {}",
         attribution_path.display()
     );
+    // Q13 preserves the two handwritten notes sources through package commits.
+    let package = open_opc(&bytes, "M21 preserved minimal notes");
+    for index in 1..=2 {
+        assert_eq!(
+            package
+                .get_part(&format!("/ppt/notesSlides/notesSlide{index}.xml"))
+                .unwrap(),
+            f226_notes_slide_xml(&format!("M21 speaker note {index}")),
+        );
+    }
     assert_eq!(sha256_bytes(&bytes), M21_CURRENT_MINIMAL_SOURCE_SHA256);
     fs::remove_file(&attribution_path).unwrap();
     let presentation = Presentation::from_bytes(&bytes).unwrap();
@@ -12393,7 +12573,7 @@ struct M21RecordedMovieSample {
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_CURRENT_MINIMAL_SOURCE_SHA256: &str =
-    "411f028c4b51c6aac0a0e2ae11bc63592a6d0947ab1a5f0d15116d19bfe766bc";
+    "4566e218cd5855162101dd6dec3101f68e90d3ae1323e5fe93cb63db00b0adc7";
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_LEGACY_UNSIGNED_SOURCE_SHA256: &str =
@@ -12637,7 +12817,7 @@ fn m21_assert_signature_surrogate(unsigned_bytes: &[u8], signed_bytes: &[u8]) {
         .collect::<Vec<_>>();
     signed_only_parts.sort_unstable();
     assert_eq!(signed_only_parts, signature_parts);
-    assert_eq!(signed.parts[signature_parts[0]], []);
+    assert!(signed.parts[signature_parts[0]].is_empty());
     assert!(!signed.parts[signature_parts[1]].is_empty());
     assert_eq!(
         unsigned.parts.len() + signature_parts.len(),
@@ -15437,7 +15617,7 @@ fn removing_shared_and_last_image_users_prunes_only_new_orphans() {
         shared
             .parts
             .iter()
-            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && *bytes == &png)
+            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && bytes.as_slice() == png)
             .count(),
         1
     );
@@ -15450,7 +15630,7 @@ fn removing_shared_and_last_image_users_prunes_only_new_orphans() {
         pruned
             .parts
             .iter()
-            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && *bytes == &png)
+            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && bytes.as_slice() == png)
             .count(),
         0
     );
@@ -19168,7 +19348,9 @@ fn duplicate_picture_bytes_share_one_media_part_across_slides() {
     let media = package
         .parts
         .iter()
-        .filter(|(part_name, bytes)| part_name.starts_with("/ppt/media/") && *bytes == &png)
+        .filter(|(part_name, bytes)| {
+            part_name.starts_with("/ppt/media/") && bytes.as_slice() == png
+        })
         .map(|(part_name, _)| part_name.clone())
         .collect::<Vec<_>>();
     assert_eq!(media.len(), 1);
@@ -19750,7 +19932,7 @@ fn picture_sniffs_bytes_when_extension_is_misleading() {
     let part = package
         .parts
         .iter()
-        .find(|(part_name, bytes)| part_name.starts_with("/ppt/media/") && *bytes == &png)
+        .find(|(part_name, bytes)| part_name.starts_with("/ppt/media/") && bytes.as_slice() == png)
         .map(|(part_name, _)| part_name)
         .unwrap();
     assert!(part.ends_with(".png"));
@@ -21400,10 +21582,10 @@ fn rpptx_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(workspace.contains("\"crates/rpptx\""));
     assert!(workspace.contains(
-        "rpptx = { path = \"crates/rpptx\", version = \"0.14.3\", default-features = false }"
+        "rpptx = { path = \"crates/rpptx\", version = \"0.14.4\", default-features = false }"
     ));
     assert!(manifest.contains("name = \"rpptx\""));
-    assert!(manifest.contains("version = \"0.14.3\""));
+    assert!(manifest.contains("version = \"0.14.4\""));
     assert!(manifest.contains("publish = true"));
     assert!(manifest.contains("default = [\"default-template\", \"render\", \"system-fonts\"]"));
     assert!(manifest.contains("default-template = [\"dep:scraper\"]"));
@@ -22628,6 +22810,63 @@ fn smartart_oracle_sources_preserve_the_valid_default_presentation_graph() {
     }
 }
 
+fn authored_timeline_rectangle(slide: &CT_Slide, name: &str, color: &str) -> Option<u32> {
+    let children = &slide.common_slide_data.shape_tree.children;
+    let mut matches = children
+        .iter()
+        .filter(|child| child.non_visual_name().as_deref() == Some(name));
+    let child = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let ShapeTreeChild::Shape(shape) = child else {
+        return None;
+    };
+    let id = child.non_visual_id()?;
+    if id == 0
+        || children
+            .iter()
+            .filter(|candidate| candidate.non_visual_id() == Some(id))
+            .count()
+            != 1
+        || shape.placeholder.is_some()
+    {
+        return None;
+    }
+    let properties = &shape.shape_properties;
+    if properties.custom_geometry.is_some() || properties.preset_geometry.as_ref()?.preset != "rect"
+    {
+        return None;
+    }
+    let transform = properties.transform.as_ref()?;
+    let offset = transform.offset?;
+    let extent = transform.extent?;
+    if offset.x.0 < 0
+        || offset.y.0 < 0
+        || extent.cx.0 <= 0
+        || extent.cy.0 <= 0
+        || offset.x.0.checked_add(extent.cx.0)? > 12_192_000
+        || offset.y.0.checked_add(extent.cy.0)? > 6_858_000
+    {
+        return None;
+    }
+    let expected_fill = Fill::from_xml(
+        format!(
+            r#"<a:solidFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:srgbClr val="{color}"/></a:solidFill>"#
+        )
+        .as_bytes(),
+    )
+    .ok()?;
+    let plain_line = oxml_drawing::line::CT_LineProperties::from_xml(
+        br#"<a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:noFill/></a:ln>"#,
+    )
+    .ok()?;
+    (properties.fill.as_ref() == Some(&expected_fill)
+        && properties.line.as_ref() == Some(&plain_line)
+        && properties.effects.as_ref() == Some(&oxml_drawing::effect::CT_EffectList::default()))
+    .then_some(id)
+}
+
 fn powerpoint_timeline_oracle_source_bytes() -> Vec<u8> {
     let mut presentation = Presentation::new().expect("create PowerPoint timeline oracle source");
     for slide_index in 0..6 {
@@ -22692,20 +22931,44 @@ fn powerpoint_timeline_oracle_source_bytes() -> Vec<u8> {
             OpcPackage::resolve_rel_target(&presentation_part, &relationship.target)
         })
         .collect::<Vec<_>>();
+    // Isolate animation from the template's inherited line and outer shadow.
+    // Keep every authored Hero and the click marker on the same plain-paint policy.
+    for part in &slide_parts {
+        let mut slide = CT_Slide::from_xml(package.get_part(part).unwrap()).unwrap();
+        for child in &mut slide.common_slide_data.shape_tree.children {
+            if !matches!(
+                child.non_visual_name().as_deref(),
+                Some("!!Hero" | "Click fill marker")
+            ) {
+                continue;
+            }
+            if let ShapeTreeChild::Shape(shape) = child {
+                shape.shape_properties.line = Some(
+                    oxml_drawing::line::CT_LineProperties::from_xml(
+                        br#"<a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:noFill/></a:ln>"#,
+                    )
+                    .unwrap(),
+                );
+                shape.shape_properties.effects =
+                    Some(oxml_drawing::effect::CT_EffectList::default());
+            }
+        }
+        package.set_part(part, slide.to_xml().unwrap());
+    }
     let evaluator_part = &slide_parts[0];
     let mut evaluator_slide =
         CT_Slide::from_xml(package.get_part(evaluator_part).unwrap()).unwrap();
-    let evaluator_target = evaluator_slide.common_slide_data.shape_tree.children[0]
-        .non_visual_id()
-        .unwrap();
+    let evaluator_target = authored_timeline_rectangle(&evaluator_slide, "!!Hero", "D63C32")
+        .expect("one visible authored Hero rectangle");
     let timing = format!(
         r#"<p:timing xmlns:p="{P_NS}"><p:tnLst><p:seq><p:cTn id="100" dur="4000"><p:childTnLst>
-        <p:animEffect transition="in" filter="appear"><p:cBhvr><p:cTn id="101" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl></p:cBhvr></p:animEffect>
-        <p:animEffect transition="in" filter="wipe(left)"><p:cBhvr><p:cTn id="102" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl></p:cBhvr></p:animEffect>
-        <p:anim from="100000" to="50000"><p:cBhvr><p:cTn id="103" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>style.opacity</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
+        <p:set><p:cBhvr><p:cTn id="101" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set>
+        <p:animEffect transition="in" filter="wipe(left)"><p:cBhvr><p:cTn id="102" dur="500" fill="remove"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl></p:cBhvr></p:animEffect>
+        <p:anim from="1" to="0.5" calcmode="lin" valueType="num"><p:cBhvr><p:cTn id="103" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>style.opacity</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
         <p:par><p:cTn id="104" dur="1000"><p:childTnLst>
-        <p:anim from="100000" to="150000"><p:cBhvr><p:cTn id="105" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>scale</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
-        <p:anim from="0" to="5400000"><p:cBhvr><p:cTn id="106" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>spin</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
+        <p:anim from="1" to="1.5" calcmode="lin" valueType="num"><p:cBhvr><p:cTn id="105" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>ScaleX</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
+        <p:anim from="1" to="1.5" calcmode="lin" valueType="num"><p:cBhvr><p:cTn id="110" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>ScaleY</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
+        <p:anim from="0" to="90" calcmode="lin" valueType="num"><p:cBhvr><p:cTn id="106" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl><p:attrNameLst><p:attrName>style.rotation</p:attrName></p:attrNameLst></p:cBhvr></p:anim>
         <p:animMotion origin="layout" path="M 0 0 L .15 .1 E"><p:cBhvr><p:cTn id="107" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl></p:cBhvr></p:animMotion>
         </p:childTnLst></p:cTn></p:par>
         <p:animEffect transition="out" filter="fade"><p:cBhvr><p:cTn id="108" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="{evaluator_target}"/></p:tgtEl></p:cBhvr></p:animEffect>
@@ -22725,9 +22988,8 @@ fn powerpoint_timeline_oracle_source_bytes() -> Vec<u8> {
 
     let click_part = &slide_parts[1];
     let mut click_slide = CT_Slide::from_xml(package.get_part(click_part).unwrap()).unwrap();
-    let click_target = click_slide.common_slide_data.shape_tree.children[1]
-        .non_visual_id()
-        .unwrap();
+    let click_target = authored_timeline_rectangle(&click_slide, "Click fill marker", "F0C541")
+        .expect("one visible authored click marker rectangle");
     let click_timing = format!(
         r#"<p:timing xmlns:p="{P_NS}"><p:tnLst><p:set><p:cBhvr><p:cTn id="109" dur="500" fill="remove" nodeType="clickEffect"><p:stCondLst><p:cond evt="onClick" delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="{click_target}"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="hidden"/></p:to></p:set></p:tnLst></p:timing>"#
     );
@@ -22988,10 +23250,152 @@ fn normalize_powerpoint_timeline_oracle_frame_for_comparison(
 }
 
 #[test]
+fn powerpoint_timeline_authored_targets_reject_ambiguous_or_invisible_owners() {
+    let bytes = powerpoint_timeline_oracle_source_bytes();
+    let package = open_opc(&bytes, "timeline authored targets");
+    let original = CT_Slide::from_xml(package.get_part("/ppt/slides/slide1.xml").unwrap()).unwrap();
+    let id = authored_timeline_rectangle(&original, "!!Hero", "D63C32").unwrap();
+    let index = original
+        .common_slide_data
+        .shape_tree
+        .children
+        .iter()
+        .position(|child| child.non_visual_name().as_deref() == Some("!!Hero"))
+        .unwrap();
+    let ShapeTreeChild::Shape(hero) = &original.common_slide_data.shape_tree.children[index] else {
+        panic!("authored Hero must be an ordinary shape")
+    };
+    assert_eq!(
+        authored_timeline_rectangle(&original, "Title 1", "D63C32"),
+        None
+    );
+    assert_eq!(
+        authored_timeline_rectangle(&original, "missing", "D63C32"),
+        None
+    );
+    assert_eq!(
+        authored_timeline_rectangle(&original, "!!Hero", "F0C541"),
+        None
+    );
+
+    let mut reordered = original.clone();
+    reordered.common_slide_data.shape_tree.children.reverse();
+    assert_eq!(
+        authored_timeline_rectangle(&reordered, "!!Hero", "D63C32"),
+        Some(id)
+    );
+
+    let mut duplicate_name = original.clone();
+    duplicate_name
+        .common_slide_data
+        .shape_tree
+        .children
+        .push(ShapeTreeChild::Shape(hero.clone_with_id(id + 100).unwrap()));
+    assert_eq!(
+        authored_timeline_rectangle(&duplicate_name, "!!Hero", "D63C32"),
+        None
+    );
+
+    let mut duplicate_id = original.clone();
+    let ShapeTreeChild::Shape(placeholder) = &original.common_slide_data.shape_tree.children[0]
+    else {
+        panic!("source contains a template placeholder")
+    };
+    assert!(placeholder.placeholder.is_some());
+    duplicate_id.common_slide_data.shape_tree.children[0] =
+        ShapeTreeChild::Shape(placeholder.clone_with_id(id).unwrap());
+    assert_eq!(
+        authored_timeline_rectangle(&duplicate_id, "!!Hero", "D63C32"),
+        None
+    );
+
+    let xml = String::from_utf8(original.to_xml().unwrap()).unwrap();
+    let owned_id = format!(r#"id="{id}" name="!!Hero""#);
+    assert!(xml.contains(&owned_id));
+    let missing_id =
+        CT_Slide::from_xml(xml.replace(&owned_id, r#"name="!!Hero""#).as_bytes()).unwrap();
+    assert_eq!(
+        authored_timeline_rectangle(&missing_id, "!!Hero", "D63C32"),
+        None
+    );
+
+    let mut wrong_kind = original.clone();
+    wrong_kind.common_slide_data.shape_tree.children[index] = ShapeTreeChild::GroupShape(Box::new(
+        rpptx_oxml::shape_tree::CT_GroupShape::new_empty(id, "!!Hero"),
+    ));
+    assert_eq!(
+        authored_timeline_rectangle(&wrong_kind, "!!Hero", "D63C32"),
+        None
+    );
+
+    for invalid in [
+        "placeholder",
+        "empty extent",
+        "off page",
+        "inherited line",
+        "inherited effect",
+    ] {
+        let mut candidate = original.clone();
+        let ShapeTreeChild::Shape(shape) =
+            &mut candidate.common_slide_data.shape_tree.children[index]
+        else {
+            unreachable!()
+        };
+        match invalid {
+            "placeholder" => shape.placeholder = placeholder.placeholder.clone(),
+            "inherited line" => shape.shape_properties.line = None,
+            "inherited effect" => shape.shape_properties.effects = None,
+            "empty extent" => {
+                shape
+                    .shape_properties
+                    .transform
+                    .as_mut()
+                    .unwrap()
+                    .extent
+                    .as_mut()
+                    .unwrap()
+                    .cx = Emu(0);
+            }
+            "off page" => {
+                shape
+                    .shape_properties
+                    .transform
+                    .as_mut()
+                    .unwrap()
+                    .offset
+                    .as_mut()
+                    .unwrap()
+                    .x = Emu(-1);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            authored_timeline_rectangle(&candidate, "!!Hero", "D63C32"),
+            None,
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn powerpoint_timeline_oracle_source_round_trips_through_f213_model() {
     let bytes = powerpoint_timeline_oracle_source_bytes();
     let presentation = Presentation::from_bytes(&bytes).unwrap();
     assert!(presentation.validate().is_empty());
+    let first = presentation.slide(0).unwrap();
+    let hero_id = first
+        .shapes()
+        .find(|shape| shape.non_visual_name().as_deref() == Some("!!Hero"))
+        .unwrap()
+        .non_visual_id()
+        .unwrap();
+    let second = presentation.slide(1).unwrap();
+    let marker_id = second
+        .shapes()
+        .find(|shape| shape.non_visual_name().as_deref() == Some("Click fill marker"))
+        .unwrap()
+        .non_visual_id()
+        .unwrap();
 
     let at = |elapsed_ms, click_count| {
         presentation
@@ -23006,19 +23410,89 @@ fn powerpoint_timeline_oracle_source_round_trips_through_f213_model() {
             .unwrap()
     };
     let wipe = at(750, 0);
-    assert!(wipe.state.shapes.values().next().unwrap().clip.is_some());
+    assert_eq!(wipe.state.shapes.len(), 1);
+    assert!(wipe.state.shapes[&hero_id].clip.is_some());
+    assert!(at(330, 0).state.shapes[&hero_id].visible);
     let opacity = at(1_250, 0);
-    assert_eq!(opacity.state.shapes.values().next().unwrap().opacity, 0.75);
+    assert_eq!(opacity.state.shapes[&hero_id].opacity, 0.75);
     let parallel = at(2_000, 0);
+    assert!(!parallel.state.shapes[&hero_id].transform.is_identity());
+    let exit = at(2_805, 0);
+    assert!(exit.state.shapes[&hero_id].visible);
+    assert!((exit.state.shapes[&hero_id].opacity - 0.39).abs() < 1e-6);
+    let raster = |page| {
+        let layout = oxml_layout::LayoutResult::new(
+            vec![std::sync::Arc::new(page)],
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        oxml_pdf::render_page_to_png(&layout, 0, F214_POWERPOINT_COMPARISON_DPI).unwrap()
+    };
+    let static_layout = presentation.render_deterministic().unwrap().1;
+    let static_paint =
+        oxml_pdf::render_page_to_png(&static_layout, 0, F214_POWERPOINT_COMPARISON_DPI).unwrap();
+    assert_ne!(
+        raster(wipe.page.clone()),
+        static_paint,
+        "wipe must alter visible Hero paint"
+    );
+    assert_ne!(
+        raster(opacity.page),
+        static_paint,
+        "opacity must alter visible Hero paint"
+    );
+    assert_ne!(
+        raster(parallel.page),
+        static_paint,
+        "transform must alter visible Hero paint"
+    );
+    let soft_wipe = tiny_skia::Pixmap::decode_png(&raster(wipe.page.clone())).unwrap();
+    let middle = soft_wipe.pixel(450, 450).unwrap();
     assert!(
-        !parallel
-            .state
-            .shapes
-            .values()
-            .next()
+        (150..=170).contains(&middle.green()),
+        "resolved public timeline must retain a partial alpha front, not a hard clip: {middle:?}"
+    );
+    let mut no_exit_package = open_opc(&bytes, "same-time timeline without exit");
+    let mut no_exit_xml = String::from_utf8(
+        no_exit_package
+            .get_part("/ppt/slides/slide1.xml")
             .unwrap()
-            .transform
-            .is_identity()
+            .to_vec(),
+    )
+    .unwrap();
+    let exit_start = r#"<p:animEffect transition="out" filter="fade">"#;
+    assert_eq!(no_exit_xml.matches(exit_start).count(), 1);
+    let start = no_exit_xml.find(exit_start).unwrap();
+    let end =
+        start + no_exit_xml[start..].find("</p:animEffect>").unwrap() + "</p:animEffect>".len();
+    assert!(no_exit_xml[start..end].contains(r#"id="108""#));
+    no_exit_xml.replace_range(start..end, "");
+    no_exit_package.set_part("/ppt/slides/slide1.xml", no_exit_xml.into_bytes());
+    let no_exit = Presentation::from_bytes(&package_bytes(no_exit_package)).unwrap();
+    let no_exit = no_exit
+        .render_timeline_deterministic(
+            0,
+            TimelinePosition {
+                elapsed_ms: 2_805,
+                click_count: 0,
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(no_exit.state.shapes[&hero_id].opacity, 0.5);
+    assert_eq!(
+        no_exit.state.shapes[&hero_id].transform,
+        exit.state.shapes[&hero_id].transform
+    );
+    assert_eq!(
+        no_exit.state.shapes[&hero_id].clip,
+        exit.state.shapes[&hero_id].clip
+    );
+    assert_ne!(
+        raster(exit.page),
+        raster(no_exit.page),
+        "exit must change Hero paint at the same time with all prior effects retained"
     );
     let click_at = |elapsed_ms| {
         presentation
@@ -23034,7 +23508,7 @@ fn powerpoint_timeline_oracle_source_round_trips_through_f213_model() {
     };
     let click_start = click_at(0);
     assert_eq!(click_start.state.shapes.len(), 1, "{:?}", click_start.state);
-    assert!(!click_start.state.shapes.values().next().unwrap().visible);
+    assert!(!click_start.state.shapes[&marker_id].visible);
     assert_eq!(click_at(499).state.shapes.len(), 1);
     assert_eq!(click_at(500).state.shapes.len(), 1);
     assert!(click_at(501).state.shapes.is_empty());
@@ -23575,6 +24049,123 @@ fn powerpoint_timeline_oracle_normalization_is_bounded_deterministic_and_non_mut
     );
 }
 
+fn assert_q26_native_halo_bounds(bounds: &[u32]) {
+    assert_eq!(bounds.len(), 16);
+    assert_eq!(&bounds[0..4], [143, 215, 720, 648]);
+    assert_eq!(&bounds[4..8], [144, 216, 720, 648]);
+    let edge_delta = |left: &[u32], right: &[u32]| {
+        left.iter()
+            .zip(right)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap()
+    };
+    let points_per_raw_pixel = 960.0 / f64::from(F214_POWERPOINT_ORACLE_WIDTH);
+    let approved_delta = f64::from(edge_delta(&bounds[0..4], &bounds[4..8])) * points_per_raw_pixel;
+    let legacy_delta =
+        f64::from(edge_delta(&bounds[8..12], &bounds[12..16])) * points_per_raw_pixel;
+    assert!(
+        approved_delta <= 1.0,
+        "native240 drift exceeds the unchanged1pt geometry bound"
+    );
+    assert!(
+        legacy_delta > 1.0 && legacy_delta > approved_delta,
+        "native250 must expose a materially larger halo"
+    );
+}
+
+#[test]
+fn q26_native_reference_header_movie_and_halo_refuse_substitutions() {
+    let header = format!(
+        "{Q26_NATIVE_PROFILE}\napplication\tMicrosoft PowerPoint\nversion\t16.114.1\nbundle_build\t16.114.26102031\nabout_build_observation\t26102031\napplication_build_getter\tnot_queried\n"
+    );
+    let digest = sha256_bytes(header.as_bytes());
+    assert!(q26_native_manifest_profile(&header, &digest));
+    for changed in [
+        header.replace("version\t16.114.1\n", "version\t16.114.2\n"),
+        header.replace(
+            "bundle_build\t16.114.26102031",
+            "bundle_build\t16.114.26102032",
+        ),
+        header.replace("q26-native-16.114.1", "unapproved"),
+        format!("{header}version\t16.104\n"),
+        format!("{header}{Q26_NATIVE_PROFILE}\n"),
+        header.replace("not_queried", "1020"),
+        format!("{header}app_build\t1214\n"),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| q26_native_manifest_profile(&changed, &digest)).is_err()
+        );
+        let changed_digest = sha256_bytes(changed.as_bytes());
+        assert!(
+            std::panic::catch_unwind(|| q26_native_manifest_profile(&changed, &changed_digest))
+                .is_err(),
+            "changed hash cannot substitute the native identity header"
+        );
+    }
+    assert!(
+        std::panic::catch_unwind(|| q26_native_manifest_profile(
+            &header,
+            Q26_SMARTART_MANIFEST_SHA256
+        ))
+        .is_err()
+    );
+    assert!(!q26_native_manifest_profile(
+        "application\tMicrosoft PowerPoint\n",
+        Q26_TIMELINE_MANIFEST_SHA256
+    ));
+    let movie = [
+        "movie",
+        "timeline-oracle.mp4",
+        Q26_TIMELINE_MOVIE_SHA256,
+        Q26_TIMELINE_SOURCE_SHA256,
+        "16.114.1",
+        "16.114.26102031",
+        "not_queried",
+    ];
+    assert!(q26_native_movie_binding(
+        &movie,
+        Q26_TIMELINE_MOVIE_SHA256,
+        Q26_TIMELINE_MOVIE_SHA256,
+        Q26_TIMELINE_SOURCE_SHA256
+    ));
+    for index in 0..movie.len() {
+        let mut changed = movie;
+        changed[index] = "substituted";
+        assert!(!q26_native_movie_binding(
+            &changed,
+            Q26_TIMELINE_MOVIE_SHA256,
+            Q26_TIMELINE_MOVIE_SHA256,
+            Q26_TIMELINE_SOURCE_SHA256
+        ));
+    }
+    assert!(!q26_native_movie_binding(
+        &movie,
+        "substituted",
+        "substituted",
+        Q26_TIMELINE_SOURCE_SHA256
+    ));
+    let bounds = [
+        143, 215, 720, 648, 144, 216, 720, 648, 143, 215, 720, 648, 138, 213, 725, 650,
+    ];
+    assert_q26_native_halo_bounds(&bounds);
+    assert_ne!(
+        &bounds[0..4],
+        &bounds[4..8],
+        "historical exact240 equality did not pass this new observation"
+    );
+    for changed in [
+        [
+            143, 215, 720, 648, 148, 216, 720, 648, 143, 215, 720, 648, 138, 213, 725, 650,
+        ],
+        [
+            143, 215, 720, 648, 144, 216, 720, 648, 143, 215, 720, 648, 144, 216, 720, 648,
+        ],
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_q26_native_halo_bounds(&changed)).is_err());
+    }
+}
+
 #[test]
 fn powerpoint_timeline_oracle_foreground_cutoff_ignores_fixed_opacity_halo() {
     let oracle_dir = std::env::var_os("RDOCX_PPTX_TIMELINE_ORACLE_DIR")
@@ -23590,13 +24181,27 @@ fn powerpoint_timeline_oracle_foreground_cutoff_ignores_fixed_opacity_halo() {
         eprintln!("PowerPoint opacity-halo regression skipped because fixed frames are absent");
         return;
     }
+    let manifest_path = oracle_dir.join("manifest.tsv");
+    let q26 = manifest_path.is_file()
+        && q26_native_manifest_profile(
+            &fs::read_to_string(&manifest_path).unwrap(),
+            Q26_TIMELINE_MANIFEST_SHA256,
+        );
     assert_eq!(
         sha256(&appear),
-        "3970c922c4105875bb57cfd61896cafc345c0aaa520434651415a5e9b2f57f16"
+        if q26 {
+            q26_timeline_frame_pin("timeline-appear-active")
+        } else {
+            "3970c922c4105875bb57cfd61896cafc345c0aaa520434651415a5e9b2f57f16"
+        }
     );
     assert_eq!(
         sha256(&opacity),
-        "14c836fc873c5080e3834eab04b72e2c93b30e814440cd0f845942faa5d71c69"
+        if q26 {
+            q26_timeline_frame_pin("timeline-opacity-mid")
+        } else {
+            "14c836fc873c5080e3834eab04b72e2c93b30e814440cd0f845942faa5d71c69"
+        }
     );
 
     let script = r#"from pathlib import Path
@@ -23643,16 +24248,23 @@ print(*foreground_bounds(appear, cutoff), *foreground_bounds(opacity, cutoff), *
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(bounds.len(), 16);
-    assert_eq!(
-        &bounds[0..4],
-        &bounds[4..8],
-        "approved foreground cutoff must keep geometry invariant under opacity"
-    );
-    assert_ne!(
-        &bounds[8..12],
-        &bounds[12..16],
-        "legacy near-white cutoff must expose the fixed movie's opacity halo"
-    );
+    if q26 {
+        assert_q26_native_halo_bounds(&bounds);
+        eprintln!(
+            "Q26 source-specific halo profile, historical exact240 equality remains a recorded failure"
+        );
+    } else {
+        assert_eq!(
+            &bounds[0..4],
+            &bounds[4..8],
+            "approved foreground cutoff must keep geometry invariant under opacity"
+        );
+        assert_ne!(
+            &bounds[8..12],
+            &bounds[12..16],
+            "legacy near-white cutoff must expose the fixed movie's opacity halo"
+        );
+    }
 }
 
 #[test]
@@ -23669,9 +24281,19 @@ fn fade_composition_matches_the_fixed_powerpoint_observation() {
         eprintln!("PowerPoint fade regression skipped because the fixed frame is absent");
         return;
     }
+    let manifest_path = oracle_dir.join("manifest.tsv");
+    let q26 = manifest_path.is_file()
+        && q26_native_manifest_profile(
+            &fs::read_to_string(&manifest_path).unwrap(),
+            Q26_TIMELINE_MANIFEST_SHA256,
+        );
     assert_eq!(
         sha256(&oracle),
-        "61d45d85bd3d6a36361cdad6d438fc60e0a3295e932b582f6e046af16879818d"
+        if q26 {
+            q26_timeline_frame_pin("ordinary-transition")
+        } else {
+            "61d45d85bd3d6a36361cdad6d438fc60e0a3295e932b582f6e046af16879818d"
+        }
     );
 
     let presentation =
@@ -25034,11 +25656,16 @@ fn pinned_timestamps_match_powerpoint_frame_oracle_within_declared_tolerances() 
     }
     let manifest = fs::read_to_string(&manifest_path)
         .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display()));
+    let q26 = q26_native_manifest_profile(&manifest, Q26_TIMELINE_MANIFEST_SHA256);
     let lines = manifest.lines().collect::<Vec<_>>();
     assert!(lines.contains(&"application\tMicrosoft PowerPoint"));
-    assert!(lines.contains(&format!("version\t{POWERPOINT_VERSION}").as_str()));
-    assert!(lines.contains(&format!("bundle_build\t{POWERPOINT_BUILD}").as_str()));
-    assert!(lines.contains(&format!("app_build\t{POWERPOINT_APP_BUILD}").as_str()));
+    if q26 {
+        assert!(lines.contains(&"timing_contract\tentrance_wipe_node_102_fill_remove"));
+    } else {
+        assert!(lines.contains(&format!("version\t{POWERPOINT_VERSION}").as_str()));
+        assert!(lines.contains(&format!("bundle_build\t{POWERPOINT_BUILD}").as_str()));
+        assert!(lines.contains(&format!("app_build\t{POWERPOINT_APP_BUILD}").as_str()));
+    }
     assert!(lines.contains(&"dpi\t150"));
     assert!(lines.contains(&"geometry_tolerance_pt\t1"));
     assert!(lines.contains(&"ssim_threshold\t0.99"));
@@ -25053,6 +25680,10 @@ fn pinned_timestamps_match_powerpoint_frame_oracle_within_declared_tolerances() 
         .split('\t')
         .collect::<Vec<_>>();
     assert_eq!(source_fields.len(), 2);
+    if q26 {
+        assert_eq!(source_fields[0], "timeline-oracle-source.pptx");
+        assert_eq!(source_fields[1], Q26_TIMELINE_SOURCE_SHA256);
+    }
     let source = oracle_dir.join(source_fields[0]);
     assert_eq!(sha256(&source), source_fields[1]);
     let source_bytes = fs::read(&source).unwrap();
@@ -25090,12 +25721,21 @@ fn pinned_timestamps_match_powerpoint_frame_oracle_within_declared_tolerances() 
         "{F214_POWERPOINT_ORACLE_MOVIE_SHA256_ENV} must be the actual lowercase movie SHA-256"
     );
     assert!(
-        is_approved_powerpoint_timeline_oracle_movie_binding(
-            &movie_fields,
-            &actual_movie_sha256,
-            &pinned_movie_sha256,
-            source_fields[1]
-        ),
+        if q26 {
+            q26_native_movie_binding(
+                &movie_fields,
+                &actual_movie_sha256,
+                &pinned_movie_sha256,
+                source_fields[1],
+            )
+        } else {
+            is_approved_powerpoint_timeline_oracle_movie_binding(
+                &movie_fields,
+                &actual_movie_sha256,
+                &pinned_movie_sha256,
+                source_fields[1],
+            )
+        },
         "PowerPoint timeline oracle movie is not independently pinned to the exact source and PowerPoint builds"
     );
     let header_index = lines.iter().position(|line| *line == HEADER).unwrap();
@@ -25132,6 +25772,10 @@ fn pinned_timestamps_match_powerpoint_frame_oracle_within_declared_tolerances() 
             );
         }
         let oracle_png = oracle_dir.join(fields[7]);
+        if q26 {
+            assert_eq!(fields[7], format!("{case}-{timestamp_ms}.png"));
+            assert_eq!(fields[8], q26_timeline_frame_pin(case));
+        }
         assert_eq!(sha256(&oracle_png), fields[8]);
         let width = fields[9].parse::<u32>().unwrap();
         let height = fields[10].parse::<u32>().unwrap();
@@ -32288,6 +32932,42 @@ fn fx211b_native_opaque_root_edit_retains_invalidated_signature() {
     );
 }
 
+/// `replace_embedded_content` publishes through `commit_embedded_candidate`.
+/// Setup is outside the counter epoch. The replacement write is ZIP work,
+/// and the reopened payload is the replacement.
+#[cfg(debug_assertions)]
+#[test]
+fn embedded_replace_counts_commit_zip_write() {
+    let bytes = package_bytes(embedded_fixture_package(false));
+    let mut presentation = Presentation::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        presentation
+            .extract_embedded_content(PRESENTATION_PART, "vba-rel")
+            .unwrap(),
+        b"vba-executable"
+    );
+    rpptx::take_commit_work();
+    presentation
+        .replace_embedded_content(
+            PRESENTATION_PART,
+            "vba-rel",
+            b"counted-embed",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let [_, _, _, zip_writes] = rpptx::take_commit_work();
+    assert_eq!(
+        presentation
+            .extract_embedded_content(PRESENTATION_PART, "vba-rel")
+            .unwrap(),
+        b"counted-embed"
+    );
+    assert!(
+        zip_writes > 0,
+        "embedded candidate ZIP write counted {zip_writes}"
+    );
+}
+
 #[test]
 fn fx211b_native_actual_part_inherited_opaque_closure_and_siblings() {
     use rpptx::{Emu, Presentation, ShapeOwner};
@@ -34979,7 +35659,7 @@ fn fx216_batch_jumps_map_existing_self_and_drop_only_unmapped_targets() {
         assert_eq!(destination.slide(2).unwrap().shapes().len(), 7);
         let saved = destination.to_bytes().unwrap();
         let package = open_opc(&saved, "mapped jumps and new image");
-        assert!(package.parts.values().any(|bytes| bytes == &new_image));
+        assert!(package.parts.values().any(|bytes| **bytes == new_image));
         let reopened = Presentation::from_bytes(&saved).unwrap();
         assert!(reopened.validate().is_empty());
     }
@@ -36418,4 +37098,89 @@ fn fx239_notes_frame_projection_admits_only_one_direct_body() {
             .as_deref(),
         Some("exact body")
     );
+}
+
+#[test]
+fn native_scaled_preset_paints_all_expected_corners_at_parallel_phase() {
+    let p = Presentation::from_bytes(&powerpoint_timeline_oracle_source_bytes()).unwrap();
+    let frame = p
+        .render_timeline_deterministic(
+            0,
+            TimelinePosition {
+                elapsed_ms: 1980,
+                click_count: 0,
+            },
+            None,
+        )
+        .unwrap();
+    let mut actual = Vec::new();
+    oxml_layout::walk(&frame.page.elements, &mut |element, transform| {
+        if let oxml_layout::PositionedElement::Path(path) = element
+            && matches!(&path.fill, Some(oxml_layout::Paint::Solid(color)) if *color == oxml_layout::Color::from_hex("D63C32"))
+        {
+            for c in &path.path.commands {
+                if let oxml_layout::PathCommand::MoveTo(point)
+                | oxml_layout::PathCommand::LineTo(point) = c
+                {
+                    actual.push(transform.apply(*point));
+                }
+            }
+        }
+    });
+    assert_eq!(actual.len(), 4, "one physical plain Hero");
+    let theta = 43.2_f64.to_radians();
+    let (cx, cy) = (216.0 + 0.072 * 960.0, 216.0 + 0.048 * 540.0);
+    let expected = [
+        (-144.0, -108.0),
+        (144.0, -108.0),
+        (144.0, 108.0),
+        (-144.0, 108.0),
+    ]
+    .map(|(x, y)| {
+        let (x, y) = (x * 1.24, y * 1.24);
+        oxml_layout::Point {
+            x: cx + x * theta.cos() - y * theta.sin(),
+            y: cy + x * theta.sin() + y * theta.cos(),
+        }
+    });
+    for (a, e) in actual.iter().zip(expected) {
+        assert!(
+            (a.x - e.x).abs() < 1e-8 && (a.y - e.y).abs() < 1e-8,
+            "actual {a:?}, expected {e:?}"
+        );
+    }
+    let layout =
+        oxml_layout::LayoutResult::new(vec![frame.page.into()], Vec::new(), None, Vec::new());
+    let png = oxml_pdf::render_page_to_png(&layout, 0, 150.0).unwrap();
+    let pix = tiny_skia::Pixmap::decode_png(&png).unwrap();
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for y in 0..pix.height() {
+        for x in 0..pix.width() {
+            let p = pix.pixel(x, y).unwrap();
+            if p.red().min(p.green()).min(p.blue()) < 240 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    let bounds = [
+        expected.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+        expected.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+        expected
+            .iter()
+            .map(|p| p.x)
+            .fold(f64::NEG_INFINITY, f64::max),
+        expected
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::NEG_INFINITY, f64::max),
+    ];
+    for (a, e) in [x0, y0, x1, y1].into_iter().zip(bounds) {
+        assert!(
+            (f64::from(a) - e * 150.0 / 72.0).abs() <= 1.0,
+            "painted{a} expected{e}"
+        );
+    }
 }

@@ -21014,3 +21014,202 @@ At this qualification checkpoint, final sprint pass 6 and closure are pending.
 Their actual outcomes follow in the numbered review and sprint tag. Q26 preserves
 passes 1 through 5 and permits pass 7 only if needed. Publication requires
 separate approval at the exact clean main merge SHA after closure.
+
+
+## S95.4 completed features
+
+### F-288, Legacy form field creation
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** M, estimated shared authoring 12 to 17 developer-days, actual effort not recorded.
+
+**What was built.** Rust and Python create bounded legacy text, checkbox and drop-down fields with separate current values and reset defaults, help/status text and typed options. Additive Rust default queries preserve existing metadata struct literals.
+
+**Non-obvious choices.** Q25/Q27 admit one bounded ordinary TIME, DATE or formula child with authoritative outer saved current. Literal assignment preserves its instruction child. Ambiguous, deeper and multiple nested children retain fallback.
+
+**Deviations from the design plan.** Approved Q25/Q27 native-shape refinements. Native Word inputs and source applicability are separate from evaluator behavior.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, `docs/hld/02-scope-and-non-goals.md`, `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`. Approved intent was reconciled before final verification.
+
+**Tests.** Native-original ten-field inventory, six-input A6 setter controls, thirteen-mode F288 supplement, existing CLI/text/layout and installed tests. Reviews F-288-native-bookmarks-pass-2 and native-ordinary-children-pass-2. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** No macro execution or general nested evaluator. Actual native inputs and literal/default round trips retain their original producers.
+
+### F-289, Modern Word form authoring
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** L, estimated shared authoring 12 to 17 developer-days, actual effort not recorded.
+
+**What was built.** Atomic Rust and Python form inventory, validation, fill, reset and protection compose qualified content-control and legacy-field owners across supported stories.
+
+**Non-obvious choices.** Rules are transient caller inputs. Native CJK metrics stay Word-only and source qualified. Placeholder display and stored typed values remain distinct.
+
+**Deviations from the design plan.** Bounded native metric repair and qualifier constraints recorded in the approved plan and reviews, without a global font policy.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`, `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`. Approved intent was reconciled before final verification.
+
+**Tests.** Whole-feature pass2, native pass5 and native-cjk-metrics-pass1. Current A7 source join compares12 freshDOCX and8 dense exact parts with the authenticated native Word evidence. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** Native Word 16.114 (build 16.114.26101123) appearance qualification does not establish a universal Word layout guarantee or new password derivation.
+
+### F-290, Mail-merge package and data-source authoring
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** M, estimated shared authoring 12 to 17 developer-days, actual effort not recorded.
+
+**What was built.** Rust and Python author and inspect merge settings, canonical Word field-role slots, recipients and owned source metadata, and prepare bounded offline records.
+
+**Non-obvious choices.** The embedded source is an offline rdocx custom-XML table. External file, HTTP and SQL declarations are stored without fetching or executing connectors. Imported unknown mappings survive until explicit assignment.
+
+**Deviations from the design plan.** None beyond the approved canonical-slot clarification.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, `docs/hld/02-scope-and-non-goals.md`, `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`. Approved intent was reconciled before final verification.
+
+**Tests.** Whole-feature pass3, public local regressions, current source-qualified native/installed union and strict typing/stub observations. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** No native Word database-execution claim or new customXML Word oracle. Word performs its own connector execution.
+
+### F-X264, Repair Word defaults package inspection and comment projection
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** L, estimated 3 to 5 developer-days, actual effort not recorded.
+
+**What was built.** Python defaults, paragraphs and styles share the checked numeric spacing rule. Save-equivalent part inspection exposes relationships/content types. Comment listing projects cross-cell text and diagnoses individual unrepresentable anchors.
+
+**Non-obvious choices.** Length means exact spacing, non-bool int/float means multiples, None clears and omission preserves. Imported atLeast survives until assigned. Part inspection inherits full serialization failures.
+
+**Deviations from the design plan.** Corrected approval-time fixture assumptions and retained old semantic RED provenance. A10 remains an explicit limitation outside this gate.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`. Approved intent was reconciled before final verification.
+
+**Tests.** All-pass2 review, valid-base RED receipt, fifteen A8 observations and the final source-qualified native/installed and typing union. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** PAGEREF across owners and generated table page ranges remain outside A10 qualification. No blanket XML-inspection fast path.
+
+### F-X265, Preserve fragment relationship targets and duplicate styles
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** M, estimated 2 to 3 developer-days, actual effort not recorded.
+
+**What was built.** Fragment edits retain pending picture relationship targets through save/reopen, and duplicate style IDs use the first definition without copying shadowed dependencies.
+
+**Non-obvious choices.** Relationship ownership stays on the existing staged package. Available picture swap/reinsert cases discriminate real target retention.
+
+**Deviations from the design plan.** Q17 accepts available reproductions because the original unreduced404 input is unavailable. No exact-original verification is claimed.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`. Approved intent was reconciled before final verification.
+
+**Tests.** All-pass2 review, available-case RED/GREEN, final native and installed union. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** The reporter should test the original404 file after publication and reopen if needed. Preserve that explicit note in later issue reconciliation.
+
+### F-X266, Bound Word body reads and structural edit cost
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** L, estimated 4 to 6 developer-days, actual effort not recorded.
+
+**What was built.** Direct body reads and structural edits reuse current source facts and qualified owners, reducing repeated package inventory and serialization work.
+
+**Non-obvious choices.** Actual production work counters and owner transitions remain correctness controls. The original100/1000 paragraph workload retains its six verbose formatted runs.
+
+**Deviations from the design plan.** None beyond approved local-provider integration and later F-X268 composition.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`. Approved intent was reconciled before final verification.
+
+**Tests.** All-pass4 and provider checkpoints. All12 original407 rows passed with original cold/warm and mean/median protocols, exact source/artifact receipts retained. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** Provider-prefix completion was not final acceptance. These final records are written once after the integrated union.
+
+### F-X267, Bound PowerPoint mutation cost across public publishers
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** L, estimated 6 to 10 developer-days, actual effort not recorded.
+
+**What was built.** Shared OPC buffers and qualified in-memory commits reduce mutation cost while preserving signed/embedded safety checks and owner reports. Approved native animation and SmartArt repairs compose with the checked public publishers.
+
+**Non-obvious choices.** The explicit Rust Arc part-storage/removal source break has migration guidance. Whole-deck, shared-context and costly safety fallback work remain disclosed. LinearOpacityMask supports qualified raster/SVG behavior, with PDF limits.
+
+**Deviations from the design plan.** Q13 labeled behavior changes and Q26 fresh native requalification on installed PowerPoint 16.114.1 preserve old16.104 pins/failures and unchanged thresholds.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/06-presentationml-model.md`, `docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`. Approved intent was reconciled before final verification.
+
+**Tests.** 248 call catalogue,272 original10/40/80workload rows,54signed/embedded fallback cases over63 packages, actual four Q26 gates and six SmartArt controls. Applicable c62 normal producer retained. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** F-X269 owns remaining shadow falloff, paint-domain and held-wipe interactions. No general native animation/SmartArt or soft-wipe PDF parity claim.
+
+### F-X268, Bound Word owner inventory and unchanged package staging
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** L, estimated 12 to 21 scope judgment developer-days, actual effort not recorded.
+
+**What was built.** Eight approved mechanisms reuse current parsed/body/frame/namespace/relationship facts and owned transactions, reducing repeated work without skipping atomicity or current-owner validation. Add checked Rust insertion methods and route Python through them.
+
+**Non-obvious choices.** Old infallible Rust insertions retain legacy behavior. Retained caches are measured with no invented cap. Debug reference oracles use cold independent memo state, and paused instrumentation counts only real production proofs.
+
+**Deviations from the design plan.** Approved refresh2/3/4 and bounded debug-reference correction. Original benchmark and fixture failures are preserved, including legitimate namespace refusal on unsupported rich positive assumptions.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, `docs/hld/14-development-backlog.md`. Approved intent was reconciled before final verification.
+
+**Tests.** Pass30 clean. All79 required flat gates, five linear gates,28 A9 vectors/870 comparisons, full255 measurement report,84 fresh-process RSS children,18 Word fallback samples and no-oracle100/400history proof. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** Cell actual one-successor minimum24.889375/39.790875ms passes42.334062bound after admitted quiet window. Original failure remains. RSS calibration/pressure and historical 654 labels limit precision, and layer deltas are not summed.
+
+### F-X270, Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases
+
+**Sprint.** S95.4
+**Completed.** 2026-10-28
+**Size.** L, estimated 4 to 5 provisional developer-days, actual effort not recorded.
+
+**What was built.** Fresh retained-line patch carriers, internal pins, lock records, package metadata and current examples align across exactly22 Rust candidates and both Python projects. Published S95.3 notes are restored byte for byte and only S95.4 additions appear in new family sections.
+
+**Non-obvious choices.** Actual candidate inventories found all 22 Rust plus2PyPI versions and both remote tags absent. Final mutable publisher/owner/absence checks and exact-main approval remain release obligations.
+
+**Deviations from the design plan.** A narrow explicit canonical source-availability exception covers unchanged build-only workflow. Automatic approval first blocked source disclosure, then the user explicitly approved exactc49 push. No fictional worker handoff or publication approval.
+
+**Spec sections touched.** `docs/hld/14-development-backlog.md`, `docs/hld/15-build-and-toolchain.md`. Approved intent was reconciled before final verification.
+
+**Tests.** Pass1 and data supplement clean. Actual17local policies,7manifest cases, WASM/clippy,22verified archives/21 READMEcases/hash 49 and actual hosted31jobs/27 success/4 publicationSKIP,26 rawpayloads,172downloaded-wheel priorities and typing/stub checks. Shared final acceptance and producer identities follow below at source `c49bab8865ea93587879bed8702e5affd2c9904d`.
+
+**Hash harness.** Unchanged49 hashes, actual new-version check at source c49. Applicable deterministic pixel baselines remain unchanged.
+
+**Notes for future sessions.** Preparation is complete before sprint close. Authenticate the reviewed main merge/tree afterward. Release shared/PowerPoint 0.14.4 before Word 0.16.4, each with separate final approval. No registry upload or release tag here.
+
+## S95.4 final integrated acceptance
+
+Actual full producerH is `c49bab8865ea93587879bed8702e5affd2c9904d`. The final union composes genuine original executions and affected successors through independent source/applicability reviews, rather than pretending every command ran at H. Original full native execution at7ca produced6958 passes,4 failures,72 ignored and4 Q26 filtered. Four affected successors and three new debug-isolation cases qualify6965 unique ordinary native passes. The actual current-version seven manifest cases overlap that inventory and add no duplicate credit. The four required Q26 controls are separately qualified on native PowerPoint 16.114.1, preserving the original16.104 failures and unchanged geometry/SSIM thresholds.
+
+Actual source-qualified installed full suites retain Word 1192 passes/25 skips on3.9 and1190 passes/27 skips on3.12, plus PowerPoint 1031 passes/2 skips on each interpreter. These are old producer observations with explicit applicability, not newly executed whole suites on downloaded patch wheels. Fresh c49 hosted wheels separately pass172pinned priority calls over both interpreters, with exact42/44 membership and zero failures/errors/skips, and both3.12 strict mypy/stub pairs. Actual host CLIs report0.16.4 and0.14.4. The hosted run is [40608035966](https://github.com/tensorbee/rdocx/actions/runs/40608035966), actual31jobs with 27 successes/four publication skips. All26 unique raw payloads are authenticated through API artifact ZIP digests and copied-file/RECORD/native/source checks. Aggregate copies add no subjects.
+
+Actual local c49 checks include all 21 README example sets, clean patched22 package verification with all archives below10MiB, current49hash matches, dependency policy, formatting/prose/adapters and the affected native/WASM/clippy/policy batch. Prior full workspace lint, docs/doctests, minimal-layout, corpus, typing, native Office and risk observations retain actual producers and explicit unaffected-input applicability. Full native/regression and A9 stress suites were not replayed for patch metadata. The old-version4f5 verified archives are preserved separately from current new-version c49 archives.
+
+Word normal producer is fc670a18 and PowerPoint normal producer is c62e0a71, with integration 7ca and version-only c49 applicability recorded in the clean F-X270 review. Instrumented observations retain their7ca producer. Original A9 noassert28 vectors/870 comparisons remain their actual7ca execution. Cell's single admitted same-product successor at load16.77/29.03 with no compiler passes39.790875ms against42.334062ms. The original full-catalogue miss remains preserved. The catalogue reports all 252keys plus three XML reads and19nonmandatory residuals, without a universal constant-time promise.
+
+Q22 includes14 measurement categories and84 fresh processes:60 historical source 65428847 children with original labels and24 current children. The31,421,548-byte main XML fixture is not the donor6MiB claim. Full-process omission deltas include fallbacks/transients and are not exact layer heaps or an additive budget. Python calibration spread and host paging/contention limit precision. The independent no-debug-oracle history test uses immutable S2 source, root opt 2/debugfalse/overflowtrue/testtrue with inherited debugtrue dependencies. It is not a literal release build. Actual1 pass in 3.57 seconds shows equal N100/N400: 46 roots/46 nodes/15 edges/depth 2,57014 child bytes,19173 normalized bytes,3386 context bytes,30 decoders/30 namespace facts. Final Weak count 0 with532 installed, and positive held-control 2, rejects empty-graph and accumulating-history substitutes. Eighteen actual Word fallback timings disclose six cases. No RSS cap or constant fallback ceiling was invented.
+
+Receipt anchors: local `/private/tmp/s954-fx270-final-local/receipt.json`, hosted `/private/tmp/s954-fx270-hosted-acceptance.json`, frozen artifacts `/private/tmp/s954-recovered-artifacts-7ca9adb9/frozen-receipt.json`, native union `/private/tmp/s954-native-union-7ca9adb9/receipt.json`, runtime correction `/private/tmp/s954-word-runtime-env-correction-7ca9adb9/receipt.json`, A7 join `/private/tmp/s954-a7-independent-7ca9adb9/acceptance.json`, RSS `/private/tmp/s954-memory-v19-rss-execution/measurement-report.json` and actual no-oracle history `/private/tmp/s954-memory-v19-history-noassert/result/receipt.json`. Actual source/profiles, tools, input/artifact hashes, raw samples, failed attempts and scoped successors remain bound in those receipts and the committed reviews. No old proof helper is generalized to relabel its source.
+
+Nine delivery records are written once, including three earlier local provider-prefix completions. Per-feature effort is unrecorded. Six actual worked dates are calendar throughput units, not person-days. Historical overlapping scope judgments are not silently re-summed into a capacity promise. Remaining F-X269 work belongs to S96. M24 continues, with no end-of-milestone gate waived. Issue404 original input remains unavailable and unverified, with the authorized reporter retest/reopen note retained. Release-bound comments wait verified publication. No release tag, registry upload or publication is part of this sprint acceptance.

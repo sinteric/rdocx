@@ -206,6 +206,18 @@ def exercise_rdocx_types(path: Path) -> None:
     document.remove_section(1)
     styles: tuple[Style, ...] = document.styles
     note: Style = document.add_style("Note", "paragraph", based_on="Normal")
+    document.set_default_paragraph_format(line_spacing=1.0)
+    document.set_default_paragraph_format(line_spacing=2)
+    assert_type(document.default_paragraph_format.line_spacing, Length | float | None)
+    document.set_style("Note", line_spacing=1.5)
+    document.set_style("Note", line_spacing=2)
+    document.set_style("Note", line_spacing=Pt(12))
+    document.set_style("Note", line_spacing=None)
+    document.set_style("Note", bold=True)
+    part_names: tuple[str, ...] = document.part_names()
+    assert_type(part_names, tuple[str, ...])
+    part_xml: str = document.part_xml("/word/document.xml")
+    assert_type(part_xml, str)
     document.add_style(
         "Boxed Note",
         style_id="BoxedNote",
@@ -350,6 +362,7 @@ def exercise_rdocx_types(path: Path) -> None:
         assert_type(bounds.width, float)
     assert_type(comments[0].date, str | None)
     assert_type(comments[0].anchor_text, str | None)
+    assert_type(comments[0].anchor_issue, str | None)
     assert_type(comments[0].anchor, StoryRunRange | None)
     assert_type(sections[0].page_width, int | None)
     assert_type(styles[0].style_type, str)
@@ -596,6 +609,103 @@ def fx241_form_types(document: Document) -> None:
     assert_type(field.type, Literal["text", "checkbox", "dropdown"])
     assert_type(field.value, str | bool | int)
     assert_type(field.choices, tuple[str, ...])
+    assert_type(field.default_value, str | bool | int | None)
+    from rdocx import LegacyFormFieldDefinition
+    definition = LegacyFormFieldDefinition.text_input(value="now", default="keep", calculate_on_exit=False)
+    box = LegacyFormFieldDefinition.checkbox(checked=True, size_half_points=12)
+    listed = LegacyFormFieldDefinition.drop_down_list(["one", "two"], selected_index=1)
+    assert_type(box, LegacyFormFieldDefinition)
+    assert_type(listed, LegacyFormFieldDefinition)
+    assert_type(definition, LegacyFormFieldDefinition)
+
+
+def fx289_form_carriers(document: Document, span: StoryRunRange) -> None:
+    from rdocx import (
+        DocumentProtection,
+        FormFieldAssignment,
+        FormFieldRule,
+        FormFieldTarget,
+        FormFieldValue,
+        FormResetValue,
+        FormValidationIssue,
+    )
+    target = FormFieldTarget.content_control_tag("")
+    legacy = FormFieldTarget.legacy("word/document.xml", 0)
+    text = FormFieldValue.text("")
+    checked = FormFieldValue.checked(False)
+    selected = FormFieldValue.selected_index(0)
+    reset = FormResetValue.value(text)
+    prompt = FormResetValue.placeholder("")
+    rule = FormFieldRule(target=target, reset=reset)
+    explicit = FormFieldRule(target=legacy, reset=prompt, required=True)
+    assignment = FormFieldAssignment(target=target, value=checked)
+    other = FormFieldAssignment(target=legacy, value=selected)
+    protection = DocumentProtection(mode="forms")
+    full = DocumentProtection(
+        mode="readOnly",
+        enforcement=False,
+        formatting=True,
+        provider_type="rsaAES",
+        algorithm_class="hash",
+        algorithm_type="typeAny",
+        algorithm_sid=0,
+        spin_count=1,
+        hash="",
+        salt=None,
+    )
+    assert_type(target, FormFieldTarget)
+    assert_type(legacy, FormFieldTarget)
+    assert_type(text, FormFieldValue)
+    assert_type(checked, FormFieldValue)
+    assert_type(selected, FormFieldValue)
+    assert_type(reset, FormResetValue)
+    assert_type(prompt, FormResetValue)
+    assert_type(rule, FormFieldRule)
+    assert_type(explicit, FormFieldRule)
+    assert_type(rule.target, FormFieldTarget)
+    assert_type(rule.reset, FormResetValue)
+    assert_type(rule.required, bool)
+    assert_type(assignment, FormFieldAssignment)
+    assert_type(other, FormFieldAssignment)
+    assert_type(assignment.target, FormFieldTarget)
+    assert_type(assignment.value, FormFieldValue)
+    assert_type(protection, DocumentProtection)
+    assert_type(full.mode, Literal["readOnly", "comments", "trackedChanges", "forms"])
+    assert_type(full.enforcement, bool | None)
+    assert_type(full.formatting, bool | None)
+    assert_type(full.provider_type, Literal["rsaAES", "rsaFull", "custom"] | None)
+    assert_type(full.algorithm_class, Literal["hash", "custom"] | None)
+    assert_type(full.algorithm_type, Literal["typeAny", "custom"] | None)
+    assert_type(full.algorithm_sid, int | None)
+    assert_type(full.spin_count, int | None)
+    assert_type(full.hash, str | None)
+    assert_type(full.salt, str | None)
+    def _read_issue(issue: FormValidationIssue) -> None:
+        assert_type(issue.target, FormFieldTarget)
+        assert_type(issue.source_part, str)
+        assert_type(issue.ordinal, int)
+        assert_type(issue.target, FormFieldTarget)
+        assert_type(issue.source_part, str)
+        assert_type(issue.ordinal, int)
+        assert_type(issue.message, str)
+    issues = document.validate_form([rule])
+    filled = document.fill_form((rule,), [assignment])
+    reset_counts = document.reset_form([explicit])
+    document.protect_form([rule], protection)
+    current = document.document_protection
+    document.set_document_protection(full)
+    removed = document.remove_document_protection()
+    permission = document.add_story_permission_range(span, editor="Clerk")
+    assert_type(issues, tuple[FormValidationIssue, ...])
+    assert_type(filled, tuple[int, ...])
+    assert_type(reset_counts, tuple[int, ...])
+    assert_type(current, DocumentProtection | None)
+    assert_type(removed, DocumentProtection | None)
+    assert_type(permission, int)
+    if current is not None:
+        assert_type(current.mode, Literal["readOnly", "comments", "trackedChanges", "forms"])
+    if issues:
+        _read_issue(issues[0])
 
 
 def fx240_owned_signature_reports(owner: Document, private_key: bytes, certificate: bytes) -> None:
@@ -648,3 +758,47 @@ def s953_typed_authoring_contract(owner: Document, location: ContentLocation) ->
     assert_type(owner.add_custom_xml_store(b"<root/>"), str)
     assert_type(owner.add_custom_xml_store(b"<root/>", ("urn:example",)), str)
     assert_type(owner.remove_content_range(0, 0), int)
+
+
+def mail_merge_package_signatures() -> None:
+    from rdocx import (
+        Document,
+        MailMergeFieldMapping,
+        MailMergePackageDiagnostic,
+        MailMergePackageOptions,
+        MailMergePackageSource,
+        MailMergePreparedData,
+        MailMergeRecipient,
+        MailMergeSettings,
+    )
+
+    source: MailMergePackageSource = MailMergePackageSource.embedded(("given",), (("Ada",),))
+    external: MailMergePackageSource = MailMergePackageSource.external("file:///declared/people.csv")
+    settings: MailMergeSettings = MailMergeSettings()
+    mapping: MailMergeFieldMapping = MailMergeFieldMapping(0, "given", "FirstName")
+    recipient: MailMergeRecipient = MailMergeRecipient(0, b"tag")
+    options: MailMergePackageOptions = MailMergePackageOptions(
+        source, settings=settings, mappings=(mapping,), recipients=(recipient,)
+    )
+    document = Document()
+    document.set_mail_merge_package(options)
+    snapshot: MailMergePackageOptions | None = document.mail_merge_package()
+    removed: bool = document.remove_mail_merge_package()
+    prepared: MailMergePreparedData = document.prepare_mail_merge_data(
+        policy="caller_supplied", external_records=({"given": "Ada"},)
+    )
+    kind: Literal["embedded", "external"] = external.kind
+    diagnostic: MailMergePackageDiagnostic = prepared.diagnostics[0]
+    assert_type(source.columns, tuple[str, ...])
+    assert_type(source.records, tuple[tuple[str, ...], ...])
+    assert_type(source.uri, str | None)
+    assert_type(settings.data_type, str | None)
+    assert_type(settings.active_record, int | None)
+    assert_type(mapping.dynamic_address, bool | None)
+    assert_type(recipient.unique_tag, bytes)
+    assert_type(options.mappings, tuple[MailMergeFieldMapping, ...])
+    assert_type(prepared.records, tuple[dict[str, str], ...])
+    assert_type(diagnostic.kind, Literal["external_source_blocked", "external_source_unavailable", "unsupported_source"])
+    assert_type(kind, Literal["embedded", "external"])
+    assert_type(snapshot, MailMergePackageOptions | None)
+    assert_type(removed, bool)

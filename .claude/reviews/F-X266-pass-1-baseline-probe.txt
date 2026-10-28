@@ -1,0 +1,34 @@
+python 3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]
+executable /opt/homebrew/opt/python@3.14/bin/python3.14
+so /private/tmp/s95.4-fx265-verified-_rdocx.so
+sha256 61bea238f1aa339a6360726c8cb55ffb9252fc7ed1c9f77f186fee20a0d9a86d
+loaded /private/tmp/s95.4-fx265-verified-_rdocx.so
+build_note preserved F-X265 .so under Python 3.14.7 direct native module, worker package not imported
+--- add_paragraph
+mutate_ok
+to_bytes_exc RuntimeError OPC package error: /word/document.xml holds U+0001 at line 1, column 433, a character XML 1.0 cannot carry
+held_paragraph_text 'held'
+held_run_exc RuntimeError stale run handle was created at document revision 1, but the document is now at revision 2 (a structural change invalidated it). First invalidated by Document.add_paragraph at committed revision 2. Re-fetch it with doc.paragraphs[0].runs[i].
+--- insert_paragraph
+mutate_ok
+to_bytes_exc RuntimeError OPC package error: /word/document.xml holds U+0001 at line 1, column 396, a character XML 1.0 cannot carry
+held_paragraph_exc RuntimeError stale paragraph handle was created at document revision 1, but the document is now at revision 2 (a structural change invalidated it). First invalidated by Document.insert_paragraph at committed revision 2. Re-fetch it from its current physical owner.
+held_run_exc RuntimeError stale run handle was created at document revision 1, but the document is now at revision 2 (a structural change invalidated it). First invalidated by Document.insert_paragraph at committed revision 2. Re-fetch it with doc.paragraphs[0].runs[i].
+--- run_text
+mutate_exc RuntimeError OPC package error: /word/document.xml holds U+0001 at line 1, column 396, a character XML 1.0 cannot carry
+serializes True
+byte_identical True
+held_paragraph_text 'held'
+held_run_text 'held'
+--- valid_control
+serializes True
+nbytes 5769
+texts ['ordinary-insert', 'ordinary-run']
+--- unrelated_u0001
+load_ok
+to_bytes_ok 5879
+paragraph_xml_ok 339
+--- unrelated_valid
+load_ok
+to_bytes_ok 5880
+paragraph_xml_ok 339

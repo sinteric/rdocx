@@ -591,26 +591,43 @@ struct WordLineUnits {
     descent: i32,
     /// External leading, never negative.
     leading: i32,
+    /// Actual OS/2 CJK codepage coverage, not a font-name or script guess.
+    cjk: bool,
 }
 
 impl WordLineUnits {
-    /// Read from the face's OS/2 table, or `None` when it has no Windows
-    /// metrics.
+    /// Read the Word face policy, or `None` when the existing fallback
+    /// must use shared metrics.
     fn of(face: &ttf_parser::Face<'_>) -> Option<Self> {
         let os2 = face.tables().os2?;
+        let table = face
+            .raw_face()
+            .table(ttf_parser::Tag::from_bytes(b"OS/2"))?;
+        let hhea = face.tables().hhea;
+        // Version 1 added both codepage-range words. A truncated range is
+        // not a positive face classification. CP932/936/949/950 occupy bits 17 through 20.
+        let cjk = table.len() >= 86
+            && u16::from_be_bytes([table[0], table[1]]) >= 1
+            && u32::from_be_bytes(table[78..82].try_into().ok()?) & 0x001e0000 != 0;
+        if cjk && hhea.ascender > 0 && hhea.descender <= 0 {
+            return Some(Self {
+                ascent: i32::from(hhea.ascender),
+                descent: -i32::from(hhea.descender),
+                leading: 0,
+                cjk: true,
+            });
+        }
         if os2.use_typographic_metrics() {
             return Some(Self {
                 ascent: i32::from(os2.typographic_ascender()),
                 descent: -i32::from(os2.typographic_descender()),
                 leading: i32::from(os2.typographic_line_gap()).max(0),
+                cjk: false,
             });
         }
         // `usWinAscent` and `usWinDescent` are unsigned. ttf-parser reads
         // them as signed and negates the descent, which overflows at 32768,
         // so the two fields are read here directly.
-        let table = face
-            .raw_face()
-            .table(ttf_parser::Tag::from_bytes(b"OS/2"))?;
         let unsigned = |offset: usize| {
             table
                 .get(offset..offset + 2)
@@ -621,12 +638,12 @@ impl WordLineUnits {
         if ascent + descent == 0 {
             return None;
         }
-        let hhea = face.tables().hhea;
         let hhea_extent = i32::from(hhea.ascender) - i32::from(hhea.descender);
         Some(Self {
             ascent,
             descent,
             leading: (i32::from(hhea.line_gap) - (ascent + descent - hhea_extent)).max(0),
+            cjk: false,
         })
     }
 }
@@ -2235,8 +2252,11 @@ impl FontManager {
     /// sum of the three, so Calibri and Carlito are 2500/2048 em and Arial and
     /// Liberation Sans 2355/2048 em. A face that sets the OS/2
     /// `USE_TYPO_METRICS` flag is measured on its typographic values instead,
-    /// which is what Word does with Aptos, and a face without Windows metrics
-    /// on the values [`FontManager::metrics`] reports.
+    /// which is what Word does with Aptos. Actual OS/2 CP932/936/949/950
+    /// coverage instead selects gap-free hhea, with 15 percent of that extent
+    /// added independently above and below the baseline. Missing/invalid CJK
+    /// tables retain the established fallback. A face without Windows metrics
+    /// uses the values [`FontManager::metrics`] reports.
     pub fn word_line_metrics(&self, font_id: FontId, size_pt: f64) -> Result<FontMetrics> {
         let font = self.get_font(font_id)?;
         let scale = size_pt / font.units_per_em as f64;
@@ -2244,11 +2264,17 @@ impl FontManager {
             ascent: i32::from(font.ascender),
             descent: -i32::from(font.descender),
             leading: i32::from(font.line_gap).max(0),
+            cjk: false,
         });
 
+        let extra = if units.cjk {
+            f64::from(units.ascent + units.descent) * 0.15
+        } else {
+            0.0
+        };
         Ok(FontMetrics {
-            ascent: units.ascent as f64 * scale,
-            descent: units.descent as f64 * scale,
+            ascent: (f64::from(units.ascent) + extra) * scale,
+            descent: (f64::from(units.descent) + extra) * scale,
             line_gap: units.leading as f64 * scale,
             units_per_em: font.units_per_em,
         })
@@ -3688,6 +3714,213 @@ for feature in ['smcp=0','smcp=1']:
                 (metrics.line_gap - leading * scale).abs() < 1e-9,
                 "{family}"
             );
+        }
+    }
+
+    fn word_metric_table_record(data: &[u8], tag: &[u8; 4]) -> usize {
+        let count = u16::from_be_bytes(data[4..6].try_into().unwrap()) as usize;
+        (0..count)
+            .map(|n| 12 + n * 16)
+            .find(|p| &data[*p..*p + 4] == tag)
+            .unwrap()
+    }
+
+    fn synthetic_word_metric_font(codepages: u32, typo: bool) -> Vec<u8> {
+        let mut data = bundled_font_data()
+            .into_iter()
+            .find(|(name, _)| *name == "Liberation Sans")
+            .unwrap()
+            .1
+            .to_vec();
+        let offset = |data: &[u8], tag: &[u8; 4]| {
+            let r = word_metric_table_record(data, tag);
+            u32::from_be_bytes(data[r + 8..r + 12].try_into().unwrap()) as usize
+        };
+        let os2 = offset(&data, b"OS/2");
+        let hhea = offset(&data, b"hhea");
+        data[os2..os2 + 2].copy_from_slice(&4_u16.to_be_bytes());
+        data[os2 + 62..os2 + 64].copy_from_slice(&(if typo { 128_u16 } else { 0 }).to_be_bytes());
+        for (at, value) in [(68, 1000_i16), (70, -200), (72, 300)] {
+            data[os2 + at..os2 + at + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        for (at, value) in [(74, 2300_u16), (76, 900)] {
+            data[os2 + at..os2 + at + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        data[os2 + 78..os2 + 82].copy_from_slice(&codepages.to_be_bytes());
+        data[os2 + 82..os2 + 86].copy_from_slice(&0_u32.to_be_bytes());
+        for (at, value) in [(4, 1300_i16), (6, -300), (8, 700)] {
+            data[hhea + at..hhea + at + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        // ttf-parser does not use SFNT checksums. Only these synthetic test
+        // bytes change, never a bundled asset or an oracle font.
+        assert!(ttf_parser::Face::parse(&data, 0).is_ok());
+        data
+    }
+
+    #[test]
+    fn cjk_word_metrics_use_face_codepages_and_symmetric_gap_free_hhea() {
+        for bits in [
+            0,
+            1 << 16,
+            1 << 17,
+            1 << 18,
+            1 << 19,
+            1 << 20,
+            1 << 21,
+            0x001e0000,
+        ] {
+            for typo in [false, true] {
+                let data = synthetic_word_metric_font(bits, typo);
+                let mut manager = FontManager::new_deterministic().unwrap();
+                let label = if bits == 0 {
+                    "MS Gothic"
+                } else {
+                    "Latin label"
+                };
+                manager.load_additional_fonts(&[FontFile {
+                    family: label.into(),
+                    data: data.clone(),
+                }]);
+                let id = manager.resolve_font(Some(label), false, false).unwrap();
+                assert_eq!(
+                    manager.font_data(id).unwrap().data.as_ref(),
+                    data.as_slice(),
+                    "actual supplied face resolves"
+                );
+                for size in [10.0, 12.0, 16.0] {
+                    let word = manager.word_line_metrics(id, size).unwrap();
+                    let scale = size / f64::from(word.units_per_em);
+                    let expected = if bits & 0x001e0000 != 0 {
+                        (1540.0, 540.0, 0.0)
+                    } else if typo {
+                        (1000.0, 200.0, 300.0)
+                    } else {
+                        (2300.0, 900.0, 0.0)
+                    };
+                    assert!(
+                        (word.ascent - expected.0 * scale).abs() < 1e-9,
+                        "bits={bits:x} typo={typo} size={size} ascent={}",
+                        word.ascent
+                    );
+                    assert!(
+                        (word.descent - expected.1 * scale).abs() < 1e-9,
+                        "bits={bits:x} descent={}",
+                        word.descent
+                    );
+                    assert!((word.line_gap - expected.2 * scale).abs() < 1e-9);
+                }
+                let reference = synthetic_word_metric_font(0, typo);
+                let face = ttf_parser::Face::parse(&reference, 0).unwrap();
+                let shared = manager.metrics(id, 12.0).unwrap();
+                let scale = 12.0 / f64::from(face.units_per_em());
+                assert_eq!(shared.ascent, f64::from(face.ascender()) * scale);
+                assert_eq!(shared.descent, -f64::from(face.descender()) * scale);
+                assert_eq!(shared.line_gap, f64::from(face.line_gap()) * scale);
+                let latin = manager.shape_text(id, "A", 12.0).unwrap();
+                let _han = manager.shape_text(id, "漢", 12.0).unwrap();
+                let again = manager.shape_text(id, "A", 12.0).unwrap();
+                assert_eq!(
+                    (again.glyph_ids, again.advances, again.width),
+                    (latin.glyph_ids, latin.advances, latin.width),
+                    "script does not change face policy or shaping"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_word_metric_table_boundaries_keep_the_existing_fallback() {
+        for (version, length) in [(0, 78), (0, 86), (1, 78), (1, 80), (1, 82), (1, 84)] {
+            let mut data = synthetic_word_metric_font(1 << 17, false);
+            let record = word_metric_table_record(&data, b"OS/2");
+            let offset =
+                u32::from_be_bytes(data[record + 8..record + 12].try_into().unwrap()) as usize;
+            data[offset..offset + 2].copy_from_slice(&(version as u16).to_be_bytes());
+            data[record + 12..record + 16].copy_from_slice(&(length as u32).to_be_bytes());
+            let face = ttf_parser::Face::parse(&data, 0).unwrap();
+            if let Some(units) = WordLineUnits::of(&face) {
+                assert_eq!(
+                    (units.ascent, units.descent, units.leading),
+                    (2300, 900, 0),
+                    "version={version} length={length}"
+                );
+            } else {
+                assert!(face.tables().os2.is_none());
+            }
+        }
+        let mut second_word = synthetic_word_metric_font(0, false);
+        let record = word_metric_table_record(&second_word, b"OS/2");
+        let offset =
+            u32::from_be_bytes(second_word[record + 8..record + 12].try_into().unwrap()) as usize;
+        second_word[offset + 82..offset + 86].copy_from_slice(&(1_u32 << 17).to_be_bytes());
+        let face = ttf_parser::Face::parse(&second_word, 0).unwrap();
+        let units = WordLineUnits::of(&face).unwrap();
+        assert_eq!(
+            (units.ascent, units.descent),
+            (2300, 900),
+            "coverage word2 is not CP932"
+        );
+        let mut missing = synthetic_word_metric_font(1 << 17, false);
+        let record = word_metric_table_record(&missing, b"OS/2");
+        missing[record..record + 4].copy_from_slice(b"XXXX");
+        let mut manager = FontManager::new_deterministic().unwrap();
+        manager.load_additional_fonts(&[FontFile {
+            family: "Missing OS2".into(),
+            data: missing,
+        }]);
+        let id = manager
+            .resolve_font(Some("Missing OS2"), false, false)
+            .unwrap();
+        let word = manager.word_line_metrics(id, 12.0).unwrap();
+        let shared = manager.metrics(id, 12.0).unwrap();
+        assert_eq!(
+            (word.ascent, word.descent, word.line_gap, word.units_per_em),
+            (
+                shared.ascent,
+                shared.descent,
+                shared.line_gap,
+                shared.units_per_em
+            )
+        );
+        for (asc, desc) in [(0_i16, 0_i16), (-100, -200), (1300, 1)] {
+            for typo in [false, true] {
+                let mut data = synthetic_word_metric_font(1 << 17, typo);
+                let record = word_metric_table_record(&data, b"hhea");
+                let at =
+                    u32::from_be_bytes(data[record + 8..record + 12].try_into().unwrap()) as usize;
+                data[at + 4..at + 6].copy_from_slice(&asc.to_be_bytes());
+                data[at + 6..at + 8].copy_from_slice(&desc.to_be_bytes());
+                let face = ttf_parser::Face::parse(&data, 0).unwrap();
+                let units = WordLineUnits::of(&face).unwrap();
+                assert_eq!(
+                    (units.ascent, units.descent),
+                    if typo { (1000, 200) } else { (2300, 900) }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_word_metric_face_storage_and_bundled_coverage_are_explicit() {
+        eprintln!(
+            "WORD_FACE_STORAGE units={} optional={} loaded={}",
+            std::mem::size_of::<WordLineUnits>(),
+            std::mem::size_of::<Option<WordLineUnits>>(),
+            std::mem::size_of::<LoadedFont>()
+        );
+        for (name, data) in bundled_font_data() {
+            let face = ttf_parser::Face::parse(data, 0).unwrap();
+            if let Some(table) = face.raw_face().table(ttf_parser::Tag::from_bytes(b"OS/2"))
+                && table.len() >= 86
+                && u16::from_be_bytes(table[..2].try_into().unwrap()) >= 1
+            {
+                let codepages = u32::from_be_bytes(table[78..82].try_into().unwrap());
+                assert_eq!(
+                    codepages & 0x001e0000,
+                    0,
+                    "bundled font unexpectedly activates CJK policy: {name}"
+                );
+            }
         }
     }
 

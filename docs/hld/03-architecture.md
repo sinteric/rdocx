@@ -1,5 +1,10 @@
 # 03, Architecture
 
+
+## Neutral linear opacity ownership
+
+The neutral non-exhaustive Effect carries LinearOpacityMask with child-local bounds, endpoints and alpha stops. One doc-hidden inherent validation query supplies the raster and SVG consumers with identical geometry and stop rules. A masked group retains one child scene and one physical text/font/source owner. Masks multiply over the complete painted group after ordinary effects, then group opacity applies once. No format dependency is introduced into the neutral output model.
+
 ## Numbering-aware navigation sources
 
 Navigation reads the production paragraph cascade and its resolved numbering
@@ -40,6 +45,8 @@ No additional cascade, flag, counter or per-field source scan is introduced.
 
 ## Owned publication and causal paths
 
+Checked Word body insertion shares native namespace replay policy across the four Rust `try_` methods and the existing Python insertion publishers. The guard runs before model, layout or owner revision changes. Its cached answer is invalidated before mutable model access that clears layout, and when the main source changes. A cold proof can clone and replay the body. This is not a constant-time claim.
+
 `oxml-py-support` owns captured path authority, owner scopes and prepared
 revision publication. It does not own native presentation objects or keep a
 second handle registry. Word bindings prepare a finite inventory of current
@@ -55,7 +62,27 @@ columns. Candidate revision matching indexes current owner routes and retains
 all admissible parent matches until descendant matching completes. Body-slot
 and projection fallback classes remain distinct because their pairwise match
 relation is not transitive. Earliest matching old ownership determines retained
-scopes. No historical owner registry or persistent source cache is introduced.
+scopes. No historical owner registry is introduced. Word publication keeps a current `WordPieces` cache of one vector of body blocks and one vector of physical parts. Each record is a concrete `Arc`. Reuse requires the current body context and equal block value. A field, a tab stop or a bookmark excludes that block. A duplicate physical part or a failed piece proof uses the full inventory. Physical part identity compares resolved target names without ASCII case distinctions, matching OPC lookup. A changed existing context uses the full inventory before publication, while an initially absent context may build fresh pieces. A changed existing body context uses the old full reader before publication. A document with no cached context remains a cold piece read. A prepared publication installs the pieces assembled for that candidate. An unprepared property install clears that cache. Returned paragraph and table owners read the prepared indexes when they exist and otherwise use the existing native route. The conservative document epoch for regular runs is unchanged. An opened Word package keeps one shared record of that opening. Unchanged main reuse requires the opened bytes, the namespace context, successful serialization equality and cached parsed-model equality. A nonempty pending relationship hold for the current main owner uses the whole canonicalization, which keeps its cleanup for an expired hold, a still-live unreferenced hold, and a now-referenced hold. A checked reopen skips ZIP staging only for literal `PackageReadLimits::UNBOUNDED` on a trusted byte-opened baseline. A new document, an in-memory package, a Flat OPC first commit, a limited reopen and a failure hook keep the checked ZIP path until a later legitimate save and byte open. Reuse copies the current main parse, nested namespace owners and canonicalization, including a cached failure, into a new opening record when the main bytes, name, namespace frame and relationship dependencies match. Relationship facts and identifier categories stay checked for that opening. There is no historical chain of openings. Debug counters record namespace input bytes and reopen input bytes. A changed header story records nonzero identifier input bytes when the main part is unchanged. Child-part staging is not part of this record. Direct body addressing uses the shared document writer. `to_xml_with_body_spans` returns the same bytes and errors as `to_xml`, including the conditional `w14` declaration. The main-body address cache stores XML-only facts. Reuse requires the same head and tail and exact aligned child bytes. A scan is eligible only when one body frame covers the scanned range. A second body, or a raw span that crosses a body child boundary, uses the checked full reader. A split raw paragraph that stays inside one body frame still uses that fallback. Prefix and suffix reuse keeps occurrence and order. `MainBodyScans` is one retained address scan record. It is independent of the parsed opening record and exists for a new document that has no opening record. Both reopen routes carry that address-read memo under an exact current writer frame. Each lookup aligns exact current child bytes before reusing a fact, so a changed child is rescanned while unchanged neighbors remain eligible. A changed partition invalidates the body fingerprint. The carry step uses the existing qualified writer partition. Direct modeled paragraph lookup uses the checked direct-body route, while controlled paragraphs retain their two-segment lookup. There is no history chain. `direct_body_item_location` stays hidden. The piece cache still excludes a field, a tab stop or a bookmark by model. Addressing does not copy those typed facts. Its XML facts come from the fresh serialization. Address-scan facts remain separate from serialization and retained-source proofs. Equality-only writer checks can consume the existing record without assembling a complete output when resource limits, the exact frame, every current child and its private facts qualify. This optional comparison requires an explicit `w14` root declaration. Other cases serialize through the established path. An opening keeps its independently qualified writer record in the existing serialized slot before an older carried record. This is writer provenance and does not supply unread source facts. Owned main output may copy an existing opening normalization only after resource admission, the block-proof switch and complete current writer-byte equality succeed. It returns a writer-only record without retained-source part identity. Every failed or unavailable proof uses the established serializer. No retained output copy is added, and the actual owned-byte copy remains linear work. Each immutable body block also stores the exact case-sensitive field-token substring result for its owned bytes. Constructors compute it, byte replacements create a new block, and frame-only copies retain it with identical bytes. It avoids repeated lexical scans in writer, read, scoped and namespace qualification. It does not replace current mutable-model checks or grant parse, source, writer or namespace authority. The independent whole-item owner scanner remains unchanged. This inline fact belongs to the existing Q22 body-scan memory layer. Picture inventory reuses each current immutable source owner for embedded relationship validation, while the public relationship API still validates the story and fingerprint first. Scoped replacement selects retained physical owners from its already checked canonical view within one immutable candidate phase. Control XML indices assign dense append-position IDs and close elements through checked direct lookup. No historical inventory or cache is added.
+
+Word checked replacement and configured picture insertion have consuming internal bridges for an already private owned candidate. The borrowing Rust route and consuming bridge share each actual checked transaction body. The bridge retains the real source package and invalidation flag and moves complete engine mutexes into temporary commit authority. Native commit and the bridge use the same signature and engine finalizer. There is no second typed model copy merely to privatize that owned candidate again. The binding still prepares the full conservative revision before installing it. A private borrowed main-read view shares actual canonical bytes, writer facts and checked spans only during the immutable scoped proof and reopened picture selection phases. It cannot cross a model, package, identifier or namespace mutation. No persistent model-success stamp or additional retained cache is introduced. Production read-phase reporting separates current writer calls, normalized opening copies, canonical record copies, namespace replay outputs, normalized retained/current/restored model outputs, masked rewrites and occurrence writers. Only the successful optional proof's audited debug whole-reference comparison is paused. Force-off and private-tab production fallbacks must expose their actual work and are not held to the qualified one-canonical-producer bound. Splice reporting requires actual successful preparation and consumption, counts every mandatory final owner index visit, and separately counts general-publication index visits. Pinned cold/warm 100/1000 six-run controls require one consumed packet, exact post-edit owner cardinality in the mandatory index, and no general-publication index work. An empty reopened document has no body-story owner, so its actual public insertion must decline the packet after classifying the section and expose all three general-publication index visits. Append paragraph and table survivors retain their existing contract while held ordinary runs become stale. Scoped normalization shares only work already executed on identical immutable bytes and frame. The first and second actual writer outputs must both equal the canonical child before repeating the right rounds can be omitted. Only the fresh producer builder can lend an actual checked source read, with complete partition and namespace provenance. Private owners and field-bearing children or frames retain the old rounds because field parsing allocates source identities. No new model cache or binding API is introduced.
+
+A fresh producer record may avoid normalization only after its complete actual source model equals the current immutable document and its independent canonical record requalifies the current writer against actual writer bytes. Source and writer frames, resource admission, reusable private facts and field absence remain checked. Unavailable or unequal proof retains the existing normalization path. This record supplies actual source reads with staged=None, never a manufactured generic correspondence memo. No retained cache or public interface is added.
+
+Full picture inventory may omit reparsing an ordinary direct main-body paragraph under an existing actual source-read proof of its exact bytes, whole span, frame and namespace context. A completely plain table source read can also certify its cell paragraphs. The entire cell owner and paragraph must lie strictly inside the same exact table block. Table, row, cell, grid and property raw/control/revision carriers decline, and every cell contains only existing-plain paragraphs. Writer-staged values supply no read authority. Sorted certified block ranges are local to the inventory and fill no memo. Scope closure, owner traversal and all picture checks remain ordered and complete. Opaque, private, drawing-bearing, nested-table, control and related-part cases retain the original parser.
+
+Canonical readback into an already owned candidate retains equal children only under successful actual source-read, complete frame, namespace and private-fact guards. After that complete guard, the immutable successful child is borrowed directly without repeating its staged and private revalidation. It copies unequal actual children and applies the complete parsed frame. Exact resource validation commits that readback or restores every displaced value before the original fallback. Relationship and retained-source publication keep their original mandatory read phase and record installation. Drawing identity edits omit reconstruction only after complete actual model equality. Opening ownership and whole fallbacks remain independent.
+
+Story scanners share immutable namespace-prefix vectors only within their traversal. Namespace declarations use copy-on-write with the original ordered update and validation. Owned field-edit contexts still copy their final values. Picture insertion may reuse one exact item projection for direct selection and the body boundary, and another after reopening for the returned projected location. Each source must be lexically field-free. Field-bearing input retains the original repeated scans and private identity allocation order. No scanner context becomes a retained document cache. A pure zero-allocation precheck bypasses complex admission only when no complex item exists. The original positive admission loop and its private allocation order remain unchanged.
+
+Main-part staging keeps current `MainPartBlocks` with an exact head, tail and physical child partition. The serialization memo keeps writer-proved child bytes without publishing an assembled package part. Retained-source records bind exact current part bytes and actual parsed child facts. A parsed source that normalizes on write does not grant serialization reuse. A field, private tab stop or bookmark prevents value-only reuse. Failed context and child proofs use the whole reader or writer. Both record kinds describe current state rather than an edit history. Scoped replacement compares selected physical children under exact source and writer frames. Untouched child decoding facts are context-bound. A frame change clears those facts. Relationship renames and drawing-ID canonicalization apply checked disjoint edits within children or the tail. Unproved shapes retain the whole algorithm. The current serialization memo carries independently of address-read facts. Address reuse still requires an exact frame and exact aligned child bytes at consumption. Immutable namespace-span scope vectors are shared across rebased views, whose offsets remain current. Names come from the closed admitted owner set. Sharing never changes a context guard. Qualified child reads borrow actual parsed facts, while an owned document still receives owned children. Equality-only consumers compare every frame field and every qualified child without constructing another whole document. A later unavailable child still declines after an earlier mismatch. Current opening serialization proofs use the same qualified writer pieces and full fallback. Read equality supplies no writer permission. Safe carried-model equality additionally requires reusable values and successful current opening serialization. Private field and other unsupported facts keep the old normalization comparison. Ordered physical cell routes are prepared once, with the same modeled-pointer check and legacy fallback when the source inventory cannot qualify.
+ZIP file openings and byte openings both establish actual package-read provenance. A checked story hyperlink keeps its authored typed body while adopting only the validated current package and opening. Relationship query bindings may differ in declaration order when names, values and multiplicity match. Stored frame and source proof dependencies remain exact.
+
+Masked namespace and relationship queries can compose a new result across a tail-only change. Both writer-produced partitions, the identical head and the new empty frame are checked. Unchanged closed children contribute their existing relative XML facts at the same occurrence. Changed children and frame facts are checked anew. Generic frame invalidation stays intact. This temporary query does not transport parsed ASTs, writer eligibility or decoder facts.
+
+Fully conservative Word publication constructs and validates the candidate owner inventory but does not match old owner routes that its policy always retires. Birth order, retirement and snapshot invalidation follow the same publication policy.
+
+Picture discovery optionally inventories all owners and paragraph scopes of one source together. Each paragraph's own declarations are applied before reading its drawings. Failed batch preparation restores the original ordered traversal and its first error. Comment movement consumes the checked paragraph spans and closed XML from its existing source inventory rather than resolving each paragraph again. These traversals add no retained cache.
+
 Namespace scans retain a frame per element and copy inherited maps only when
 the element declares a namespace. Attribute validation and scope restoration
 retain their checked source semantics.
@@ -74,6 +101,10 @@ Bindings stage a native candidate and validate all conversions, source graph
 constraints and returned Python allocations before committing prepared scopes.
 The final native assignment cannot fail after publication. A rejected edit or
 an actual no-op leaves source, scope generations and live handles unchanged.
+A proved direct-body splice prepares its revision on the same exclusive
+document borrow and commits only after the native edit. Append keeps eligible
+direct-body owners. Conservative insert and remove retire every scope. An
+unproved plan uses the existing rebuild candidate before mutation.
 First retirement records the exact public operation label for later stale
 errors. The native facades retain ownership of relationships, geometry and
 package authoring, while bindings reuse that publication protocol.
@@ -169,6 +200,10 @@ the exact name directory entry before key derivation or package allocation.
 Word font CLI mutation preflight composes identity and file-kind checks with
 nonreplacement availability and staged publication. These checks preserve
 source bytes and captured authority on refusal.
+
+An isolated legacy field can retain Word's own-name bookmark with its start after the pure begin run and its end after the pure end run. The start remains in the field's physical source, while direct, accepted and tracked bookmark endpoints surround the virtual field run. The exact paragraph namespace frame stays with the projection, and local scopes continue to shadow it. A conflicting generated writer binding or partial or ambiguous interior range keeps the untyped source. Authored bookmark renumbering that reaches a legacy-bearing paragraph uses the whole XML patch and reparse path, preserving both physical markers. One own-bookmarked FORMTEXT TextInput can retain a single complex ordinary TIME, DATE or formula leaf in either its cached result or one direct instruction argument, never both. The instruction variant has no extra literal operand or nested switch argument. A result child follows existing effective display and parent override policy. An instruction child does not replace the outer saved current, including outer5.00 versus inner raw instrText5. Reset metadata and distinct parsed source identities stay unchanged. Candidate bytes decide a same-current no-op, so a missing or custom display can still require canonical repair. A missing physical cache run is materialized before the unchanged pure end-marker run, preserving the admitted own-bookmark boundary and end-run formatting and namespace scope. Non-namespace run owner attributes stay on the original run. Checked publication compares ordered legacy part, ordinal, name and kind before and after reopen, then verifies current value. Ordinary field count may change when a result child is literalized. An explicit different parent assignment writes a literal current, removing a result child but retaining an instruction child and its configuration. Canonical reconstruction that would lose a source-owned bookmark refuses before checked publication. This adds no evaluator, clock or interpretation of inner instrText.
+
+Modern form fill, reset, protect, protection set, and protection remove clone one package candidate, validate it, allocate returned results, and publish once. Read, no-op, and refusal leave the source scope unchanged. A changed owner follows the ordinary staleness policy and is not revived. Private `WordPublication::ModernFormValues` is only that new path. Content-control binding, the legacy form setter, and signing keep their existing publication. `localScopeCommit` keeps the document epoch, so only unproved states retire. Exact `stories` and `story_item_snapshots` stay. The proof serializes and validates the whole package. It does not claim part-local or constant-time publication, and it keeps no second model or retained history.
 
 ## Three families, one workspace
 
@@ -609,6 +644,21 @@ PowerPoint edge. The all-target tree admits this test-only edge and retains the
 rule that no `oxml-*` crate depends on either facade family.
 
 ## What stays put
+Mail-merge package authoring stays in `rdocx::field` and the existing settings
+grammar. It adds four `Document` methods. Rust carriers are owned mutable
+inputs and read copies. It does not add a merge engine, a connector, or a
+second settings writer. Flat `mail_merge` and rich `mail_merge_rich` still
+consume records the caller already holds. Package prepare is offline unless
+the caller passes `CallerSupplied` rows for a faithful external source.
+Embedded rows live in one versioned custom XML store named by
+`rdocx.mailMerge.storeItemId`. An identical store is reused. A changed
+unshared store is replaced in place. A shared or bound store is copied to a
+new GUID and the old store is kept. Settings relationships stay on the
+settings part. Recipient capacity is one part for the whole package across
+both recipient content types. A changed shared recipient part is kept and the
+write is refused. The same four methods are the Python surface. The seven
+Python classes stay frozen. WASM and CLI gain no authoring method.
+
 Bibliography source authoring and formatting stay in the native
 `rdocx::bibliography` module. It owns qualified custom XML source inspection,
 checked source CRUD, document style/options and concrete measured citation and
@@ -733,7 +783,11 @@ same result-local projection consumed by marker layout, TOC rebuild, and REF
 evaluation.
 
 The same grammar owns the bounded `w:ffData` projection on complex legacy form
-fields and the `w:glossaryDocument` root model. Typed form values and glossary
+fields and the `w:glossaryDocument` root model. Current text, checkbox, and
+drop-down values stay in the result region. An explicit reset default stays in
+`w:ffData` and is not rewritten when only the current value changes. A new
+legacy field always writes a result region, including an empty one, and writes
+`w:ffData` only on the begin marker. Typed form values and glossary
 properties are namespace aware, while retained XML remains the serialization
 source for every unsupported attribute and subtree. The `rdocx` facade owns
 relationship resolution, story-part identity, staged validation, and package
@@ -915,8 +969,16 @@ complex hyperlinks are not reported as `Document::links()` until the update
 policy defines how to handle them. The `rdocx` facade correlates bookmark ids
 and owns mutation across typed body paragraphs, including supported table and
 content-control traversal. Its story-qualified range inventory also pairs
-bookmarks, comment endpoints, permission ranges and proofing ranges within one
-physical owner. Checked add, move and remove operations stage a candidate,
+bookmarks, comment endpoints, permission ranges and proofing ranges. Validation
+walks every admitted marker in physical source order first. Only after that
+walk does the inventory omit a bookmark, comment, or permission pair that has
+exactly one begin and one end, is unique, stays in one part, and crosses
+owners. The omitted name or id stays occupied. A proofing pair that crosses
+owners is refused. Duplicate, unmatched, reversed, crossing, and cross-part
+pairs still error. Returned ranges keep the legacy order. Owner-local ordinals
+stay on those ranges. Destination placement still requires one owner. The name
+uniqueness filter still applies when marker scan or pairing fails, if paragraph
+projection succeeded. Checked add, move and remove operations stage a candidate,
 validate accepted-view order and reopen the result before publication.
 Proofing pairs carry their spelling or grammar type without an invented id.
 Removing a comment range leaves its reference run and definition as a point
@@ -1573,6 +1635,8 @@ relationship-resolved part and ID allocation. Rich edits use the same checked
 story operations as footnotes, then reopen the candidate package before
 publication.
 
+High-level form rules stay caller state on the `rdocx` facade. They are not a package schema and they are not stored on save. One open package remains authoritative. The private inventory walks the current physical owner of each part in deterministic preorder, then applies the tag filter. Dedup is only the same part and span. An exact tag reaches every currently authorable internal story. Overlap, a duplicate, the wrong kind, a schema or reset binding conflict, or missing store ownership is one atomic error. One current invalid state is one owned issue per physical target. A package or XML failure is an error. An empty rule list discovers nothing. A partial fill may leave an unassigned required control empty. Legacy reset uses the F-288 default or fallback pair and does not add a second default authority. Repeat counts stay, and repeat still clones the first item and refuses removal of the last item.
+
 ## Versioning
 
 The 15 shared and PowerPoint publication candidates use the explicit common
@@ -2225,8 +2289,15 @@ three anchors together, then invalidates layout once. `CommentRef` is a
 read-only view over the typed comment and its comments-extended thread entry.
 Its checked `anchor()` and `anchor_text()` accessors share the document's
 qualified comment ownership proof. `Document::comment_anchor` returns an
-accepted-view `StoryRunRange`, and `comment_anchor_text` returns exactly the
-selected accepted display, with one newline between paragraphs. A known
+accepted-view `StoryRunRange`, and `comment_anchor_text` returns the accepted
+display of one enclosing non-cell physical flow. Table cells in that flow are
+included. Paragraphs are joined by one newline. An independent nested text box
+is a separate flow and is excluded. `comment_anchor_snapshot_results` returns
+one result per comment. An unrepresentable projection or endpoint is that
+comment's error, and the other comments stay listed. `comment_anchor_snapshots`
+is the strict collect wrapper over the same body, so one such error fails the
+whole map. Document-wide inventory and ownership failures still fail both
+calls. A known
 orphan returns no range or text, and a reference-only point returns no paired
 range with empty text. Replies do not inherit a fabricated parent range.
 Unknown identities and malformed, ambiguous or unprojectable selected sources
@@ -2370,11 +2441,17 @@ cannot back a Python property setter. The 61 consuming builders delegate to
 their setter twins, so Rust callers retain chaining while borrowed handles and
 Python properties use in-place mutation.
 
+The Word facade exports `validate_form`, `fill_form`, `reset_form`, and `protect_form` on the approved carriers. Python exposes the same four operations, the protection getter, set, and remove, and story permission insertion. WASM and CLI gain no new authoring method. Existing readers keep preservation and current-value behavior. A candidate that is byte-equivalent to the source is a no-op. Typed equality is not that shortcut. Returned issues, counts, and revision tokens are allocated before publication.
+
 ## Shared Word document operations
 
 The native Word facade owns accepted-view text presentation and advisory package validation. Python and CLI callers consume the same TextReport and ValidationReport. The native crate has no CLI dependency. Plain text presentation groups readable related stories in physical inventory order and retains main text with one ordered omission diagnostic if extraction fails. Body counts use accepted content rather than presentation labels.
 
 Python template conversion admits explicit JSON scalar and container types before native mutation. Its existing workspace serde_json dependency edge introduces no separate converter model. Checked fragment publication and property mutation stage complete candidates, preserve the original on refusal and invalidate live handles only after changed publication. Markdown requests recursive physical-owner boundaries from the existing accepted projection. The default accepted view remains unchanged for its other consumers.
+
+Fragment import keeps a main-part relationship id stable until the main story references that id or the id leaves the relationship registry. Loss of an owner part by itself does not drop the hold. Reconciliation intersects the registry before save. An unreferenced id is not promised to survive a fresh reload. Picture bytes stay with the drawing for both insertion orders, the default policy and related-part reuse turned off. Chart, hyperlink, template, building-block and rich-merge publication use that same hold. Native typed insert_document remains the existing body, style and numbering route. It does not import source media relationships. Its unchanged control uses a source and a destination that already share the intended media graph.
+
+Style import resolves a repeated style id to its first definition before the dependency closure. Equal first definitions add no copy. A different first definition adds one renamed copy, and that renamed copy is not a default. A later shadowed definition and its dependencies are ignored. Existing target duplicate style XML stays. A source default whose id differs from the destination default still refuses as a second default.
 
 ## PowerPoint checked XML ownership
 
@@ -2391,6 +2468,17 @@ and revision tokens before committing. Physical paragraph and run positions
 address current owners, never prove that removed children survived. Actual
 owner, text-body and XML-property child generations establish alias identity.
 Shared revision primitives remain owned by oxml-py-support.
+
+Part bytes are `Arc<Vec<u8>>`. `set_part` accepts `impl Into<Arc<Vec<u8>>>`.
+`get_part` still returns borrowed bytes. A parsed presentation keeps the
+package it read as an immutable baseline. The candidate is edited from
+that baseline. The trusted flag records a read or a reread. It does not
+detect a later public part-map edit. A commit reuses unchanged part
+allocations and reparses only changed owners. A missing or untrusted baseline,
+or a name a write would normalize, writes the ZIP and reads it back.
+`saves_as` compares exact saved bytes,
+including pending direct edits. Unchanged-since queries report shared
+allocations and may treat equal new allocations as changed.
 
 ## Embedded font ownership
 

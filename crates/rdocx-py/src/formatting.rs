@@ -1,5 +1,5 @@
 use oxml_py_support::ContentPath;
-use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
@@ -8,6 +8,41 @@ use crate::paragraph::{ParagraphLocation, paragraph_location};
 use crate::{color_hex, color_object, enum_object, length_object, stale_to_pyerr};
 
 type BorderSnapshot = (String, Option<u32>, Option<Py<PyAny>>);
+
+/// Python line multiple checked before [`rdocx::auto_line_spacing`].
+///
+/// An exact `n / 240` grid point inside signed 32-bit twips is accepted even
+/// when the raw product is one ulp outside `n`. Every other multiple must have
+/// a finite raw product inside the closed 32-bit range. Non-finite values and
+/// a huge int whose float conversion overflows are `ValueError`.
+///
+/// The Python number is extracted once. Callers publish this checked `f64`.
+pub(crate) fn require_auto_line_spacing(value: &Bound<'_, PyAny>) -> PyResult<f64> {
+    let multiple = match value.extract::<f64>() {
+        Ok(multiple) => multiple,
+        Err(error) if error.is_instance_of::<PyOverflowError>(value.py()) => {
+            return Err(PyValueError::new_err(
+                "line_spacing multiple must be finite and fit signed twips",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    if !multiple.is_finite() {
+        return Err(PyValueError::new_err(
+            "line_spacing multiple must be finite and fit signed twips",
+        ));
+    }
+    let scaled = multiple * 240.0;
+    let nearest = scaled.round();
+    let rescued =
+        nearest >= i32::MIN as f64 && nearest <= i32::MAX as f64 && nearest / 240.0 == multiple;
+    if !rescued && !(scaled.is_finite() && scaled >= i32::MIN as f64 && scaled <= i32::MAX as f64) {
+        return Err(PyValueError::new_err(
+            "line_spacing multiple must be finite and fit signed twips",
+        ));
+    }
+    Ok(multiple)
+}
 
 // These two Word spacing properties share EMU storage but have different signs.
 fn checked_spacing_length(
@@ -1488,14 +1523,7 @@ impl PyParagraphFormat {
                 "line_spacing requires a numeric line multiple or Pt/Length",
             ));
         }
-        let multiple = value.extract::<f64>()?;
-        let scaled = multiple * 240.0;
-        let twips = scaled.trunc();
-        if !scaled.is_finite() || twips < i32::MIN as f64 || twips > i32::MAX as f64 {
-            return Err(PyValueError::new_err(
-                "line_spacing multiple must be finite and fit signed twips; use a representable multiple or Pt/Length",
-            ));
-        }
+        let multiple = require_auto_line_spacing(value)?;
         self.apply(py, ParagraphUpdate::LineSpacingMultiple(multiple))
     }
 

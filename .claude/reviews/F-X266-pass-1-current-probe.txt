@@ -1,0 +1,50 @@
+python 3.12.13 (main, Jun  2 2026, 22:42:28) [Clang 22.1.3 ]
+executable /tmp/f-x264-py312/bin/python
+importpath /Users/atulsharma/Documents/projects/tensorbee/rdocx-s954-f-x266-grok/crates/rdocx-py/python/rdocx/_rdocx.abi3.so
+sha256 a89567b2475960789967adf4ba03219ff17fe0c5314f78811e3fa72b41aa02fd
+has_whole True
+has_splice True
+--- add_no_handle
+reset_read whole (2, 0) splice (5, 339)
+mutate_ok
+after_mutate whole (0, 0) splice (36, 678)
+to_bytes_exc PackageError OPC package error: /word/document.xml holds U+0001 at line 1, column 433, a character XML 1.0 cannot carry
+after_to_bytes whole (0, 0) splice (0, 0)
+after_held_read whole (0, 0) splice (0, 0)
+--- add_with_handle
+reset_read whole (2, 0) splice (5, 339)
+mutate_ok
+after_mutate whole (0, 0) splice (36, 678)
+to_bytes_exc PackageError OPC package error: /word/document.xml holds U+0001 at line 1, column 433, a character XML 1.0 cannot carry
+after_to_bytes whole (0, 0) splice (0, 0)
+held_paragraph_text 'held'
+held_run_exc StaleElementError stale run handle was created at document revision 1, but the document is now at revision 2 (a structural change invalidated it). First invalidated by Document.add_paragraph at committed revision 2. Re-fetch it with doc.paragraphs[0].runs[i].
+after_held_read whole (0, 0) splice (1, 0)
+--- insert_no_handle
+reset_read whole (2, 0) splice (5, 339)
+mutate_ok
+after_mutate whole (0, 0) splice (36, 339)
+to_bytes_exc PackageError OPC package error: /word/document.xml holds U+0001 at line 1, column 396, a character XML 1.0 cannot carry
+after_to_bytes whole (0, 0) splice (0, 0)
+after_held_read whole (0, 0) splice (0, 0)
+--- insert_with_handle
+reset_read whole (2, 0) splice (5, 339)
+mutate_ok
+after_mutate whole (0, 0) splice (36, 339)
+to_bytes_exc PackageError OPC package error: /word/document.xml holds U+0001 at line 1, column 396, a character XML 1.0 cannot carry
+after_to_bytes whole (0, 0) splice (0, 0)
+held_paragraph_exc StaleElementError stale paragraph handle was created at document revision 1, but the document is now at revision 2 (a structural change invalidated it). First invalidated by Document.insert_paragraph at committed revision 2. Re-fetch it from its current physical owner.
+held_run_exc StaleElementError stale run handle was created at document revision 1, but the document is now at revision 2 (a structural change invalidated it). First invalidated by Document.insert_paragraph at committed revision 2. Re-fetch it with doc.paragraphs[0].runs[i].
+after_held_read whole (0, 0) splice (0, 0)
+--- valid_control
+serializes True
+nbytes 5769
+texts ['ordinary-insert', 'ordinary-run']
+--- unrelated_u0001
+load_ok
+to_bytes_ok 5879
+paragraph_xml_ok 339
+--- unrelated_valid
+load_ok
+to_bytes_ok 5880
+paragraph_xml_ok 339

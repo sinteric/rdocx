@@ -1,5 +1,111 @@
 # Changelog
 
+## v0.16.4
+
+### Highlights
+
+Word0.16.4 adds bounded legacy fields, atomic form operations and mail-merge package authoring, and addresses the qualified S95.4 correctness and access-cost reports. The seven Rust packages, CLI and Python distribution share this version. The approved shared-buffer Rust source break and remaining qualification limits are explicit below.
+
+### Added
+
+- author legacy text, checkbox and drop-down form fields with separate current values and reset defaults, help/status text and typed options. Add default-value queries without changing the existing public metadata structs. Imported ordinary nested TIME, DATE and formula results remain bounded by the approved typed projection and retained-source rules.
+- validate, fill, reset and protect Word forms across the qualified content-control and legacy-field owners. Operations validate the complete candidate before publication. Rules are caller inputs, not a stored second form model.
+- author and inspect mail-merge package settings, canonical Word field-role mappings and recipient metadata. An offline rdocx custom-XML table can supply records. External source declarations and connection settings are stored without fetching files, HTTP or SQL. Word performs its own connector execution.
+
+### Fixed
+
+- preserve native legacy checkbox ownership when filling an empty result cache. A dedicated result run keeps the own-name bookmark boundary valid, and setter reopen checks reject a shifted neighboring field.
+- write numeric line multiples consistently through defaults, paragraph formatting and styles, including exact stored-value round trips. List cross-cell comments in physical paragraph order and diagnose an individual unrepresentable anchor without losing the remaining comments. `part_names` and `part_xml` expose relationship parts and `[Content_Types].xml` through the same serialization and validation as saving. Addresses [#402](https://github.com/tensorbee/rdocx/issues/402), [#405](https://github.com/tensorbee/rdocx/issues/405) and [#406](https://github.com/tensorbee/rdocx/issues/406).
+- preserve imported and returned picture relationship targets through staged edits and save/reopen. Resolve duplicate imported style IDs by their first definition, without redundant renamed copies for equal definitions or importing shadowed dependencies. Addresses the available [#404](https://github.com/tensorbee/rdocx/issues/404) cases and [#408](https://github.com/tensorbee/rdocx/issues/408).
+- reduce repeated body scanning, package copying and normalization in qualified Word reads and edits while retaining current-owner, namespace, private-field and resource validation. Add checked Rust `try_add_paragraph`, `try_insert_paragraph`, `try_add_table` and `try_insert_table` paths. Python insertion uses those checked paths. Addresses [#407](https://github.com/tensorbee/rdocx/issues/407) and the captured Word follow-up performance contributions.
+- use the bounded CJK font-metric policy derived from the font's OS/2 code-page bits. This does not install fonts or claim general native Word layout equivalence.
+
+### Compatibility
+
+- Python 3.9 remains supported for constructor calls and defaults. With the stable-ABI wheel, native class constructor signatures are available to `inspect.signature` on CPython 3.10 or newer. On CPython 3.9, pinned PyO3 exposes no class text signature, so constructor introspection raises `ValueError`. No constructor, stub or class identity changes.
+
+- **Approved Rust source break in both prepared version lines:** `oxml_opc::OpcPackage.parts` now stores `Arc<Vec<u8>>`, and `remove_part` returns `Option<Arc<Vec<u8>>>`. The Word `rdocx_opc` re-export exposes the same change. Migrate direct map writes and owned removal results as described below. `set_part` accepts both `Vec<u8>` and `Arc<Vec<u8>>` through `Into`, and `get_part` still returns borrowed bytes. Python signatures are unchanged. These releases retain the explicitly requested 0.16.x and 0.14.x lines and do not claim unrestricted Rust source compatibility.
+
+The approved Rust source break affects both `oxml_opc::OpcPackage` and its `rdocx_opc` re-export. Existing owned `set_part` calls continue to work:
+
+```rust
+use std::sync::Arc;
+
+package.set_part("/word/example.xml", xml.into_bytes());
+
+// Direct public-map insertion now needs shared storage.
+package.parts.insert("/word/example.xml".to_owned(), Arc::new(bytes));
+
+// Preserve sharing when reusing an already shared payload.
+package.set_part("/word/example-copy.xml", Arc::clone(&shared_bytes));
+
+// Removal returns shared storage. Clone the Vec only if ownership is required.
+let shared = package.remove_part("/word/example-copy.xml").unwrap();
+let owned_bytes: Vec<u8> = shared.as_ref().clone();
+```
+
+Readers can keep using `get_part`, which still returns `Option<&[u8]>`. Direct mutation of a retained part's bytes requires copy-on-write, such as `Arc::make_mut`, rather than mutating through a shared reference. Python signatures are unchanged.
+
+- Bounded legacy form creation, form operations and mail-merge package authoring are included. Fillable PDF forms remain outside this release. Mail-merge custom XML is an offline rdocx table, not a claim that Word treats it as a native embedded database. External connectors remain declarations for Word to execute. Offline validation reports unsupported source or mapping states.
+- Non-bool Python integers and floats mean line multiples in the affected formatting APIs. `Length` means exact spacing. Omitted values preserve formatting and `None` clears it. Imported `atLeast` spacing stays preserved until explicitly assigned. This changes raw integer interpretation in style calls.
+- Save-equivalent part inspection can fail when the package cannot be serialized. Legacy infallible Rust body-insertion methods retain their existing behavior. Use the additive checked methods for atomic refusal.
+- The original unreduced #404 picture-swap input was unavailable. Available reproduction cases are covered, but that original input remains unverified. The reporter should retest the original file after release and reopen if necessary.
+- Performance work uses qualified workloads and safety fallbacks. It is not a promise that every public call is constant-time. Retained-data caches trade memory for speed. The [S95.4 delivery record](docs/sprints/AS_BUILT.md) retains measured timing, memory and retained-history results, including residual expensive calls and fallback costs.
+The private unreduced Issue 390 document remains unqualified. Its reduced cases and constructed image-reinsert controls are included, so the report is partially addressed. Custom XML store removal, general XPath, citation/equation/bibliography/document-part control authoring, Python 3.14 and npm publication are excluded. Default paragraph line-spacing reads stored auto values as multiples and exact/atLeast values as Length. Assigning Length writes an exact rule, an omitted keyword preserves its element, and None clears only the selected property. The shared 0.14.4 family must precede Word publication where the internal pins require it.
+
+### Contributors
+
+- S95.4 thanks **Hadrien Mary ([@hadim](https://github.com/hadim))** for Issues [#402](https://github.com/tensorbee/rdocx/issues/402), [#404](https://github.com/tensorbee/rdocx/issues/404), [#405](https://github.com/tensorbee/rdocx/issues/405), [#406](https://github.com/tensorbee/rdocx/issues/406), [#407](https://github.com/tensorbee/rdocx/issues/407) and [#408](https://github.com/tensorbee/rdocx/issues/408), and assessed PRs [#409](https://github.com/tensorbee/rdocx/pull/409), [#410](https://github.com/tensorbee/rdocx/pull/410), [#411](https://github.com/tensorbee/rdocx/pull/411), [#412](https://github.com/tensorbee/rdocx/pull/412), [#414](https://github.com/tensorbee/rdocx/pull/414), [#415](https://github.com/tensorbee/rdocx/pull/415), [#417](https://github.com/tensorbee/rdocx/pull/417), [#418](https://github.com/tensorbee/rdocx/pull/418), [#419](https://github.com/tensorbee/rdocx/pull/419), [#420](https://github.com/tensorbee/rdocx/pull/420), [#421](https://github.com/tensorbee/rdocx/pull/421), [#422](https://github.com/tensorbee/rdocx/pull/422). Shared OPC work from PRs [#413](https://github.com/tensorbee/rdocx/pull/413) and [#416](https://github.com/tensorbee/rdocx/pull/416) also benefits Word. Contributor inputs were adapted and hardened to the approved local contracts, rather than represented as unchanged merges.
+
+## rpptx-v0.14.4
+
+### Highlights
+
+PowerPoint0.14.4 bounds the qualified mutation workloads and repairs the named native animation and SmartArt cases. The fifteen shared OOXML and PowerPoint Rust packages, CLI and Python distribution share this version. The approved shared-buffer Rust source break and remaining qualification limits are explicit below.
+
+### Added
+
+- add `Effect::LinearOpacityMask` to the existing non-exhaustive Rust effect enum, with one shared validation query and raster/SVG composition. Invalid masks produce transparent output in those renderers.
+
+### Fixed
+
+- share unchanged package bytes and commit qualified edits in memory while refreshing the affected owner inventories. Preserve full checks for signed/embedded cases and operations that require shared contexts or whole-deck reports. Addresses [#403](https://github.com/tensorbee/rdocx/issues/403).
+- Correct earlier visibility ownership when a later entrance is still pending, the four qualified native wipe directions, and native `ScaleX`, `ScaleY` and `style.rotation` numeric properties while retaining the legacy aliases. Scale materialized custom geometry and its text rectangle before page-clip projection, without double-scaling dynamic rectangle geometry.
+- Correct the six qualified SmartArt family profiles and text owners, including native cycle and pyramid text frames, list insets, hierarchy/relationship sizing, matrix sizing and diagram text defaults. Explicit source formatting remains authoritative.
+
+### Compatibility
+
+- **Approved Rust source break in both prepared version lines:** `oxml_opc::OpcPackage.parts` now stores `Arc<Vec<u8>>`, and `remove_part` returns `Option<Arc<Vec<u8>>>`. The Word `rdocx_opc` re-export exposes the same change. Migrate direct map writes and owned removal results as described below. `set_part` accepts both `Vec<u8>` and `Arc<Vec<u8>>` through `Into`, and `get_part` still returns borrowed bytes. Python signatures are unchanged. These releases retain the explicitly requested 0.16.x and 0.14.x lines and do not claim unrestricted Rust source compatibility.
+
+The approved Rust source break affects both `oxml_opc::OpcPackage` and its `rdocx_opc` re-export. Existing owned `set_part` calls continue to work:
+
+```rust
+use std::sync::Arc;
+
+package.set_part("/word/example.xml", xml.into_bytes());
+
+// Direct public-map insertion now needs shared storage.
+package.parts.insert("/word/example.xml".to_owned(), Arc::new(bytes));
+
+// Preserve sharing when reusing an already shared payload.
+package.set_part("/word/example-copy.xml", Arc::clone(&shared_bytes));
+
+// Removal returns shared storage. Clone the Vec only if ownership is required.
+let shared = package.remove_part("/word/example-copy.xml").unwrap();
+let owned_bytes: Vec<u8> = shared.as_ref().clone();
+```
+
+Readers can keep using `get_part`, which still returns `Option<&[u8]>`. Direct mutation of a retained part's bytes requires copy-on-write, such as `Arc::make_mut`, rather than mutating through a shared reference. Python signatures are unchanged.
+
+- Native soft-wipe qualification covers direct leaf owners and the isolated plain-paint fixture. Group-target timeline wipes retain the existing hard-clip fallback with a diagnostic. The neutral mask composes an existing group scene once. Caller clips remain authoritative.
+- Raster and SVG support the new linear opacity mask. Ordinary PDF retains its existing unsupported-effect behavior and checked PDF conformance refuses it. This release does not claim soft-wipe PDF parity, general shadow fidelity or expanded paint-domain support. Held entrance-wipe composition with later opacity remains outside the qualified interaction set.
+- Custom-path emphasis scaling retains existing font, inset, stroke, shadow and precomputed-paint semantics. Qualified geometry repairs do not establish general native emphasis fidelity. Native profile claims must name the authenticated application/source profile and completed gates, rather than generalize across PowerPoint versions.
+- Performance acceptance remains tied to the pinned 248-call catalogue and original 10/40/80-slide workloads. Costly correctness fallbacks and by-design whole-deck operations remain disclosed. The [S95.4 delivery record](docs/sprints/AS_BUILT.md) retains the normal-artifact measurements and remaining slow calls.
+
+### Contributors
+
+- S95.4 thanks **Hadrien Mary ([@hadim](https://github.com/hadim))** for [Issue #403](https://github.com/tensorbee/rdocx/issues/403) and assessed PRs [#413](https://github.com/tensorbee/rdocx/pull/413) and [#416](https://github.com/tensorbee/rdocx/pull/416). The shared package layer also supports the Word follow-ups credited in v0.16.4. These are adapted contribution inputs, not claims of unchanged PR merges.
+
 ## v0.16.3
 
 ### Highlights

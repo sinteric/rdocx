@@ -1,5 +1,18 @@
 # 12, Testing strategy
 
+
+Materialized timeline geometry controls start with actual CT_Slide presets/custom paths, then inspect positioned corners and raster extents at the native1980ms scale/rotation/motion phase. Asymmetric nonorigin cubic controls and text rectangles distinguish independent axes and parent transforms. Factor1, signed/zero factors, overflow refusal, picture custom clipping, ordinary/fallback geometry and a single text/content owner protect the existing consumer boundaries. Numeric state or changed bounds alone cannot discharge painted-geometry correctness.
+
+## Native linear mask and profile discriminators
+
+Timeline regressions distinguish real visibility writes from opacity/motion map entries, both traversal orders, distinct targets, click and parent endpoints. Native numeric controls include ScaleX 12, ScaleY 20 and style.rotation 720 separately from legacy scale 100000 and spin 5400000. Four directions, entrance/exit and exact endpoints exercise the same native spatial alpha policy.
+
+Backend controls cover translated/scaled masks, clips, colored and transparent backgrounds, overlapping descendants, shadows, multiple masks, invalid geometry/stops and one text occurrence. SVG and raster compare the same bounded scene. Ordinary PDF output deliberately ignores the effect while checked conformance refuses it. SmartArt tests retain native physical text frames, explicit data overrides, empty/multiple paragraphs and nonorigin/nonsquare bounds. Exact caller fonts and native geometry remain independent reference inputs.
+
+The animation oracle fixture explicitly suppresses inherited line and effects on every animated/control rectangle. It uses native visibility set and fractional opacity, independent ScaleX/ScaleY and degree rotation while preserving all existing cases, local/encoded times and thresholds. Historical shadowed failures remain evidence for the separate shadow qualification story. New source requires fresh independent native capture and trusted review. Successful local tests do not adopt pins or pass native gates.
+
+The canonical wipe releases its completed filter before the later opacity phases. A source-bound one-literal held/remove native control preserves all nine sample clocks and retains the held-source failure as explicit unsupported effect-composition evidence. Native reference admission keeps the historical16.104 exact halo240 equality and250 inequality profile. The independently reviewed16.114.1 plain-source profile pins both observed240 bounds exactly and applies the unchanged1pt geometry limit to their difference. Its250 control must exceed1pt and the240 difference. This is an explicit source-specific acceptance amendment, with the failed historical predicate retained. It does not alter cutoffs, source paint/placement, sample clocks or product1pt/0.99 bounds. A passing timeline SSIM alone does not qualify the halo profile.
+
 ## Numbering-aware navigation regression
 
 One source-built multilevel document compares visible markers, TOC, numbered
@@ -223,7 +236,10 @@ marker order after both resolutions. Compatible comment text remains covered
 by the existing full-story Word records.
 
 The legacy form and glossary round-trip gate constructs every package in
-source. It covers typed text, checkbox, and drop-down values, deterministic
+source. Current values and explicit reset defaults are separate observations.
+A local layout and PDF check uses the bundled deterministic fonts and shows a
+fallback display before an empty current-value assignment. Literal replacement
+of that virtual display changes no bytes. The gate covers typed text, checkbox, and drop-down values, deterministic
 part-scoped ordinal identity across supported internal Word stories, AutoText
 classification, and selected building-block replacement. Prefix aliases,
 fixed-prefix changed output, schema-order insertion, structural reopen,
@@ -263,8 +279,10 @@ same batched native inventory as their addresses. Section source uses the
 existing checked section XML provider. Every ancestor must also be certified.
 Cells bind their exact table, row, cell and physical story, so a changed table
 retires all its cells and descendants. Changed or ambiguous paragraphs retire.
-Equal text or equal inventory counts alone grant no authority. Run/Hyperlink
-and existing global run/snapshot epochs retire on actual mutation. Exact
+Equal text or equal inventory counts alone grant no authority. Existing FormValues publication retires run, hyperlink, and existing global
+run and snapshot epochs on actual mutation. Modern form publication keeps
+proved runs and exact snapshots as the bindings spec describes.
+`validate_form` does not publish. Signing behavior stays as specified. Exact
 no-ops and refused operations keep all current tokens. Other conservative
 publishers retain their existing behavior, and retired pre-existing tokens
 cannot be revived by a same-route or equal-text form result.
@@ -1096,6 +1114,22 @@ references, entity-escaped bookmark names, collision-safe identity allocation,
 and foreign same-local-name attributes. The methods are opt-in and no sample
 invokes them, so the 49-entry hash harness must remain unchanged.
 
+Mail-merge package tests live in the existing `rdocx` integration entrypoint
+and in four existing `rdocx-py` tests. They cover embedded and external
+authoring, noncanonical settings and recipient part names, canonical slot
+order, offline and caller-supplied prepare, diagnostics without invented
+rows, identical store reuse, in-place replacement of an unshared store,
+copy-on-write of a bound or shared store, shared recipient refusal, and the
+column, row, and encoded-size caps. Python checks deep copies, readonly
+carriers, exact default tuples, and import of a wider `data_type` or raw URI
+without the authoring factories. The focused typed check is
+`crates/rdocx-py/tests/typing_smoke.py` against the built package. F-290 owns
+that round-trip local gate and adds no Word oracle of its own. Other form
+stories own native Word acceptance in the integrated union. Bounded
+capability closure is the implemented and scoped-reviewed operation. Pending
+outcomes stay in the delivery record. Strict stubtest, the installed full
+suite, and the hash harness are outside this story's local gate.
+
 The rich mail-merge gate builds nested and named source records in code and
 compares exact paragraph, list, table, image, fragment, and formatted-run order
 with no remaining merge fields or region markers. Its unit matrix covers
@@ -1745,6 +1779,8 @@ inherited-prefix opaque children but rejects actual raw Word delimiters and
 malformed XML. Attachment failures keep destination runs unchanged, and the
 legacy plain-string field API retains its existing serialization. Existing
 `text.rs` unit tests and `regression_test.rs` provide this round-trip gate.
+
+High-level form tests build the dense document in source. The native integration entrypoint and the public Python helper `_source_built_dense_form` share one profile: six rules, a body checkbox, date, list, custom store, legacy field, repeat, permission, and header criterion. Positive cases do not inject XML as the primary construction path. Imported negative edge fixtures remain allowed. The local Python public check calls `to_pdfa_deterministic("pdfa-2b")` and reads a bounding box and a PNG diagnostic. PATH Poppler 26.09.0 is that local reader. It is not the 26.01.0 pin, and it is not a baseline or an external oracle. Named final gates stay the hash harness, rustdoc, WASM, the publish dry-run, strict installed mypy, stubtest, and the full suite, and they run only on the final union. No new hard performance cap is part of this form surface.
 
 ## The hash harness
 
@@ -4290,7 +4326,17 @@ Stated plainly, because they are why two shipped defects went unnoticed:
 ### Checked Word comment anchor projections
 
 The existing native regression entrypoint exercises exact accepted-view comment
-text and reusable story ranges across body and related owners. Controls cover
+text and reusable story ranges across body and related owners. Accepted text
+inside one enclosing non-cell flow includes table cells and joins paragraphs
+with newlines. An independent nested text box stays outside that flow.
+`cross_cell_range_stays_in_one_owner` and
+`story_range_order_rejects_reversed_and_crossing_omissions` discriminate a
+physically valid same-part omission from reversed, crossing, and duplicate-name
+controls. `BodyKeep` beside invalid `BadRelated`, and the same-name body and
+header control, stay on that order guard. `ref_cross_owner_keeps_old_cache`
+discriminates an ordinary related `REF`, a separate `REF \f`, and update plus
+reopen. `comment_anchor_snapshot_results` keeps one bad row, and
+`comment_anchor_snapshots` still returns an error for that row. Controls cover
 Google block and inline content controls, accepted revisions, field cache text,
 empty intervening paragraphs, namespace-qualified endpoints and source-order
 boundaries. Reads and reopen preserve package source. Point, orphan and reply
@@ -4299,7 +4345,11 @@ ranges return checked errors. A wrapper-only zero-run interval is refused when
 its coordinates cannot re-anchor the selected display. Python runtime and
 strict typing cover optional frozen fields, typed snapshots and stale range
 reuse. CLI JSON asserts complete typed endpoint locations and null versus empty
-text. These source-built API checks do not claim native Word render parity. Issue 289 is covered by block-control paragraph endpoints with accepted text and nonempty XML, exact two-segment paths and containing body indices before and after reopen.
+text. These source-built API checks are local discriminators. They do not claim
+native Word render parity, and they are not the final installed typing, hash,
+Word, or full verify gate. Issue 289 is covered by block-control paragraph endpoints with accepted text and nonempty XML, exact two-segment paths and containing body indices before and after reopen.
+
+`self_closing_story_paragraph_fields_evaluate` keeps the original twelve shape and story controls. The original `add_footnote` seed stays unreferenced. A fresh copy of that seed appends the same note id with `paragraph_mut(0).add_footnote_ref`, adding three referenced footnote shapes and fifteen observations in all. One `PAGE` row has cached result `9` and defers pagination. A visible ordinary update returns `1`, keeps cached `9`, and may change bytes. It is not a byte no-op. Pure evaluation and layout reads preserve bytes. The unreferenced footnote has no placement, layout-backed `page_fields` `0`, cached `9`, and the unplaced-source diagnostic. Header, footer, referenced footnote, and endnote place physical page 1 and displayed page 1 on direct child paths `[2]`, `[3]`, and `[2]`. Header and footer layout-backed update keeps `page_fields` `0` and cached `9`, with the dynamic header and footer retention diagnostic. A placed footnote or endnote writes `page_fields` `1` and cached `1`. Save and reopen check the cache and either the placement or the deliberate non-placement. Dirty state is the model flag, not an XML spelling. The endnote `PAGE` hash corpus stays final and unrun. This check claims no native Word result.
 
 
 ### Checked Word comment moves
@@ -4390,6 +4440,11 @@ All 49 deterministic hash entries remain unchanged.
 
 ## PowerPoint footer and transition acceptance
 
+Part-local footer and transition proofs compare the untouched slide bytes.
+Ambiguous owner identity remains a refusal. Release timing of signed and
+embedded fallbacks is disclosed with the final bench and is not a constant-time
+claim.
+
 Public Base controls separately decide deck footer, local footer, transition,
 per-master theme, placeholder metadata, field insertion and displayed start.
 Current native and installed tests require repeat bytes, save/reopen, unique
@@ -4430,6 +4485,14 @@ Text watermark opacity coverage includes exact named refusals for zero, one and 
 
 ## Word document-operation parity controls
 
+Conservative publication controls count actual route matching while retaining candidate validation and stale-handle assertions. Picture inventory controls at 250 and 1000 paragraphs count source-prefix namespace bytes and verify media and dimensions. Scope batching retains paragraph-local declarations and the original error fallback. Comment movement retains the located inventory's physical reference span and complete uniqueness check. These controls do not replace the five public linear timings or the native lookup-work rider.
+
+Masked-query controls combine a retained W15 owner and a modeled header relationship, require fixed warm child-write and namespace qualification work at 25 and 100 paragraphs, and compare complete output against the whole reference. Separate controls cover an opaque occurrence sharing a modeled relationship ID, changed head bindings, malformed tails, crossing spans and field fallback. Successful full-writer fallbacks count the body children actually written, rather than hiding that work behind a zero parse count.
+
+Debug whole-reference agreement checks have cold, independent main-part state. Their clones discard retained Parsed, body-block proofs and shared body-read memos before executing the ordinary save or ZIP reopen. Readonly agreement assertions inspect an initialized main-parse slot without initializing an empty one, while always comparing the fresh parse with the current model. The six auxiliary frame, namespace, canonical-fragment, relationship-membership, closed-body and namespace-span units follow the existing staging pause for these reference comparisons. Production successes and refusals remain counted outside that pause. Focused controls require positive real unpaused work, real guard refusal, zero paused reference units and unchanged original cache identities and occupancy. They also preserve retained alias markers, field current/default values, bookmarks, unknown qualified properties and W15 owners through independent save/reopen. These debug checks do not qualify release timing or retained-memory costs.
+
+Checked body insertion regressions compare valid edits with atomic refusal on ambiguous aliases, repeated namespace owners and actual shadowed root declarations. Controls include unused foreign prefixes, already-unsavable native state, index and XML-character precedence, zero dimensions and the old infallible Rust behavior. Cache tests prime a savable answer, change the text that disambiguates retained namespace owners through a mutable native paragraph, require refusal without model or XML changes, then restore the owner and require success. Held Python owners survive a refusal. These local checks do not replace the final sprint performance, memory, hash or Word riders.
+
 Missing-operation Base controls precede new public routes. Installed current-source controls verify typed payloads, atomic JSON conversion, live property ownership, immutable equation and fragment snapshots, and qualified checkbox scalar/font selection. Strict typing and stubtest run against the authenticated wheel while the complete installed PowerPoint distribution remains unchanged.
 
 Identified block-control regression controls execute CLI validate,
@@ -4440,7 +4503,27 @@ TOC content and nested controls, inherited aliases, namespace shadowing,
 default clearing and escaped producer URIs. Equal-count wrong-owner and
 malformed-source controls continue to refuse.
 
+F-X265 local regressions cover picture order and reuse, staged picture, chart and hyperlink targets, available unused-relationship and body-replaced picture bytes, equal and different first style definitions, a same-id non-default rename, a different default-id refusal, and template, building-block and rich-merge controls. The native typed-insert control uses a source and a destination that already share the intended media graph. The original Issue 404 input remains unverified. Final hash, installed typing, WASM and native Word riders stay outside this local set.
+
+F-X266 local regressions cover direct body routes, append owner retention, conservative retirement, atomic splice refusal, unused root `w14` omission, scope precedence, held fresh native and reopened reads, and debug owner and byte counters. The Issue 407 release ratio stays pending for the final union.
+
+F-X268 local controls compare the current native physical inventory, including cell story fingerprints and table geometry, with the whole-reader projection. Ordinary text edits and qualified splices record piece reads and whole-inventory work. A cache-off control forces every block to be read again and must exceed the reuse bound. Opened-package controls record parsed, scanned, canonicalized and ZIP bytes. Warm font and numbering edits on an unchanged main part record none of those four. Direct-body address controls are `body_spans_match_existing_to_xml_on_current_fixtures` and the `main_body_layout_` group for raw blocks, whole-walk and fallback counts, mixed owners, serialized facts and frame bytes, reopen reuse, multiple body owners, and coverage steps. The changed-before-reopen control requires exactly one fresh child scan after changing one unread child among 50 or 200, through both reopen routes, and compares the actual location with the full reader. Changed frame and unsupported body controls retain full-scan behavior. The Python control is `test_fx268_body_locations_keep_physical_slots`. It checks end-index refusal, indexed edits, exactly three duplicate paragraphs at direct indices 1, 2 and 3 after the table moves to index 0, controls, import and reopen at 20 and 80 paragraphs. Debug `_main_body_block_scans` is cumulative and is not a stable export. A zero first measurement is not a cold-cost or constant-time result. `main_body_block_reuse_preserves_physical_owners_and_publication` is the broader native composition control. The address cases do not replace it. The six staging-counter slots record parsed bytes, scanned bytes, canonicalized bytes, ZIP bytes written, serialized children and children read. Actual child work is counted separately from byte work. Warm counted-work controls use two distinct changed edits after two changed warmups, with setup outside the window. `retained_source_parse_survives_distinct_unflushed_model_edits` checks exact opening identity and public package mutation. `masked_canonical_source_reuses_current_neighbors` has a growing whole-reference control. `source_read_proof_does_not_grant_writer_reuse` distinguishes a parsed normalizing source from exact writer bytes and retains the private tab-stop fallback. `source_piece_note_references_keep_neighbor_reads_bounded` and `retained_body_whitespace_keeps_source_edits_bounded_after_reopen` exercise actual staged reopen. Source splice controls compare private parsed state, normalized bytes, retained bytes and whole-reader errors. `drawing_id_edits_read_only_the_changed_body_child` changes IDs after two changed warmups and compares the whole reference. `retained_story_picture_source_matches_whole_canonicalization` compares repeated actual picture publication for canonical and producer-whitespace source. The pinned opening-cache-off fixture has no reusable child record and grows those four units with body size. Clearing an opening alone does not disable independent child proofs. Dedicated child-source and writer controls use the explicit force-off switch with their relevant carried records unavailable. Equal serialization with an unequal parsed model does not admit reuse. Repeated body add_run records one owner-piece read after prepared publication, and runs held from before the first add_run stay stale. Nested-table owners, table append grid retirement and physical table routes were rerun on that extension. Pending-hold controls require the whole canonicalization and the same expired, live, and referenced cleanup. Eligible in-memory reopen is covered by `in_memory_reopen_matches_zip_for_new_flat_limited_and_hook_paths`, `in_memory_reopen_keeps_related_part_errors_and_drops_stale_main_checks`, `identifier_scan_replays_exact_bytes_categories_and_old_error_order`, `parsed_none_reopen_grows_zip_parse_and_identifier_bytes` and `test_header_story_text_reopen_counts_the_changed_header_part`. Native tests cover read limits. The Python test uses the existing `Document.set_story_text` API. Scoped replacement and story-picture controls compare the whole reference at 50 and 200 paragraphs after two changed warmups. `scoped_cache_off_reads_growing_whole_inputs` requires actual growing whole parse work with reuse disabled. Context controls distinguish physical duplicates, marker collisions, root aliases, private fields and tabs, invalid entities, changed frames and disjoint edit bounds. Python A10 covers all 14 public calls at 20 and 80 paragraphs, including actual changed text and picture bytes. `fx268_changed_existing_context_uses_full_inventory_before_publication` checks an actual prepared source adoption through one live Python document, distinguishes an absent cache from a changed existing context, observes whole inventory work before commit, and checks the next stable edit. `fx268_case_equivalent_story_parts_use_the_full_inventory` and `test_word_piece_shared_header_identity_uses_opc_part_names` distinguish case-equivalent physical aliases from already deduplicated shared headers. Forms, bound stores, defaults, mail-merge settings and live-owner composition use the existing dense form fixture. `namespace_span_views_share_immutable_values_when_rebased` compares complete span values with the whole reader and rejects copied scope storage. `parsed_child_reads_borrow_immutable_proof_values` rejects copying an already qualified parsed child. `immutable_proof_model_equality_matches_whole_parse_and_late_refusals` checks changed final children, root metadata, section metadata and an unsupported later raw block after an earlier mismatch. `controlled_cell_replacement_does_not_repeat_whole_owner_routing` uses balanced 25/100 layouts and requires the real legacy route to fail the same work bound. The native `body_lookup_work_is_linear_at_250_and_1000` keeps cold and warm vectors for each actual XML reader and candidate pass. Every family and size starts from an independent byte opening. Each frozen cold, warmup and warm sample is followed by exact semantic checks outside counting, including all physical cells and control identity and destination. Native test-profile count runs with debug assertions disabled retain production checks and test instrumentation. Debug agreement controls run separately. Reads count consumed bytes and failed attempts. Candidate counters include rejects. Mandatory preflight remains counted. Audited debug comparison oracles pause counting, while production empty-frame qualification remains counted. Two changed warmups precede each changed warm sample. Every pass and unit must meet the five-times bound with zero allowance, including zero baselines. The original per-paragraph prefix algorithm is a sensitivity control under that same rule. Writer comparison controls count actual assembled output bytes, require no assembly or record replacement on the admitted equality path, and require the real cache-off path to violate that bound. They compare whole-writer bytes for zero, one and many children and retain actual writers for private facts, changed frames and conditional namespace declarations. Q22 measures the earlier initialization of the existing normalized writer record at open. Owned-output controls distinguish producer bytes from normalization, count the actual normalized-byte copy separately, and require unchanged whole-writer output without assembly. Force-off, changed children, private fields and bookmarks, missing root declarations and new-document cases keep actual assembly. No copied output or writer record supplies raw-source provenance. The comment fixture keeps each comment paragraph ID linked to its companion metadata. Comment movement uses the same batched paragraph inventory for endpoint rebasing and marker removal, with the original scanner and error order on failed qualification. Ordered disjoint paragraph spans permit a forward membership cursor. Other inventories retain containment search. Marker XML reads, failed reads, membership candidates, hidden ancestors and marker attributes are counted. Picture inventory separately counts actual writer assemblies and requires one source construction for multiple embedded relationships. Content-control indexing counts actual closing candidates per caller, including rejects. The native work gate retains these output-byte and closing-candidate vectors under the same five-times rule. Dense-ID controls cover nested and empty elements, exact ranges, parent and namespace identity, and malformed endings. Retained-fragment view controls compare all discovered stories against the independently checked canonical reader without another source build. These work counters do not qualify all copy costs, memory or release timings. Whole main-part staging qualification, final integrated release qualification, native Word comparison, release memory and release timing remain pending. Donor timings and donor memory figures are not evidence.
+
+Warm picture inventory controls count successful ordinary-paragraph skips at the original fragment-parser site and actual remaining parser attempts. A successful existing read proof, exact current part partition, complete frame and namespace scope and whole direct paragraph span must be positively exercised. A writer-only model or missing proof does not qualify. Cold and both warm public Document and Cell windows compare exact saved parts, media, relationship and returned occurrence facts with the real force-off route. Stale bytes, changed frames, fields, private owners, opaque children, alternate pictures and earlier unrelated inventory errors retain original parsing, occurrence results and atomic refusal. Plain-table controls additionally distinguish whole cell ownership inside one exact source block from arbitrary subrange membership, retain exact direct-paragraph matching and reject crossing or inverted spans. Actual source reads and frame publishers are tested separately from synthetic model-only predicate mutations. Table/row/cell controls, nested tables, raw/revision/grid/property/border/shading carriers and genuine drawing-table fallbacks retain parsing. All public windows compare independent table-proof and complex-precheck OFF controls. Actual remaining parser attempts, predicate visits, table-shape work and unchanged discovery/scope/closure work stay visible. Positive ordinary and aliased complex fields exercise the unchanged original admission loop. These mechanism controls do not replace the normal release timing or memory gates.
+
+Canonical readback controls distinguish actual borrowed-child clones from owned moves, retained equal children, changed-child copies and frame copies. Getter-only controls retain every full guard and original publication optimization, restore the old accessor alone, and measure actual accessor and reads_anew entries. The native guard matrix checks exact borrowed pointer identity after the complete guard. Relationship and retained-source admissions must be positive on the pinned public calls. Their exact outputs compare with disabled reconstruction and both earlier implementations without XML normalization. Counter vectors retain original source parsing and namespace/canonical scans and expose work in opening and other consumers. The native canonical_readback_guard_matrix covers exact changed values, late missing and failed reads, real frame invalidation, private rejection with no new child read, the original private second-phase read, actual typed resource-limit failure restoring two children and every frame field, and retained unavailable/rejected/successful outcomes. It directly checks complete source equality for drawing no-op admission. The typed invalid model exercises the transaction validator without claiming successful malformed source provenance. No mechanism result replaces normal timing, memory or final union checks.
+
+Story scan-sharing controls compare all pinned public picture windows against independently disabled scan sharing and prefix sharing. They inspect actual scan entries, XML events and bytes, eligibility work, selected-span copies and namespace vector/string copies, with exact saved/reopened parts and returned physical locations. Namespace controls compare exact ordered vectors and first errors, including repeated declarations, default/aliased bindings, shadowing, undeclaration, invalid entities and malformed later attributes. Pointer controls prove unchanged context sharing and parent/sibling isolation. Field-bearing and opaque-token inputs retain the original scan and private allocation schedule. Body sections, non-body closing-owner behavior, placement errors and direct-versus-projected indices remain discriminating cases. Scanner-local shared storage has no persistent history root. Normal timing and full memory qualification remain separate.
+
+Complete producer controls require actual source/current equality and independent actual current writer eligibility through each pinned whole public Document/Cell picture call at25/100. Counter windows include the entire public action and preserve original target/image setup. Exact saved/reopened part, media, relationship and returned-picture facts compare with the unchanged artifact and a temporary diagnostic control. Source child/shell parse and write sites remain counted separately from generic normalization. Producer success removes the producer's remaining normalization rounds, not whole inventory, current writer, namespace, decoder or publication work. Warm samples without fresh certification are distinguished from positive cold admission. A source-current mismatch still exercises real seeded normalization. Private field/frame/w14 and force-off controls keep original outcomes. Native producer_current cases cover complete metadata, late unavailable reads, zero/one/many/duplicate children, actual writer false/None and no correspondence manufacture. The owned publisher, signed-package, engine, reopen, namespace/error and source/writer controls remain independent. No counted mechanism result substitutes for the final normal79-call timing gate.
+
+Modern form parity for this authoring surface is native Word 16.114 with an independent Word PDF. The compared packages are source-built current Rust and current Python, not an older F-286 package. The criterion is equal page count, exact text and checkbox semantics, per-page SSIM of at least 0.95 at 144 DPI, matched fonts, deterministic drawing, and documented margin alignment. Acceptance joins independently exported native PDF metrics with exact text, checkbox and physical-font evidence. Each current artifact must prove source and input applicability. A local PDF bounding box from a different Poppler build does not qualify it. Full hash, rustdoc, WASM, publish dry-run, strict installed mypy, stubtest, and the full suite stay on the final union. No Word-compared performance claim and no new hard cap belong to this control.
+
 Text controls compare accepted Paragraph and story snapshots across body, tables, controls and related stories. CLI plain and JSON views retain aliases, tabs, direct and simple-field newlines, and closed complex cached-field page and column controls. Nested instruction, deleted and moveFrom content stays suppressed. Malformed related stories retain main text and the existing ordered omission diagnostic. Markdown keeps literal whitespace and physical field, control, revision and hard-break boundaries. Export controls inspect owned ODT space elements and EPUB content rather than relying on lexical XML substrings.
+
+Field-token controls count the actual comparison windows visited for `fldChar` and `fldSimple`, including rejected windows and early successful exits. After immutable block construction, repeated warm writer qualification scans zero token windows. An actual uncached scan over the same block bytes must violate that bound. Constructor and lifetime controls cover empty and short bytes, both tokens, casing, escaped spellings, foreign attributes and text, source and writer records, frame-only copies, multiple edits of one block, token removal and unchanged neighbors. Private tabs, bookmarks and fields still require their live-model controls. Inline block size is recorded before and after, and Q22 measures the existing parent cache layer and combined footprint. A local zero-rescan result does not establish a flat public-call time or memory acceptance.
+
+Owned Word transaction controls compare the actual old borrowing entry with the consuming bridge, exact package/XML/identifier results, no-op and count mismatch, refusal and reopen faults. They include all five scoped/picture publishers and every shared splice caller. Signature controls preserve the actual original package authority. Engine controls retain payload reuse and complete mutex poison state. Read-phase controls count actual current output calls and bytes and require a real old duplicate-query route to exceed the qualified one-read bound. Splice controls count actual slot-map insertion attempts and redundant scope/extraction/classification visits. The Original407-shaped mechanism case uses the pinned six verbose formatted runs at 100/1000 with cold and two-insert warm states, an actual public index-10 insert and actual setup owner cardinalities. Simple one-run controls are labelled separately. Scope/cell/parent/index agreement, returned owners, append survivors and conservative retirements remain mandatory. These local checks do not qualify release timing, memory peaks, native Word or the unchanged full gates. Production read-phase reporting separates current writer calls, normalized opening copies, canonical record copies, namespace replay outputs, normalized retained/current/restored model outputs, masked rewrites and occurrence writers. Only the successful optional proof's audited debug whole-reference comparison is paused. Force-off and private-tab production fallbacks must expose their actual work and are not held to the qualified one-canonical-producer bound. Splice reporting requires actual successful preparation and consumption, counts every mandatory final owner index visit, and separately counts general-publication index visits. Pinned cold/warm 100/1000 six-run controls require one consumed packet, exact post-edit owner cardinality in the mandatory index, and no general-publication index work. An empty reopened document has no body-story owner, so its actual public insertion must decline the packet after classifying the section and expose all three general-publication index visits. Append paragraph and table survivors retain their existing contract while held ordinary runs become stale. Normalization controls record actual parser attempts and body/frame writer calls and bytes by side and round. Positive eligible pieces and consumed producer reads accompany zero repeated right work. The uncached reference really parses and writes twice. Fields, bookmarks, tab stops, field-bearing frames, unequal bytes, invalid left input, missing w14, changed frames, marker collisions and force-off retain actual full fallback work. The fully eligible fresh picture pin must reduce6P+13 actual child reads to at most3P+13 with zero whole parsed bytes. Marker collisions at a field-free exact fixed point may reuse the already executed pure rounds, but still reject at the unchanged absence guard and retain the authoritative whole fallback. They do not require redundant right-side parsing. A zero caused by abandoning the producer proof is not a pass. Final wallclock and memory gates remain separate.
 
 ## PowerPoint names and finite language controls
 
@@ -4579,6 +4662,13 @@ Ignorable grants, blank/additive scope, sibling restoration and Choice Requires
 meaning have independent controls. Safe bounded storage counters qualify shared
 namespace and route storage without large allocation or elapsed-time claims.
 
+Trusted reread tests compare a write and a read. A hand-built baseline uses
+the ZIP fallback because it is untrusted, not because a flag scanned the
+part map. Debug ZIP counters count that fallback and an embedded candidate
+write. They stay at zero on the proved fast path. The 248-call catalogue and
+the 40 and 80 slide budgets run once in the final release bench, with no
+compilation during that bench.
+
 Local story readiness uses unique in-repo RED/GREEN tests and microscope.
 Complete ordinary installed suites, strict typing/stubs, original reporter
 markers and bodies, native PowerPoint controls and pinned external comparisons
@@ -4599,6 +4689,30 @@ notes and existing setter compatibility. The full integration run retains
 missing historical timeline and SmartArt oracle fixtures as unqualified.
 Focused applicable feature gates do not infer oracle credit from early returns
 or substitute package inspection for native application acceptance.
+
+### Native PowerPoint reference admission
+
+Reference requalification retains versioned application, source, movie, frame
+and font identities. Historical pins and failed captures remain available.
+New trusted pins require actual independent native output and review. The Q26 profile authenticates separate hardcoded timeline and SmartArt manifest digests, actual source and artifact hashes, and the observed application version, bundle and About identity. An unqueried Application.Build getter stays explicit rather than being inferred from the bundle. SmartArt
+geometry comes from native saved drawing owners, with explicit mapping for
+different primitive representations. Rust bounds never supply native expected
+geometry. Existing geometry, line-count, ink and SSIM limits remain gates.
+
+Timeline fixture targets are unique authored ordinary rectangles selected by
+exact name and the same owner's unique nonzero ID. Template position cannot
+select an empty placeholder. Admission rejects missing or duplicate names/IDs,
+placeholders, wrong kind/paint and absent, empty or off-page geometry. Reordered
+template children preserve selection. Local state checks address the selected
+Hero and click marker by ID, and wipe, opacity, transform and exit must change
+visible Hero paint. A state-map value or unequal compressed frame bytes alone
+cannot prove that an animation affected its intended visible owner.
+
+Native admission retains all nine logical cases, exact local and encoded movie
+times, zero extraction tolerances, the terminal outgoing fade binding and the
+existing normalization. A corrected fixture needs a fresh source-bound movie.
+Unavailable, semantically ineffective or failing reference observations remain
+unqualified until their actual replacement passes its declared source-specific checks. Product geometry, ink, line-count and SSIM limits stay unchanged.
 
 ## Embedded font acceptance
 
@@ -4783,6 +4897,10 @@ archives, scoped checks and unchanged deterministic hashes complete the gate.
 
 ## Typed content-control native Word qualification
 
+Word CJK line-metric controls classify synthetic raw font tables by actual OS/2 codepage coverage, not caller names or text script. Each supported bit and adjacent non-CJK bits, sizes, Windows and typographic alternatives, nonzero hhea gap, invalid hhea and old, missing or truncated OS/2 tables discriminate the policy. Shared font metrics and bundled-font coverage remain unchanged. Plain and rich CJK lines, inline objects, blank and break carriers, single, proportional, at-least and Exact modes test the existing Word restoration owner. Initial and float-induced reflow use the same face policy. Synthetic arithmetic does not qualify native compatibility. Independent Word PDFs with exact vendor-face glyph identity distinguish gap-free hhea from Windows and gap-inclusive metrics, and distinguish symmetric leading from proportional ascent/descent scaling. Native dense-form A7 still requires its eight source/state comparisons at the approved threshold. The fixed face classification is included in final source and memory applicability without an edit-history allocation.
+
+Named legacy-field controls cover the native begin/bookmark/instruction/result/end/bookmark sequence for text, checkbox and dropdown kinds. They distinguish direct, accepted and tracked axes with preceding inline controls and deleted text, retain aliased scope metadata, preserve one physical marker pair through current edits and reopen, and check frozen Python defaults. Reopen uses an ordinary document scope without injecting aliases. Mixed marker aliases, opaque foreign and default namespaces, local hyperlink shadows and conflicting generated prefixes discriminate namespace-frame preservation. Negative cases retain partial, crossing, duplicate, mismatched and shared-run source. A rich mail merge fragment named `MailMerge1`, inserted before an authored bookmark, forces a nonidentity ID remap and tests both physical markers together. Ordinary bookmark text and REF cache updates use the same virtual field range. Q25/Q27 controls add the own-bookmarked TextInput with one total complex ordinary TIME, DATE or formula leaf in either result or instruction ownership, including native subtype swaps. Exact native-shaped instruction cases distinguish inner raw instrText5 from outer current5.00. Controls test unchanged physical source, distinct source identities, all three bookmark axes, parent override, same-current byte no-op, region-specific literal replacement, source-aware canonical refusal, ordinary context and lock policy, REF and rich remap. Negative cases retain both-region, multiple, deep, extra operand, nested switch, simple, nested legacy, other ordinary and private-owner fallbacks. Mixed aliases, scalar switches and reserved-prefix conflicts qualify the same namespace frame. Authenticated Python controls distinguish frozen snapshots, fresh reads, checked selection and saved reopen. The independently native seven-of-ten RED and exact original hashes remain separate from constructed regressions, and a repaired identified artifact must list ten in both originals and all four consumed source-built outputs. These local controls do not replace the complete native Word A6 comparison or the dense-form visual gate. Empty-cache controls distinguish a missing result run from an explicit empty text run. Both marker spellings and canonical, aliased and default scopes preserve pure begin/end runs, copied result formatting, original run owner attributes, reset defaults and repeated canonical no-op. Facade cases cover body, physical cell and related header, same and opposite Booleans, a neighboring checkbox and following dropdown. Ordered legacy owner descriptors must survive publication, so a following equal Boolean cannot satisfy a shifted ordinal. Ordinary result-child removal remains legal and is not checked through a blanket ordinary-field count.
+
 F-286 external installed controls use `RDOCX_F286_WORD_PROVENANCE` to locate
 the independently retained native producer receipt. Each input is read from
 its recorded source and checked against its recorded SHA-256. The pinned
@@ -4807,6 +4925,8 @@ Native opening and saving of library-authored outputs is consumer acceptance,
 not original-oracle authorship. Record types, payloads, ids, text, image bytes
 and individual native normalizations. Do not turn no repair prompt into a
 claim of complete structural or behavioral equality.
+
+The same native Word 16.114 producer supplies the independent form reference for source-built Rust and Python packages. It requires an independent Word PDF, equal page count, exact text and checkbox semantics, per-page SSIM of at least 0.95 at 144 DPI, matched fonts, deterministic drawing, and documented margin alignment. Current artifact acceptance requires exact source and input applicability to the complete native comparison. A local Poppler bounding box does not substitute for it. Older typed-control evidence does not qualify this form surface. Full hash, rustdoc, WASM, publish dry-run, strict installed mypy, stubtest, and the full suite remain final-union gates.
 
 ## Word checked XML qualification
 

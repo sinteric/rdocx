@@ -1,7 +1,7 @@
 //! Integration tests for rdocx — end-to-end document creation and round-trip.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::rel_types;
@@ -15,11 +15,17 @@ use rdocx::{
     RunPosition, RunRange, SectionBreak, StoryItemKind, StoryKind, StyleBuilder, TabAlignment,
     TabLeader, TableStyleRegion, UnderlineStyle,
 };
-use rdocx::{Document, PackageReadLimits, RevisionKind, WordCreationProfile, WordPackageClass};
+use rdocx::{
+    Document, MailMerge, MailMergeDocumentType, MailMergeFieldMapping,
+    MailMergePackageDiagnosticKind, MailMergePackageOptions, MailMergePackageSource,
+    MailMergeRecipient, MailMergeSourcePolicy, PackageReadLimits, RevisionKind,
+    WordCreationProfile, WordPackageClass,
+};
 use rdocx_oxml::CT_BorderEdge;
 use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrType};
 use rdocx_oxml::properties::{CT_PPr, CT_RPr, CT_Shd};
 use rdocx_oxml::shared::{ST_Border, ST_PageOrientation, ST_SectionType};
+use rdocx_oxml::styles::StyleType;
 use rdocx_oxml::table::{CT_TblBorders, CT_TblCellMar, CT_TblPr, CT_TcPr};
 
 const ODT_ORACLE_VERSION: &str = "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb";
@@ -4972,7 +4978,7 @@ fn odt_supported_record(mut document: Document) -> OdtSupportedRecord {
         .parts
         .iter()
         .filter(|(name, _)| name.starts_with("/word/media/"))
-        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .map(|(name, bytes)| (name.clone(), bytes.to_vec()))
         .collect();
     media.sort_by(|left, right| left.0.cmp(&right.0));
     OdtSupportedRecord {
@@ -5071,7 +5077,7 @@ fn odt_structural_record(mut document: Document) -> OdtStructuralRecord {
         .parts
         .iter()
         .filter(|(name, _)| name.starts_with("/word/media/"))
-        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .map(|(name, bytes)| (name.clone(), bytes.to_vec()))
         .collect();
     media.sort_by(|left, right| left.0.cmp(&right.0));
     OdtStructuralRecord {
@@ -14462,6 +14468,1735 @@ mod legacy_forms_and_building_blocks {
         let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
         let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
         assert!(xml.contains(r#"<x:producer keep="yes"><x:nested/></x:producer>"#));
+    }
+
+    fn native_named_form_document(name: &str) -> Document {
+        let mut package = base_package();
+        let xml = format!(
+            concat!(
+                r#"<w:document xmlns:w="{word}"><w:body><w:p>"#,
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="{name}"/><w:textInput><w:default w:val="keep"/></w:textInput></w:ffData></w:fldChar></w:r>"#,
+                r#"<w:bookmarkStart w:id="7" w:name="{name}"/><w:r><w:instrText> FORMTEXT </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>now</w:t></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r><w:bookmarkEnd w:id="7"/></w:p>"#,
+                r#"<w:p><w:fldSimple w:instr=" REF {name} "><w:r><w:t>stale</w:t></w:r></w:fldSimple></w:p><w:sectPr/></w:body></w:document>"#,
+            ),
+            word = WORD_NS,
+            name = name,
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        Document::from_bytes(&package_bytes(package)).unwrap()
+    }
+
+    fn native_named_child_document(
+        name: &str,
+        instruction: &str,
+        display: &str,
+        bookmarked: bool,
+        locked: bool,
+        instruction_region: bool,
+    ) -> Document {
+        let mut source = native_named_form_document(name);
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(source.to_bytes().unwrap())).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        let needle = r#"<w:r><w:rPr><w:b/></w:rPr><w:t>now</w:t></w:r>"#;
+        assert_eq!(xml.matches(needle).count(), 1);
+        let lock = if locked { r#" w:fldLock="1""# } else { "" };
+        let child = format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"{lock}/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>{display}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:instrText>{display}</w:instrText></w:r>"#
+        );
+        let mut xml = if instruction_region {
+            let separator = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
+            let child = format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"{lock}/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:instrText>inner</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            );
+            xml.replacen(separator, &format!("{child}{separator}"), 1)
+                .replace(
+                    needle,
+                    &format!(r#"<w:r><w:rPr><w:b/></w:rPr><w:t>{display}</w:t></w:r>"#),
+                )
+        } else {
+            xml.replace(needle, &child)
+        };
+        if !bookmarked {
+            xml = xml
+                .replace(
+                    &format!(r#"<w:bookmarkStart w:id="7" w:name="{name}"/>"#),
+                    "",
+                )
+                .replace(r#"<w:bookmarkEnd w:id="7"/>"#, "");
+        }
+        package.set_part("/word/document.xml", xml.into_bytes());
+        Document::from_bytes(&package_bytes(package)).unwrap()
+    }
+
+    #[test]
+    fn native_named_legacy_result_fields_keep_public_defaults_updates_and_bookmarks() {
+        for instruction_region in [false, true] {
+            for instruction in [r#"TIME \@ "HH:mm:ss""#, r#"DATE \@ "yyyy-MM-dd""#, "= 2+3"] {
+                for locked in [false, true] {
+                    for now in [
+                        None,
+                        Some(rdocx::FieldDateTime {
+                            year: 2026,
+                            month: 10,
+                            day: 27,
+                            hour: 12,
+                            minute: 34,
+                            second: 56,
+                        }),
+                    ] {
+                        let mut named = native_named_child_document(
+                            "Legacy",
+                            instruction,
+                            "stored",
+                            true,
+                            locked,
+                            instruction_region,
+                        );
+                        let mut control = native_named_child_document(
+                            "Legacy",
+                            instruction,
+                            "stored",
+                            false,
+                            locked,
+                            instruction_region,
+                        );
+                        let held = named.legacy_form_fields_with_defaults().unwrap();
+                        assert_eq!(held.len(), 1);
+                        assert_eq!(held[0].0.value, LegacyFormFieldValue::Text("stored".into()));
+                        assert_eq!(held[0].1, Some(LegacyFormFieldValue::Text("keep".into())));
+                        let context = rdocx::FieldEvaluationContext {
+                            now,
+                            ..Default::default()
+                        };
+                        let outcome = |d: &Document| {
+                            d.evaluate_fields(&context)
+                                .unwrap()
+                                .into_iter()
+                                .filter(|f| f.instruction.trim() == instruction)
+                                .map(|f| format!("{:?}", f.outcome))
+                                .collect::<Vec<_>>()
+                        };
+                        assert_eq!(
+                            outcome(&named),
+                            outcome(&control),
+                            "{instruction} locked={locked}"
+                        );
+                        assert_eq!(
+                            outcome(&named).len(),
+                            1,
+                            "ordinary child must be visited once"
+                        );
+                        named.update_fields(&context).unwrap();
+                        control.update_fields(&context).unwrap();
+                        let fresh = named.legacy_form_fields_with_defaults().unwrap();
+                        assert_eq!(fresh, control.legacy_form_fields_with_defaults().unwrap());
+                        assert_eq!(fresh[0].1, held[0].1);
+                        if instruction_region || locked {
+                            assert_eq!(fresh[0].0.value, held[0].0.value);
+                        }
+                        if !instruction_region
+                            && !locked
+                            && (context.now.is_some() || instruction.starts_with('='))
+                        {
+                            assert_ne!(
+                                fresh[0].0.value, held[0].0.value,
+                                "ordinary child update must actually change cache"
+                            );
+                        }
+                        assert_eq!(
+                            held[0].0.value,
+                            LegacyFormFieldValue::Text("stored".into()),
+                            "owned snapshot stays old"
+                        );
+                        let LegacyFormFieldValue::Text(current) = &fresh[0].0.value else {
+                            unreachable!()
+                        };
+                        assert_eq!(named.bookmarks()[0].text(), current);
+                        // REF reads the document snapshot. A second call compares
+                        // its cache against the already materialized child result.
+                        named.update_fields(&context).unwrap();
+                        let mut references = Vec::new();
+                        for run in named.paragraph(1).unwrap().runs() {
+                            for item in run.items() {
+                                if let rdocx::RunItemRef::Field(f) = item {
+                                    references.push(f.cached_result().to_owned());
+                                }
+                            }
+                        }
+                        assert_eq!(references.as_slice(), std::slice::from_ref(current));
+                        let bytes = named.to_bytes().unwrap();
+                        let reopened = Document::from_bytes(&bytes).unwrap();
+                        assert_eq!(reopened.legacy_form_fields_with_defaults().unwrap(), fresh);
+                        assert_eq!(reopened.bookmarks()[0].text(), current);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_named_legacy_result_parent_assignments_are_atomic_literal_replacements() {
+        for instruction_region in [false, true] {
+            for instruction in ["TIME", "DATE", "=2+3"] {
+                let mut document = native_named_child_document(
+                    "Legacy",
+                    instruction,
+                    "stored",
+                    true,
+                    false,
+                    instruction_region,
+                );
+                let before = document.to_bytes().unwrap();
+                document
+                    .set_legacy_form_field_value(
+                        "/word/document.xml",
+                        0,
+                        LegacyFormFieldValue::Text("stored".into()),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    document.to_bytes().unwrap(),
+                    before,
+                    "same-current byte no-op"
+                );
+                assert!(
+                    document
+                        .set_legacy_form_field_value(
+                            "/word/document.xml",
+                            0,
+                            LegacyFormFieldValue::Checked(false)
+                        )
+                        .is_err()
+                );
+                assert_eq!(document.to_bytes().unwrap(), before, "wrong kind is atomic");
+                document
+                    .set_legacy_form_field_value(
+                        "/word/document.xml",
+                        0,
+                        LegacyFormFieldValue::Text("literal".into()),
+                    )
+                    .unwrap();
+                // Qualify literal publication before a separate ordinary update,
+                // whose existing policy may change a child dirty marker.
+                let assigned_bytes = document.to_bytes().unwrap();
+                let assigned_package =
+                    OpcPackage::from_reader(std::io::Cursor::new(assigned_bytes)).unwrap();
+                let assigned_xml =
+                    std::str::from_utf8(assigned_package.get_part("/word/document.xml").unwrap())
+                        .unwrap();
+                if instruction_region {
+                    let child = format!(
+                        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:instrText>inner</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                    );
+                    let original =
+                        OpcPackage::from_reader(std::io::Cursor::new(before.as_slice())).unwrap();
+                    let original =
+                        std::str::from_utf8(original.get_part("/word/document.xml").unwrap())
+                            .unwrap();
+                    assert!(original.contains(&child));
+                    assert!(
+                        assigned_xml.contains(&child),
+                        "literal parent preserves the entire instruction configuration: expected {child}, got {assigned_xml}"
+                    );
+                }
+                document
+                    .update_fields(&rdocx::FieldEvaluationContext::default())
+                    .unwrap();
+                let fields = document.legacy_form_fields_with_defaults().unwrap();
+                assert_eq!(
+                    fields[0].0.value,
+                    LegacyFormFieldValue::Text("literal".into())
+                );
+                assert_eq!(fields[0].1, Some(LegacyFormFieldValue::Text("keep".into())));
+                assert_eq!(document.bookmarks()[0].text(), "literal");
+                let bytes = document.to_bytes().unwrap();
+                let package = OpcPackage::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+                let xml =
+                    std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+                assert_eq!(
+                    xml.matches("fldCharType=\"begin\"").count(),
+                    if instruction_region { 2 } else { 1 },
+                    "only a result-region child is removed by literal replacement"
+                );
+                if instruction_region {
+                    assert!(xml.contains("<w:instrText>inner</w:instrText>"));
+                    assert!(xml.contains(&format!("<w:instrText> {instruction} </w:instrText>")));
+                }
+                assert_eq!(xml.matches("<w:bookmarkStart ").count(), 1);
+                assert_eq!(xml.matches("<w:bookmarkEnd ").count(), 1);
+                assert_eq!(
+                    Document::from_bytes(&bytes)
+                        .unwrap()
+                        .legacy_form_fields_with_defaults()
+                        .unwrap(),
+                    fields
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_named_legacy_bookmarks_keep_current_defaults_and_reference_text() {
+        let mut document = native_named_form_document("Legacy");
+        for value in ["now", "changed", "changed"] {
+            document
+                .set_legacy_form_field_value(
+                    "/word/document.xml",
+                    0,
+                    LegacyFormFieldValue::Text(value.into()),
+                )
+                .unwrap();
+            document
+                .update_fields(&rdocx::FieldEvaluationContext::default())
+                .unwrap();
+            let fields = document.legacy_form_fields_with_defaults().unwrap();
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].0.name.as_deref(), Some("Legacy"));
+            assert_eq!(fields[0].0.value, LegacyFormFieldValue::Text(value.into()));
+            assert_eq!(fields[0].1, Some(LegacyFormFieldValue::Text("keep".into())));
+            let bookmarks = document.bookmarks();
+            assert_eq!(bookmarks.len(), 1);
+            assert!(bookmarks[0].issue().is_none());
+            assert_eq!(bookmarks[0].text(), value);
+            let mut reference = Vec::new();
+            for run in document.paragraph(1).unwrap().runs() {
+                for item in run.items() {
+                    if let rdocx::RunItemRef::Field(field) = item {
+                        reference.push(field.cached_result().to_owned());
+                    }
+                }
+            }
+            assert_eq!(reference, [value.to_owned()]);
+            let bytes = document.to_bytes().unwrap();
+            let package = OpcPackage::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+            let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+            assert_eq!(xml.matches("<w:bookmarkStart ").count(), 1);
+            assert_eq!(xml.matches("<w:bookmarkEnd ").count(), 1);
+            assert!(
+                xml.find("fldCharType=\"begin\"").unwrap() < xml.find("<w:bookmarkStart ").unwrap()
+            );
+            assert!(
+                xml.find("fldCharType=\"end\"").unwrap() < xml.find("<w:bookmarkEnd ").unwrap()
+            );
+            document = Document::from_bytes(&bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_named_legacy_rich_fragment_remaps_both_markers_before_authored_bookmarks() {
+        for nested in [0, 1, 2] {
+            let mut source = if nested != 0 {
+                native_named_child_document("MailMerge1", "DATE", "now", true, false, nested == 2)
+            } else {
+                native_named_form_document("MailMerge1")
+            };
+            let source_bytes = source.to_bytes().unwrap();
+            let mut package = base_package();
+            package.set_part("/word/document.xml", format!(
+            r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:fldSimple w:instr=" MERGEFIELD Insert "><w:r><w:t>Insert</w:t></w:r></w:fldSimple></w:p><w:p><w:r><w:t>tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        ).into_bytes());
+            let mut template = Document::from_bytes(&package_bytes(package)).unwrap();
+            let existing = template
+                .add_bookmark(
+                    "Tail",
+                    rdocx::RunRange {
+                        start: rdocx::RunPosition {
+                            body_index: 1,
+                            run_index: 0,
+                        },
+                        end: rdocx::RunPosition {
+                            body_index: 1,
+                            run_index: 1,
+                        },
+                    },
+                )
+                .unwrap();
+            assert_eq!(existing, 0);
+            let mut record = rdocx::MailMergeRecord::default();
+            record.values.insert(
+                "Insert".into(),
+                rdocx::MailMergeValue::Fragment(source_bytes),
+            );
+            let mut destination = template
+                .mail_merge_rich(
+                    &rdocx::MailMergeData {
+                        records: vec![record],
+                        sources: Default::default(),
+                    },
+                    None,
+                )
+                .unwrap()
+                .remove(0);
+            for _ in 0..2 {
+                let fields = destination.legacy_form_fields_with_defaults().unwrap();
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0.name.as_deref(), Some("MailMerge1"));
+                assert_eq!(fields[0].0.value, LegacyFormFieldValue::Text("now".into()));
+                assert_eq!(fields[0].1, Some(LegacyFormFieldValue::Text("keep".into())));
+                let bookmarks = destination.bookmarks();
+                assert_eq!(bookmarks.len(), 2);
+                assert!(bookmarks.iter().all(|bookmark| bookmark.issue().is_none()));
+                let imported = bookmarks
+                    .iter()
+                    .find(|bookmark| bookmark.name() == Some("MailMerge1"))
+                    .unwrap();
+                let tail = bookmarks
+                    .iter()
+                    .find(|bookmark| bookmark.name() == Some("Tail"))
+                    .unwrap();
+                assert_eq!((imported.id(), tail.id()), (Some(0), Some(1)));
+                assert_eq!(imported.text(), "now");
+                assert_eq!(tail.text(), "tail");
+                destination = Document::from_bytes(&destination.to_bytes().unwrap()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_reset_defaults_survive_current_value_updates() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Imported"/><w:textInput><w:default w:val="Foo"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Bar</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&package_bytes(package)).expect("import");
+        let before = document.legacy_form_fields().expect("inventory");
+        assert_eq!(before[0].value, LegacyFormFieldValue::Text("Bar".into()));
+        let saved_before = document.to_bytes().unwrap();
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("Baz".into()),
+            )
+            .unwrap();
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"w:default w:val="Foo""#), "{xml}");
+        assert!(!xml.contains(r#"w:default w:val="Baz""#), "{xml}");
+        assert!(xml.contains(">Baz<"), "{xml}");
+        let _ = saved_before;
+    }
+
+    #[test]
+    fn legacy_cache_publishers_follow_current_presence_and_parent_policy() {
+        let mut field = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Regular,
+                default: Some("Keep".into()),
+                value: "Old".into(),
+                max_length: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        field.cached_result = "New".into();
+        assert_eq!(
+            field.legacy_form_value().unwrap(),
+            Some(LegacyFormFieldValue::Text("New".into()))
+        );
+        field
+            .set_cached_runs(vec![rdocx_oxml::text::CT_R::new("")])
+            .unwrap();
+        assert_eq!(
+            field.legacy_form_value().unwrap(),
+            Some(LegacyFormFieldValue::Text(String::new()))
+        );
+        assert_eq!(field.effective_display().as_ref(), "");
+        assert_eq!(
+            field.legacy_form_default_value().unwrap(),
+            Some(LegacyFormFieldValue::Text("Keep".into()))
+        );
+        field
+            .set_cached_runs_with_comment_ranges(
+                vec![rdocx_oxml::text::CT_R::new("Ann")],
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            field.legacy_form_value().unwrap(),
+            Some(LegacyFormFieldValue::Text("Ann".into()))
+        );
+
+        let mut check = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::CheckBox {
+                size: rdocx::LegacyCheckBoxSize::Auto,
+                default: false,
+                checked: true,
+            },
+        )
+        .unwrap();
+        check.cached_result = "glyph".into();
+        check
+            .set_cached_runs(vec![rdocx_oxml::text::CT_R::new("")])
+            .unwrap();
+        assert_eq!(
+            check.legacy_form_value().unwrap(),
+            Some(LegacyFormFieldValue::Checked(true))
+        );
+        assert_eq!(
+            check.legacy_form_default_value().unwrap(),
+            Some(LegacyFormFieldValue::Checked(false))
+        );
+
+        let mut styled = rdocx_oxml::text::CT_R::new("Styled");
+        styled.properties = Some(rdocx_oxml::CT_RPr {
+            bold: Some(true),
+            ..rdocx_oxml::CT_RPr::default()
+        });
+        field.set_cached_runs(vec![styled]).unwrap();
+        let segments = field.effective_display_field_segments();
+        assert_eq!(segments[0].0.as_ref(), "Styled");
+        assert_eq!(
+            segments[0].1.and_then(|properties| properties.bold),
+            Some(true)
+        );
+
+        let nested = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Regular,
+                default: Some("Inner".into()),
+                value: "Child".into(),
+                max_length: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        let mut parent = rdocx::Field::from_instruction(
+            rdocx_oxml::text::FieldInstruction::new("QUOTE", Vec::new(), Vec::new()).unwrap(),
+            rdocx_oxml::text::FieldForm::Complex,
+            vec![rdocx_oxml::text::CT_R::new("Child")],
+        )
+        .unwrap();
+        let mut carrier = rdocx_oxml::text::CT_R::new("");
+        carrier.properties = Some(rdocx_oxml::CT_RPr {
+            italic: Some(true),
+            ..rdocx_oxml::CT_RPr::default()
+        });
+        carrier.content = vec![
+            rdocx_oxml::text::RunContent::Text(rdocx_oxml::text::CT_Text::new("Lit")),
+            rdocx_oxml::text::RunContent::Break(rdocx_oxml::text::BreakType::Page),
+            rdocx_oxml::text::RunContent::Field(nested),
+        ];
+        parent.set_cached_runs(vec![carrier]).unwrap();
+        let shown = parent.effective_display_field_segments();
+        assert!(shown.iter().any(|(text, properties, _)| {
+            text.as_ref() == "Lit" && properties.and_then(|item| item.italic) == Some(true)
+        }));
+        assert!(shown.iter().any(|(text, _, _)| text.as_ref() == "\u{000c}"));
+        assert!(shown.iter().any(|(text, _, owner)| {
+            text.as_ref() == "Child" && !std::ptr::eq(*owner, &parent)
+        }));
+        parent.cached_field_mut(0).unwrap().cached_result = "Next".into();
+        assert_eq!(parent.effective_display().as_ref(), "Lit\u{000c}Next");
+        parent.refresh_cached_field_projection();
+        assert_eq!(parent.effective_display().as_ref(), "Lit\u{000c}Next");
+        parent.cached_result = "Override".into();
+        assert_eq!(parent.effective_display().as_ref(), "Override");
+        parent.cached_result.clear();
+        assert_eq!(parent.effective_display().as_ref(), "");
+        parent.refresh_cached_field_projection();
+        assert_eq!(parent.effective_display().as_ref(), "Lit\u{000c}Next");
+    }
+
+    #[test]
+    fn parsed_parent_shows_absent_result_child_default_without_a_parent_cache() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Parent"/><w:textInput><w:default w:val="outer"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Child"/><w:textInput><w:default w:val="foo"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        let parent = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("Parent"))
+            .expect("parent");
+        assert_eq!(parent.value, LegacyFormFieldValue::Text("foo".into()));
+        let paragraphs = document.paragraphs();
+        let mut cached = None;
+        for run in paragraphs[0].runs() {
+            for item in run.items() {
+                if let rdocx::RunItemRef::Field(field) = item {
+                    cached = Some(field.cached_result().to_owned());
+                }
+            }
+        }
+        assert_eq!(cached.as_deref(), Some(""));
+        assert!(document.text().contains("foo"), "{}", document.text());
+        let before = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&before).unwrap();
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Text("foo".into())
+        );
+        let package = OpcPackage::from_reader(std::io::Cursor::new(before)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"w:default w:val="foo""#), "{xml}");
+        assert!(!xml.contains("<w:t>foo</w:t>"), "{xml}");
+    }
+
+    #[test]
+    fn text_box_fill_patches_the_retained_drawing_and_keeps_other_owners() {
+        let mut package = base_package();
+        let drawing = |name: &str, value: &str, id: &str, extra: &str| {
+            format!(
+                r#"<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="{id}" name="{name}"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p>{}</w:p>{extra}<x:opaque x:flag="keep-{name}"/></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+                text_form_runs(name, value)
+            )
+        };
+        let nested = format!(
+            r#"<w:tbl><w:tr><w:tc><w:p>{}</w:p></w:tc></w:tr></w:tbl><w:sdt><w:sdtContent><w:p>{}</w:p></w:sdtContent></w:sdt>"#,
+            text_form_runs("nested", "nested-old"),
+            text_form_runs("inline", "inline-old"),
+        );
+        let document_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="urn:producer"><w:body><w:p>{}</w:p>{}<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHdr"/></w:sectPr></w:pPr></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHdr"/></w:sectPr></w:body></w:document>"#,
+            drawing("box", "box-old", "1", &nested),
+            text_form("body", "body-old"),
+        );
+        package.set_part("/word/document.xml", document_xml.into_bytes());
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id("rIdHdr", rel_types::HEADER, "header.xml");
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::COMMENTS, "comments.xml");
+        add_story_content_type(&mut package, "/word/header.xml", rel_types::HEADER);
+        package.content_types.add_override(
+            "/word/comments.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+        );
+        package.set_part(
+            "/word/header.xml",
+            format!(
+                r#"<?xml version="1.0"?><w:hdr xmlns:w="{WORD_NS}"><w:p>{}</w:p></w:hdr>"#,
+                drawing("related", "related-old", "2", "")
+            )
+            .into_bytes(),
+        );
+        package.set_part(
+            "/word/comments.xml",
+            format!(
+                r#"<?xml version="1.0"?><w:comments xmlns:w="{WORD_NS}"><w:comment w:id="1" w:author="Ada">{}</w:comment></w:comments>"#,
+                text_form("note", "note-old")
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        let body = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("body"))
+            .unwrap();
+        let box_field = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("box"))
+            .unwrap();
+        assert!(box_field.ordinal > body.ordinal);
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|field| field.name.as_deref() == Some("related"))
+                .count(),
+            1
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.name.as_deref() == Some("note"))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.name.as_deref() == Some("nested"))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.name.as_deref() == Some("inline"))
+        );
+        document
+            .set_legacy_form_field_value(
+                &box_field.source_part,
+                box_field.ordinal,
+                LegacyFormFieldValue::Text("box-new".into()),
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"w:default w:val="box-old""#), "{xml}");
+        assert!(xml.contains("box-new"), "{xml}");
+        assert!(xml.contains("keep-box"), "{xml}");
+        assert!(xml.contains("body-old"), "{xml}");
+        let reopened = Document::from_bytes(&saved).unwrap();
+        let filled = reopened
+            .legacy_form_fields()
+            .unwrap()
+            .into_iter()
+            .find(|field| field.name.as_deref() == Some("box"))
+            .unwrap();
+        assert_eq!(filled.value, LegacyFormFieldValue::Text("box-new".into()));
+        let defaults = reopened.legacy_form_fields_with_defaults().unwrap();
+        assert_eq!(
+            defaults
+                .iter()
+                .find(|(field, _)| field.name.as_deref() == Some("box"))
+                .unwrap()
+                .1,
+            Some(LegacyFormFieldValue::Text("box-old".into()))
+        );
+        assert_eq!(
+            reopened
+                .legacy_form_fields()
+                .unwrap()
+                .into_iter()
+                .filter(|field| field.name.as_deref() == Some("related"))
+                .count(),
+            1
+        );
+        let nested = reopened
+            .legacy_form_fields()
+            .unwrap()
+            .into_iter()
+            .find(|field| field.name.as_deref() == Some("nested"))
+            .unwrap();
+        let mut reopened = reopened;
+        reopened
+            .set_legacy_form_field_value(
+                &nested.source_part,
+                nested.ordinal,
+                LegacyFormFieldValue::Text("nested-new".into()),
+            )
+            .unwrap();
+        let related = reopened
+            .legacy_form_fields()
+            .unwrap()
+            .into_iter()
+            .find(|field| field.name.as_deref() == Some("related"))
+            .unwrap();
+        reopened
+            .set_legacy_form_field_value(
+                &related.source_part,
+                related.ordinal,
+                LegacyFormFieldValue::Text("related-new".into()),
+            )
+            .unwrap();
+        let note = reopened
+            .legacy_form_fields()
+            .unwrap()
+            .into_iter()
+            .find(|field| field.name.as_deref() == Some("note"))
+            .unwrap();
+        reopened
+            .set_legacy_form_field_value(
+                &note.source_part,
+                note.ordinal,
+                LegacyFormFieldValue::Text("note-new".into()),
+            )
+            .unwrap();
+        let saved = reopened.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let header = std::str::from_utf8(package.get_part("/word/header.xml").unwrap()).unwrap();
+        let comments =
+            std::str::from_utf8(package.get_part("/word/comments.xml").unwrap()).unwrap();
+        let document_xml =
+            std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(header.contains("related-new"), "{header}");
+        assert!(
+            header.contains(r#"w:default w:val="related-old""#),
+            "{header}"
+        );
+        assert!(header.contains("keep-related"), "{header}");
+        assert!(comments.contains("note-new"), "{comments}");
+        assert!(document_xml.contains("nested-new"), "{document_xml}");
+        assert!(document_xml.contains("inline-old"), "{document_xml}");
+        assert!(document_xml.contains("body-old"), "{document_xml}");
+        let fields = Document::from_bytes(&saved)
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .find(|field| field.name.as_deref() == Some("nested"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("nested-new".into())
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|field| field.name.as_deref() == Some("inline"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("inline-old".into())
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|field| field.name.as_deref() == Some("related"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("related-new".into())
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|field| field.name.as_deref() == Some("note"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("note-new".into())
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|field| field.name.as_deref() == Some("related"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn text_box_inside_inline_control_appends_after_body_fields() {
+        let mut package = base_package();
+        let drawing = |name: &str, value: &str, id: &str| {
+            format!(
+                r#"<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="{id}" name="{name}"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p>{}</w:p><x:opaque x:flag="keep-{name}"/></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+                text_form_runs(name, value)
+            )
+        };
+        let inline = |name: &str, value: &str, id: &str| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{id}"/><w:tag w:val="keep-sdt-{name}"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+                drawing(name, value, id)
+            )
+        };
+        let document_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="urn:producer"><w:body><w:p>{}</w:p><w:p><w:hyperlink w:anchor="top">{}</w:hyperlink></w:p><w:p><w:ins w:id="7" w:author="Ada">{}</w:ins></w:p><w:p><w:del w:id="8" w:author="Ada">{}</w:del></w:p>{}<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdHdr"/></w:sectPr></w:pPr></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHdr"/></w:sectPr></w:body></w:document>"#,
+            inline("control", "control-old", "11"),
+            drawing("linked", "linked-old", "12"),
+            drawing("inserted", "inserted-old", "13"),
+            drawing("deleted", "deleted-old", "14"),
+            text_form("body", "body-old"),
+        );
+        package.set_part("/word/document.xml", document_xml.into_bytes());
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id("rIdHdr", rel_types::HEADER, "header.xml");
+        add_story_content_type(&mut package, "/word/header.xml", rel_types::HEADER);
+        package.set_part(
+            "/word/header.xml",
+            format!(
+                r#"<?xml version="1.0"?><w:hdr xmlns:w="{WORD_NS}" xmlns:x="urn:producer"><w:p>{}</w:p><w:p>{}</w:p></w:hdr>"#,
+                inline("related-control", "related-control-old", "15"),
+                text_form_runs("related-body", "related-body-old"),
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        let body = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("body"))
+            .unwrap();
+        let control = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("control"))
+            .unwrap();
+        assert!(control.ordinal > body.ordinal);
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.name.as_deref() == Some("linked"))
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.name.as_deref() == Some("inserted"))
+        );
+        assert!(
+            fields
+                .iter()
+                .all(|field| field.name.as_deref() != Some("deleted"))
+        );
+        let related_body = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("related-body"))
+            .unwrap();
+        let related = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("related-control"))
+            .unwrap();
+        assert!(related.ordinal > related_body.ordinal);
+        document
+            .set_legacy_form_field_value(
+                &control.source_part,
+                control.ordinal,
+                LegacyFormFieldValue::Text("control-new".into()),
+            )
+            .unwrap();
+        document
+            .set_legacy_form_field_value(
+                &related.source_part,
+                related.ordinal,
+                LegacyFormFieldValue::Text("related-control-new".into()),
+            )
+            .unwrap();
+        for (name, updated) in [("linked", "linked-new"), ("inserted", "inserted-new")] {
+            let field = document
+                .legacy_form_fields()
+                .unwrap()
+                .into_iter()
+                .find(|field| field.name.as_deref() == Some(name))
+                .unwrap();
+            document
+                .set_legacy_form_field_value(
+                    &field.source_part,
+                    field.ordinal,
+                    LegacyFormFieldValue::Text(updated.into()),
+                )
+                .unwrap();
+        }
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let document_xml =
+            std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        let header = std::str::from_utf8(package.get_part("/word/header.xml").unwrap()).unwrap();
+        assert!(document_xml.contains("keep-sdt-control"), "{document_xml}");
+        assert!(document_xml.contains("keep-control"), "{document_xml}");
+        assert!(
+            document_xml.contains(r#"w:default w:val="control-old""#),
+            "{document_xml}"
+        );
+        assert!(document_xml.contains("control-new"), "{document_xml}");
+        assert!(document_xml.contains("body-old"), "{document_xml}");
+        assert!(document_xml.contains("linked-new"), "{document_xml}");
+        assert!(document_xml.contains("inserted-new"), "{document_xml}");
+        assert!(document_xml.contains("deleted-old"), "{document_xml}");
+        assert!(
+            document_xml.contains(r#"w:default w:val="linked-old""#),
+            "{document_xml}"
+        );
+        assert!(
+            document_xml.contains(r#"w:default w:val="inserted-old""#),
+            "{document_xml}"
+        );
+        assert!(header.contains("keep-sdt-related-control"), "{header}");
+        assert!(
+            header.contains(r#"w:default w:val="related-control-old""#),
+            "{header}"
+        );
+        assert!(header.contains("related-control-new"), "{header}");
+        assert!(header.contains("related-body-old"), "{header}");
+        let reopened = Document::from_bytes(&saved)
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("control"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("control-new".into())
+        );
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("related-control"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("related-control-new".into())
+        );
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("body"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("body-old".into())
+        );
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("linked"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("linked-new".into())
+        );
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("inserted"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("inserted-new".into())
+        );
+        assert!(
+            reopened
+                .iter()
+                .all(|field| field.name.as_deref() != Some("deleted"))
+        );
+    }
+
+    #[test]
+    fn text_box_deleted_sibling_does_not_steal_the_live_span() {
+        let mut package = base_package();
+        let drawing = |name: &str, value: &str, id: &str| {
+            format!(
+                r#"<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="{id}" name="{name}"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p>{}</w:p><x:opaque x:flag="keep-{name}"/></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+                text_form_runs(name, value)
+            )
+        };
+        let paragraph = format!(
+            "{}<w:del w:id=\"8\" w:author=\"Ada\">{}</w:del><w:moveFrom w:id=\"9\" w:author=\"Ada\">{}</w:moveFrom><x:opaque>{}</x:opaque><w:dir w:val=\"rtl\">{}</w:dir><ignored>{}</ignored><w:r><mc:AlternateContent><mc:Choice Requires=\"wps\">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent></w:r>",
+            drawing("active", "old", "21"),
+            drawing("deleted", "old", "22"),
+            drawing("moved", "old", "23"),
+            drawing("wrapped", "old", "24"),
+            drawing("directed", "old", "27"),
+            drawing("bare", "old", "28"),
+            drawing("chosen", "old", "25"),
+            drawing("fallback", "old", "26"),
+        );
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id("rIdHdr", rel_types::HEADER, "header.xml");
+        add_story_content_type(&mut package, "/word/header.xml", rel_types::HEADER);
+        package.set_part(
+            "/word/header.xml",
+            format!(
+                r#"<?xml version="1.0"?><w:hdr xmlns:w="{WORD_NS}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:producer"><w:p>{paragraph}</w:p></w:hdr>"#
+            )
+            .into_bytes(),
+        );
+        let original_header = package.get_part("/word/header.xml").unwrap().to_vec();
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        let names = fields
+            .iter()
+            .map(|field| field.name.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["active".to_string()]);
+        let active = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("active"))
+            .unwrap();
+        assert_eq!(active.ordinal, 0);
+        document
+            .set_legacy_form_field_value(
+                &active.source_part,
+                active.ordinal,
+                LegacyFormFieldValue::Text("new".into()),
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let header = package.get_part("/word/header.xml").unwrap();
+        let header_xml = std::str::from_utf8(header).unwrap();
+        let original = std::str::from_utf8(&original_header).unwrap();
+        assert!(header_xml.contains("new"), "{header_xml}");
+        assert!(
+            header_xml.contains(r#"w:default w:val="old""#),
+            "{header_xml}"
+        );
+        for marker in [
+            "deleted", "moved", "wrapped", "directed", "bare", "chosen", "fallback",
+        ] {
+            let start = original
+                .find(&format!(r#"w:name w:val="{marker}""#))
+                .unwrap();
+            let end =
+                original[start..].find("</w:drawing>").unwrap() + start + "</w:drawing>".len();
+            assert!(
+                header_xml.contains(&original[start..end]),
+                "{marker} {header_xml}"
+            );
+        }
+        let reopened = Document::from_bytes(&saved)
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            reopened
+                .iter()
+                .map(|field| field.name.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["active".to_string()]
+        );
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("active"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("new".into())
+        );
+        assert_eq!(reopened[0].ordinal, 0);
+    }
+
+    #[test]
+    fn text_box_second_identical_field_ignores_opaque_lookalike() {
+        let mut package = base_package();
+        let twin = text_form_runs("twin", "twin-old");
+        let lookalike = format!("<x:opaque><![CDATA[{twin}]]></x:opaque>");
+        let drawing = format!(
+            r#"<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="8" name="twins"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent>{lookalike}<w:p>{twin}{twin}</w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+        );
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}" xmlns:x="urn:producer"><w:body><w:p>{drawing}</w:p><w:sectPr/></w:body></w:document>"#
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(
+            fields
+                .iter()
+                .all(|field| field.value == LegacyFormFieldValue::Text("twin-old".into()))
+        );
+        let before = document.to_bytes().unwrap();
+        let before_xml = std::str::from_utf8(
+            OpcPackage::from_reader(std::io::Cursor::new(&before))
+                .unwrap()
+                .get_part("/word/document.xml")
+                .unwrap(),
+        )
+        .unwrap()
+        .to_owned();
+        let opaque_at = before_xml.find("<x:opaque>").unwrap();
+        let opaque_end = before_xml.find("</x:opaque>").unwrap() + "</x:opaque>".len();
+        let opaque = before_xml[opaque_at..opaque_end].to_owned();
+        document
+            .set_legacy_form_field_value(
+                &fields[1].source_part,
+                fields[1].ordinal,
+                LegacyFormFieldValue::Text("twin-new".into()),
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let xml = std::str::from_utf8(
+            OpcPackage::from_reader(std::io::Cursor::new(&saved))
+                .unwrap()
+                .get_part("/word/document.xml")
+                .unwrap(),
+        )
+        .unwrap()
+        .to_owned();
+        let opaque_at = xml.find("<x:opaque>").unwrap();
+        let opaque_end = xml.find("</x:opaque>").unwrap() + "</x:opaque>".len();
+        assert_eq!(&xml[opaque_at..opaque_end], opaque);
+        let reopened = Document::from_bytes(&saved)
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            reopened[0].value,
+            LegacyFormFieldValue::Text("twin-old".into())
+        );
+        assert_eq!(
+            reopened[1].value,
+            LegacyFormFieldValue::Text("twin-new".into())
+        );
+        document
+            .set_legacy_form_field_value(
+                &reopened[0].source_part,
+                reopened[0].ordinal,
+                LegacyFormFieldValue::Text("twin-new".into()),
+            )
+            .unwrap();
+        let both = Document::from_bytes(&document.to_bytes().unwrap())
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(both[0].value, LegacyFormFieldValue::Text("twin-new".into()));
+        assert_eq!(both[1].value, LegacyFormFieldValue::Text("twin-new".into()));
+        let again = std::str::from_utf8(
+            OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
+                .unwrap()
+                .get_part("/word/document.xml")
+                .unwrap(),
+        )
+        .unwrap()
+        .to_owned();
+        let opaque_at = again.find("<x:opaque>").unwrap();
+        let opaque_end = again.find("</x:opaque>").unwrap() + "</x:opaque>".len();
+        assert_eq!(&again[opaque_at..opaque_end], opaque);
+    }
+
+    #[test]
+    fn text_box_alias_fill_uses_inherited_word_namespace() {
+        let mut package = base_package();
+        let form = |name: &str, value: &str| {
+            format!(
+                r#"<q:r><q:fldChar q:fldCharType="begin"><q:ffData><q:name q:val="{name}"/><q:textInput><q:default q:val="{value}"/></q:textInput></q:ffData></q:fldChar></q:r><q:r><q:instrText> FORMTEXT </q:instrText></q:r><q:r><q:fldChar q:fldCharType="separate"/></q:r><q:r><q:t>{value}</q:t></q:r><q:r><q:fldChar q:fldCharType="end"/></q:r>"#
+            )
+        };
+        let drawing = |name: &str, value: &str, id: &str| {
+            let field = form(name, value);
+            format!(
+                r#"<q:r><q:drawing xmlns:w="urn:foreign-shadow" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="{id}" name="{name}"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><q:txbxContent><w:p><w:r><w:t>shadow-{name}</w:t></w:r></w:p><q:p>{field}</q:p></q:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></q:drawing></q:r>"#
+            )
+        };
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><q:document xmlns:q="{WORD_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><q:body><q:p>{}</q:p><q:sectPr><q:headerReference q:type="default" r:id="rIdHdr"/></q:sectPr></q:body></q:document>"#,
+                drawing("main-alias", "alias-old", "4")
+            )
+            .into_bytes(),
+        );
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id("rIdHdr", rel_types::HEADER, "header.xml");
+        add_story_content_type(&mut package, "/word/header.xml", rel_types::HEADER);
+        package.set_part(
+            "/word/header.xml",
+            format!(
+                r#"<?xml version="1.0"?><q:hdr xmlns:q="{WORD_NS}"><q:p>{}</q:p></q:hdr>"#,
+                drawing("related-alias", "related-alias-old", "5")
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        let main = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("main-alias"))
+            .unwrap();
+        let related = fields
+            .iter()
+            .find(|field| field.name.as_deref() == Some("related-alias"))
+            .unwrap();
+        document
+            .set_legacy_form_field_value(
+                &main.source_part,
+                main.ordinal,
+                LegacyFormFieldValue::Text("alias-new".into()),
+            )
+            .unwrap();
+        document
+            .set_legacy_form_field_value(
+                &related.source_part,
+                related.ordinal,
+                LegacyFormFieldValue::Text("related-alias-new".into()),
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let document_xml =
+            std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        let header = std::str::from_utf8(package.get_part("/word/header.xml").unwrap()).unwrap();
+        assert!(document_xml.contains("shadow-main-alias"), "{document_xml}");
+        assert!(header.contains("shadow-related-alias"), "{header}");
+        assert!(
+            document_xml.contains(r#"q:default q:val="alias-old""#),
+            "{document_xml}"
+        );
+        assert!(
+            header.contains(r#"q:default q:val="related-alias-old""#),
+            "{header}"
+        );
+        let reopened = Document::from_bytes(&saved)
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("main-alias"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("alias-new".into())
+        );
+        assert_eq!(
+            reopened
+                .iter()
+                .find(|field| field.name.as_deref() == Some("related-alias"))
+                .unwrap()
+                .value,
+            LegacyFormFieldValue::Text("related-alias-new".into())
+        );
+    }
+
+    #[test]
+    fn positioned_legacy_result_keeps_bold_formatting() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:textInput><w:default w:val="plain"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>BoldForm</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let layout = document.layout_deterministic().unwrap();
+        let mut found = false;
+        for page in &layout.layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let oxml_layout::PositionedElement::Text(run) = element
+                    && run.text.contains("BoldForm")
+                    && run.bold
+                {
+                    found = true;
+                }
+            });
+        }
+        assert!(found, "expected a positioned bold field result");
+    }
+
+    #[test]
+    fn public_legacy_fields_keep_properties_and_typed_values_on_reopen() {
+        let mut document = Document::new();
+        let text = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions {
+                name: Some("Name".into()),
+                calculate_on_exit: true,
+                ..rdocx::LegacyFormFieldOptions::default()
+            },
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Date,
+                default: Some("keep".into()),
+                value: "now".into(),
+                max_length: Some(8),
+                format: Some("yyyy".into()),
+            },
+        )
+        .unwrap();
+        let check = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::CheckBox {
+                size: rdocx::LegacyCheckBoxSize::HalfPoints(25),
+                default: false,
+                checked: true,
+            },
+        )
+        .unwrap();
+        let list = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::DropDownList {
+                choices: vec!["one".into(), "two".into()],
+                default_index: 0,
+                selected_index: 1,
+            },
+        )
+        .unwrap();
+        {
+            let mut paragraph = document.add_paragraph("");
+            let mut run = paragraph.add_run("");
+            run.add_field_value(text).unwrap();
+            run.add_field_value(check).unwrap();
+            run.add_field_value(list).unwrap();
+        }
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        let fields = reopened.legacy_form_fields().unwrap();
+        assert_eq!(fields[0].name.as_deref(), Some("Name"));
+        assert!(fields[0].calculate_on_exit);
+        assert_eq!(fields[0].value, LegacyFormFieldValue::Text("now".into()));
+        assert_eq!(fields[1].value, LegacyFormFieldValue::Checked(true));
+        assert_eq!(fields[2].value, LegacyFormFieldValue::SelectedIndex(1));
+        let pairs = reopened.legacy_form_fields_with_defaults().unwrap();
+        assert_eq!(pairs[0].1, Some(LegacyFormFieldValue::Text("keep".into())));
+        assert_eq!(pairs[1].1, Some(LegacyFormFieldValue::Checked(false)));
+        assert_eq!(pairs[2].1, Some(LegacyFormFieldValue::SelectedIndex(0)));
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"w:type w:val="date""#), "{xml}");
+        assert!(xml.contains(r#"w:default w:val="keep""#), "{xml}");
+        assert!(xml.contains(r#"w:size w:val="25""#), "{xml}");
+        assert!(
+            xml.contains("FORMTEXT")
+                && xml.contains("FORMCHECKBOX")
+                && xml.contains("FORMDROPDOWN"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn native_empty_checkbox_setters_retain_legacy_identity_and_neighbors() {
+        for placement in ["body", "cell", "header"] {
+            for (ordinal, value) in [(0, false), (0, true), (1, false), (1, true)] {
+                let mut package = base_package();
+                let mut paragraphs = String::new();
+                for (index, name, initial) in [(7, "AutoFlag", false), (8, "ExactFlag", true)] {
+                    paragraphs.push_str(&format!(
+                        concat!(
+                            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="{name}"/>"#,
+                            r#"<w:checkBox><w:sizeAuto/><w:default w:val="{default}"/></w:checkBox></w:ffData></w:fldChar></w:r>"#,
+                            r#"<w:bookmarkStart w:id="{index}" w:name="{name}"/><w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r>"#,
+                            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:i/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#,
+                            r#"<w:bookmarkEnd w:id="{index}"/></w:p>"#,
+                        ), default = u8::from(initial), name = name, index = index,
+                    ));
+                }
+                paragraphs.push_str(&drop_down_form("Tail"));
+                let part = if placement == "header" {
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add(rel_types::HEADER, "header-native.xml");
+                    add_story_content_type(
+                        &mut package,
+                        "/word/header-native.xml",
+                        rel_types::HEADER,
+                    );
+                    package.set_part(
+                        "/word/header-native.xml",
+                        format!(r#"<w:hdr xmlns:w="{WORD_NS}">{paragraphs}</w:hdr>"#,).into_bytes(),
+                    );
+                    "/word/header-native.xml"
+                } else {
+                    let body = if placement == "cell" {
+                        format!(r#"<w:tbl><w:tr><w:tc>{paragraphs}</w:tc></w:tr></w:tbl>"#)
+                    } else {
+                        paragraphs
+                    };
+                    package.set_part("/word/document.xml", format!(
+                        r#"<?xml version="1.0"?><w:document xmlns:w="{WORD_NS}"><w:body>{body}<w:sectPr/></w:body></w:document>"#,
+                    ).into_bytes());
+                    "/word/document.xml"
+                };
+                let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+                let before = document.legacy_form_fields().unwrap();
+                assert_eq!(before.len(), 3);
+                let expected_name = before[ordinal].name.clone();
+                let result = document
+                    .set_legacy_form_field_value(
+                        part,
+                        ordinal,
+                        LegacyFormFieldValue::Checked(value),
+                    )
+                    .unwrap();
+                assert_eq!(result.name, expected_name);
+                assert_eq!(result.kind, LegacyFormFieldKind::CheckBox);
+                assert_eq!(result.ordinal, ordinal);
+                let bytes = document.to_bytes().unwrap();
+                let reopened = Document::from_bytes(&bytes).unwrap();
+                let actual = reopened.legacy_form_fields().unwrap();
+                assert_eq!(actual.len(), before.len());
+                for (index, (old, new)) in before.iter().zip(&actual).enumerate() {
+                    assert_eq!(
+                        (&old.source_part, old.ordinal, &old.name, old.kind),
+                        (&new.source_part, new.ordinal, &new.name, new.kind)
+                    );
+                    assert_eq!(
+                        new.value,
+                        if index == ordinal {
+                            LegacyFormFieldValue::Checked(value)
+                        } else {
+                            old.value.clone()
+                        }
+                    );
+                }
+                let defaults = reopened.legacy_form_fields_with_defaults().unwrap();
+                assert_eq!(defaults[0].1, Some(LegacyFormFieldValue::Checked(false)));
+                assert_eq!(defaults[1].1, Some(LegacyFormFieldValue::Checked(true)));
+                let same = document.to_bytes().unwrap();
+                document
+                    .set_legacy_form_field_value(
+                        part,
+                        ordinal,
+                        LegacyFormFieldValue::Checked(value),
+                    )
+                    .unwrap();
+                assert_eq!(document.to_bytes().unwrap(), same);
+            }
+        }
+    }
+
+    #[test]
+    fn generic_field_updates_preserve_legacy_form_state() {
+        let mut document = Document::new();
+        let form = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions {
+                name: Some("Imported".into()),
+                ..rdocx::LegacyFormFieldOptions::default()
+            },
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Regular,
+                default: Some("Foo".into()),
+                value: "Bar".into(),
+                max_length: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        {
+            let mut paragraph = document.add_paragraph("");
+            paragraph.add_run("").add_field_value(form).unwrap();
+            paragraph.add_run("").add_field(" DATE ", "old").unwrap();
+        }
+        let before = document.to_bytes().unwrap();
+        document
+            .update_fields(&rdocx::FieldEvaluationContext {
+                now: Some(rdocx::FieldDateTime {
+                    year: 2026,
+                    month: 10,
+                    day: 24,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                }),
+                ..rdocx::FieldEvaluationContext::default()
+            })
+            .unwrap();
+        let fields = document.legacy_form_fields_with_defaults().unwrap();
+        assert_eq!(fields[0].0.value, LegacyFormFieldValue::Text("Bar".into()));
+        assert_eq!(fields[0].1, Some(LegacyFormFieldValue::Text("Foo".into())));
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"w:default w:val="Foo""#), "{xml}");
+        assert!(xml.contains(">Bar<"), "{xml}");
+        let _ = before;
+    }
+
+    #[test]
+    fn invalid_legacy_field_creation_cannot_change_destination() {
+        let mut document = Document::new();
+        document.add_paragraph("stay");
+        let before = document.to_bytes().unwrap();
+        let invalid = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::DropDownList {
+                choices: Vec::new(),
+                default_index: 0,
+                selected_index: 0,
+            },
+        );
+        assert!(invalid.is_err());
+        let too_long = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions {
+                name: Some("abcdefghijklmnopqrstu".into()),
+                ..rdocx::LegacyFormFieldOptions::default()
+            },
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Regular,
+                default: None,
+                value: String::new(),
+                max_length: None,
+                format: None,
+            },
+        );
+        assert!(too_long.is_err());
+        let mut contradictory = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::CheckBox {
+                size: rdocx::LegacyCheckBoxSize::Auto,
+                default: false,
+                checked: false,
+            },
+        )
+        .unwrap();
+        contradictory.instruction.name = "FORMTEXT".into();
+        let revisions = document.revisions().len();
+        let held = document.paragraph(0).unwrap().text();
+        {
+            let mut paragraph = document.paragraph_mut(0).unwrap();
+            let mut run = paragraph.run_mut(0).unwrap();
+            assert!(run.add_field_value(contradictory.clone()).is_err());
+        }
+        assert!(
+            document
+                .insert_field(
+                    &rdocx::StoryRunPosition {
+                        location: document.paragraph_story_location(0).unwrap().unwrap(),
+                        run_index: 1,
+                    },
+                    contradictory,
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+        assert_eq!(document.revisions().len(), revisions);
+        assert_eq!(document.paragraph(0).unwrap().text(), held);
+    }
+
+    #[test]
+    fn legacy_authoring_respects_nested_story_owners_and_opaque_xml() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}" xmlns:x="urn:producer"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><x:keep/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        document.add_paragraph("body");
+        let field = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions::default(),
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Regular,
+                default: Some("d".into()),
+                value: "v".into(),
+                max_length: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        {
+            let mut table = document.add_table(1, 1);
+            let mut cell = table.cell(0, 0).unwrap();
+            let mut nested = cell.add_table(1, 1);
+            nested
+                .cell(0, 0)
+                .unwrap()
+                .add_paragraph("")
+                .add_run("")
+                .add_field_value(field.clone())
+                .unwrap();
+        }
+        document.set_header("related");
+        let header = document
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == rdocx::StoryKind::Header)
+            .unwrap();
+        let location = document
+            .story_items(&header)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind() == rdocx::StoryItemKind::Paragraph)
+            .unwrap()
+            .location()
+            .clone();
+        document
+            .insert_field(
+                &rdocx::StoryRunPosition {
+                    location,
+                    run_index: 1,
+                },
+                field,
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(
+            xml.contains("<x:keep/>") || xml.contains("<x:keep />"),
+            "{xml}"
+        );
+        assert!(xml.contains("FORMTEXT"), "{xml}");
+        let mut reopened = Document::from_bytes(&saved).unwrap();
+        let fields = reopened.legacy_form_fields().unwrap();
+        assert!(fields.len() >= 2, "{}", fields.len());
+        assert!(fields.iter().any(
+            |field| field.value == LegacyFormFieldValue::Text("v".into())
+                && field.source_part.contains("header")
+        ));
+        assert!(fields.iter().any(|field| {
+            field.value == LegacyFormFieldValue::Text("v".into())
+                && field.source_part == "/word/document.xml"
+        }));
+        reopened
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("filled".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Text("filled".into())
+        );
+    }
+
+    #[test]
+    fn cross_consumer_render_fallback_before_empty_assignment() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Imported"/><w:textInput><w:default w:val="foo"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        assert!(document.text().contains("foo"), "{}", document.text());
+        let before = document.to_bytes().unwrap();
+        assert_eq!(document.replace_text("foo", "bar"), 0);
+        assert_eq!(document.to_bytes().unwrap(), before);
+        let page_text = |document: &Document| {
+            let layout = document.layout_deterministic().unwrap();
+            let mut text = String::new();
+            for page in &layout.layout.pages {
+                oxml_layout::walk(&page.elements, &mut |element, _| match element {
+                    oxml_layout::PositionedElement::Text(run) => text.push_str(&run.text),
+                    oxml_layout::PositionedElement::MultilingualText(run) => {
+                        text.push_str(&run.logical_text)
+                    }
+                    _ => {}
+                });
+            }
+            text
+        };
+        assert!(
+            page_text(&document).contains("foo"),
+            "{}",
+            page_text(&document)
+        );
+        let pdf = document.to_pdf_deterministic().unwrap();
+        let path = std::env::temp_dir().join("f288-fallback.pdf");
+        std::fs::write(&path, &pdf).unwrap();
+        let extracted = std::process::Command::new("pdftotext")
+            .arg(&path)
+            .arg("-")
+            .output()
+            .expect("pdftotext");
+        assert!(extracted.status.success());
+        let pdf_text = String::from_utf8_lossy(&extracted.stdout);
+        assert!(pdf_text.contains("foo"), "{pdf_text}");
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text(String::new()),
+            )
+            .unwrap();
+        assert!(!document.text().contains("foo"), "{}", document.text());
+        assert!(
+            !page_text(&document).contains("foo"),
+            "{}",
+            page_text(&document)
+        );
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"w:default w:val="foo""#), "{xml}");
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Text(String::new())
+        );
+        assert_eq!(
+            reopened.legacy_form_fields_with_defaults().unwrap()[0].1,
+            Some(LegacyFormFieldValue::Text("foo".into()))
+        );
+        let docx = std::env::temp_dir().join("f288-fallback.docx");
+        std::fs::write(&docx, &saved).unwrap();
+        let cli = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            })
+            .join("debug/rdocx");
+        let output = std::process::Command::new(&cli)
+            .arg("text")
+            .arg(&docx)
+            .output()
+            .expect("rdocx text");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let cli_text = String::from_utf8_lossy(&output.stdout);
+        assert!(!cli_text.contains("foo"), "{cli_text}");
     }
 
     #[test]
@@ -28433,4 +30168,6322 @@ fn batched_paragraph_locations_match_the_single_lookups() {
     }
     assert_eq!(cells.len(), resolved);
     assert!(resolved >= 7);
+}
+
+fn fx265_png(rgb: [u8; 3]) -> Vec<u8> {
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(2, 2).unwrap();
+    pixmap.fill(resvg::tiny_skia::Color::from_rgba8(
+        rgb[0], rgb[1], rgb[2], 255,
+    ));
+    pixmap.encode_png().unwrap()
+}
+
+fn fx265_reopened_with_pictures(pictures: &[&[u8]]) -> Document {
+    let mut document = Document::new();
+    for (index, picture) in pictures.iter().enumerate() {
+        document.add_picture(
+            picture,
+            &format!("picture{index}.png"),
+            Length::inches(1.0),
+            Length::inches(1.0),
+        );
+    }
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+
+fn fx265_shown_pictures(document: &mut Document, first: usize) -> Vec<(String, Vec<u8>)> {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let relationships = package.get_part_rels("/word/document.xml").unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    xml.split(r#"r:embed=""#)
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next())
+        .skip(first)
+        .map(|id| {
+            let relationship = relationships.get_by_id(id).unwrap();
+            let part = OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+            let bytes = package.get_part(&part).unwrap().to_vec();
+            (part, bytes)
+        })
+        .collect()
+}
+
+fn fx265_shown_colours(
+    document: &mut Document,
+    first: usize,
+    colours: &[(&str, &[u8])],
+) -> Vec<String> {
+    fx265_shown_pictures(document, first)
+        .into_iter()
+        .map(|(_, bytes)| {
+            colours
+                .iter()
+                .find(|(_, colour)| *colour == bytes.as_slice())
+                .map(|(name, _)| (*name).to_owned())
+                .unwrap_or_else(|| "other".to_owned())
+        })
+        .collect()
+}
+
+fn fx265_import_body(
+    target: &mut Document,
+    source: &Document,
+    policy: rdocx::FragmentConflictPolicy,
+) {
+    let source_body = body_story(source);
+    let start = source.story_items(&source_body).unwrap()[0]
+        .location()
+        .clone();
+    let fragment = rdocx::DocumentFragment::from_range(
+        source,
+        &start,
+        &rdocx::ContentLocation::end(source_body),
+        false,
+    )
+    .unwrap();
+    let body = body_story(target);
+    target
+        .import_fragment(&rdocx::ContentLocation::end(body), &fragment, policy)
+        .unwrap();
+}
+
+fn fx265_policies() -> [(&'static str, rdocx::FragmentConflictPolicy); 3] {
+    [
+        ("default", rdocx::FragmentConflictPolicy::default()),
+        (
+            "reuse_equivalent",
+            rdocx::FragmentConflictPolicy::reuse_equivalent(),
+        ),
+        (
+            "related-part reuse off",
+            rdocx::FragmentConflictPolicy::reuse_equivalent().with_related_part_reuse(false),
+        ),
+    ]
+}
+
+fn fx265_body_replaced(document: &mut Document, pictures: &[&[u8]]) -> Document {
+    let mut copy = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let replaced = copy.content_count();
+    for (index, picture) in pictures.iter().enumerate() {
+        copy.add_picture(
+            picture,
+            &format!("new{index}.png"),
+            Length::inches(1.0),
+            Length::inches(1.0),
+        );
+    }
+    for _ in 0..replaced {
+        let body = body_story(&copy);
+        let first = copy.story_items(&body).unwrap()[0].location().clone();
+        copy.remove_content_at(&first).unwrap();
+    }
+    Document::from_bytes(&copy.to_bytes().unwrap()).unwrap()
+}
+
+fn fx265_save_reopen(document: &mut Document) -> Document {
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+
+/// A1. Both picture orders, the default path, and related-part reuse off keep
+/// the inserted picture bytes through save and reopen.
+#[test]
+fn picture_order_and_reuse_keep_bytes() {
+    let red = fx265_png([200, 0, 0]);
+    let blue = fx265_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let mut failures = Vec::new();
+    for (label, policy) in fx265_policies() {
+        for inserted in [["red", "blue"], ["blue", "red"]] {
+            let pictures = inserted.map(|name| if name == "red" { &red[..] } else { &blue[..] });
+            let mut target = fx265_reopened_with_pictures(&[&blue, &red]);
+            let source = fx265_reopened_with_pictures(&pictures);
+            fx265_import_body(&mut target, &source, policy);
+            let shown = fx265_shown_colours(&mut target, 2, &colours);
+            let mut saved = fx265_save_reopen(&mut target);
+            let reopened = fx265_shown_colours(&mut saved, 2, &colours);
+            if shown != inserted || reopened != inserted {
+                failures.push(format!(
+                    "{label}, inserted {inserted:?}, shown {shown:?}, reopened {reopened:?}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A1. A picture, a chart, and hyperlinks keep the targets named by the ids
+/// that were staged, including ids returned before a later staged edit.
+#[test]
+fn staged_ids_keep_targets() {
+    let red = fx265_png([200, 0, 0]);
+    let blue = fx265_png([0, 0, 200]);
+    let mut source = Document::new();
+    source.add_picture(&red, "red.png", Length::inches(1.0), Length::inches(1.0));
+    source
+        .add_chart(
+            rdocx::ChartKind::Bar,
+            Length::inches(3.0),
+            Length::inches(2.0),
+            &rdocx::ChartData {
+                categories: vec!["North".to_owned(), "South".to_owned()],
+                series: vec![("Revenue".to_owned(), vec![12.0, 18.0])],
+                ..rdocx::ChartData::default()
+            },
+        )
+        .unwrap();
+    for url in ["https://b.example/", "https://a.example/"] {
+        let body = body_story(&source);
+        source.add_hyperlink_to_story(&body, url, url).unwrap();
+    }
+    let source = fx265_save_reopen(&mut source);
+    for (label, policy) in fx265_policies() {
+        let mut target = fx265_reopened_with_pictures(&[&blue, &red]);
+        fx265_import_body(&mut target, &source, policy);
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(target.to_bytes().unwrap())).unwrap();
+        let relationships = package.get_part_rels("/word/document.xml").unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .replace(r#"r:embed=""#, r#"r:id=""#);
+        let shown = xml
+            .split(r#"r:id=""#)
+            .skip(3)
+            .filter_map(|tail| tail.split('"').next())
+            .map(|id| {
+                let relationship = relationships.get_by_id(id).unwrap();
+                if relationship.rel_type == rel_types::HYPERLINK {
+                    return relationship.target.clone();
+                }
+                let part =
+                    OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+                if relationship.rel_type == rel_types::CHART {
+                    return format!("chart {}", part.starts_with("/word/charts/"));
+                }
+                format!(
+                    "image red {}",
+                    package.get_part(&part).unwrap() == red.as_slice()
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                "image red true",
+                "chart true",
+                "https://b.example/",
+                "https://a.example/"
+            ],
+            "{label}"
+        );
+    }
+
+    let mut document = Document::new();
+    document.add_paragraph("cloned");
+    let b = document.add_hyperlink_relationship("https://b.example/");
+    let a = document.add_hyperlink_relationship("https://a.example/");
+    let body = body_story(&document);
+    let first = document.story_items(&body).unwrap()[0].location().clone();
+    document
+        .clone_content(&first, &rdocx::ContentLocation::end(body))
+        .unwrap();
+    let mut paragraph = document.add_paragraph("");
+    paragraph.add_hyperlink("b", &b);
+    paragraph.add_hyperlink("a", &a);
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let relationships = package.get_part_rels("/word/document.xml").unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let links = xml
+        .split("<w:hyperlink ")
+        .skip(1)
+        .map(|tail| {
+            let id = tail
+                .split(r#"r:id=""#)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let text = tail
+                .split("<w:t>")
+                .nth(1)
+                .unwrap()
+                .split('<')
+                .next()
+                .unwrap();
+            (
+                text.to_owned(),
+                relationships.get_by_id(id).unwrap().target.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        links,
+        [
+            ("b".to_owned(), "https://b.example/".to_owned()),
+            ("a".to_owned(), "https://a.example/".to_owned())
+        ]
+    );
+
+    let body = body_story(&document);
+    let story_b = document
+        .add_hyperlink_relationship_to_story(&body, "https://b.example/story")
+        .unwrap();
+    let body = body_story(&document);
+    let story_a = document
+        .add_hyperlink_relationship_to_story(&body, "https://a.example/story")
+        .unwrap();
+    let body = body_story(&document);
+    let first = document.story_items(&body).unwrap()[0].location().clone();
+    document
+        .clone_content(&first, &rdocx::ContentLocation::end(body))
+        .unwrap();
+    let mut paragraph = document.add_paragraph("");
+    paragraph.add_hyperlink("story-b", &story_b);
+    paragraph.add_hyperlink("story-a", &story_a);
+    let mut reopened = fx265_save_reopen(&mut document);
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(reopened.to_bytes().unwrap())).unwrap();
+    let relationships = package.get_part_rels("/word/document.xml").unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let story_links = xml
+        .split("<w:hyperlink ")
+        .skip(1)
+        .filter_map(|tail| {
+            let id = tail
+                .split(r#"r:id=""#)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let text = tail
+                .split("<w:t>")
+                .nth(1)
+                .unwrap()
+                .split('<')
+                .next()
+                .unwrap();
+            text.starts_with("story-").then(|| {
+                (
+                    text.to_owned(),
+                    relationships.get_by_id(id).unwrap().target.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        story_links,
+        [
+            ("story-b".to_owned(), "https://b.example/story".to_owned()),
+            ("story-a".to_owned(), "https://a.example/story".to_owned())
+        ]
+    );
+
+    let fillers = (0..8_u8)
+        .map(|index| fx265_png([20 * index, 120, 60]))
+        .collect::<Vec<_>>();
+    let mut document =
+        fx265_reopened_with_pictures(&fillers.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let red_id = document.embed_image(&red, "red.png");
+    let blue_id = document.embed_image(&blue, "blue.png");
+    let orphan = fx265_png([0, 200, 0]);
+    let orphan_id = document.embed_image(&orphan, "orphan.png");
+    let body = body_story(&document);
+    let first = document.story_items(&body).unwrap()[0].location().clone();
+    document
+        .clone_content(&first, &rdocx::ContentLocation::end(body))
+        .unwrap();
+    let mut paragraph = document.add_paragraph("");
+    for id in [&red_id, &blue_id] {
+        paragraph
+            .add_run("")
+            .add_picture(id, Length::inches(1.0), Length::inches(1.0));
+    }
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    assert_eq!(
+        fx265_shown_colours(&mut document, 9, &colours),
+        ["red", "blue"]
+    );
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let relationship = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .get_by_id(&orphan_id)
+        .unwrap();
+    let part = OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+    assert_eq!(package.get_part(&part).unwrap(), orphan.as_slice());
+}
+
+/// A2. Available unused-relationship and body-replaced picture bytes stay
+/// exact through policies, save and reopen. Image 9 and image 10 are a
+/// reconstructed additional case. The original Issue 404 input is not claimed.
+#[test]
+fn inserted_picture_bytes_survive_unused_rels() {
+    let red = fx265_png([200, 0, 0]);
+    let blue = fx265_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let fillers = (0..6_u8)
+        .map(|index| fx265_png([20 * index, 120, 60]))
+        .collect::<Vec<_>>();
+    let mut held: Vec<&[u8]> = vec![&blue, &red];
+    held.extend(fillers.iter().map(Vec::as_slice));
+    let mut failures = Vec::new();
+    for (label, policy) in fx265_policies() {
+        for inserted in [["red", "blue"], ["blue", "red"]] {
+            let pictures = inserted.map(|name| if name == "red" { &red[..] } else { &blue[..] });
+            for plain_target in [false, true] {
+                let mut target = fx265_reopened_with_pictures(&held);
+                let mut source = fx265_body_replaced(&mut target, &pictures);
+                let stored = fx265_shown_pictures(&mut source, 0)
+                    .into_iter()
+                    .map(|(part, _)| part)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    stored,
+                    ["/word/media/image9.png", "/word/media/image10.png"]
+                );
+                let first = if plain_target {
+                    target = fx265_reopened_with_pictures(&[]);
+                    0
+                } else {
+                    held.len()
+                };
+                fx265_import_body(&mut target, &source, policy);
+                let shown = fx265_shown_colours(&mut target, first, &colours);
+                let mut saved = fx265_save_reopen(&mut target);
+                let reopened = fx265_shown_colours(&mut saved, first, &colours);
+                if shown != inserted || reopened != inserted {
+                    failures.push(format!(
+                        "{label}, plain target {plain_target}, inserted {inserted:?}, shown {shown:?}, reopened {reopened:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+fn fx265_style(id: &str, name: &str, color: &str) -> String {
+    format!(
+        r#"<w:style w:type="paragraph" w:styleId="{id}"><w:name w:val="{name}"/><w:basedOn w:val="Normal"/><w:rPr><w:color w:val="{color}"/></w:rPr></w:style>"#
+    )
+}
+
+fn fx265_restyle(
+    mut document: Document,
+    first_heading_color: Option<&str>,
+    appended: &str,
+) -> Document {
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let mut styles =
+        String::from_utf8(package.get_part("/word/styles.xml").unwrap().to_vec()).unwrap();
+    if let Some(color) = first_heading_color {
+        let id = styles.find(r#"w:styleId="Heading1""#).unwrap();
+        let start = styles[..id].rfind("<w:style").unwrap();
+        let end = start + styles[start..].find("</w:style>").unwrap() + "</w:style>".len();
+        styles.replace_range(start..end, &fx265_style("Heading1", "heading 1", color));
+    }
+    let styles = styles.replacen("</w:styles>", &format!("{appended}</w:styles>"), 1);
+    package.set_part("/word/styles.xml", styles.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+fn fx265_styled_document(
+    text: &str,
+    first_heading_color: Option<&str>,
+    appended: &str,
+) -> Document {
+    let mut document = Document::new();
+    document.add_paragraph(text).style("Heading1");
+    document.add_paragraph(text).style("Title");
+    fx265_restyle(document, first_heading_color, appended)
+}
+
+fn fx265_style_elements(document: &mut Document) -> Vec<String> {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let styles = std::str::from_utf8(package.get_part("/word/styles.xml").unwrap()).unwrap();
+    let redeclared = format!(r#" xmlns:w="{}""#, rdocx_oxml::namespace::W_NS);
+    styles
+        .match_indices("<w:style ")
+        .map(|(start, _)| {
+            let end = start + styles[start..].find("</w:style>").unwrap() + "</w:style>".len();
+            styles[start..end].replace(&redeclared, "")
+        })
+        .collect()
+}
+
+fn fx265_paragraph_styles(document: &Document) -> Vec<String> {
+    document
+        .paragraphs()
+        .iter()
+        .map(|paragraph| paragraph.style_id().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// A3. Equal first definitions add no style copy. A target duplicate stays.
+#[test]
+fn equal_styles_add_no_copy() {
+    let duplicates =
+        fx265_style("Heading1", "heading 1", "C00000") + &fx265_style("Title", "Title", "C00000");
+    for (target_appended, source_appended) in [
+        (duplicates.as_str(), duplicates.as_str()),
+        (duplicates.as_str(), ""),
+        ("", duplicates.as_str()),
+    ] {
+        let mut target = fx265_styled_document("target", None, target_appended);
+        let source = fx265_styled_document("inserted", None, source_appended);
+        let before = fx265_style_elements(&mut target);
+        for _ in 0..2 {
+            fx265_import_body(
+                &mut target,
+                &source,
+                rdocx::FragmentConflictPolicy::default(),
+            );
+            assert_eq!(fx265_style_elements(&mut target), before);
+        }
+        assert_eq!(
+            fx265_paragraph_styles(&target),
+            ["Heading1", "Title"].repeat(3)
+        );
+    }
+}
+
+/// A4. A different first definition adds one renamed copy. A later shadow and
+/// its dependency are ignored. Existing target duplicate XML stays.
+#[test]
+fn different_first_style_copies_once() {
+    let duplicates =
+        fx265_style("Heading1", "heading 1", "C00000") + &fx265_style("Title", "Title", "C00000");
+    let mut target = fx265_styled_document("target", None, &duplicates);
+    let source = fx265_styled_document("inserted", Some("00B050"), &duplicates);
+    let mut expected = fx265_style_elements(&mut target);
+    let duplicate_count = expected
+        .iter()
+        .filter(|element| element.contains(r#"w:styleId="Heading1""#))
+        .count();
+    assert!(duplicate_count >= 2, "target duplicate setup failed");
+    expected.push(fx265_style("Heading1Merge1", "heading 1", "00B050"));
+    fx265_import_body(
+        &mut target,
+        &source,
+        rdocx::FragmentConflictPolicy::default(),
+    );
+    assert_eq!(fx265_style_elements(&mut target), expected);
+    assert_eq!(
+        fx265_paragraph_styles(&target),
+        ["Heading1", "Title", "Heading1Merge1", "Title"]
+    );
+
+    let mut target = fx265_styled_document("target", None, "");
+    let source = fx265_styled_document(
+        "inserted",
+        None,
+        r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Issue408Shadowed"/></w:style><w:style w:type="paragraph" w:styleId="Issue408Shadowed"><w:name w:val="Issue 408 shadowed"/><w:basedOn w:val="Normal"/></w:style>"#,
+    );
+    let before = fx265_style_elements(&mut target);
+    fx265_import_body(
+        &mut target,
+        &source,
+        rdocx::FragmentConflictPolicy::default(),
+    );
+    assert_eq!(fx265_style_elements(&mut target), before);
+    assert!(
+        !fx265_style_elements(&mut target)
+            .iter()
+            .any(|element| element.contains("Issue408Shadowed"))
+    );
+}
+
+/// A5. Same-id Normal with different content adds one renamed non-default
+/// copy. A different source default id keeps the existing refusal.
+#[test]
+fn same_id_default_copies_once_nondefault() {
+    let mut target = Document::new();
+    target.add_paragraph("target");
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(target.to_bytes().unwrap())).unwrap();
+    let styles = String::from_utf8(package.get_part("/word/styles.xml").unwrap().to_vec())
+        .unwrap()
+        .replacen(
+            r#"<w:name w:val="Normal"/></w:style>"#,
+            r#"<w:name w:val="Normal"/><w:rPr><w:sz w:val="22"/></w:rPr></w:style>"#,
+            1,
+        );
+    package.set_part("/word/styles.xml", styles.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut target = Document::from_bytes(bytes.get_ref()).unwrap();
+    let mut source = Document::new();
+    source.add_paragraph("inserted");
+    fx265_import_body(
+        &mut target,
+        &source,
+        rdocx::FragmentConflictPolicy::default(),
+    );
+    target.validate_style_graph().unwrap();
+    let defaults = target
+        .styles()
+        .iter()
+        .filter(|style| style.is_default() && style.style_type() == StyleType::Paragraph)
+        .map(|style| style.style_id().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(defaults, ["Normal"]);
+    let copy = target.style("NormalMerge1").unwrap();
+    assert!(!copy.is_default());
+    assert_eq!(fx265_paragraph_styles(&target), ["", ""]);
+    let mut reopened = fx265_save_reopen(&mut target);
+    assert!(
+        fx265_style_elements(&mut reopened)
+            .iter()
+            .any(|element| element.contains(r#"w:styleId="NormalMerge1""#)
+                && !element.contains(r#"w:default="1""#))
+    );
+
+    let mut source = Document::new();
+    source.add_paragraph("other default");
+    source
+        .add_style(rdocx::StyleBuilder::paragraph(
+            "SourceDefault",
+            "Source default",
+        ))
+        .unwrap();
+    source
+        .set_default_style(StyleType::Paragraph, "SourceDefault")
+        .unwrap();
+    let mut target = Document::new();
+    target.add_paragraph("target");
+    let source_body = body_story(&source);
+    let start = source.story_items(&source_body).unwrap()[0]
+        .location()
+        .clone();
+    let fragment = rdocx::DocumentFragment::from_range(
+        &source,
+        &start,
+        &rdocx::ContentLocation::end(source_body),
+        false,
+    )
+    .unwrap();
+    let body = body_story(&target);
+    let error = target
+        .import_fragment(
+            &rdocx::ContentLocation::end(body),
+            &fragment,
+            rdocx::FragmentConflictPolicy::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("more than one default"), "{error}");
+    assert_eq!(target.paragraphs().len(), 1);
+}
+
+/// A6. Template repeat, building-block insert and rich merge keep picture
+/// bytes through the shared provider. Native typed insert is the valid
+/// unchanged control for an already-shared media graph.
+#[test]
+fn template_merge_and_typed_insert_follow_the_same_rule() {
+    let red = fx265_png([200, 0, 0]);
+    let blue = fx265_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let mut document = Document::new();
+    for index in 0..8_u8 {
+        document.add_picture(
+            &fx265_png([20 * index, 120, 60]),
+            &format!("filler{index}.png"),
+            Length::inches(1.0),
+            Length::inches(1.0),
+        );
+    }
+    document.add_paragraph("{% for item in items %}");
+    document.add_picture(&red, "red.png", Length::inches(1.0), Length::inches(1.0));
+    document.add_picture(&blue, "blue.png", Length::inches(1.0), Length::inches(1.0));
+    document.add_paragraph("{% endfor %}");
+    let mut document = fx265_save_reopen(&mut document);
+    let stored = fx265_shown_pictures(&mut document, 8)
+        .into_iter()
+        .map(|(part, _)| part)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stored,
+        ["/word/media/image9.png", "/word/media/image10.png"]
+    );
+    document
+        .render_template_versioned(&serde_json::json!({"items": [1, 2, 3]}), 1)
+        .unwrap();
+    assert_eq!(
+        fx265_shown_colours(&mut document, 8, &colours),
+        ["red", "blue", "red", "blue", "red", "blue"]
+    );
+
+    let source = fx265_reopened_with_pictures(&[&red, &blue]);
+    let source_body = body_story(&source);
+    let start = source.story_items(&source_body).unwrap()[0]
+        .location()
+        .clone();
+    let fragment = rdocx::DocumentFragment::from_range(
+        &source,
+        &start,
+        &rdocx::ContentLocation::end(source_body),
+        false,
+    )
+    .unwrap();
+    let mut host = fx265_reopened_with_pictures(&[&blue, &red]);
+    let block = rdocx::BuildingBlock {
+        name: "Pictures".to_owned(),
+        kind: rdocx::BuildingBlockKind::BuildingBlock,
+        category: None,
+        description: None,
+        guid: None,
+        gallery: None,
+        behaviors: Vec::new(),
+        body: rdocx_oxml::document::CT_Body {
+            content: Vec::new(),
+            sect_pr: None,
+        },
+    };
+    let info = host
+        .create_building_block_from_fragment(
+            block,
+            &fragment,
+            rdocx::FragmentConflictPolicy::default(),
+        )
+        .unwrap();
+    let body = body_story(&host);
+    host.insert_building_block(
+        &rdocx::ContentLocation::end(body),
+        &info,
+        rdocx::FragmentConflictPolicy::reuse_equivalent().with_related_part_reuse(false),
+    )
+    .unwrap();
+    assert_eq!(
+        fx265_shown_colours(&mut fx265_save_reopen(&mut host), 2, &colours),
+        ["red", "blue"]
+    );
+
+    let merge = document_with_body_inner(
+        r#"<w:p><w:fldSimple w:instr=" MERGEFIELD Picture "><w:r><w:t>Picture</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let mut record = rdocx::MailMergeRecord::default();
+    record.values.insert(
+        "Picture".to_owned(),
+        rdocx::MailMergeValue::Image(rdocx::MailMergeImage {
+            data: red.clone(),
+            filename: "red.png".to_owned(),
+            width: Length::inches(1.0),
+            height: Length::inches(1.0),
+        }),
+    );
+    let mut merged = merge
+        .mail_merge_rich(
+            &rdocx::MailMergeData {
+                records: vec![record],
+                sources: Default::default(),
+            },
+            None,
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(fx265_shown_colours(&mut merged, 0, &colours), ["red"]);
+
+    let mut typed = fx265_reopened_with_pictures(&[&blue]);
+    // Valid shared graph preservation. The source is a clone of the
+    // destination bytes, so both drawings already share the same intended
+    // blue picture and relationship graph.
+    let other = Document::from_bytes(&typed.to_bytes().unwrap()).unwrap();
+    typed.insert_document(1, &other);
+    assert_eq!(
+        fx265_shown_colours(&mut fx265_save_reopen(&mut typed), 0, &colours),
+        ["blue", "blue"]
+    );
+}
+
+fn form_tag(tag: &str) -> rdocx::FormFieldTarget {
+    rdocx::FormFieldTarget::ContentControlTag(tag.to_owned())
+}
+
+fn form_rule(
+    target: rdocx::FormFieldTarget,
+    required: bool,
+    reset: rdocx::FormResetValue,
+) -> rdocx::FormFieldRule {
+    rdocx::FormFieldRule {
+        target,
+        required,
+        reset,
+    }
+}
+
+fn form_text(text: &str) -> rdocx::FormFieldValue {
+    rdocx::FormFieldValue::Text(text.to_owned())
+}
+
+fn form_assignment(
+    target: rdocx::FormFieldTarget,
+    value: rdocx::FormFieldValue,
+) -> rdocx::FormFieldAssignment {
+    rdocx::FormFieldAssignment { target, value }
+}
+
+fn form_protection(mode: rdocx::ProtectionMode) -> rdocx::DocumentProtection {
+    rdocx::DocumentProtection {
+        mode,
+        enforcement: Some(true),
+        formatting: None,
+        provider_type: None,
+        algorithm_class: None,
+        algorithm_type: None,
+        algorithm_sid: None,
+        spin_count: None,
+        hash: None,
+        salt: None,
+    }
+}
+
+fn insert_form_control(
+    document: &mut Document,
+    story: &rdocx::StoryId,
+    kind: rdocx_oxml::content_control::SdtType,
+    tag: &str,
+) {
+    let story = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|item| {
+            item.kind() == story.kind()
+                && item.part_name() == story.part_name()
+                && item.owner_index() == story.owner_index()
+        })
+        .unwrap_or_else(|| panic!("missing story {:?}", story.kind()));
+    document
+        .insert_content_control(
+            &rdocx::ContentLocation::end(story),
+            content_control_spec(rdocx::ContentControlPlacement::Block, kind, tag),
+        )
+        .unwrap();
+}
+
+fn story_kind(document: &Document, kind: StoryKind) -> rdocx::StoryId {
+    document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == kind)
+        .unwrap_or_else(|| panic!("missing story {kind:?}"))
+}
+
+fn package_text(document: &mut Document) -> String {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let mut text = String::new();
+    for part in package.parts.values() {
+        text.push_str(&String::from_utf8_lossy(part));
+    }
+    text
+}
+
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+
+fn attribute_bindings(xml: &str, local: &str) -> Vec<(String, String)> {
+    let mut reader = quick_xml::reader::NsReader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut found = Vec::new();
+    while let Ok((_namespace, event)) = reader.read_resolved_event_into(&mut buffer) {
+        let element = match event {
+            quick_xml::events::Event::Start(element) | quick_xml::events::Event::Empty(element) => {
+                element
+            }
+            quick_xml::events::Event::Eof => break,
+            _ => {
+                buffer.clear();
+                continue;
+            }
+        };
+        for attribute in element.attributes().flatten() {
+            let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+            if name.as_ref() != local.as_bytes() {
+                continue;
+            }
+            let uri = match namespace {
+                quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(uri)) => {
+                    String::from_utf8_lossy(uri).into_owned()
+                }
+                _ => String::new(),
+            };
+            found.push((
+                uri,
+                String::from_utf8_lossy(attribute.value.as_ref()).into_owned(),
+            ));
+        }
+        buffer.clear();
+    }
+    found
+}
+
+fn assert_positioned(document: &Document, text: &str) {
+    let layout = document.layout_deterministic().unwrap();
+    let mut found = false;
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && run.text.contains(text)
+            {
+                found = true;
+            }
+        });
+    }
+    assert!(found, "missing positioned text {text}");
+}
+
+#[test]
+fn dense_authored_form_fill_reset_and_protect_share_one_model() {
+    let mut document = Document::new();
+    document.add_paragraph("Anchor");
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "name",
+    );
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "agree",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "agree"),
+            rdocx::ContentControlTypePayload::CheckBox,
+        )
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "when",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "when"),
+            rdocx::ContentControlTypePayload::Date {
+                format: "yyyy-MM-dd".into(),
+            },
+        )
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "color",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "color"),
+            rdocx::ContentControlTypePayload::DropDownList {
+                items: vec![("Red".into(), "r".into()), ("Blue".into(), "b".into())],
+            },
+        )
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "rows",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "rows"),
+            rdocx::ContentControlTypePayload::RepeatingSection,
+        )
+        .unwrap();
+    document
+        .repeat_content_control(&control_by_tag(&document, "rows"))
+        .unwrap();
+    let store = br#"<ns:root xmlns:ns="urn:example"><ns:child></ns:child></ns:root>"#;
+    let store_id = document
+        .add_custom_xml_store(store, &["urn:example"])
+        .unwrap();
+    document
+        .set_content_control_binding(
+            &control_by_tag(&document, "name"),
+            &store_id,
+            "/ns:root/ns:child",
+            Some("xmlns:ns='urn:example'"),
+        )
+        .unwrap();
+    {
+        let mut paragraph = document.add_paragraph("");
+        let mut run = paragraph.add_run("");
+        let field = rdocx::Field::from_legacy_form(
+            rdocx::LegacyFormFieldOptions {
+                name: Some("Legacy".into()),
+                ..rdocx::LegacyFormFieldOptions::default()
+            },
+            rdocx::LegacyFormFieldDefinition::TextInput {
+                input_type: rdocx::LegacyTextInputType::Regular,
+                default: Some("keep".into()),
+                value: "now".into(),
+                max_length: None,
+                format: None,
+            },
+        )
+        .unwrap();
+        run.add_field_value(field).unwrap();
+    }
+    let anchor = document
+        .story_items(&body_story(&document))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.kind() == StoryItemKind::Paragraph)
+        .unwrap()
+        .location()
+        .clone();
+    document
+        .add_story_permission_range(
+            Some("Clerk"),
+            None,
+            rdocx::StoryRunRange {
+                start: rdocx::StoryRunPosition {
+                    location: anchor.clone(),
+                    run_index: 0,
+                },
+                end: rdocx::StoryRunPosition {
+                    location: anchor,
+                    run_index: 1,
+                },
+            },
+        )
+        .unwrap();
+    let header = document
+        .create_section_story(0, rdocx::HeaderFooterKind::Header, HdrFtrType::Default)
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &header,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "office",
+    );
+
+    let legacy = document.legacy_form_fields().unwrap().remove(0);
+    let legacy_target = rdocx::FormFieldTarget::Legacy {
+        source_part: legacy.source_part,
+        ordinal: legacy.ordinal,
+    };
+    let rules = vec![
+        form_rule(
+            form_tag("name"),
+            true,
+            rdocx::FormResetValue::Placeholder {
+                text: "Name".into(),
+            },
+        ),
+        form_rule(
+            form_tag("agree"),
+            true,
+            rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+        ),
+        form_rule(
+            form_tag("when"),
+            true,
+            rdocx::FormResetValue::Value(form_text("2026-10-24")),
+        ),
+        form_rule(
+            form_tag("color"),
+            true,
+            rdocx::FormResetValue::Value(form_text("Red")),
+        ),
+        form_rule(
+            legacy_target.clone(),
+            true,
+            rdocx::FormResetValue::Value(form_text("keep")),
+        ),
+        form_rule(
+            form_tag("office"),
+            false,
+            rdocx::FormResetValue::Placeholder {
+                text: "Office".into(),
+            },
+        ),
+    ];
+    let before = document.to_bytes().unwrap();
+    let issues = document.validate_form(&rules).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message == "required value is empty" && issue.ordinal < 20)
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let structural = document.protect_form(&rules, form_protection(rdocx::ProtectionMode::Forms));
+    assert!(structural.unwrap_err().to_string().contains("valid form"));
+    assert!(document.document_protection().is_none());
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let refused = document.fill_form(
+        &rules,
+        &[form_assignment(
+            form_tag("color"),
+            rdocx::FormFieldValue::SelectedIndex(1),
+        )],
+    );
+    assert!(refused.unwrap_err().to_string().contains("kind"));
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let counts = document
+        .fill_form(
+            &rules,
+            &[
+                form_assignment(form_tag("name"), form_text("FormAda")),
+                form_assignment(form_tag("agree"), rdocx::FormFieldValue::Checked(true)),
+                form_assignment(form_tag("when"), form_text("2026-10-23")),
+                form_assignment(form_tag("color"), form_text("Blue")),
+                form_assignment(legacy_target.clone(), form_text("typed")),
+                form_assignment(form_tag("office"), form_text("North")),
+            ],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![1, 1, 1, 1, 1, 1]);
+    let filled = document_part_xml(&mut document);
+    assert!(filled.contains("FormAda"), "{filled}");
+    assert!(filled.contains("2026-10-23T00:00:00Z"), "{filled}");
+    assert!(filled.contains("Blue"), "{filled}");
+    assert_eq!(
+        document_part_xml(&mut document)
+            .matches("repeatingSectionItem")
+            .count(),
+        2
+    );
+    assert!(package_text(&mut document).contains("North"));
+    assert!(package_text(&mut document).contains("typed"));
+    assert!(document.validate_form(&rules).unwrap().is_empty());
+    document
+        .protect_form(&rules, form_protection(rdocx::ProtectionMode::Forms))
+        .unwrap();
+    assert_eq!(
+        document.document_protection().unwrap().mode,
+        rdocx::ProtectionMode::Forms
+    );
+    assert_positioned(&document, "FormAda");
+    let png = document
+        .render_page_to_png_deterministic(0, 72.0)
+        .unwrap()
+        .expect("local page render");
+    assert!(png.starts_with(b"\x89PNG"));
+
+    let counts = document.reset_form(&rules).unwrap();
+    assert_eq!(counts, vec![1, 1, 1, 1, 1, 1]);
+    let reset = document_part_xml(&mut document);
+    assert!(reset.contains("Name"), "{reset}");
+    assert!(reset.contains("2026-10-24T00:00:00Z"), "{reset}");
+    assert!(reset.contains("Red"), "{reset}");
+    assert_eq!(reset.matches("repeatingSectionItem").count(), 2);
+    assert!(reset.contains("permStart") || package_text(&mut document).contains("permStart"));
+    assert_eq!(
+        document.legacy_form_fields().unwrap()[0].value,
+        rdocx::LegacyFormFieldValue::Text("keep".into())
+    );
+    let mut reopened = reopen_document(&mut document);
+    assert_eq!(
+        reopened.document_protection().unwrap().mode,
+        rdocx::ProtectionMode::Forms
+    );
+    let issues = reopened.validate_form(&rules).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message == "required value is empty"),
+        "{issues:?}"
+    );
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue.message == "required value is empty"),
+        "{issues:?}"
+    );
+    assert!(
+        document_part_xml(&mut reopened).contains(">keep<")
+            || package_text(&mut reopened).contains("keep")
+    );
+}
+
+#[test]
+fn form_batches_reject_invalid_values_without_partial_publication() {
+    let mut document = Document::new();
+    document.add_paragraph("Batch");
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "name",
+    );
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "color",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "color"),
+            rdocx::ContentControlTypePayload::DropDownList {
+                items: vec![("Red".into(), "r".into()), ("Blue".into(), "b".into())],
+            },
+        )
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "group",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "group"),
+            rdocx::ContentControlTypePayload::Group,
+        )
+        .unwrap();
+    let rules = vec![
+        form_rule(
+            form_tag("name"),
+            true,
+            rdocx::FormResetValue::Value(form_text("N")),
+        ),
+        form_rule(
+            form_tag("color"),
+            false,
+            rdocx::FormResetValue::Value(form_text("Red")),
+        ),
+    ];
+    assert!(document.validate_form(&[]).unwrap().is_empty());
+    let before = document.to_bytes().unwrap();
+    assert!(document.fill_form(&[], &[]).unwrap().is_empty());
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let late = document.fill_form(
+        &rules,
+        &[
+            form_assignment(form_tag("name"), form_text("Ada")),
+            form_assignment(form_tag("color"), rdocx::FormFieldValue::SelectedIndex(0)),
+        ],
+    );
+    assert!(late.is_err(), "{late:?}");
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert!(!document_part_xml(&mut document).contains(">Ada<"));
+    let unknown = document.fill_form(
+        &rules,
+        &[form_assignment(form_tag("missing"), form_text("X"))],
+    );
+    assert!(
+        unknown
+            .unwrap_err()
+            .to_string()
+            .contains("unknown form assignment")
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let duplicate = document.fill_form(
+        &rules,
+        &[
+            form_assignment(form_tag("name"), form_text("A")),
+            form_assignment(form_tag("name"), form_text("B")),
+        ],
+    );
+    assert!(duplicate.unwrap_err().to_string().contains("duplicate"));
+    let structural = document.validate_form(&[form_rule(
+        form_tag("group"),
+        false,
+        rdocx::FormResetValue::Value(form_text("nope")),
+    )]);
+    assert!(structural.unwrap_err().to_string().contains("structural"));
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let counts = document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("color"), form_text("Blue"))],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![1]);
+    assert!(document_part_xml(&mut document).contains("Blue"));
+    let issues = document.validate_form(&rules).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message == "required value is empty")
+    );
+    let blocked = document.to_bytes().unwrap();
+    assert!(
+        document
+            .protect_form(&rules, form_protection(rdocx::ProtectionMode::Forms))
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), blocked);
+
+    let mut imported = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="9"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t>NO</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let box_rules = vec![form_rule(
+        form_tag("box"),
+        true,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+    )];
+    let issues = imported.validate_form(&box_rules).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].message, "current form value is invalid");
+    let before_box = imported.to_bytes().unwrap();
+    let mut imported = imported;
+    assert_eq!(imported.validate_form(&box_rules).unwrap().len(), 1);
+    assert_eq!(imported.to_bytes().unwrap(), before_box);
+    let counts = imported
+        .fill_form(
+            &box_rules,
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(false),
+            )],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![1]);
+    let repaired = document_part_xml(&mut imported);
+    assert!(repaired.contains('\u{2610}'), "{repaired}");
+    assert!(!repaired.contains(">NO<"), "{repaired}");
+    assert!(imported.validate_form(&box_rules).unwrap().is_empty());
+}
+
+#[test]
+fn form_selection_and_updates_use_the_same_physical_story_owner() {
+    let mut document = Document::new();
+    document.add_paragraph("Body");
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "shared",
+    );
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "alias-host",
+    );
+    document
+        .set_content_control_alias(&control_by_tag(&document, "alias-host"), Some("shared"))
+        .unwrap();
+    let header = document
+        .create_section_story(0, rdocx::HeaderFooterKind::Header, HdrFtrType::Default)
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &header,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "shared",
+    );
+    let footer = document
+        .create_section_story(0, rdocx::HeaderFooterKind::Footer, HdrFtrType::Default)
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &footer,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "footer-note",
+    );
+    document.add_footnote("Noted");
+    let note = story_kind(&document, StoryKind::Footnote);
+    insert_form_control(
+        &mut document,
+        &note,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "note-tag",
+    );
+    document
+        .add_text_box_to_story(&body_story(&document), "Boxed", text_box_options())
+        .unwrap();
+    let text_box = story_kind(&document, StoryKind::TextBox);
+    insert_form_control(
+        &mut document,
+        &text_box,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "box-tag",
+    );
+    document.add_table(1, 1);
+    let table = document
+        .story_items(&body_story(&document))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.kind() == StoryItemKind::Table)
+        .unwrap()
+        .location()
+        .clone();
+    let mut cell_path = table.index_path().to_vec();
+    cell_path.push(0);
+    document
+        .insert_content_control(
+            &rdocx::ContentLocation::new(table.story().clone(), StoryItemKind::Table, cell_path),
+            content_control_spec(
+                rdocx::ContentControlPlacement::Cell,
+                rdocx_oxml::content_control::SdtType::PlainText,
+                "cell-tag",
+            ),
+        )
+        .unwrap();
+    let inline_paragraph = document
+        .story_items(&body_story(&document))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.kind() == StoryItemKind::Paragraph)
+        .unwrap()
+        .location()
+        .clone();
+    document
+        .insert_content_control(
+            &inline_paragraph,
+            content_control_spec(
+                rdocx::ContentControlPlacement::Inline,
+                rdocx_oxml::content_control::SdtType::PlainText,
+                "inline-tag",
+            ),
+        )
+        .unwrap();
+    document
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "Comment",
+        )
+        .unwrap();
+    let comment = story_kind(&document, StoryKind::Comment);
+    insert_form_control(
+        &mut document,
+        &comment,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "comment-tag",
+    );
+
+    let rules = vec![
+        form_rule(
+            form_tag("shared"),
+            false,
+            rdocx::FormResetValue::Value(form_text("S")),
+        ),
+        form_rule(
+            form_tag("footer-note"),
+            false,
+            rdocx::FormResetValue::Value(form_text("F")),
+        ),
+        form_rule(
+            form_tag("note-tag"),
+            false,
+            rdocx::FormResetValue::Value(form_text("N")),
+        ),
+        form_rule(
+            form_tag("box-tag"),
+            false,
+            rdocx::FormResetValue::Value(form_text("B")),
+        ),
+        form_rule(
+            form_tag("cell-tag"),
+            false,
+            rdocx::FormResetValue::Value(form_text("C")),
+        ),
+        form_rule(
+            form_tag("inline-tag"),
+            false,
+            rdocx::FormResetValue::Value(form_text("I")),
+        ),
+        form_rule(
+            form_tag("comment-tag"),
+            false,
+            rdocx::FormResetValue::Value(form_text("K")),
+        ),
+    ];
+    let body_tags = document
+        .content_controls()
+        .into_iter()
+        .filter_map(|control| control.tag().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(body_tags.iter().any(|tag| tag == "shared"));
+    assert!(!body_tags.iter().any(|tag| tag == "footer-note"));
+    let before_old = document.to_bytes().unwrap();
+    let old = document.set_content_control_value_by_tag("footer-note", "body-only");
+    assert!(old.is_err() || !package_text(&mut document).contains("body-only"));
+    if old.is_err() {
+        assert_eq!(document.to_bytes().unwrap(), before_old);
+    }
+    let counts = document
+        .fill_form(
+            &rules,
+            &[
+                form_assignment(form_tag("shared"), form_text("Both")),
+                form_assignment(form_tag("footer-note"), form_text("Foot")),
+                form_assignment(form_tag("note-tag"), form_text("Footnote")),
+                form_assignment(form_tag("box-tag"), form_text("TextBox")),
+                form_assignment(form_tag("cell-tag"), form_text("Cell")),
+                form_assignment(form_tag("inline-tag"), form_text("Inline")),
+                form_assignment(form_tag("comment-tag"), form_text("CommentText")),
+            ],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![2, 1, 1, 1, 1, 1, 1]);
+    let packed = package_text(&mut document);
+    assert_eq!(packed.matches("Both").count(), 2, "{packed}");
+    assert!(packed.contains("Foot"));
+    assert!(packed.contains("Footnote"));
+    assert!(packed.contains("TextBox"));
+    assert!(packed.contains("Cell"));
+    assert!(packed.contains("Inline"));
+    assert!(packed.contains("CommentText"));
+    assert!(!story_control_xml(&document, &body_story(&document), "alias-host").contains("Both"));
+
+    let nested = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="same"/><w:id w:val="1"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>STAY</w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="same"/><w:id w:val="2"/><w:richText/></w:sdtPr><w:sdtContent><w:r><w:t>LEAF</w:t></w:r></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let nested_rules = vec![form_rule(
+        form_tag("same"),
+        false,
+        rdocx::FormResetValue::Value(form_text("NEW")),
+    )];
+    let mut nested = nested;
+    let before_nested = nested.to_bytes().unwrap();
+    let nested_error = nested
+        .fill_form(
+            &nested_rules,
+            &[form_assignment(form_tag("same"), form_text("NEW"))],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        nested_error.contains("overlapping") || nested_error.contains("structural"),
+        "{nested_error}"
+    );
+    assert_eq!(nested.to_bytes().unwrap(), before_nested);
+
+    let mut overlap = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="outer"/><w:id w:val="1"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:sdt><w:sdtPr><w:tag w:val="inner"/><w:id w:val="2"/><w:richText/></w:sdtPr><w:sdtContent><w:r><w:t>IN</w:t></w:r></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let before = overlap.to_bytes().unwrap();
+    let mut overlap = overlap;
+    let error = overlap.validate_form(&[
+        form_rule(
+            form_tag("outer"),
+            false,
+            rdocx::FormResetValue::Value(form_text("O")),
+        ),
+        form_rule(
+            form_tag("inner"),
+            false,
+            rdocx::FormResetValue::Value(form_text("I")),
+        ),
+    ]);
+    assert!(error.unwrap_err().to_string().contains("overlapping"));
+    assert_eq!(overlap.to_bytes().unwrap(), before);
+
+    let mut hidden = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="live"/><w:id w:val="1"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>LIVE</w:t></w:r><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="9" name="box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>BOX</w:t></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="boxed"/><w:id w:val="3"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>INNER</w:t></w:r></w:p></w:sdtContent></w:sdt></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:sdtContent></w:sdt><x:wrap xmlns:x="urn:opaque"><w:sdt><w:sdtPr><w:tag w:val="live"/><w:id w:val="2"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>HIDDEN</w:t></w:r></w:p></w:sdtContent></w:sdt></x:wrap>"#,
+    );
+    let hidden_rules = vec![form_rule(
+        form_tag("live"),
+        false,
+        rdocx::FormResetValue::Value(form_text("NEW")),
+    )];
+    let counts = hidden
+        .fill_form(
+            &hidden_rules,
+            &[form_assignment(form_tag("live"), form_text("NEW"))],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![1]);
+    let xml = document_part_xml(&mut hidden);
+    assert!(xml.contains("NEW"), "{xml}");
+    assert!(xml.contains("BOX"), "{xml}");
+    assert!(xml.contains("HIDDEN"), "{xml}");
+    assert!(xml.contains("INNER"), "{xml}");
+    assert!(!xml.contains(">LIVE<"), "{xml}");
+    let boxed = hidden
+        .fill_form(
+            &[form_rule(
+                form_tag("boxed"),
+                false,
+                rdocx::FormResetValue::Value(form_text("BOXED")),
+            )],
+            &[form_assignment(form_tag("boxed"), form_text("BOXED"))],
+        )
+        .unwrap();
+    assert_eq!(boxed, vec![1]);
+    let xml = document_part_xml(&mut hidden);
+    assert!(xml.contains("BOXED"), "{xml}");
+    assert!(xml.contains(">NEW<"), "{xml}");
+
+    let decoy = r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:textInput><w:default w:val="decoy"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>DECOY</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let live = r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:textInput><w:default w:val="keep"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>LIVE</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let mut shifted = document_with_body_inner(&format!(
+        r#"<x:wrap xmlns:x="urn:opaque"><w:p>{decoy}</w:p></x:wrap><w:sdt><w:sdtPr><w:tag w:val="wrap"/><w:id w:val="8"/><w:richText/></w:sdtPr><w:sdtContent><w:p>{live}</w:p></w:sdtContent></w:sdt>"#
+    ));
+    let legacy = shifted.legacy_form_fields().unwrap();
+    assert_eq!(legacy.len(), 1, "{legacy:?}");
+    let before = shifted.to_bytes().unwrap();
+    let error = shifted
+        .validate_form(&[
+            form_rule(
+                form_tag("wrap"),
+                false,
+                rdocx::FormResetValue::Value(form_text("W")),
+            ),
+            form_rule(
+                rdocx::FormFieldTarget::Legacy {
+                    source_part: legacy[0].source_part.clone(),
+                    ordinal: legacy[0].ordinal,
+                },
+                false,
+                rdocx::FormResetValue::Value(form_text("keep")),
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlapping"), "{error}");
+    assert_eq!(shifted.to_bytes().unwrap(), before);
+
+    let mut nested_leaf = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="outer"/><w:id w:val="1"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>STAY</w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="leaf"/><w:id w:val="2"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>LEAF</w:t></w:r></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let leaf_counts = nested_leaf
+        .fill_form(
+            &[form_rule(
+                form_tag("leaf"),
+                false,
+                rdocx::FormResetValue::Value(form_text("NEW")),
+            )],
+            &[form_assignment(form_tag("leaf"), form_text("NEW"))],
+        )
+        .unwrap();
+    assert_eq!(leaf_counts, vec![1]);
+    let leaf_xml = document_part_xml(&mut nested_leaf);
+    assert!(leaf_xml.contains(">NEW<"), "{leaf_xml}");
+    assert!(leaf_xml.contains(">STAY<"), "{leaf_xml}");
+
+    let mut structural = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="same"/><w:id w:val="1"/><w:group/></w:sdtPr><w:sdtContent><w:p><w:sdt><w:sdtPr><w:tag w:val="same"/><w:id w:val="2"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>LEAF</w:t></w:r></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let before_structural = structural.to_bytes().unwrap();
+    let structural_error = structural
+        .fill_form(
+            &[form_rule(
+                form_tag("same"),
+                false,
+                rdocx::FormResetValue::Value(form_text("NEW")),
+            )],
+            &[form_assignment(form_tag("same"), form_text("NEW"))],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        structural_error.contains("structural")
+            || structural_error.contains("kinds differ")
+            || structural_error.contains("overlapping"),
+        "{structural_error}"
+    );
+    assert_eq!(structural.to_bytes().unwrap(), before_structural);
+    assert!(document_part_xml(&mut structural).contains(">LEAF<"));
+}
+
+#[test]
+fn form_reset_preserves_repeat_count_and_editable_ranges() {
+    let mut document = Document::new();
+    document.add_paragraph("Editable");
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "name",
+    );
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "rows",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "rows"),
+            rdocx::ContentControlTypePayload::RepeatingSection,
+        )
+        .unwrap();
+    document
+        .repeat_content_control(&control_by_tag(&document, "rows"))
+        .unwrap();
+    let paragraph = document
+        .story_items(&body_story(&document))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.kind() == StoryItemKind::Paragraph)
+        .unwrap()
+        .location()
+        .clone();
+    document
+        .add_story_permission_range(
+            Some("Clerk"),
+            None,
+            rdocx::StoryRunRange {
+                start: rdocx::StoryRunPosition {
+                    location: paragraph.clone(),
+                    run_index: 0,
+                },
+                end: rdocx::StoryRunPosition {
+                    location: paragraph,
+                    run_index: 1,
+                },
+            },
+        )
+        .unwrap();
+    {
+        let mut paragraph = document.add_paragraph("");
+        let mut run = paragraph.add_run("");
+        run.add_field_value(
+            rdocx::Field::from_legacy_form(
+                rdocx::LegacyFormFieldOptions::default(),
+                rdocx::LegacyFormFieldDefinition::TextInput {
+                    input_type: rdocx::LegacyTextInputType::Regular,
+                    default: None,
+                    value: "current".into(),
+                    max_length: None,
+                    format: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        run.add_field_value(
+            rdocx::Field::from_legacy_form(
+                rdocx::LegacyFormFieldOptions::default(),
+                rdocx::LegacyFormFieldDefinition::CheckBox {
+                    size: rdocx::LegacyCheckBoxSize::Auto,
+                    default: false,
+                    checked: true,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        run.add_field_value(
+            rdocx::Field::from_legacy_form(
+                rdocx::LegacyFormFieldOptions::default(),
+                rdocx::LegacyFormFieldDefinition::DropDownList {
+                    choices: vec!["one".into(), "two".into()],
+                    default_index: 0,
+                    selected_index: 1,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let fields = document.legacy_form_fields_with_defaults().unwrap();
+    assert_eq!(fields[0].1, None);
+    assert_eq!(
+        fields[1].1,
+        Some(rdocx::LegacyFormFieldValue::Checked(false))
+    );
+    assert_eq!(
+        fields[2].1,
+        Some(rdocx::LegacyFormFieldValue::SelectedIndex(0))
+    );
+    let text_target = rdocx::FormFieldTarget::Legacy {
+        source_part: fields[0].0.source_part.clone(),
+        ordinal: fields[0].0.ordinal,
+    };
+    let check_target = rdocx::FormFieldTarget::Legacy {
+        source_part: fields[1].0.source_part.clone(),
+        ordinal: fields[1].0.ordinal,
+    };
+    let list_target = rdocx::FormFieldTarget::Legacy {
+        source_part: fields[2].0.source_part.clone(),
+        ordinal: fields[2].0.ordinal,
+    };
+    let bad_rules = vec![form_rule(
+        text_target.clone(),
+        false,
+        rdocx::FormResetValue::Value(form_text("current")),
+    )];
+    let before = document.to_bytes().unwrap();
+    assert!(document.reset_form(&bad_rules).is_err());
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let placeholder = document.reset_form(&[form_rule(
+        check_target.clone(),
+        false,
+        rdocx::FormResetValue::Placeholder { text: "no".into() },
+    )]);
+    assert!(placeholder.unwrap_err().to_string().contains("placeholder"));
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let rules = vec![
+        form_rule(
+            form_tag("name"),
+            true,
+            rdocx::FormResetValue::Placeholder {
+                text: "Name".into(),
+            },
+        ),
+        form_rule(
+            text_target,
+            true,
+            rdocx::FormResetValue::Value(form_text("")),
+        ),
+        form_rule(
+            check_target,
+            true,
+            rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+        ),
+        form_rule(
+            list_target,
+            true,
+            rdocx::FormResetValue::Value(rdocx::FormFieldValue::SelectedIndex(0)),
+        ),
+    ];
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("Filled"))],
+        )
+        .unwrap();
+    assert_eq!(
+        document_part_xml(&mut document)
+            .matches("repeatingSectionItem")
+            .count(),
+        2
+    );
+    let counts = document.reset_form(&rules).unwrap();
+    assert_eq!(counts, vec![1, 1, 1, 1]);
+    assert_eq!(
+        document_part_xml(&mut document)
+            .matches("repeatingSectionItem")
+            .count(),
+        2
+    );
+    assert!(package_text(&mut document).contains("permStart"));
+    let values = document.legacy_form_fields().unwrap();
+    assert_eq!(
+        values[0].value,
+        rdocx::LegacyFormFieldValue::Text(String::new())
+    );
+    assert_eq!(values[1].value, rdocx::LegacyFormFieldValue::Checked(false));
+    assert_eq!(
+        values[2].value,
+        rdocx::LegacyFormFieldValue::SelectedIndex(0)
+    );
+    let issues = document.validate_form(&rules).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message == "required value is empty")
+    );
+    let blocked = document.to_bytes().unwrap();
+    assert!(
+        document
+            .protect_form(&rules, form_protection(rdocx::ProtectionMode::ReadOnly))
+            .unwrap_err()
+            .to_string()
+            .contains("forms mode")
+    );
+    assert!(
+        document
+            .protect_form(&rules, form_protection(rdocx::ProtectionMode::Forms))
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), blocked);
+
+    let field = r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:textInput><w:default w:val="keep"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>One</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let mut reindex = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="wrap"/><w:id w:val="4"/><w:richText/></w:sdtPr><w:sdtContent><w:p>{field}</w:p></w:sdtContent></w:sdt><w:p>{field}</w:p>"#
+    ));
+    let legacy = reindex.legacy_form_fields().unwrap();
+    assert!(legacy.len() >= 2, "{legacy:?}");
+    let before = reindex.to_bytes().unwrap();
+    let error = reindex
+        .fill_form(
+            &[
+                form_rule(
+                    form_tag("wrap"),
+                    false,
+                    rdocx::FormResetValue::Value(form_text("W")),
+                ),
+                form_rule(
+                    rdocx::FormFieldTarget::Legacy {
+                        source_part: legacy[1].source_part.clone(),
+                        ordinal: legacy[1].ordinal,
+                    },
+                    false,
+                    rdocx::FormResetValue::Value(form_text("keep")),
+                ),
+            ],
+            &[form_assignment(form_tag("wrap"), form_text("Moved"))],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reindex") || error.contains("overlap"),
+        "{error}"
+    );
+    assert_eq!(reindex.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn form_reopen_keeps_defaults_placeholders_and_bound_values() {
+    let mut document = Document::new();
+    document.add_paragraph("Reopen");
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "name",
+    );
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "when",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "when"),
+            rdocx::ContentControlTypePayload::Date {
+                format: "dd/MM/yyyy".into(),
+            },
+        )
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "color",
+    );
+    document
+        .set_content_control_type(
+            &control_by_tag(&document, "color"),
+            rdocx::ContentControlTypePayload::DropDownList {
+                items: vec![("Red".into(), "r".into()), ("Blue".into(), "b".into())],
+            },
+        )
+        .unwrap();
+    let store =
+        br#"<ns:root xmlns:ns="urn:example"><ns:name></ns:name><ns:color>b</ns:color></ns:root>"#;
+    let store_id = document
+        .add_custom_xml_store(store, &["urn:example"])
+        .unwrap();
+    let mappings = Some("xmlns:ns='urn:example'");
+    document
+        .set_content_control_binding(
+            &control_by_tag(&document, "name"),
+            &store_id,
+            "/ns:root/ns:name",
+            mappings,
+        )
+        .unwrap();
+    document
+        .set_content_control_binding(
+            &control_by_tag(&document, "color"),
+            &store_id,
+            "/ns:root/ns:color",
+            mappings,
+        )
+        .unwrap();
+    let rules = vec![
+        form_rule(
+            form_tag("name"),
+            false,
+            rdocx::FormResetValue::Placeholder {
+                text: "Name".into(),
+            },
+        ),
+        form_rule(
+            form_tag("when"),
+            false,
+            rdocx::FormResetValue::Placeholder {
+                text: "Date".into(),
+            },
+        ),
+        form_rule(
+            form_tag("color"),
+            false,
+            rdocx::FormResetValue::Placeholder {
+                text: "Color".into(),
+            },
+        ),
+    ];
+    let issues = document.validate_form(&rules).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.message == "bound scalar is not empty")
+    );
+    let counts = document.reset_form(&rules).unwrap();
+    assert_eq!(counts, vec![1, 1, 1]);
+    assert!(document.validate_form(&rules).unwrap().is_empty());
+    document
+        .fill_form(
+            &rules,
+            &[
+                form_assignment(form_tag("name"), form_text("Ada")),
+                form_assignment(form_tag("when"), form_text("2026-10-23")),
+                form_assignment(form_tag("color"), form_text("Blue")),
+            ],
+        )
+        .unwrap();
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains("23/10/2026"), "{xml}");
+    assert!(xml.contains("2026-10-23T00:00:00Z"), "{xml}");
+    assert!(!xml.contains("fullDate=\"23/10/2026\""), "{xml}");
+    let mut reopened = reopen_document(&mut document);
+    assert!(reopened.validate_form(&rules).unwrap().is_empty());
+    let saved = document_part_xml(&mut reopened);
+    assert!(saved.contains("Ada"), "{saved}");
+    assert!(saved.contains("23/10/2026"), "{saved}");
+    assert!(saved.contains(">b<") || package_text(&mut reopened).contains(">b<"));
+    let again = reopened.to_bytes().unwrap();
+    reopened
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("color"), form_text("Blue"))],
+        )
+        .unwrap();
+    assert_eq!(reopened.to_bytes().unwrap(), again);
+
+    let mut imported = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="when"/><w:id w:val="3"/><w:showingPlcHdr/><w:date f:fullDate="1999-01-01T00:00:00Z" w:fullDate = "2026-10-23T00:00:00Z" xmlns:f="urn:foreign"><w:dateFormat w:val="dd/MM/yyyy"/><w:storeMappedDataAs w:val="dateTime"/><w:calendar w:val="gregorian"/></w:date></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Choose</w:t></w:r></w:p></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="list"/><w:id w:val="4"/><w:dropDownList w:lastValue="r"><w:listItem w:displayText="Red" w:value="r"/><w:listItem w:displayText="Blue" w:value="b"/></w:dropDownList></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Blue</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let imported_rules = vec![
+        form_rule(
+            form_tag("when"),
+            false,
+            rdocx::FormResetValue::Placeholder {
+                text: "Choose".into(),
+            },
+        ),
+        form_rule(
+            form_tag("list"),
+            false,
+            rdocx::FormResetValue::Value(form_text("Blue")),
+        ),
+    ];
+    let before = imported.to_bytes().unwrap();
+    assert!(imported.validate_form(&imported_rules).unwrap().is_empty());
+    assert_eq!(imported.to_bytes().unwrap(), before);
+    imported.reset_form(&imported_rules).unwrap();
+    let xml = document_part_xml(&mut imported);
+    assert!(!xml.contains("w:fullDate"), "{xml}");
+    assert!(xml.contains("f:fullDate=\"1999-01-01T00:00:00Z\""), "{xml}");
+    assert!(xml.contains("showingPlcHdr"), "{xml}");
+    assert!(xml.contains("w:lastValue=\"b\""), "{xml}");
+    assert!(!xml.contains("<w:lastValue"), "{xml}");
+    assert!(xml.contains(">Blue<"), "{xml}");
+    let reopened = reopen_document(&mut imported);
+    assert!(reopened.validate_form(&imported_rules).unwrap().is_empty());
+    let wrong = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="list"/><w:id w:val="5"/><w:dropDownList w:lastValue="b"><w:listItem w:displayText="Red" w:value="r"/><w:listItem w:displayText="Blue" w:value="b"/></w:dropDownList></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Green</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let issues = wrong
+        .validate_form(&[form_rule(
+            form_tag("list"),
+            false,
+            rdocx::FormResetValue::Value(form_text("Blue")),
+        )])
+        .unwrap();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].message, "current form value is invalid");
+
+    let glyphs = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="ok"/><w:id w:val="6"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Ready</w:t></w:r></w:p></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="bad"/><w:id w:val="7"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="ZZ"/><w14:uncheckedState w14:val="2610"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t>NO</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    assert!(glyphs.validate_form(&[]).unwrap().is_empty());
+    let ok_rules = vec![form_rule(
+        form_tag("ok"),
+        false,
+        rdocx::FormResetValue::Value(form_text("Ready")),
+    )];
+    assert!(glyphs.validate_form(&ok_rules).unwrap().is_empty());
+    let bad_rules = vec![form_rule(
+        form_tag("bad"),
+        false,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+    )];
+    let issues = glyphs.validate_form(&bad_rules).unwrap();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].message, "current form value is invalid");
+
+    let mut value_only = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="value-only"/><w:id w:val="8"/><w:dropDownList><w:listItem w:value="r"/></w:dropDownList></w:sdtPr><w:sdtContent><w:p><w:r><w:t>r</w:t></w:r></w:p></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="label-only"/><w:id w:val="9"/><w:dropDownList><w:listItem w:displayText="Only"/></w:dropDownList></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Only</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let value_rules = vec![form_rule(
+        form_tag("value-only"),
+        false,
+        rdocx::FormResetValue::Value(form_text("r")),
+    )];
+    assert!(value_only.validate_form(&value_rules).unwrap().is_empty());
+    let before = value_only.to_bytes().unwrap();
+    let label_error = value_only
+        .validate_form(&[form_rule(
+            form_tag("label-only"),
+            false,
+            rdocx::FormResetValue::Value(form_text("Only")),
+        )])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        label_error.contains("no value") || label_error.contains("value"),
+        "{label_error}"
+    );
+    assert_eq!(value_only.to_bytes().unwrap(), before);
+
+    let mut spaced = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="spaced"/><w:id w:val="10"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t f:space="keep" xml:space="default" xmlns:f="urn:foreign">x</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let space_rules = vec![form_rule(
+        form_tag("spaced"),
+        false,
+        rdocx::FormResetValue::Value(form_text(" a ")),
+    )];
+    spaced
+        .fill_form(
+            &space_rules,
+            &[form_assignment(form_tag("spaced"), form_text(" a "))],
+        )
+        .unwrap();
+    let mut spaced = reopen_document(&mut spaced);
+    let xml = document_part_xml(&mut spaced);
+    assert!(xml.contains("> a <"), "{xml}");
+    assert!(xml.contains("f:space=\"keep\""), "{xml}");
+    let space = attribute_bindings(&xml, "space");
+    assert!(
+        space
+            .iter()
+            .any(|(uri, value)| uri == XML_NS && value == "preserve"),
+        "{space:?}"
+    );
+    assert!(
+        space
+            .iter()
+            .any(|(uri, value)| uri == "urn:foreign" && value == "keep"),
+        "{space:?}"
+    );
+    let layout = spaced.layout_deterministic().unwrap();
+    let mut laid_out = String::new();
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element {
+                laid_out.push_str(&run.text);
+            }
+        });
+    }
+    assert!(laid_out.contains(" a "), "{laid_out}");
+
+    let mut shared = Document::new();
+    shared.add_paragraph("Bind");
+    let body = body_story(&shared);
+    insert_form_control(
+        &mut shared,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "left",
+    );
+    insert_form_control(
+        &mut shared,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "right",
+    );
+    let store_id = shared
+        .add_custom_xml_store(
+            br#"<ns:root xmlns:ns="urn:example"><ns:child>same</ns:child></ns:root>"#,
+            &["urn:example"],
+        )
+        .unwrap();
+    for tag in ["left", "right"] {
+        shared
+            .set_content_control_binding(
+                &control_by_tag(&shared, tag),
+                &store_id,
+                "/ns:root/ns:child",
+                Some("xmlns:ns='urn:example'"),
+            )
+            .unwrap();
+    }
+    let conflict = vec![
+        form_rule(
+            form_tag("left"),
+            false,
+            rdocx::FormResetValue::Value(form_text("A")),
+        ),
+        form_rule(
+            form_tag("right"),
+            false,
+            rdocx::FormResetValue::Value(form_text("B")),
+        ),
+    ];
+    let before = shared.to_bytes().unwrap();
+    for result in [
+        shared.validate_form(&conflict).map(|_| ()),
+        shared.fill_form(&conflict, &[]).map(|_| ()),
+        shared
+            .fill_form(
+                &conflict,
+                &[form_assignment(form_tag("left"), form_text("A"))],
+            )
+            .map(|_| ()),
+        shared
+            .protect_form(&conflict, form_protection(rdocx::ProtectionMode::Forms))
+            .map(|_| ()),
+    ] {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("different values"), "{error}");
+    }
+    assert_eq!(shared.to_bytes().unwrap(), before);
+    let agreed = vec![
+        form_rule(
+            form_tag("left"),
+            false,
+            rdocx::FormResetValue::Value(form_text("same")),
+        ),
+        form_rule(
+            form_tag("right"),
+            false,
+            rdocx::FormResetValue::Value(form_text("same")),
+        ),
+    ];
+    shared
+        .fill_form(
+            &agreed,
+            &[
+                form_assignment(form_tag("left"), form_text("same")),
+                form_assignment(form_tag("right"), form_text("same")),
+            ],
+        )
+        .unwrap();
+    assert!(shared.validate_form(&agreed).unwrap().is_empty());
+
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut bare = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="bare"/><w:id w:val="11"/><date xmlns="{word}" xmlns:w="urn:foreign"><dateFormat xmlns:a="{word}" a:val="yyyy-MM-dd"/></date></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Choose</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    bare.fill_form(
+        &[form_rule(
+            form_tag("bare"),
+            false,
+            rdocx::FormResetValue::Value(form_text("2026-10-23")),
+        )],
+        &[form_assignment(form_tag("bare"), form_text("2026-10-23"))],
+    )
+    .unwrap();
+    let bare_xml = document_part_xml(&mut bare);
+    assert!(bare_xml.contains("xmlns:w=\"urn:foreign\""), "{bare_xml}");
+    assert!(
+        !bare_xml.contains(" fullDate=") && !bare_xml.contains("\tfullDate="),
+        "{bare_xml}"
+    );
+    let full_dates = attribute_bindings(&bare_xml, "fullDate");
+    assert!(
+        full_dates
+            .iter()
+            .any(|(uri, value)| uri == word && value == "2026-10-23T00:00:00Z"),
+        "{full_dates:?} {bare_xml}"
+    );
+
+    let mut alias = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="alias"/><w:id w:val="12"/><q:date xmlns:q="{word}" xmlns:w="urn:foreign" q:fullDate="2020-01-01T00:00:00Z" p:fullDate="foreign" xmlns:p="urn:producer"><w:dateFormat w:val="foreign"/><q:dateFormat q:val="yyyy-MM-dd"/></q:date></w:sdtPr><w:sdtContent><w:p><w:r><w:t>old</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    alias
+        .fill_form(
+            &[form_rule(
+                form_tag("alias"),
+                false,
+                rdocx::FormResetValue::Value(form_text("2026-10-23")),
+            )],
+            &[form_assignment(form_tag("alias"), form_text("2026-10-23"))],
+        )
+        .unwrap();
+    let alias_xml = document_part_xml(&mut alias);
+    assert!(alias_xml.contains("p:fullDate=\"foreign\""), "{alias_xml}");
+    assert!(alias_xml.contains("w:val=\"foreign\""), "{alias_xml}");
+    let alias_dates = attribute_bindings(&alias_xml, "fullDate");
+    assert!(
+        alias_dates
+            .iter()
+            .any(|(uri, value)| uri == word && value == "2026-10-23T00:00:00Z"),
+        "{alias_dates:?}"
+    );
+    assert!(
+        alias_dates
+            .iter()
+            .any(|(uri, value)| uri == "urn:producer" && value == "foreign"),
+        "{alias_dates:?}"
+    );
+
+    let mut box_alias = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="13"/><w14:checkbox><w14:checked f:val="9" w14:val="0" xmlns:f="urn:foreign"/><w14:checkedState w14:val="2612"/><w14:uncheckedState w14:val="2610"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t>NO</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    box_alias
+        .fill_form(
+            &[form_rule(
+                form_tag("box"),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+            )],
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+    let box_xml = document_part_xml(&mut box_alias);
+    let checked = attribute_bindings(&box_xml, "val");
+    assert!(
+        checked.iter().any(|(uri, value)| {
+            uri == "http://schemas.microsoft.com/office/word/2010/wordml" && value == "1"
+        }),
+        "{checked:?} {box_xml}"
+    );
+    assert!(
+        checked
+            .iter()
+            .any(|(uri, value)| uri == "urn:foreign" && value == "9"),
+        "{checked:?}"
+    );
+
+    let mut hinted = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="hint"/><w:id w:val="14"/><w:showingPlcHdr/><w:dropDownList f:lastValue="keep" w:lastValue="r" xmlns:f="urn:foreign"><w:listItem w:displayText="Red" w:value="r"/><w:listItem w:displayText="Blue" w:value="b"/></w:dropDownList></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Red</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    hinted
+        .reset_form(&[form_rule(
+            form_tag("hint"),
+            false,
+            rdocx::FormResetValue::Placeholder {
+                text: "Pick".into(),
+            },
+        )])
+        .unwrap();
+    let hint_xml = document_part_xml(&mut hinted);
+    assert!(hint_xml.contains("f:lastValue=\"keep\""), "{hint_xml}");
+    assert!(!hint_xml.contains("<w:lastValue"), "{hint_xml}");
+    let hints = attribute_bindings(&hint_xml, "lastValue");
+    assert!(
+        hints
+            .iter()
+            .any(|(uri, value)| uri == "urn:foreign" && value == "keep"),
+        "{hints:?}"
+    );
+    assert!(!hints.iter().any(|(uri, _)| uri == word), "{hints:?}");
+}
+
+fn review2_legacy_run(name: &str, value: &str) -> String {
+    format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="{name}"/><w:textInput><w:default w:val="{value}"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{value}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+    )
+}
+
+fn review2_issue<'a>(
+    issues: &'a [rdocx::FormValidationIssue],
+    tag: &str,
+) -> &'a rdocx::FormValidationIssue {
+    issues
+        .iter()
+        .find(|issue| issue.target == form_tag(tag))
+        .unwrap_or_else(|| panic!("missing issue for {tag}: {issues:?}"))
+}
+
+#[test]
+fn form_review2_owner_boundaries() {
+    let producer = r#"<p:note xmlns:p="urn:producer"><w:t>PRODUCER</w:t></p:note>"#;
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="1"/><w:text/>{producer}</w:sdtPr><w:sdtContent><w:p><w:r><w:t>OLD</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    let rules = vec![form_rule(
+        form_tag("name"),
+        false,
+        rdocx::FormResetValue::Value(form_text("NEW")),
+    )];
+    let counts = document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("NEW"))],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![1]);
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains(producer), "{xml}");
+    assert!(xml.contains(">NEW<"), "{xml}");
+    assert!(!xml.contains(">OLD<"), "{xml}");
+    assert!(!xml.contains(">PRODUCERNEW<"), "{xml}");
+    let mut reopened = reopen_document(&mut document);
+    let reopened_xml = document_part_xml(&mut reopened);
+    assert!(reopened_xml.contains(producer), "{reopened_xml}");
+    assert!(reopened_xml.contains(">NEW<"), "{reopened_xml}");
+
+    let wrapper = r#"<x:wrap xmlns:x="urn:opaque"><w:t>WRAP</w:t></x:wrap>"#;
+    let mut wrapped = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="wrap"/><w:id w:val="2"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r>{wrapper}<w:t>OLD</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    wrapped
+        .fill_form(
+            &[form_rule(
+                form_tag("wrap"),
+                false,
+                rdocx::FormResetValue::Value(form_text("NEW")),
+            )],
+            &[form_assignment(form_tag("wrap"), form_text("NEW"))],
+        )
+        .unwrap();
+    let wrapped_xml = document_part_xml(&mut wrapped);
+    assert!(wrapped_xml.contains(wrapper), "{wrapped_xml}");
+    assert!(wrapped_xml.contains(">NEW<"), "{wrapped_xml}");
+    assert!(!wrapped_xml.contains(">OLD<"), "{wrapped_xml}");
+}
+
+#[test]
+fn form_review2_owner_boundaries_legacy_ordinal() {
+    let decoy = review2_legacy_run("Decoy", "DECOY");
+    let live = review2_legacy_run("Live", "LIVE");
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:p><w:r><w:t>before</w:t><x:wrap xmlns:x="urn:opaque">{decoy}</x:wrap></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="wrap"/><w:id w:val="8"/><w:richText/></w:sdtPr><w:sdtContent><w:p>{live}</w:p></w:sdtContent></w:sdt>"#
+    ));
+    let fields = document.legacy_form_fields().unwrap();
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert_eq!(fields[0].ordinal, 0);
+    assert_eq!(fields[0].name.as_deref(), Some("Live"));
+    let legacy = rdocx::FormFieldTarget::Legacy {
+        source_part: fields[0].source_part.clone(),
+        ordinal: fields[0].ordinal,
+    };
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .validate_form(&[
+            form_rule(
+                form_tag("wrap"),
+                false,
+                rdocx::FormResetValue::Value(form_text("W")),
+            ),
+            form_rule(
+                legacy.clone(),
+                false,
+                rdocx::FormResetValue::Value(form_text("LIVE")),
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlapping"), "{error}");
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    document
+        .set_legacy_form_field_value(
+            &fields[0].source_part,
+            fields[0].ordinal,
+            rdocx::LegacyFormFieldValue::Text("SET".into()),
+        )
+        .unwrap();
+    let fresh = document.legacy_form_fields().unwrap();
+    assert_eq!(fresh.len(), 1, "{fresh:?}");
+    assert_eq!(fresh[0].ordinal, 0);
+    assert_eq!(
+        fresh[0].value,
+        rdocx::LegacyFormFieldValue::Text("SET".into())
+    );
+    let mut reopened = reopen_document(&mut document);
+    let reopened_fields = reopened.legacy_form_fields().unwrap();
+    assert_eq!(reopened_fields.len(), 1, "{reopened_fields:?}");
+    assert_eq!(reopened_fields[0].ordinal, 0);
+    assert_eq!(reopened_fields[0].name.as_deref(), Some("Live"));
+    assert_eq!(
+        reopened_fields[0].value,
+        rdocx::LegacyFormFieldValue::Text("SET".into())
+    );
+    let xml = document_part_xml(&mut reopened);
+    assert!(xml.contains(">SET<"), "{xml}");
+    assert!(xml.contains(">DECOY<"), "{xml}");
+    assert!(xml.contains("w:val=\"Decoy\""), "{xml}");
+    let overlap = reopened
+        .validate_form(&[
+            form_rule(
+                form_tag("wrap"),
+                false,
+                rdocx::FormResetValue::Value(form_text("W")),
+            ),
+            form_rule(
+                rdocx::FormFieldTarget::Legacy {
+                    source_part: reopened_fields[0].source_part.clone(),
+                    ordinal: reopened_fields[0].ordinal,
+                },
+                false,
+                rdocx::FormResetValue::Value(form_text("LIVE")),
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+    assert!(overlap.contains("overlapping"), "{overlap}");
+}
+
+#[test]
+fn form_review2_owner_boundaries_accepted_containers() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="outer"/><w:id w:val="1"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:hyperlink w:anchor="top"><w:r><w:t>LINK</w:t></w:r></w:hyperlink><w:ins w:id="1" w:author="Ada" w:date="2026-10-24T00:00:00Z"><w:r><w:t>INS</w:t></w:r></w:ins><w:r><w:t>OWN</w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="leaf"/><w:id w:val="2"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>NEST</w:t></w:r></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt>"#,
+    );
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag("outer"),
+                false,
+                rdocx::FormResetValue::Value(form_text("NEW")),
+            )],
+            &[form_assignment(form_tag("outer"), form_text("NEW"))],
+        )
+        .unwrap();
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains(">NEW<"), "{xml}");
+    assert!(!xml.contains(">LINK<"), "{xml}");
+    assert!(!xml.contains(">INS<"), "{xml}");
+    assert!(!xml.contains(">OWN<"), "{xml}");
+    assert!(xml.contains(">NEST<"), "{xml}");
+
+    let linked = review2_legacy_run("Link", "KEEP");
+    let inserted = review2_legacy_run("Inserted", "STAY");
+    let mut owned = document_with_body_inner(&format!(
+        r#"<w:p><w:hyperlink w:anchor="top">{linked}</w:hyperlink><w:ins w:id="4" w:author="Ada" w:date="2026-10-24T00:00:00Z">{inserted}</w:ins><w:sdt><w:sdtPr><w:tag w:val="inline"/><w:id w:val="5"/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t>INLINE</w:t></w:r></w:sdtContent></w:sdt></w:p>"#
+    ));
+    let fields = owned.legacy_form_fields().unwrap();
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert_eq!(fields[0].ordinal, 0);
+    assert_eq!(fields[0].name.as_deref(), Some("Link"));
+    owned
+        .fill_form(
+            &[form_rule(
+                form_tag("inline"),
+                false,
+                rdocx::FormResetValue::Value(form_text("NEW")),
+            )],
+            &[form_assignment(form_tag("inline"), form_text("NEW"))],
+        )
+        .unwrap();
+    let owned_xml = document_part_xml(&mut owned);
+    assert!(owned_xml.contains(">NEW<"), "{owned_xml}");
+    assert!(owned_xml.contains(">KEEP<"), "{owned_xml}");
+    assert!(owned_xml.contains(">STAY<"), "{owned_xml}");
+
+    let mut boxed = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="live"/><w:id w:val="1"/><w:richText/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>LIVE</w:t></w:r><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="100" cy="100"/><wp:wrapNone/><wp:docPr id="9" name="box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>BOX</w:t></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="boxed"/><w:id w:val="3"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>INNER</w:t></w:r></w:p></w:sdtContent></w:sdt></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    boxed
+        .fill_form(
+            &[form_rule(
+                form_tag("live"),
+                false,
+                rdocx::FormResetValue::Value(form_text("NEW")),
+            )],
+            &[form_assignment(form_tag("live"), form_text("NEW"))],
+        )
+        .unwrap();
+    boxed
+        .fill_form(
+            &[form_rule(
+                form_tag("boxed"),
+                false,
+                rdocx::FormResetValue::Value(form_text("BOXED")),
+            )],
+            &[form_assignment(form_tag("boxed"), form_text("BOXED"))],
+        )
+        .unwrap();
+    let boxed_xml = document_part_xml(&mut boxed);
+    assert!(boxed_xml.contains(">NEW<"), "{boxed_xml}");
+    assert!(boxed_xml.contains(">BOXED<"), "{boxed_xml}");
+    assert!(boxed_xml.contains(">BOX<"), "{boxed_xml}");
+    assert!(!boxed_xml.contains(">LIVE<"), "{boxed_xml}");
+    assert!(!boxed_xml.contains(">INNER<"), "{boxed_xml}");
+}
+
+#[test]
+fn form_review2_qualified_attribute_creation() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="1"/><checkbox xmlns="http://schemas.microsoft.com/office/word/2010/wordml"><checkedState val="2612" font="MS Gothic"/><uncheckedState val="2610" font="MS Gothic"/></checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let rules = vec![form_rule(
+        form_tag("box"),
+        false,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+    )];
+    assert!(document.validate_form(&rules).unwrap().is_empty());
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(false),
+            )],
+        )
+        .unwrap();
+    let mut reopened = reopen_document(&mut document);
+    let xml = document_part_xml(&mut reopened);
+    let values = attribute_bindings(&xml, "val");
+    assert!(
+        values.iter().any(|(uri, value)| {
+            uri == "http://schemas.microsoft.com/office/word/2010/wordml" && value == "0"
+        }),
+        "{values:?} {xml}"
+    );
+    assert!(
+        !xml.contains("<checked val=") && !xml.contains(" checked val="),
+        "{xml}"
+    );
+    assert!(reopened.validate_form(&rules).unwrap().is_empty(), "{xml}");
+}
+
+#[test]
+fn form_review2_qualified_attribute_creation_quoted_end() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="2"/><w14:checkbox><w14:checked w14:val="0" note="a>b"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t>&#x2610;</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag("box"),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+            )],
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains("note=\"a>b\""), "{xml}");
+    let values = attribute_bindings(&xml, "val");
+    assert!(
+        values.iter().any(|(uri, value)| {
+            uri == "http://schemas.microsoft.com/office/word/2010/wordml" && value == "1"
+        }),
+        "{values:?} {xml}"
+    );
+}
+
+#[test]
+fn form_review2_qualified_attribute_creation_free_prefix() {
+    let mut taken = String::new();
+    taken.push_str(r#" xmlns:w14="urn:taken""#);
+    for index in 2..=33 {
+        taken.push_str(&format!(r#" xmlns:w14{index}="urn:taken""#));
+    }
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="3"/><checkbox xmlns="http://schemas.microsoft.com/office/word/2010/wordml"{taken}><checkedState val="2612" font="MS Gothic"/><uncheckedState val="2610" font="MS Gothic"/></checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    let before = document_part_xml(&mut document);
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag("box"),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+            )],
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(false),
+            )],
+        )
+        .unwrap();
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains(r#"xmlns:w1432="urn:taken""#), "{xml}");
+    assert!(xml.contains(r#"xmlns:w1433="urn:taken""#), "{xml}");
+    let values = attribute_bindings(&xml, "val");
+    assert!(
+        values.iter().any(|(uri, value)| {
+            uri == "http://schemas.microsoft.com/office/word/2010/wordml" && value == "0"
+        }),
+        "{values:?} {xml}"
+    );
+    assert!(
+        !xml.contains(r#"xmlns:w1432="http://schemas.microsoft.com/office/word/2010/wordml""#),
+        "{xml}"
+    );
+    assert!(before.contains(r#"xmlns:w1433="urn:taken""#));
+}
+
+#[test]
+fn form_review2_checkbox_state_policy() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="ok"/><w:id w:val="1"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Ready</w:t></w:r></w:p></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="bad"/><w:id w:val="2"/><w14:checkbox><w14:checked w14:val="1"/><w14:checkedState w14:val="0000" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="font"/><w:id w:val="3"/><w14:checkbox><w14:checked w14:val="1"/><w14:checkedState w14:val="2612" w14:font=""/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    assert!(document.validate_form(&[]).unwrap().is_empty());
+    let ok_rules = vec![form_rule(
+        form_tag("ok"),
+        true,
+        rdocx::FormResetValue::Value(form_text("Ready")),
+    )];
+    assert!(document.validate_form(&ok_rules).unwrap().is_empty());
+    let bad_rules = vec![form_rule(
+        form_tag("bad"),
+        false,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+    )];
+    let issues = document.validate_form(&bad_rules).unwrap();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].message, "current form value is invalid");
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .fill_form(
+            &bad_rules,
+            &[form_assignment(
+                form_tag("bad"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("glyph") || error.contains("XML") || error.contains("font"),
+        "{error}"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let font_rules = vec![form_rule(
+        form_tag("font"),
+        false,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+    )];
+    let font_issues = document.validate_form(&font_rules).unwrap();
+    assert_eq!(font_issues.len(), 1, "{font_issues:?}");
+    assert_eq!(font_issues[0].message, "current form value is invalid");
+    let before_font = document.to_bytes().unwrap();
+    assert!(
+        document
+            .fill_form(
+                &font_rules,
+                &[form_assignment(
+                    form_tag("font"),
+                    rdocx::FormFieldValue::Checked(true),
+                )],
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before_font);
+}
+
+#[test]
+fn form_review2_checkbox_state_policy_font() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="4"/><p:note xmlns:p="urn:producer" p:keep="yes"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="0041" w14:font="Courier New"/><w14:uncheckedState w14:val="0042" w14:font="Times New Roman"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri"/></w:rPr><w:t>X</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let false_rules = vec![form_rule(
+        form_tag("box"),
+        false,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+    )];
+    document
+        .fill_form(
+            &false_rules,
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(false),
+            )],
+        )
+        .unwrap();
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains(">B<"), "{xml}");
+    assert!(xml.contains(r#"w:ascii="Times New Roman""#), "{xml}");
+    assert!(xml.contains(r#"w:hAnsi="Times New Roman""#), "{xml}");
+    assert!(xml.contains(r#"w:eastAsia="Times New Roman""#), "{xml}");
+    assert!(xml.contains(r#"w:cs="Times New Roman""#), "{xml}");
+    assert!(xml.contains(r#"p:keep="yes""#), "{xml}");
+    let layout = document.layout_deterministic().unwrap();
+    let mut positioned = false;
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && run.text.contains('B')
+                && run.origin.x.is_finite()
+                && run.origin.y.is_finite()
+            {
+                positioned = true;
+            }
+        });
+    }
+    assert!(positioned, "unchecked glyph was not positioned");
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag("box"),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+            )],
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+    let checked = document_part_xml(&mut document);
+    assert!(checked.contains(">A<"), "{checked}");
+    assert!(checked.contains(r#"w:ascii="Courier New""#), "{checked}");
+    assert!(checked.contains(r#"p:keep="yes""#), "{checked}");
+    let again = document.to_bytes().unwrap();
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag("box"),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+            )],
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+    let noop = document_part_xml(&mut document);
+    assert!(noop.contains(">A<"), "{noop}");
+    assert!(noop.contains(r#"w:ascii="Courier New""#), "{noop}");
+    assert!(noop.contains(r#"p:keep="yes""#), "{noop}");
+    assert_eq!(document.to_bytes().unwrap(), again);
+}
+
+#[test]
+fn form_review2_checkbox_state_policy_placeholder() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="5"/><w:showingPlcHdr/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let rules = vec![form_rule(
+        form_tag("box"),
+        true,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+    )];
+    let issues = document.validate_form(&rules).unwrap();
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].message, "required value is empty");
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(false),
+            )],
+        )
+        .unwrap();
+    let mut reopened = reopen_document(&mut document);
+    let xml = document_part_xml(&mut reopened);
+    assert!(
+        !xml.contains("<w:showingPlcHdr") && !xml.contains("<w:showingPlcHdr/>"),
+        "{xml}"
+    );
+    assert!(reopened.validate_form(&rules).unwrap().is_empty(), "{xml}");
+}
+
+#[test]
+fn form_review2_source_part_ordinals() {
+    let mut document = Document::new();
+    document.add_paragraph("Body");
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "body",
+    );
+    let header = document
+        .create_section_story(0, rdocx::HeaderFooterKind::Header, HdrFtrType::Default)
+        .unwrap();
+    insert_form_control(
+        &mut document,
+        &header,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "head",
+    );
+    let rules = vec![
+        form_rule(
+            form_tag("body"),
+            true,
+            rdocx::FormResetValue::Placeholder {
+                text: "Body".into(),
+            },
+        ),
+        form_rule(
+            form_tag("head"),
+            true,
+            rdocx::FormResetValue::Placeholder {
+                text: "Head".into(),
+            },
+        ),
+    ];
+    let issues = document.validate_form(&rules).unwrap();
+    assert_eq!(review2_issue(&issues, "body").ordinal, 0, "{issues:?}");
+    assert_eq!(review2_issue(&issues, "head").ordinal, 0, "{issues:?}");
+    assert_ne!(
+        review2_issue(&issues, "body").source_part,
+        review2_issue(&issues, "head").source_part
+    );
+}
+
+#[test]
+fn form_review2_source_part_ordinals_physical() {
+    let mut ordered = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:id w:val="1"/><w:group/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>S</w:t></w:r></w:p></w:sdtContent></w:sdt><w:tbl><w:tr><w:tc><w:p><w:sdt><w:sdtPr><w:tag w:val="cell"/><w:id w:val="2"/><w:showingPlcHdr/><w:text/></w:sdtPr><w:sdtContent><w:r><w:t></w:t></w:r></w:sdtContent></w:sdt></w:p></w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:tag w:val="later"/><w:id w:val="3"/><w:showingPlcHdr/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t></w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let ordered_rules = vec![
+        form_rule(
+            form_tag("later"),
+            true,
+            rdocx::FormResetValue::Placeholder {
+                text: "Later".into(),
+            },
+        ),
+        form_rule(
+            form_tag("cell"),
+            true,
+            rdocx::FormResetValue::Placeholder {
+                text: "Cell".into(),
+            },
+        ),
+    ];
+    let ordered_issues = ordered.validate_form(&ordered_rules).unwrap();
+    assert_eq!(ordered_issues.len(), 2, "{ordered_issues:?}");
+    assert_eq!(ordered_issues[0].target, form_tag("later"));
+    assert_eq!(ordered_issues[1].target, form_tag("cell"));
+    assert_eq!(review2_issue(&ordered_issues, "cell").ordinal, 1);
+    assert_eq!(review2_issue(&ordered_issues, "later").ordinal, 2);
+    let counts = ordered
+        .fill_form(
+            &ordered_rules,
+            &[
+                form_assignment(form_tag("later"), form_text("L")),
+                form_assignment(form_tag("cell"), form_text("C")),
+            ],
+        )
+        .unwrap();
+    assert_eq!(counts, vec![1, 1]);
+    let filled = document_part_xml(&mut ordered);
+    assert!(filled.contains(">L<"), "{filled}");
+    assert!(filled.contains(">C<"), "{filled}");
+    assert!(filled.contains(">S<"), "{filled}");
+}
+
+#[test]
+fn form_review3_identical_opaque_field_cannot_capture_live_anchor() {
+    let field = review2_legacy_run("Live", "LIVE");
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:p><w:r><w:t>before</w:t><x:wrap xmlns:x="urn:opaque">{field}</x:wrap></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="wrap"/><w:id w:val="8"/><w:richText/></w:sdtPr><w:sdtContent><w:p>{field}</w:p></w:sdtContent></w:sdt>"#
+    ));
+    let fields = document.legacy_form_fields().unwrap();
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert_eq!(fields[0].ordinal, 0);
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .validate_form(&[
+            form_rule(
+                form_tag("wrap"),
+                false,
+                rdocx::FormResetValue::Value(form_text("W")),
+            ),
+            form_rule(
+                rdocx::FormFieldTarget::Legacy {
+                    source_part: fields[0].source_part.clone(),
+                    ordinal: fields[0].ordinal,
+                },
+                false,
+                rdocx::FormResetValue::Value(form_text("LIVE")),
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlapping"), "{error}");
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn form_review3_authored_legacy_under_control_before_save() {
+    let mut document = Document::new();
+    let body = body_story(&document);
+    insert_form_control(
+        &mut document,
+        &body,
+        rdocx_oxml::content_control::SdtType::RichText,
+        "wrap",
+    );
+    {
+        let mut paragraph = document
+            .paragraph_mut(0)
+            .expect("authored control paragraph");
+        paragraph
+            .add_run("")
+            .add_field_value(review3_authored_legacy("Live", "LIVE"))
+            .unwrap();
+    }
+    let fields = document.legacy_form_fields().unwrap();
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert_eq!(fields[0].ordinal, 0);
+    assert_eq!(fields[0].name.as_deref(), Some("Live"));
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .validate_form(&[
+            form_rule(
+                form_tag("wrap"),
+                false,
+                rdocx::FormResetValue::Value(form_text("W")),
+            ),
+            form_rule(
+                rdocx::FormFieldTarget::Legacy {
+                    source_part: fields[0].source_part.clone(),
+                    ordinal: fields[0].ordinal,
+                },
+                false,
+                rdocx::FormResetValue::Value(form_text("LIVE")),
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overlapping"), "{error}");
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let mut free = Document::new();
+    {
+        let mut paragraph = free.add_paragraph("");
+        paragraph
+            .add_run("")
+            .add_field_value(review3_authored_legacy("Free", "OLD"))
+            .unwrap();
+    }
+    let free_fields = free.legacy_form_fields().unwrap();
+    assert_eq!(free_fields.len(), 1, "{free_fields:?}");
+    assert_eq!(free_fields[0].ordinal, 0);
+    free.set_legacy_form_field_value(
+        &free_fields[0].source_part,
+        free_fields[0].ordinal,
+        rdocx::LegacyFormFieldValue::Text("SET".into()),
+    )
+    .unwrap();
+    let updated = free.legacy_form_fields().unwrap();
+    assert_eq!(updated.len(), 1, "{updated:?}");
+    assert_eq!(
+        updated[0].value,
+        rdocx::LegacyFormFieldValue::Text("SET".into())
+    );
+}
+
+#[test]
+fn form_review3_repeated_identical_fields_stay_distinct() {
+    let field = review2_legacy_run("Same", "LIVE");
+    let mut document = document_with_body_inner(&format!("<w:p>{field}</w:p><w:p>{field}</w:p>"));
+    let fields = document.legacy_form_fields().unwrap();
+    assert_eq!(fields.len(), 2, "{fields:?}");
+    assert_eq!(fields[0].ordinal, 0);
+    assert_eq!(fields[1].ordinal, 1);
+    assert_eq!(fields[0].name.as_deref(), Some("Same"));
+    assert_eq!(fields[1].name.as_deref(), Some("Same"));
+    document
+        .set_legacy_form_field_value(
+            &fields[1].source_part,
+            1,
+            rdocx::LegacyFormFieldValue::Text("SECOND".into()),
+        )
+        .unwrap();
+    let fresh = document.legacy_form_fields().unwrap();
+    assert_eq!(
+        fresh[0].value,
+        rdocx::LegacyFormFieldValue::Text("LIVE".into())
+    );
+    assert_eq!(
+        fresh[1].value,
+        rdocx::LegacyFormFieldValue::Text("SECOND".into())
+    );
+    let xml = document_part_xml(&mut document);
+    assert!(xml.contains(">LIVE<"), "{xml}");
+    assert!(xml.contains(">SECOND<"), "{xml}");
+}
+
+fn review3_authored_legacy(name: &str, value: &str) -> rdocx::Field {
+    rdocx::Field::from_legacy_form(
+        rdocx::LegacyFormFieldOptions {
+            name: Some(name.to_owned()),
+            ..rdocx::LegacyFormFieldOptions::default()
+        },
+        rdocx::LegacyFormFieldDefinition::TextInput {
+            input_type: rdocx::LegacyTextInputType::Regular,
+            default: Some(value.to_owned()),
+            value: value.to_owned(),
+            max_length: None,
+            format: None,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn form_review3_default_namespace_inline_font_is_qualified() {
+    const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut document = document_with_body_inner(
+        r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="box"/><w:id w:val="41"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="0041" w14:font="Courier New"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><r xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><t>X</t></r></w:sdtContent></w:sdt></w:p>"#,
+    );
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag("box"),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+            )],
+            &[form_assignment(
+                form_tag("box"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+    let xml = document_part_xml(&mut document);
+    assert_review3_courier_fonts(&xml, WORD);
+    assert_review3_positioned_courier(&document, 'A');
+    let mut reopened = reopen_document(&mut document);
+    let reopened_xml = document_part_xml(&mut reopened);
+    assert_review3_courier_fonts(&reopened_xml, WORD);
+
+    let mut missing = document_with_body_inner(
+        r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="gap"/><w:id w:val="42"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="0041" w14:font="Courier New"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:rPr f:keep="yes" xmlns:f="urn:foreign"><w:sz w:val="24"/></w:rPr><w:t>X</w:t></w:r></w:sdtContent></w:sdt></w:p>"#,
+    );
+    fill_checked(&mut missing, "gap");
+    let gap = document_part_xml(&mut missing);
+    assert_review3_courier_fonts(&gap, WORD);
+    assert!(gap.contains(r#"f:keep="yes""#), "{gap}");
+    assert!(
+        gap.find("<w:rPr").unwrap() < gap.find("<w:t>").unwrap(),
+        "{gap}"
+    );
+
+    let mut fresh = document_with_body_inner(
+        r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="new"/><w:id w:val="43"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="0041" w14:font="Courier New"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><sdtContent xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/></w:sdt></w:p>"#,
+    );
+    fill_checked(&mut fresh, "new");
+    let inserted = document_part_xml(&mut fresh);
+    assert_review3_courier_fonts(&inserted, WORD);
+    assert!(inserted.contains(">A<"), "{inserted}");
+
+    let mut qualified = document_with_body_inner(
+        r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="keep"/><w:id w:val="44"/><w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="0041" w14:font="Courier New"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri" w:cs="Calibri" w:asciiTheme="minorHAnsi" f:keep="yes" xmlns:f="urn:foreign"/></w:rPr><w:t>X</w:t></w:r></w:sdtContent></w:sdt></w:p>"#,
+    );
+    fill_checked(&mut qualified, "keep");
+    let kept = document_part_xml(&mut qualified);
+    assert_review3_courier_fonts(&kept, WORD);
+    assert!(kept.contains(r#"f:keep="yes""#), "{kept}");
+    let themes = attribute_bindings(&kept, "asciiTheme");
+    assert!(
+        !themes.iter().any(|(uri, _)| uri == WORD),
+        "{themes:?} {kept}"
+    );
+    assert_review3_positioned_courier(&qualified, 'A');
+}
+
+#[test]
+fn form_review4_inherited_checkbox_namespace_context() {
+    const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:sdt xmlns:rdocxWord="{WORD}"><w:sdtPr xmlns="{W14}"><w:tag w:val="inherit"/><w:id w:val="51"/><checkbox xmlns:w="urn:shadow"><checked w14:val="0"/><checkedState w14:val="0041" w14:font="Courier New"/><uncheckedState w14:val="0042" w14:font="Times New Roman"/><kept xmlns="urn:override"/></checkbox></w:sdtPr><w:sdtContent><w:p><w:r><w:t>B</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    let rules = vec![form_rule(
+        form_tag("inherit"),
+        false,
+        rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(false)),
+    )];
+    let issues = document.validate_form(&rules).unwrap();
+    assert!(issues.is_empty(), "{issues:?}");
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(
+                form_tag("inherit"),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+    let filled = document_part_xml(&mut document);
+    assert_review4_state_font(&filled, WORD, "Courier New");
+    assert!(filled.contains(">A<"), "{filled}");
+    assert!(filled.contains(r#"xmlns:w="urn:shadow""#), "{filled}");
+    assert!(filled.contains(r#"xmlns="urn:override""#), "{filled}");
+    assert!(filled.contains("<checkbox"), "{filled}");
+    document.reset_form(&rules).unwrap();
+    let reset = document_part_xml(&mut document);
+    assert_review4_state_font(&reset, WORD, "Times New Roman");
+    assert!(reset.contains(">B<"), "{reset}");
+    assert!(reset.contains(r#"xmlns:w="urn:shadow""#), "{reset}");
+    assert!(reset.contains(r#"xmlns="urn:override""#), "{reset}");
+    let mut reopened = reopen_document(&mut document);
+    let again = document_part_xml(&mut reopened);
+    assert_review4_state_font(&again, WORD, "Times New Roman");
+    assert!(again.contains(">B<"), "{again}");
+    assert!(
+        reopened.validate_form(&rules).unwrap().is_empty(),
+        "{again}"
+    );
+}
+
+#[test]
+fn form_empty_display_insertion_preserves_opaque_property_owner() {
+    let property = r#"<p:note><w:p><w:r><w:t>PRODUCER</w:t></w:r></w:p></p:note>"#;
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:p><w:r><w:t>OTHER</w:t></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="81"/><w:text/>{property}</w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt><w:sdt><w:sdtPr><w:tag w:val="keep"/><w:id w:val="82"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>UNSELECTED</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    let rules = vec![form_rule(
+        form_tag("name"),
+        true,
+        rdocx::FormResetValue::Value(form_text("BACK")),
+    )];
+    let before = document_part_xml(&mut document);
+    assert!(before.contains(property), "{before}");
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("NEW"))],
+        )
+        .unwrap();
+    let filled = document_part_xml(&mut document);
+    let property_at = filled
+        .find(property)
+        .unwrap_or_else(|| panic!("property changed: {filled}"));
+    assert_eq!(filled.matches(property).count(), 1, "{filled}");
+    assert!(
+        filled[property_at..]
+            .contains("<w:sdtContent><w:p><w:r><w:t>NEW</w:t></w:r></w:p></w:sdtContent>"),
+        "{filled}"
+    );
+    assert!(filled.contains(">UNSELECTED<"), "{filled}");
+    assert!(filled.contains(">OTHER<"), "{filled}");
+    assert!(
+        document.validate_form(&rules).unwrap().is_empty(),
+        "{filled}"
+    );
+    let rendered = document
+        .render_page_to_svg_deterministic(0)
+        .unwrap()
+        .expect("page");
+    assert!(rendered.svg.contains("NEW"), "{}", rendered.svg);
+    document.reset_form(&rules).unwrap();
+    let reset = document_part_xml(&mut document);
+    assert!(reset.contains(property), "{reset}");
+    assert!(
+        reset.contains("<w:sdtContent><w:p><w:r><w:t>BACK</w:t></w:r></w:p></w:sdtContent>"),
+        "{reset}"
+    );
+    assert!(reset.contains(">UNSELECTED<"), "{reset}");
+    assert!(
+        document.validate_form(&rules).unwrap().is_empty(),
+        "{reset}"
+    );
+}
+
+fn tagged_control_text(document: &Document, tag: &str) -> String {
+    document
+        .content_controls()
+        .into_iter()
+        .find(|control| control.tag() == Some(tag))
+        .unwrap_or_else(|| panic!("missing content control {tag}"))
+        .text()
+}
+
+fn tagged_sdt<'a>(xml: &'a str, tag: &str) -> &'a str {
+    let needle = format!(r#"w:val="{tag}""#);
+    let tag_at = xml
+        .find(&needle)
+        .unwrap_or_else(|| panic!("missing tag {tag} in {xml}"));
+    let start = xml[..tag_at]
+        .rfind("<w:sdt")
+        .unwrap_or_else(|| panic!("missing sdt for {tag} in {xml}"));
+    let end = xml[tag_at..]
+        .find("</w:sdt>")
+        .unwrap_or_else(|| panic!("missing sdt end for {tag} in {xml}"))
+        + tag_at
+        + "</w:sdt>".len();
+    &xml[start..end]
+}
+
+#[test]
+fn form_owned_tab_display_is_replaced() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="81"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let rules = vec![form_rule(
+        form_tag("name"),
+        false,
+        rdocx::FormResetValue::Value(form_text("BACK")),
+    )];
+    assert_eq!(tagged_control_text(&document, "name"), "A\tB");
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("NEW"))],
+        )
+        .unwrap();
+    assert_eq!(tagged_control_text(&document, "name"), "NEW");
+    let filled = document_part_xml(&mut document);
+    assert!(!tagged_sdt(&filled, "name").contains("<w:tab"), "{filled}");
+    assert_owned_display_rendered(&document, "NEW", "VALUE");
+    document.reset_form(&rules).unwrap();
+    assert_eq!(tagged_control_text(&document, "name"), "BACK");
+    let reopened = reopen_document(&mut document);
+    assert_eq!(tagged_control_text(&reopened, "name"), "BACK");
+}
+
+#[test]
+fn form_owned_break_display_is_replaced() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="82"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>A</w:t><w:br/><w:t>B</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let rules = vec![form_rule(
+        form_tag("name"),
+        false,
+        rdocx::FormResetValue::Value(form_text("BACK")),
+    )];
+    assert_eq!(tagged_control_text(&document, "name"), "A\nB");
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("NEW"))],
+        )
+        .unwrap();
+    assert_eq!(tagged_control_text(&document, "name"), "NEW");
+    let filled = document_part_xml(&mut document);
+    assert!(!tagged_sdt(&filled, "name").contains("<w:br"), "{filled}");
+    assert_owned_display_rendered(&document, "NEW", "VALUE");
+    document.reset_form(&rules).unwrap();
+    assert_eq!(tagged_control_text(&document, "name"), "BACK");
+    let reopened = reopen_document(&mut document);
+    assert_eq!(tagged_control_text(&reopened, "name"), "BACK");
+}
+
+#[test]
+fn form_owned_simple_field_display_is_validated() {
+    let mut document = document_with_body_inner(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="83"/></w:sdtPr><w:sdtContent><w:p><w:fldSimple w:instr="MERGEFIELD visible"><w:r><w:t>VALUE</w:t></w:r></w:fldSimple></w:p></w:sdtContent></w:sdt>"#,
+    );
+    let rules = vec![form_rule(
+        form_tag("name"),
+        true,
+        rdocx::FormResetValue::Value(form_text("BACK")),
+    )];
+    assert!(
+        document.validate_form(&rules).unwrap().is_empty(),
+        "required simple field cache was treated as empty"
+    );
+    // The old content-control getter walks run text and does not project a
+    // simple-field cache. Empty here is that legacy getter, not a display contract.
+    assert_eq!(tagged_control_text(&document, "name"), "");
+    assert_eq!(document.text_report().text, "VALUE\n");
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("NEW"))],
+        )
+        .unwrap();
+    assert_eq!(tagged_control_text(&document, "name"), "");
+    assert_eq!(document.text_report().text, "NEW\n");
+    assert!(!document.text_report().text.contains("VALUE"));
+    let filled = document_part_xml(&mut document);
+    let selected = tagged_sdt(&filled, "name");
+    assert!(
+        selected.contains(r#"w:instr="MERGEFIELD visible""#),
+        "{filled}"
+    );
+    assert!(selected.contains(">NEW<"), "{filled}");
+    assert!(!selected.contains(">VALUE<"), "{filled}");
+    assert_owned_display_rendered(&document, "NEW", "VALUE");
+    document.reset_form(&rules).unwrap();
+    assert_eq!(tagged_control_text(&document, "name"), "");
+    assert_eq!(document.text_report().text, "BACK\n");
+    assert!(!document.text_report().text.contains("VALUE"));
+    let mut reopened = reopen_document(&mut document);
+    assert_eq!(reopened.text_report().text, "BACK\n");
+    assert!(!reopened.text_report().text.contains("VALUE"));
+    let reopened_xml = document_part_xml(&mut reopened);
+    assert!(
+        tagged_sdt(&reopened_xml, "name").contains(r#"w:instr="MERGEFIELD visible""#),
+        "{reopened_xml}"
+    );
+}
+
+#[test]
+fn form_owned_display_keeps_alias_opaque_nested_and_textbox() {
+    // w:alias is the content-control alias Person, not a namespace alias.
+    // A direct w:txbxContent under w:r is retained opaque invalid drawing
+    // markup. It is not an authentic independent textbox, and this fixture
+    // does not claim Word parity. Existing text box tests cover that path.
+    let opaque = r#"<p:note><w:p><w:r><w:t>OPAQUE</w:t><w:tab/><w:br/></w:r></w:p></p:note>"#;
+    let mut document = document_with_body_inner(&format!(
+        r#"<w:sdt><w:sdtPr><w:alias w:val="Person"/><w:tag w:val="name"/><w:id w:val="84"/>{opaque}</w:sdtPr><w:sdtContent><w:p><w:fldSimple w:instr="MERGEFIELD visible"><w:r><w:t>VALUE</w:t><w:tab/><w:br/></w:r></w:fldSimple></w:p><w:sdt><w:sdtPr><w:tag w:val="inner"/><w:id w:val="85"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>NESTED</w:t><w:tab/></w:r></w:p></w:sdtContent></w:sdt><w:p><w:r><w:txbxContent><w:p><w:r><w:t>BOXED</w:t><w:br/></w:r></w:p></w:txbxContent></w:r></w:p></w:sdtContent></w:sdt>"#
+    ));
+    let rules = vec![form_rule(
+        form_tag("name"),
+        true,
+        rdocx::FormResetValue::Value(form_text("BACK")),
+    )];
+    assert!(document.validate_form(&rules).unwrap().is_empty());
+    assert!(document.text_report().text.contains("VALUE"));
+    document
+        .fill_form(
+            &rules,
+            &[form_assignment(form_tag("name"), form_text("NEW"))],
+        )
+        .unwrap();
+    let shown = document.text_report().text;
+    assert!(shown.contains("NEW"), "{shown}");
+    assert!(!shown.contains("VALUE"), "{shown}");
+    assert_eq!(tagged_control_text(&document, "inner"), "NESTED\t");
+    assert_owned_display_rendered(&document, "NEW", "VALUE");
+    let filled = document_part_xml(&mut document);
+    assert!(filled.contains(r#"w:val="Person""#), "{filled}");
+    assert!(filled.contains(opaque), "{filled}");
+    assert!(
+        filled.contains(r#"w:instr="MERGEFIELD visible""#),
+        "{filled}"
+    );
+    assert!(filled.contains(">NESTED<"), "{filled}");
+    assert!(filled.contains("<w:tab"), "{filled}");
+    assert!(filled.contains(">BOXED<"), "{filled}");
+    assert!(filled.contains("<w:br"), "{filled}");
+    assert!(!filled.contains(">VALUE<"), "{filled}");
+}
+
+fn assert_owned_display_rendered(document: &Document, shown: &str, hidden: &str) {
+    let rendered = document
+        .render_page_to_svg_deterministic(0)
+        .unwrap()
+        .expect("page");
+    assert!(rendered.svg.contains(shown), "{}", rendered.svg);
+    assert!(!rendered.svg.contains(hidden), "{}", rendered.svg);
+    let layout = document.layout_deterministic().unwrap();
+    let mut finite = false;
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && run.text.contains(shown)
+                && run.origin.x.is_finite()
+                && run.origin.y.is_finite()
+            {
+                finite = true;
+            }
+        });
+    }
+    assert!(finite, "missing positioned {shown}");
+}
+
+fn assert_review4_state_font(xml: &str, word: &str, font: &str) {
+    for local in ["ascii", "hAnsi", "eastAsia", "cs"] {
+        let bindings = attribute_bindings(xml, local);
+        assert!(
+            bindings
+                .iter()
+                .any(|(uri, value)| uri == word && value == font),
+            "{local} {font} {bindings:?} {xml}"
+        );
+    }
+}
+
+fn fill_checked(document: &mut Document, tag: &str) {
+    document
+        .fill_form(
+            &[form_rule(
+                form_tag(tag),
+                false,
+                rdocx::FormResetValue::Value(rdocx::FormFieldValue::Checked(true)),
+            )],
+            &[form_assignment(
+                form_tag(tag),
+                rdocx::FormFieldValue::Checked(true),
+            )],
+        )
+        .unwrap();
+}
+
+fn assert_review3_positioned_courier(document: &Document, glyph: char) {
+    let layout = document.layout_deterministic().unwrap();
+    let mut families = Vec::new();
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && run.text.contains(glyph)
+                && run.origin.x.is_finite()
+                && run.origin.y.is_finite()
+                && let Some(font) = layout
+                    .layout
+                    .fonts
+                    .iter()
+                    .find(|font| font.id == run.font_id)
+            {
+                families.push(font.family.clone());
+            }
+        });
+    }
+    assert!(
+        families.iter().any(|family| family == "Liberation Mono"),
+        "positioned {glyph} did not use the deterministic Courier New face: {families:?}"
+    );
+}
+
+fn assert_review3_courier_fonts(xml: &str, word: &str) {
+    for local in ["ascii", "hAnsi", "eastAsia", "cs"] {
+        let bindings = attribute_bindings(xml, local);
+        assert!(
+            bindings
+                .iter()
+                .any(|(uri, value)| uri == word && value == "Courier New"),
+            "{local} {bindings:?} {xml}"
+        );
+        assert!(
+            bindings
+                .iter()
+                .all(|(uri, value)| value != "Courier New" || uri == word),
+            "{local} unqualified {bindings:?} {xml}"
+        );
+    }
+}
+
+const F290_MAIL_MERGE_SOURCE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/mailMergeSource";
+const F290_RECIPIENT_DATA: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/recipientData";
+const F290_WORD_ROLES: [&str; 30] = [
+    "Unique",
+    "CourtesyTitle",
+    "FirstName",
+    "MiddleName",
+    "LastName",
+    "Suffix",
+    "Nickname",
+    "JobTitle",
+    "Company",
+    "Address1",
+    "Address2",
+    "City",
+    "State",
+    "PostalCode",
+    "CountryorRegion",
+    "BusinessPhone",
+    "BusinessFax",
+    "HomePhone",
+    "HomeFax",
+    "EmailAddress",
+    "WebPage",
+    "SpouseCourtesyTitle",
+    "SpouseFirstName",
+    "SpouseMiddleName",
+    "SpouseLastName",
+    "SpouseNickname",
+    "RubyFirstName",
+    "RubyLastName",
+    "Address3",
+    "Department",
+];
+
+fn f290_declared_settings() -> MailMerge {
+    MailMerge {
+        main_document_type: Some(MailMergeDocumentType::FormLetters),
+        data_type: Some("textFile".to_owned()),
+        ..MailMerge::default()
+    }
+}
+
+fn f290_mapping(column: u32, source_name: &str, mapped_name: &str) -> MailMergeFieldMapping {
+    MailMergeFieldMapping {
+        column,
+        source_name: source_name.to_owned(),
+        mapped_name: mapped_name.to_owned(),
+        language: None,
+        dynamic_address: None,
+    }
+}
+
+fn f290_recipient(column: u32, tag: &[u8], active: bool) -> MailMergeRecipient {
+    MailMergeRecipient {
+        column,
+        unique_tag: tag.to_vec(),
+        active,
+    }
+}
+
+fn f290_options(
+    source: MailMergePackageSource,
+    mappings: Vec<MailMergeFieldMapping>,
+    recipients: Vec<MailMergeRecipient>,
+) -> MailMergePackageOptions {
+    MailMergePackageOptions {
+        settings: f290_declared_settings(),
+        source,
+        mappings,
+        recipients,
+    }
+}
+
+fn f290_row(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+fn f290_reopen(document: &mut Document) -> Document {
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+
+fn f290_settings_owned(document: &mut Document, rel_type: &str) -> bool {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    package
+        .get_part_rels("/word/settings.xml")
+        .is_some_and(|rels| rels.items.iter().any(|item| item.rel_type == rel_type))
+}
+
+fn f290_main_owns(document: &mut Document, rel_type: &str) -> bool {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    package
+        .get_part_rels("/word/document.xml")
+        .is_some_and(|rels| rels.items.iter().any(|item| item.rel_type == rel_type))
+}
+
+fn f290_part_inventory(document: &mut Document) -> BTreeMap<String, Vec<u8>> {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    package
+        .parts
+        .iter()
+        .map(|(name, bytes)| (name.clone(), bytes.as_ref().clone()))
+        .collect()
+}
+
+fn f290_exact_parts(
+    inventory: &BTreeMap<String, Vec<u8>>,
+    needle: &[u8],
+) -> BTreeMap<String, Vec<u8>> {
+    inventory
+        .iter()
+        .filter(|(_, bytes)| bytes.as_slice() == needle)
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect()
+}
+
+fn f290_parts_containing(
+    inventory: &BTreeMap<String, Vec<u8>>,
+    needle: &[u8],
+) -> BTreeMap<String, Vec<u8>> {
+    inventory
+        .iter()
+        .filter(|(_, bytes)| bytes.windows(needle.len()).any(|window| window == needle))
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect()
+}
+
+fn f290_package_bytes(package: &OpcPackage) -> Vec<u8> {
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    output.into_inner()
+}
+
+fn f290_alternate_package(body: &[u8]) -> Document {
+    let mut document = Document::new();
+    document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/alternate.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"tag", true)],
+        ))
+        .expect("standard recipient before alternate swap");
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let part = package
+        .parts
+        .keys()
+        .find(|name| name.contains("recipient"))
+        .cloned()
+        .expect("recipient part");
+    package.set_part(&part, body.to_vec());
+    package
+        .content_types
+        .add_override(&part, "application/vnd.ms-word.mailMergeRecipientData+xml");
+    Document::from_bytes(&f290_package_bytes(&package)).expect("alternate package")
+}
+
+fn f290_plant_settings(settings_xml: &str, rels: &[(&str, &str)]) -> Document {
+    let mut document = Document::new();
+    document
+        .set_mail_merge_settings(f290_declared_settings())
+        .unwrap();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/settings.xml", settings_xml.as_bytes().to_vec());
+    for (id, target) in rels {
+        let relationships = package.get_or_create_part_rels("/word/settings.xml");
+        relationships.add_with_id(id, F290_MAIL_MERGE_SOURCE, target);
+        relationships
+            .items
+            .last_mut()
+            .expect("planted relationship")
+            .target_mode = Some("External".to_owned());
+    }
+    Document::from_bytes(&f290_package_bytes(&package)).expect("planted settings reopen")
+}
+
+fn f290_expect_contains<T: std::fmt::Debug>(
+    failures: &mut Vec<String>,
+    label: &str,
+    result: Result<T, impl std::fmt::Display>,
+    needle: &str,
+) {
+    match result {
+        Err(error) if error.to_string().contains(needle) => {}
+        Err(error) => failures.push(format!("{label} error {error} missing {needle}")),
+        Ok(value) => failures.push(format!("{label} returned {value:?}")),
+    }
+}
+
+fn f290_expect_source_gap(failures: &mut Vec<String>, label: &str, document: &Document) {
+    f290_expect_contains(failures, label, document.mail_merge_package(), "source");
+    match document.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None) {
+        Err(error) if error.to_string().contains("absent") => {
+            failures.push(format!("{label} prepare called the package absent"))
+        }
+        Err(_) => {}
+        Ok(value) => failures.push(format!("{label} prepare returned {value:?}")),
+    }
+}
+
+fn f290_externalize_settings(mut document: Document) -> Document {
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let main = package.main_document_part().expect("main document");
+    package
+        .get_part_rels_mut(&main)
+        .expect("document relationships")
+        .items
+        .iter_mut()
+        .filter(|item| item.rel_type.ends_with("/settings"))
+        .for_each(|item| item.target_mode = Some("External".to_owned()));
+    Document::from_bytes(&f290_package_bytes(&package)).expect("external settings owner")
+}
+
+fn f290_settings_xml(document: &mut Document) -> Vec<u8> {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    package.get_part("/word/settings.xml").unwrap().to_vec()
+}
+
+fn f290_relative_target(from_part: &str, to_part: &str) -> String {
+    let from_dir: Vec<&str> = from_part
+        .trim_matches('/')
+        .rsplit_once('/')
+        .map(|(dir, _)| {
+            dir.split('/')
+                .filter(|segment| !segment.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut to_parts: Vec<&str> = to_part
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let file = to_parts.pop().expect("relationship target file");
+    let mut shared = 0;
+    while shared < from_dir.len() && shared < to_parts.len() && from_dir[shared] == to_parts[shared]
+    {
+        shared += 1;
+    }
+    let mut target = String::new();
+    for _ in shared..from_dir.len() {
+        target.push_str("../");
+    }
+    for part in &to_parts[shared..] {
+        target.push_str(part);
+        target.push('/');
+    }
+    target.push_str(file);
+    target
+}
+
+fn f290_relocate_merge_parts(bytes: &[u8]) -> Vec<u8> {
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let doc_part = package.main_document_part().expect("main document");
+    let settings_target = package
+        .get_part_rels(&doc_part)
+        .expect("document relationships")
+        .items
+        .iter()
+        .find(|item| {
+            item.target_mode.as_deref() != Some("External")
+                && package
+                    .get_part(&OpcPackage::resolve_rel_target(&doc_part, &item.target))
+                    .is_some_and(|body| {
+                        body.windows(b"mailMerge".len())
+                            .any(|window| window == b"mailMerge")
+                    })
+        })
+        .expect("settings owner")
+        .target
+        .clone();
+    let old_settings = OpcPackage::resolve_rel_target(&doc_part, &settings_target);
+    let new_settings = "/custom/merge-owner.xml";
+    let settings_body = package
+        .get_part(&old_settings)
+        .expect("settings part")
+        .to_vec();
+    let settings_type = package
+        .content_types
+        .override_for(&old_settings)
+        .map(str::to_owned);
+    let mut settings_rels = package
+        .remove_part_rels(&old_settings)
+        .expect("settings relationships");
+    package.remove_part(&old_settings);
+    if let Some(content_type) = settings_type {
+        package.content_types.remove_override(&old_settings);
+        package
+            .content_types
+            .add_override(new_settings, &content_type);
+    }
+    package.set_part(new_settings, settings_body);
+    let recipient_index = settings_rels
+        .items
+        .iter()
+        .position(|item| item.rel_type == F290_RECIPIENT_DATA)
+        .expect("recipient edge");
+    let old_recipient =
+        OpcPackage::resolve_rel_target(&old_settings, &settings_rels.items[recipient_index].target);
+    let recipient_body = package
+        .get_part(&old_recipient)
+        .expect("recipient part")
+        .to_vec();
+    let recipient_type = package
+        .content_types
+        .remove_override(&old_recipient)
+        .expect("recipient content type");
+    package.remove_part(&old_recipient);
+    package.remove_part_rels(&old_recipient);
+    let new_recipient = "/custom/rows/people.xml";
+    package.set_part(new_recipient, recipient_body);
+    package
+        .content_types
+        .add_override(new_recipient, &recipient_type);
+    settings_rels.items[recipient_index].target = f290_relative_target(new_settings, new_recipient);
+    package.set_part_rels(new_settings, settings_rels);
+    package
+        .get_part_rels_mut(&doc_part)
+        .expect("document relationships")
+        .items
+        .iter_mut()
+        .find(|item| item.target == settings_target)
+        .expect("settings edge")
+        .target = f290_relative_target(&doc_part, new_settings);
+    f290_package_bytes(&package)
+}
+
+#[test]
+fn authored_mail_merge_package_retains_source_mappings_and_recipients() {
+    let source = MailMergePackageSource::External {
+        uri: "file:///declared/people.csv".to_owned(),
+    };
+    let mappings = vec![
+        f290_mapping(1, "Given", "FirstName"),
+        f290_mapping(0, "Family", "LastName"),
+    ];
+    let recipients = vec![
+        f290_recipient(0, b"tag-a", true),
+        f290_recipient(1, b"tag-b", false),
+    ];
+    let mut document = Document::new();
+    document
+        .set_mail_merge_package(f290_options(source, mappings.clone(), recipients.clone()))
+        .expect("authored external package");
+    let mut reopened = f290_reopen(&mut document);
+    let snapshot = reopened
+        .mail_merge_package()
+        .expect("read package")
+        .expect("recognized owned configuration");
+    assert_eq!(
+        snapshot.source,
+        MailMergePackageSource::External {
+            uri: "file:///declared/people.csv".to_owned(),
+        }
+    );
+    assert_eq!(
+        snapshot.settings.main_document_type,
+        Some(MailMergeDocumentType::FormLetters)
+    );
+    assert_eq!(snapshot.settings.data_type.as_deref(), Some("textFile"));
+    assert_eq!(
+        snapshot
+            .mappings
+            .iter()
+            .map(|item| item.mapped_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["FirstName", "LastName"]
+    );
+    assert_eq!(snapshot.recipients, recipients);
+    assert!(f290_settings_owned(&mut reopened, F290_MAIL_MERGE_SOURCE));
+    assert!(f290_settings_owned(&mut reopened, F290_RECIPIENT_DATA));
+    assert!(!f290_main_owns(&mut reopened, F290_MAIL_MERGE_SOURCE));
+    assert!(!f290_main_owns(&mut reopened, F290_RECIPIENT_DATA));
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(reopened.to_bytes().unwrap())).unwrap();
+    let source_rel = package
+        .get_part_rels("/word/settings.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|item| item.rel_type == F290_MAIL_MERGE_SOURCE)
+        .unwrap();
+    assert_eq!(source_rel.target, "file:///declared/people.csv");
+    assert_eq!(source_rel.target_mode.as_deref(), Some("External"));
+
+    let relocated = f290_relocate_merge_parts(&reopened.to_bytes().unwrap());
+    let mut moved = Document::from_bytes(&relocated).expect("relocated package");
+    let moved_snapshot = moved
+        .mail_merge_package()
+        .expect("read relocated package")
+        .expect("relocated configuration");
+    assert_eq!(moved_snapshot.source, snapshot.source);
+    assert_eq!(moved_snapshot.recipients, recipients);
+    let moved_package =
+        OpcPackage::from_reader(std::io::Cursor::new(moved.to_bytes().unwrap())).unwrap();
+    let moved_doc = moved_package.main_document_part().expect("moved main");
+    let moved_settings = OpcPackage::resolve_rel_target(
+        &moved_doc,
+        &moved_package
+            .get_part_rels(&moved_doc)
+            .expect("moved document relationships")
+            .items
+            .iter()
+            .find(|item| {
+                item.target_mode.as_deref() != Some("External")
+                    && OpcPackage::resolve_rel_target(&moved_doc, &item.target)
+                        .contains("merge-owner")
+            })
+            .expect("relocated settings edge")
+            .target,
+    );
+    assert!(moved_settings.contains("merge-owner"));
+    assert!(!moved_settings.contains("/word/"));
+    let owner_rels = moved_package
+        .get_part_rels(&moved_settings)
+        .expect("owner relationships");
+    let moved_source = owner_rels
+        .items
+        .iter()
+        .find(|item| item.rel_type == F290_MAIL_MERGE_SOURCE)
+        .expect("owner source");
+    assert_eq!(moved_source.target_mode.as_deref(), Some("External"));
+    let moved_recipient = owner_rels
+        .items
+        .iter()
+        .find(|item| item.rel_type == F290_RECIPIENT_DATA)
+        .expect("owner recipient");
+    assert_ne!(moved_recipient.target_mode.as_deref(), Some("External"));
+    let recipient_part = OpcPackage::resolve_rel_target(&moved_settings, &moved_recipient.target);
+    assert!(recipient_part.contains("people.xml"));
+    assert!(!recipient_part.contains("/word/"));
+    assert!(
+        !moved_package
+            .get_part_rels(&moved_doc)
+            .expect("main edges")
+            .items
+            .iter()
+            .any(|item| item.rel_type == F290_MAIL_MERGE_SOURCE
+                || item.rel_type == F290_RECIPIENT_DATA)
+    );
+    moved
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/moved.csv".to_owned(),
+            },
+            mappings,
+            vec![f290_recipient(2, b"tag-c", true)],
+        ))
+        .expect("update relocated package");
+    let mut updated = f290_reopen(&mut moved);
+    let updated_snapshot = updated
+        .mail_merge_package()
+        .expect("read updated package")
+        .expect("updated configuration");
+    assert_eq!(
+        updated_snapshot.source,
+        MailMergePackageSource::External {
+            uri: "file:///declared/moved.csv".to_owned(),
+        }
+    );
+    assert_eq!(
+        updated_snapshot.recipients,
+        vec![f290_recipient(2, b"tag-c", true)]
+    );
+    let updated_package =
+        OpcPackage::from_reader(std::io::Cursor::new(updated.to_bytes().unwrap())).unwrap();
+    assert!(updated_package.get_part(&moved_settings).is_some());
+    assert!(updated_package.get_part(&recipient_part).is_some());
+}
+
+#[test]
+fn embedded_merge_records_round_trip_without_external_access() {
+    let mut document = Document::new();
+    let before = document.to_bytes().unwrap();
+    let refused = document.set_mail_merge_package(f290_options(
+        MailMergePackageSource::Embedded {
+            columns: Vec::new(),
+            records: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert!(refused.is_err(), "zero columns refuse");
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned(), "b".to_owned()],
+                records: vec![
+                    vec!["x".to_owned(), String::new()],
+                    vec!["&".to_owned(), "<".to_owned()],
+                ],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("authored embedded table");
+    let mut reopened = f290_reopen(&mut document);
+    let snapshot = reopened
+        .mail_merge_package()
+        .expect("read embedded")
+        .expect("embedded configuration");
+    match snapshot.source {
+        MailMergePackageSource::Embedded { columns, records } => {
+            assert_eq!(columns, vec!["a".to_owned(), "b".to_owned()]);
+            assert_eq!(
+                records,
+                vec![
+                    vec!["x".to_owned(), String::new()],
+                    vec!["&".to_owned(), "<".to_owned()],
+                ]
+            );
+        }
+        MailMergePackageSource::External { uri } => {
+            panic!("embedded table became external {uri}")
+        }
+    }
+    assert!(snapshot.mappings.is_empty());
+    assert!(snapshot.recipients.is_empty());
+    let prepared = reopened
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("offline embedded rows");
+    assert!(prepared.diagnostics.is_empty());
+    assert_eq!(
+        prepared.records,
+        vec![
+            f290_row(&[("a", "x"), ("b", "")]),
+            f290_row(&[("a", "&"), ("b", "<")])
+        ]
+    );
+    assert!(!f290_settings_owned(&mut reopened, F290_MAIL_MERGE_SOURCE));
+
+    let mut empty = Document::new();
+    empty
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: Vec::new(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("zero rows");
+    let prepared = f290_reopen(&mut empty)
+        .prepare_mail_merge_data(MailMergeSourcePolicy::default(), None)
+        .expect("zero-row prepare");
+    assert!(prepared.records.is_empty());
+    assert!(prepared.diagnostics.is_empty());
+
+    let mut bound = Document::new();
+    bound
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: vec![vec!["old".to_owned()]],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("bound baseline");
+    let old_guid = bound
+        .document_variable("rdocx.mailMerge.storeItemId")
+        .expect("owned store guid")
+        .to_owned();
+    let story = body_story(&bound);
+    insert_form_control(
+        &mut bound,
+        &story,
+        rdocx_oxml::content_control::SdtType::PlainText,
+        "merge-bound",
+    );
+    let location = control_by_tag(&bound, "merge-bound");
+    bound
+        .set_content_control_binding(
+            &location,
+            &old_guid,
+            "/m:mergeData/m:records/m:record/m:cell",
+            Some("xmlns:m='urn:rdocx:mail-merge-data:v1'"),
+        )
+        .expect("bind old store");
+    bound
+        .set_content_control_value_by_tag("merge-bound", "old")
+        .expect("display matches bound cell");
+    let before = f290_part_inventory(&mut bound);
+    let old_store: Vec<_> = before
+        .iter()
+        .filter(|(_, bytes)| {
+            bytes
+                .windows(b"<cell>old</cell>".len())
+                .any(|window| window == b"<cell>old</cell>")
+        })
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect();
+    assert_eq!(old_store.len(), 1, "one owned store part");
+    let binding_parts = f290_parts_containing(&before, old_guid.as_bytes());
+    assert!(
+        binding_parts.values().any(|bytes| {
+            bytes
+                .windows(b"dataBinding".len())
+                .any(|window| window == b"dataBinding")
+        }),
+        "binding xml keeps the old guid"
+    );
+    bound
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: vec![vec!["new".to_owned()]],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("copy on write when the store is bound");
+    let new_guid = bound
+        .document_variable("rdocx.mailMerge.storeItemId")
+        .expect("new store guid")
+        .to_owned();
+    assert_ne!(new_guid, old_guid);
+    let after = f290_part_inventory(&mut bound);
+    assert_eq!(
+        after.get(&old_store[0].0).map(Vec::as_slice),
+        Some(old_store[0].1.as_slice()),
+        "old store bytes stay"
+    );
+    let binding_after = f290_parts_containing(&after, old_guid.as_bytes());
+    assert!(
+        binding_after.values().any(|bytes| {
+            bytes
+                .windows(b"dataBinding".len())
+                .any(|window| window == b"dataBinding")
+        }),
+        "binding still names the old guid"
+    );
+    assert_eq!(
+        bound.content_controls_by_tag("merge-bound")[0].text(),
+        "old"
+    );
+    let snapshot = bound
+        .mail_merge_package()
+        .expect("query new rows")
+        .expect("package");
+    match snapshot.source {
+        MailMergePackageSource::Embedded { records, .. } => {
+            assert_eq!(records, vec![vec!["new".to_owned()]]);
+        }
+        MailMergePackageSource::External { uri } => panic!("embedded became external {uri}"),
+    }
+    let mut reopened = f290_reopen(&mut bound);
+    assert_eq!(
+        reopened.document_variable("rdocx.mailMerge.storeItemId"),
+        Some(new_guid.as_str())
+    );
+    assert_eq!(
+        reopened.content_controls_by_tag("merge-bound")[0].text(),
+        "old"
+    );
+    let reopened_parts = f290_part_inventory(&mut reopened);
+    assert_eq!(
+        reopened_parts.get(&old_store[0].0).map(Vec::as_slice),
+        Some(old_store[0].1.as_slice())
+    );
+
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60,
+        0xf8, 0xcf, 0xf0, 0x00, 0x00, 0x04, 0x01, 0x01, 0x08, 0x9d, 0x1d, 0xe1, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82, b'<', b'w', b':', b'n', b'o', b't',
+    ];
+    let mut pictured = Document::new();
+    pictured
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: vec![vec!["old".to_owned()]],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("embedded package beside media");
+    pictured.add_picture(png, "pixel.png", Length::pt(1.0), Length::pt(1.0));
+    let pictured_before = f290_part_inventory(&mut pictured);
+    let media: Vec<_> = pictured_before
+        .iter()
+        .filter(|(_, bytes)| bytes.as_slice() == png)
+        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .collect();
+    assert_eq!(media.len(), 1, "png bytes are one part");
+    pictured
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: vec![vec!["new".to_owned()]],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("binary media does not fail the binding scan");
+    let pictured_after = f290_part_inventory(&mut pictured);
+    assert_eq!(
+        pictured_after.get(&media[0].0).map(Vec::as_slice),
+        Some(png),
+        "png bytes stay exact"
+    );
+}
+
+#[test]
+fn offline_merge_sources_return_explicit_diagnostics() {
+    let mut embedded = Document::new();
+    embedded
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: Vec::new(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("clean embedded zero-row package");
+    let smuggled = vec![f290_row(&[("a", "hidden")])];
+    let offline_rows =
+        embedded.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, Some(smuggled.as_slice()));
+    assert!(offline_rows.is_err(), "offline plus rows is Err");
+    let embedded_rows = embedded.prepare_mail_merge_data(
+        MailMergeSourcePolicy::CallerSupplied,
+        Some(smuggled.as_slice()),
+    );
+    assert!(embedded_rows.is_err(), "embedded plus rows is Err");
+    let clean = embedded
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("clean zero rows");
+    assert!(clean.records.is_empty());
+    assert!(clean.diagnostics.is_empty());
+
+    let mut plain = Document::new();
+    plain
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "https://declared.example/people.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("plain external declaration");
+    let blocked = plain
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("offline external");
+    assert!(blocked.records.is_empty());
+    assert_eq!(blocked.diagnostics.len(), 1, "{:?}", blocked.diagnostics);
+    assert_eq!(
+        blocked.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::ExternalSourceBlocked
+    );
+    assert!(!blocked.diagnostics[0].message.contains("declared.example"));
+    let unavailable = plain
+        .prepare_mail_merge_data(MailMergeSourcePolicy::CallerSupplied, None)
+        .expect("caller supplied none");
+    assert!(unavailable.records.is_empty());
+    assert_eq!(
+        unavailable.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::ExternalSourceUnavailable
+    );
+    let empty_supplied = plain
+        .prepare_mail_merge_data(MailMergeSourcePolicy::CallerSupplied, Some(&[]))
+        .expect("empty caller rows");
+    assert!(empty_supplied.records.is_empty());
+    assert!(empty_supplied.diagnostics.is_empty());
+    let faithful = vec![f290_row(&[("a", "x"), ("b", "")])];
+    let copied = plain
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(faithful.as_slice()),
+        )
+        .expect("faithful raw rows");
+    assert!(copied.diagnostics.is_empty());
+    assert_eq!(copied.records, faithful);
+    let plain_meta = plain
+        .mail_merge_package()
+        .expect("plain metadata")
+        .expect("plain package");
+    assert_eq!(
+        plain_meta.source,
+        MailMergePackageSource::External {
+            uri: "https://declared.example/people.csv".to_owned(),
+        }
+    );
+    assert!(plain_meta.mappings.is_empty());
+    assert!(plain_meta.recipients.is_empty());
+
+    let mut filtered = Document::new();
+    filtered
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/filtered.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "Family", "LastName")],
+            Vec::new(),
+        ))
+        .expect("mapped declaration");
+    let blocked_first = filtered
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("offline still blocks an unfaithful external");
+    assert!(blocked_first.records.is_empty());
+    assert_eq!(
+        blocked_first.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::ExternalSourceBlocked
+    );
+    let unsupported_none = filtered
+        .prepare_mail_merge_data(MailMergeSourcePolicy::CallerSupplied, None)
+        .expect("unsupported before unavailable");
+    assert!(unsupported_none.records.is_empty());
+    assert_eq!(
+        unsupported_none.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+    let unsupported_empty = filtered
+        .prepare_mail_merge_data(MailMergeSourcePolicy::CallerSupplied, Some(&[]))
+        .expect("empty rows stay unsupported");
+    assert!(unsupported_empty.records.is_empty());
+    assert_eq!(
+        unsupported_empty.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+    let supplied = vec![f290_row(&[("Family", "Lovelace")])];
+    let unsupported_rows = filtered
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(supplied.as_slice()),
+        )
+        .expect("supplied rows are not a partial filter");
+    assert!(unsupported_rows.records.is_empty());
+    assert_ne!(unsupported_rows.records, supplied);
+    assert_eq!(
+        unsupported_rows.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+    assert!(
+        filtered
+            .mail_merge_package()
+            .expect("metadata remains")
+            .is_some()
+    );
+
+    let absent = Document::new()
+        .prepare_mail_merge_data(MailMergeSourcePolicy::default(), None)
+        .unwrap_err();
+    assert!(
+        absent.to_string().contains("mail-merge package is absent"),
+        "{absent}"
+    );
+
+    let mut identity = Document::new();
+    identity
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["FirstName".to_owned()],
+                records: vec![vec!["Ada".to_owned()]],
+            },
+            vec![f290_mapping(0, "FirstName", "FirstName")],
+            Vec::new(),
+        ))
+        .expect("embedded identity map");
+    let applied = identity
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("identity embedded rows");
+    assert!(applied.diagnostics.is_empty());
+    assert_eq!(applied.records, vec![f290_row(&[("FirstName", "Ada")])]);
+
+    let mut alias = Document::new();
+    alias
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["Family".to_owned()],
+                records: vec![vec!["Lovelace".to_owned()]],
+            },
+            vec![f290_mapping(0, "Family", "LastName")],
+            Vec::new(),
+        ))
+        .expect("embedded alias map");
+    let raw_alias = alias
+        .prepare_mail_merge_data(MailMergeSourcePolicy::CallerSupplied, None)
+        .expect("alias is unsupported rather than raw");
+    assert!(raw_alias.records.is_empty());
+    assert_eq!(
+        raw_alias.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+
+    let mut external_identity = Document::new();
+    external_identity
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/identity.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "FirstName", "FirstName")],
+            Vec::new(),
+        ))
+        .expect("external identity map");
+    let keyed = vec![f290_row(&[("FirstName", "Ada"), ("City", "London")])];
+    let copied_identity = external_identity
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(keyed.as_slice()),
+        )
+        .expect("identity external rows");
+    assert!(copied_identity.diagnostics.is_empty());
+    assert_eq!(copied_identity.records, keyed);
+    let missing_key = vec![f290_row(&[("City", "London")])];
+    let missing = external_identity
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(missing_key.as_slice()),
+        )
+        .expect("missing required column");
+    assert!(missing.records.is_empty());
+    assert_eq!(
+        missing.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+
+    let mut connected = Document::from_bytes(&external_identity.to_bytes().unwrap()).unwrap();
+    let mut with_query = f290_declared_settings();
+    with_query.connect_string = Some("dsn".to_owned());
+    with_query.query = Some("select".to_owned());
+    connected
+        .set_mail_merge_settings(with_query)
+        .expect("preserve source while recording connect");
+    let evaluated = connected
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(keyed.as_slice()),
+        )
+        .expect("connect and query stay unsupported");
+    assert_eq!(
+        evaluated.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+    assert!(evaluated.records.is_empty());
+
+    let scheme = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "ftp://declared.example/people.csv")],
+    );
+    match scheme
+        .mail_merge_package()
+        .expect("raw scheme query")
+        .expect("package")
+        .source
+    {
+        MailMergePackageSource::External { uri } => {
+            assert_eq!(uri, "ftp://declared.example/people.csv");
+        }
+        MailMergePackageSource::Embedded { .. } => panic!("scheme became embedded"),
+    }
+    let scheme_offline = scheme
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("offline before scheme");
+    assert_eq!(
+        scheme_offline.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::ExternalSourceBlocked
+    );
+    let scheme_rows = scheme
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(keyed.as_slice()),
+        )
+        .expect("unknown scheme unsupported");
+    assert_eq!(
+        scheme_rows.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+
+    let native = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="native"/>
+    <w:dataSource r:id="data"/>
+    <w:odso><w:src r:id="odso"/></w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[
+            ("data", "file:///declared/data.csv"),
+            ("odso", "file:///declared/odso.csv"),
+        ],
+    );
+    match native
+        .mail_merge_package()
+        .expect("differing native query")
+        .expect("package")
+        .source
+    {
+        MailMergePackageSource::External { uri } => assert_eq!(uri, "file:///declared/odso.csv"),
+        MailMergePackageSource::Embedded { .. } => panic!("native became embedded"),
+    }
+    let native_offline = native
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("offline before differing native");
+    assert_eq!(
+        native_offline.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::ExternalSourceBlocked
+    );
+    let native_rows = native
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(keyed.as_slice()),
+        )
+        .expect("differing native unsupported");
+    assert!(native_rows.records.is_empty());
+    assert_eq!(
+        native_rows.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+
+    let odd_type = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso><w:fieldMapData><w:type w:val="addressColumn"/></w:fieldMapData></w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/typed.csv")],
+    );
+    assert!(
+        odd_type.mail_merge_package().is_err(),
+        "unknown active type is not an empty map"
+    );
+    let odd_prepare = odd_type
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(keyed.as_slice()),
+        )
+        .expect("unknown type prepares as unsupported");
+    assert_eq!(
+        odd_prepare.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::UnsupportedSource
+    );
+
+    let mut many = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso>"#,
+    );
+    for _ in 0..31 {
+        many.push_str("<w:fieldMapData><w:type w:val=\"null\"/></w:fieldMapData>");
+    }
+    many.push_str("</w:odso></w:mailMerge></w:settings>");
+    let overflow = f290_plant_settings(&many, &[("src", "file:///declared/overflow.csv")]);
+    assert!(
+        overflow.mail_merge_package().is_err(),
+        "more than 30 slots is not an empty map"
+    );
+    let overflow_prepare = overflow
+        .prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None)
+        .expect("overflow prepares as unsupported");
+    assert_eq!(
+        overflow_prepare.diagnostics[0].kind,
+        MailMergePackageDiagnosticKind::ExternalSourceBlocked,
+        "offline block precedes the unsupported map",
+    );
+
+    let mut corrupt = Document::new();
+    corrupt
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: vec![vec!["old".to_owned()]],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap();
+    let mut corrupt_package =
+        OpcPackage::from_reader(std::io::Cursor::new(corrupt.to_bytes().unwrap())).unwrap();
+    let store_name = corrupt_package
+        .parts
+        .iter()
+        .find(|(_, bytes)| {
+            bytes
+                .windows(b"mergeData".len())
+                .any(|window| window == b"mergeData")
+        })
+        .map(|(name, _)| name.clone())
+        .expect("store part");
+    corrupt_package.set_part(&store_name, b"<<not-xml".to_vec());
+    let corrupt = Document::from_bytes(&f290_package_bytes(&corrupt_package)).unwrap();
+    let corrupt_rows = corrupt
+        .prepare_mail_merge_data(
+            MailMergeSourcePolicy::CallerSupplied,
+            Some(keyed.as_slice()),
+        )
+        .unwrap_err();
+    assert!(
+        corrupt_rows.to_string().contains("rejects caller"),
+        "embedded rows are refused before the broken store, observed {corrupt_rows}"
+    );
+
+    let mut parser_failures = Vec::new();
+    for (label, body) in [
+        (
+            "prefixed alternate root",
+            br#"<wne:recipients xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml"><wne:hash>opaque</wne:hash></wne:recipients>"#.as_slice(),
+        ),
+        (
+            "default alternate root",
+            br#"<recipients xmlns="http://schemas.microsoft.com/office/word/2006/wordml"><hash>opaque</hash></recipients>"#.as_slice(),
+        ),
+    ] {
+        let alternate = f290_alternate_package(body);
+        match alternate.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None) {
+            Ok(prepared)
+                if prepared.diagnostics.first().is_some_and(|item| {
+                    item.kind == MailMergePackageDiagnosticKind::ExternalSourceBlocked
+                }) => {}
+            other => parser_failures.push(format!("{label} offline was {other:?}")),
+        }
+        match alternate.prepare_mail_merge_data(MailMergeSourcePolicy::CallerSupplied, Some(&[])) {
+            Ok(prepared)
+                if prepared.records.is_empty()
+                    && prepared.diagnostics.first().is_some_and(|item| {
+                        item.kind == MailMergePackageDiagnosticKind::UnsupportedSource
+                    }) => {}
+            other => parser_failures.push(format!("{label} caller rows were {other:?}")),
+        }
+    }
+    for (label, body) in [
+        (
+            "wrong alternate root",
+            br#"<wne:hash xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml">opaque</wne:hash>"#.as_slice(),
+        ),
+        (
+            "wrong alternate namespace",
+            br#"<recipients xmlns="urn:f290:not-wordml"><hash>opaque</hash></recipients>"#.as_slice(),
+        ),
+    ] {
+        let mut alternate = f290_alternate_package(body);
+        let before = alternate.to_bytes().unwrap();
+        match alternate.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None) {
+            Err(_) => {}
+            Ok(prepared) => parser_failures.push(format!("{label} offline returned {prepared:?}")),
+        }
+        if alternate.to_bytes().unwrap() != before {
+            parser_failures.push(format!("{label} changed bytes"));
+        }
+    }
+    let mut root = Document::new();
+    match root.set_mail_merge_package(f290_options(
+        MailMergePackageSource::External {
+            uri: "file:///".to_owned(),
+        },
+        Vec::new(),
+        Vec::new(),
+    )) {
+        Ok(()) => match root.mail_merge_package() {
+            Ok(Some(package)) => match package.source {
+                MailMergePackageSource::External { uri } if uri == "file:///" => {}
+                other => parser_failures.push(format!("file root source was {other:?}")),
+            },
+            other => parser_failures.push(format!("file root query was {other:?}")),
+        },
+        Err(error) => parser_failures.push(format!("file root assignment was {error}")),
+    }
+    for uri in ["file://host?query=/data", "file://host#frag/path"] {
+        let mut host = Document::new();
+        let before = host.to_bytes().unwrap();
+        match host.set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: uri.to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        )) {
+            Err(_) if host.to_bytes().unwrap() == before => {}
+            other => parser_failures.push(format!("{uri} assignment was {other:?}")),
+        }
+    }
+    assert!(parser_failures.is_empty(), "{}", parser_failures.join("\n"));
+}
+
+#[test]
+fn mail_merge_graph_uses_settings_relationship_scope() {
+    let mut document = Document::new();
+    document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/scope.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "Family", "LastName")],
+            Vec::new(),
+        ))
+        .expect("package before narrow edit");
+    let mut narrow = f290_declared_settings();
+    narrow.active_record = Some(4);
+    document
+        .set_mail_merge_settings(narrow.clone())
+        .expect("narrow 13-member edit");
+    assert_eq!(document.mail_merge_settings(), Some(&narrow));
+    let snapshot = document
+        .mail_merge_package()
+        .expect("graph survives narrow edit")
+        .expect("source still owned");
+    assert_eq!(
+        snapshot.source,
+        MailMergePackageSource::External {
+            uri: "file:///declared/scope.csv".to_owned(),
+        }
+    );
+    assert!(f290_settings_owned(&mut document, F290_MAIL_MERGE_SOURCE));
+    assert!(!f290_main_owns(&mut document, F290_MAIL_MERGE_SOURCE));
+
+    let mut bare = Document::new();
+    bare.set_mail_merge_settings(f290_declared_settings())
+        .expect("recognized settings");
+    let missing = bare.mail_merge_package().unwrap_err();
+    assert!(
+        missing.to_string().contains("source"),
+        "missing required source is Err, observed {missing}"
+    );
+    assert_eq!(
+        bare.mail_merge_settings()
+            .and_then(|item| item.data_type.clone()),
+        Some("textFile".to_owned())
+    );
+
+    let planted = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <u:mailMerge xmlns:u="urn:f290:foreign"><w:dataSource r:id="decoy"/></u:mailMerge>
+  <w:mailMerge w:keepAttr="kept">
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:headerSource r:id="src"><w:keptChild w:flag="yes"/></w:headerSource>
+    <u:odso xmlns:u="urn:f290:foreign"/>
+    <w:odso>
+      <w:udl w:val="keep-udl"/>
+      <w:table w:val="keep-table"/>
+      <w:src r:id="src"/>
+      <w:type w:val="keep-type"/>
+      <w:fHdr w:val="1"/>
+      <x:extra xmlns:x="urn:f290:extra" x:flag="kept"/>
+    </w:odso>
+    <w:nest><w:odso><w:src r:id="nested"/></w:odso></w:nest>
+  </w:mailMerge>
+</w:settings>"#,
+        &[
+            ("src", "file:///declared/shared.csv"),
+            ("decoy", "file:///declared/decoy.csv"),
+            ("nested", "file:///declared/nested.csv"),
+        ],
+    );
+    let inherited = planted
+        .mail_merge_package()
+        .expect("inherited alias and direct path")
+        .expect("real source");
+    assert_eq!(
+        inherited.source,
+        MailMergePackageSource::External {
+            uri: "file:///declared/shared.csv".to_owned(),
+        },
+        "foreign and nested local names are not the settings source"
+    );
+    let mut planted = planted;
+    planted
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/moved.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "Family", "LastName")],
+            Vec::new(),
+        ))
+        .expect("rewrite keeps unknown mail-merge xml");
+    let rewritten = f290_settings_xml(&mut planted);
+    let rewritten_text = String::from_utf8(rewritten.clone()).unwrap();
+    for needle in [
+        "w:keepAttr=\"kept\"",
+        "keep-udl",
+        "keep-table",
+        "keep-type",
+        "w:keptChild",
+        "urn:f290:extra",
+        "x:flag=\"kept\"",
+        "w:fHdr",
+    ] {
+        assert!(
+            rewritten_text.contains(needle),
+            "missing preserved markup {needle}"
+        );
+    }
+    assert!(
+        rewritten_text.contains("r:id=\"src\""),
+        "header keeps the shared relationship id"
+    );
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(planted.to_bytes().unwrap())).unwrap();
+    let rels = package.get_part_rels("/word/settings.xml").unwrap();
+    let shared = rels.items.iter().find(|item| item.id == "src").unwrap();
+    assert_eq!(shared.target, "file:///declared/shared.csv");
+    assert_eq!(shared.rel_type, F290_MAIL_MERGE_SOURCE);
+    assert!(
+        rels.items
+            .iter()
+            .any(|item| item.target == "file:///declared/moved.csv"
+                && item.rel_type == F290_MAIL_MERGE_SOURCE)
+    );
+    let moved = planted
+        .mail_merge_package()
+        .expect("query moved source")
+        .expect("package");
+    assert_eq!(
+        moved.source,
+        MailMergePackageSource::External {
+            uri: "file:///declared/moved.csv".to_owned(),
+        }
+    );
+
+    let opaque = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:mailMerge><w:odso><w:udl w:val="only-udl"/></w:odso></w:mailMerge>
+</w:settings>"#,
+        &[],
+    );
+    assert_eq!(
+        opaque
+            .mail_merge_package()
+            .expect("opaque odso is not a package"),
+        None
+    );
+
+    let shadowed = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<q:settings xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <q:mailMerge xmlns:w="urn:f290:foreign-word">
+    <q:mainDocumentType q:val="formLetters"/>
+    <q:dataType q:val="textFile"/>
+    <q:dataSource xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="src"/>
+  </q:mailMerge>
+</q:settings>"#,
+        &[("src", "file:///declared/shadow.csv")],
+    );
+    let mut shadowed = shadowed;
+    shadowed
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/shadow-moved.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "Family", "LastName")],
+            Vec::new(),
+        ))
+        .expect("shadowed word prefix still authors canonical children");
+    let shadowed_xml = String::from_utf8(f290_settings_xml(&mut shadowed)).unwrap();
+    assert!(
+        shadowed_xml.contains("xmlns:w=\"urn:f290:foreign-word\""),
+        "imported foreign word prefix binding stays"
+    );
+    assert!(
+        shadowed_xml
+            .contains("xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\""),
+        "authored children declare the canonical word namespace"
+    );
+    assert_eq!(
+        shadowed
+            .mail_merge_package()
+            .expect("shadowed query")
+            .expect("package")
+            .source,
+        MailMergePackageSource::External {
+            uri: "file:///declared/shadow-moved.csv".to_owned(),
+        }
+    );
+
+    let mut nested = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso>
+      <w:fieldMapData>
+        <w:type w:val="dbColumn"/>
+        <w:name w:val="Family"><w:kept/></w:name>
+        <w:mappedName w:val="LastName"/>
+        <w:column w:val="0"/>
+      </w:fieldMapData>
+    </w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/nested-leaf.csv")],
+    );
+    let nested_before = nested.to_bytes().unwrap();
+    let nested_error = nested
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/nested-moved.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "Family", "LastName")],
+            Vec::new(),
+        ))
+        .unwrap_err();
+    let nested_message = nested_error.to_string();
+    assert!(
+        nested_message.contains("unknown assignment") || nested_message.contains("field map"),
+        "{nested_message}"
+    );
+    assert_eq!(nested.to_bytes().unwrap(), nested_before);
+
+    let mut stale = Document::new();
+    stale
+        .set_document_variable(
+            "rdocx.mailMerge.storeItemId",
+            "{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}",
+        )
+        .unwrap();
+    let stale_before = stale.to_bytes().unwrap();
+    let stale_error = stale
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/stale.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    let stale_message = stale_error.to_string();
+    assert!(
+        stale_message.contains("stale")
+            || stale_message.contains("not found")
+            || stale_message.contains("store"),
+        "{stale_message}"
+    );
+    assert!(!stale_message.contains("not authored"), "{stale_message}");
+    assert_eq!(stale.to_bytes().unwrap(), stale_before);
+
+    let mut ownership_failures = Vec::new();
+    let map_only = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:mailMerge><w:odso><w:fieldMapData>
+    <w:type w:val="dbColumn"/><w:name w:val="Family"/><w:mappedName w:val="LastName"/><w:column w:val="0"/>
+  </w:fieldMapData></w:odso></w:mailMerge>
+</w:settings>"#,
+        &[],
+    );
+    f290_expect_source_gap(
+        &mut ownership_failures,
+        "field map without source",
+        &map_only,
+    );
+    let null_only = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:mailMerge><w:odso><w:fieldMapData><w:type w:val="null"/></w:fieldMapData></w:odso></w:mailMerge>
+</w:settings>"#,
+        &[],
+    );
+    f290_expect_source_gap(
+        &mut ownership_failures,
+        "null slot without source",
+        &null_only,
+    );
+    let mut recipient_only = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge><w:odso><w:recipientData r:id="gone"/></w:odso></w:mailMerge>
+</w:settings>"#,
+        &[],
+    );
+    f290_expect_contains(
+        &mut ownership_failures,
+        "recipient reference without a target",
+        recipient_only.mail_merge_package(),
+        "recipient",
+    );
+    match recipient_only.remove_mail_merge_package() {
+        Err(error) if error.to_string().contains("recipient") => {}
+        other => ownership_failures.push(format!("recipient remove was {other:?}")),
+    }
+    let bad_header = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:headerSource r:id="missing"/>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/header.csv")],
+    );
+    f290_expect_contains(
+        &mut ownership_failures,
+        "active source with a missing header",
+        bad_header.mail_merge_package(),
+        "header",
+    );
+    match bad_header.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None) {
+        Err(error) if !error.to_string().contains("absent") => {}
+        other => ownership_failures.push(format!("bad header prepare was {other:?}")),
+    }
+    let mut embedded = Document::new();
+    embedded
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["given".to_owned()],
+                records: vec![vec!["Ada".to_owned()]],
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("embedded before mode edit");
+    let mut external_settings =
+        OpcPackage::from_reader(std::io::Cursor::new(embedded.to_bytes().unwrap())).unwrap();
+    external_settings
+        .get_part_rels_mut("/word/document.xml")
+        .expect("document relationships")
+        .items
+        .iter_mut()
+        .filter(|item| item.rel_type.contains("settings"))
+        .for_each(|item| item.target_mode = Some("External".to_owned()));
+    let mut external_settings = Document::from_bytes(&f290_package_bytes(&external_settings))
+        .expect("external settings mode");
+    let external_before = external_settings.to_bytes().unwrap();
+    f290_expect_contains(
+        &mut ownership_failures,
+        "embedded package behind an external settings relationship",
+        external_settings.mail_merge_package(),
+        "settings",
+    );
+    let _ = external_settings.set_mail_merge_package(f290_options(
+        MailMergePackageSource::External {
+            uri: "file:///declared/mode.csv".to_owned(),
+        },
+        Vec::new(),
+        Vec::new(),
+    ));
+    if external_settings.to_bytes().unwrap() != external_before {
+        ownership_failures.push("external settings mode changed bytes".to_owned());
+    }
+    let mut bare = Document::new();
+    bare.set_mail_merge_settings(f290_declared_settings())
+        .unwrap();
+    let bare_before = bare.to_bytes().unwrap();
+    let bare_error = bare.set_mail_merge_package(f290_options(
+        MailMergePackageSource::Embedded {
+            columns: vec!["given".to_owned()],
+            records: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+    ));
+    match bare_error {
+        Err(error)
+            if error.to_string().contains("source") && bare.to_bytes().unwrap() == bare_before => {}
+        other => ownership_failures.push(format!("bare embedded refusal was {other:?}")),
+    }
+    let mut unused = OpcPackage::from_reader(std::io::Cursor::new(bare_before.clone())).unwrap();
+    let relationships = unused.get_or_create_part_rels("/word/settings.xml");
+    relationships.add_with_id("unused", F290_MAIL_MERGE_SOURCE, "file:///unused.csv");
+    relationships.items.last_mut().unwrap().target_mode = Some("External".to_owned());
+    relationships.add_with_id("hdr", F290_MAIL_MERGE_SOURCE, "file:///header.csv");
+    relationships.items.last_mut().unwrap().target_mode = Some("External".to_owned());
+    let mut unused = Document::from_bytes(&f290_package_bytes(&unused)).unwrap();
+    let unused_before = unused.to_bytes().unwrap();
+    let unused_error = unused.set_mail_merge_package(f290_options(
+        MailMergePackageSource::Embedded {
+            columns: vec!["given".to_owned()],
+            records: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+    ));
+    match unused_error {
+        Err(error)
+            if error.to_string().contains("source")
+                && unused.to_bytes().unwrap() == unused_before => {}
+        other => ownership_failures.push(format!(
+            "unused mailMergeSource edge changed the embedded refusal: {other:?}"
+        )),
+    }
+    let native_src = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:dataType w:val="native"/>
+    <w:odso><w:src r:id="rId0"/></w:odso>
+  </w:mailMerge>
+</w:settings>"#;
+    let internal_src = f290_plant_settings(native_src, &[("rId0", "file:///declared/owner.csv")]);
+    match internal_src.mail_merge_package() {
+        Ok(Some(package)) => match package.source {
+            MailMergePackageSource::External { uri } if uri == "file:///declared/owner.csv" => {}
+            other => ownership_failures.push(format!("internal src source was {other:?}")),
+        },
+        other => ownership_failures.push(format!("internal src query was {other:?}")),
+    }
+    match internal_src.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None) {
+        Ok(prepared)
+            if prepared.diagnostics.first().is_some_and(|item| {
+                item.kind == MailMergePackageDiagnosticKind::ExternalSourceBlocked
+            }) => {}
+        other => ownership_failures.push(format!("internal src prepare was {other:?}")),
+    }
+    let mut external_src = f290_externalize_settings(internal_src);
+    let external_src_before = external_src.to_bytes().unwrap();
+    f290_expect_contains(
+        &mut ownership_failures,
+        "external owner hides native src",
+        external_src.mail_merge_package(),
+        "settings",
+    );
+    f290_expect_contains(
+        &mut ownership_failures,
+        "external owner hides native src prepare",
+        external_src.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None),
+        "settings",
+    );
+    let _ = external_src.set_mail_merge_package(f290_options(
+        MailMergePackageSource::External {
+            uri: "file:///declared/replacement.csv".to_owned(),
+        },
+        Vec::new(),
+        Vec::new(),
+    ));
+    if external_src.to_bytes().unwrap() != external_src_before {
+        ownership_failures.push("external src mutation changed bytes".to_owned());
+    }
+    let type_only = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:mailMerge><w:dataType w:val="native"/></w:mailMerge>
+</w:settings>"#;
+    let internal_type = f290_plant_settings(type_only, &[]);
+    f290_expect_source_gap(
+        &mut ownership_failures,
+        "internal dataType without source",
+        &internal_type,
+    );
+    let mut external_type = f290_externalize_settings(internal_type);
+    let external_type_before = external_type.to_bytes().unwrap();
+    f290_expect_contains(
+        &mut ownership_failures,
+        "external owner hides dataType",
+        external_type.mail_merge_package(),
+        "settings",
+    );
+    f290_expect_contains(
+        &mut ownership_failures,
+        "external owner hides dataType prepare",
+        external_type.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None),
+        "settings",
+    );
+    let _ = external_type.remove_mail_merge_package();
+    if external_type.to_bytes().unwrap() != external_type_before {
+        ownership_failures.push("external dataType removal changed bytes".to_owned());
+    }
+    let empty_type = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<settings xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <mailMerge><dataType/></mailMerge>
+</settings>"#;
+    let internal_empty = f290_plant_settings(empty_type, &[]);
+    f290_expect_source_gap(
+        &mut ownership_failures,
+        "default namespace empty dataType",
+        &internal_empty,
+    );
+    let external_empty = f290_externalize_settings(internal_empty);
+    f290_expect_contains(
+        &mut ownership_failures,
+        "external owner hides empty dataType",
+        external_empty.mail_merge_package(),
+        "settings",
+    );
+    let _ = external_empty.prepare_mail_merge_data(MailMergeSourcePolicy::Offline, None);
+    let started_type = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:settings xmlns:a="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <a:mailMerge><a:dataType></a:dataType></a:mailMerge>
+</a:settings>"#;
+    f290_expect_source_gap(
+        &mut ownership_failures,
+        "aliased started dataType",
+        &f290_plant_settings(started_type, &[]),
+    );
+    let foreign = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <m:mailMerge xmlns:m="urn:f290:not-word"><m:dataType m:val="native"/></m:mailMerge>
+</w:settings>"#,
+        &[],
+    );
+    match foreign.mail_merge_package() {
+        Ok(None) => {}
+        other => ownership_failures.push(format!("foreign dataType query was {other:?}")),
+    }
+    let opaque_text = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docVars><w:docVar w:name="note" w:val="rdocx.mailMerge.storeItemId"/></w:docVars>
+  <w:mailMerge><w:odso><w:udl w:val="kept"/></w:odso></w:mailMerge>
+</w:settings>"#,
+        &[],
+    );
+    match opaque_text.mail_merge_package() {
+        Ok(None) => {}
+        other => ownership_failures.push(format!("opaque text query was {other:?}")),
+    }
+    let owned_var = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docVars><w:docVar w:name="rdocx.mailMerge.storeItemId" w:val="{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"/></w:docVars>
+</w:settings>"#;
+    let internal_var = f290_plant_settings(owned_var, &[]);
+    match internal_var.mail_merge_package() {
+        Err(error) if !error.to_string().contains("absent") => {}
+        other => ownership_failures.push(format!("direct owned variable query was {other:?}")),
+    }
+    let mut external_var = f290_externalize_settings(internal_var);
+    let external_var_before = external_var.to_bytes().unwrap();
+    f290_expect_contains(
+        &mut ownership_failures,
+        "external owner hides direct document variable",
+        external_var.mail_merge_package(),
+        "settings",
+    );
+    let _ = external_var.set_mail_merge_package(f290_options(
+        MailMergePackageSource::External {
+            uri: "file:///declared/var.csv".to_owned(),
+        },
+        Vec::new(),
+        Vec::new(),
+    ));
+    if external_var.to_bytes().unwrap() != external_var_before {
+        ownership_failures.push("external document variable mutation changed bytes".to_owned());
+    }
+    let nested_var = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <m:wrap xmlns:m="urn:f290:not-word">
+    <w:docVars><w:docVar w:name="rdocx.mailMerge.storeItemId" w:val="{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"/></w:docVars>
+  </m:wrap>
+</w:settings>"#;
+    let foreign_vars = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <m:docVars xmlns:m="urn:f290:not-word"><m:docVar m:name="rdocx.mailMerge.storeItemId" m:val="{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"/></m:docVars>
+</w:settings>"#;
+    let unrelated_var = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docVars><w:docVar w:name="note" w:val="rdocx.mailMerge.storeItemId"/></w:docVars>
+</w:settings>"#;
+    for (label, xml) in [
+        ("nested qualified docVars", nested_var),
+        ("foreign docVars", foreign_vars),
+        ("unrelated variable text", unrelated_var),
+        (
+            "nested settings under a foreign root child",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <m:wrap xmlns:m="urn:f290:not-word">
+    <w:settings>
+      <w:docVars><w:docVar w:name="rdocx.mailMerge.storeItemId" w:val="{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"/></w:docVars>
+    </w:settings>
+  </m:wrap>
+</w:settings>"#,
+        ),
+    ] {
+        let planted = f290_plant_settings(xml, &[]);
+        match planted.mail_merge_package() {
+            Ok(None) => {}
+            other => ownership_failures.push(format!("{label} query was {other:?}")),
+        }
+        match f290_externalize_settings(planted).mail_merge_package() {
+            Ok(None) => {}
+            other => ownership_failures.push(format!("{label} external query was {other:?}")),
+        }
+    }
+    assert!(
+        ownership_failures.is_empty(),
+        "{}",
+        ownership_failures.join("\n")
+    );
+}
+
+#[test]
+fn merge_package_mutations_preserve_unowned_parts_and_refuse_ambiguity() {
+    let mut document = Document::new();
+    let store = br#"<mergeData xmlns="urn:rdocx:mail-merge-data:v1"><columns><column name="kept"/></columns><records/></mergeData>"#;
+    let unowned = document
+        .add_custom_xml_store(store, &["urn:unowned:mail-merge-test"])
+        .expect("unowned store");
+    let owned_store = f290_exact_parts(&f290_part_inventory(&mut document), store);
+    let owned_guid = f290_parts_containing(&f290_part_inventory(&mut document), unowned.as_bytes());
+    assert!(!owned_store.is_empty(), "input store bytes are one part");
+    assert!(!owned_guid.is_empty(), "unowned guid is stored in a part");
+    document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["a".to_owned()],
+                records: Vec::new(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"one", true)],
+        ))
+        .expect("owned package beside unowned store");
+    let mut reopened = f290_reopen(&mut document);
+    assert_eq!(
+        f290_exact_parts(&f290_part_inventory(&mut reopened), store),
+        owned_store
+    );
+    assert_eq!(
+        f290_parts_containing(&f290_part_inventory(&mut reopened), unowned.as_bytes()),
+        owned_guid
+    );
+    assert!(document.remove_mail_merge_package().expect("first remove"));
+    assert_eq!(
+        document.mail_merge_package().expect("query after remove"),
+        None
+    );
+    assert!(!document.remove_mail_merge_package().expect("second remove"));
+    assert_eq!(
+        f290_exact_parts(&f290_part_inventory(&mut document), store),
+        owned_store
+    );
+    assert_eq!(
+        f290_parts_containing(&f290_part_inventory(&mut document), unowned.as_bytes()),
+        owned_guid
+    );
+
+    let mut ambiguous = Document::new();
+    ambiguous
+        .set_document_variable(
+            "rdocx.mailMerge.storeItemId",
+            "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}",
+        )
+        .unwrap();
+    ambiguous
+        .set_mail_merge_settings(f290_declared_settings())
+        .unwrap();
+    let before = ambiguous.to_bytes().unwrap();
+    let before_parts = f290_part_inventory(&mut ambiguous);
+    let error = ambiguous
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/other.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("ambigu"),
+        "ambiguous ownership refuses before mutation, observed {message}"
+    );
+    assert!(
+        !message.contains("not authored"),
+        "placeholder is not the ambiguity result, observed {message}"
+    );
+    assert_eq!(ambiguous.to_bytes().unwrap(), before);
+    assert_eq!(f290_part_inventory(&mut ambiguous), before_parts);
+
+    let mut shared = Document::new();
+    shared
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/shared-people.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"one", true)],
+        ))
+        .expect("recipient owner");
+    let mut shared_package =
+        OpcPackage::from_reader(std::io::Cursor::new(shared.to_bytes().unwrap())).unwrap();
+    let recipient_part = shared_package
+        .parts
+        .keys()
+        .find(|name| name.contains("recipientData"))
+        .cloned()
+        .expect("recipient part");
+    let recipient_bytes = shared_package.get_part(&recipient_part).unwrap().to_vec();
+    shared_package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "rIdKeep",
+            F290_RECIPIENT_DATA,
+            recipient_part.rsplit('/').next().unwrap_or(&recipient_part),
+        );
+    let mut shared = Document::from_bytes(&f290_package_bytes(&shared_package)).unwrap();
+    let shared_before = shared.to_bytes().unwrap();
+    let shared_edit = shared
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/shared-people.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(1, b"two", false)],
+        ))
+        .unwrap_err();
+    assert!(
+        shared_edit.to_string().contains("shared") || shared_edit.to_string().contains("recipient"),
+        "{shared_edit}"
+    );
+    assert_eq!(shared.to_bytes().unwrap(), shared_before);
+    assert!(
+        shared
+            .remove_mail_merge_package()
+            .expect("drop owned recipient ref")
+    );
+    assert_eq!(
+        shared
+            .mail_merge_package()
+            .expect("query after shared remove"),
+        None
+    );
+    assert!(
+        !shared
+            .remove_mail_merge_package()
+            .expect("second shared remove")
+    );
+    let after_shared = f290_part_inventory(&mut shared);
+    assert_eq!(
+        after_shared.get(&recipient_part).map(Vec::as_slice),
+        Some(recipient_bytes.as_slice())
+    );
+
+    let mut paired = Document::new();
+    paired
+        .set_mail_merge_settings(f290_declared_settings())
+        .unwrap();
+    let mut paired_package =
+        OpcPackage::from_reader(std::io::Cursor::new(paired.to_bytes().unwrap())).unwrap();
+    paired_package.set_part("/word/recipientStandard.xml", b"<kept-standard>".to_vec());
+    paired_package.content_types.add_override(
+        "/word/recipientStandard.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml",
+    );
+    paired_package.set_part("/word/recipientAlternate.xml", b"<kept-alternate>".to_vec());
+    paired_package.content_types.add_override(
+        "/word/recipientAlternate.xml",
+        "application/vnd.ms-word.mailMergeRecipientData+xml",
+    );
+    let mut paired = Document::from_bytes(&f290_package_bytes(&paired_package)).unwrap();
+    let paired_before = paired.to_bytes().unwrap();
+    let paired_error = paired
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/capacity.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(
+        paired_error.to_string().contains("recipient"),
+        "{paired_error}"
+    );
+    assert_eq!(paired.to_bytes().unwrap(), paired_before);
+
+    let mut idle = Document::new();
+    let mut idle_package =
+        OpcPackage::from_reader(std::io::Cursor::new(idle.to_bytes().unwrap())).unwrap();
+    idle_package.set_part("/word/recipientIdle.xml", b"<kept-idle>".to_vec());
+    idle_package.content_types.add_override(
+        "/word/recipientIdle.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.mailMergeRecipientData+xml",
+    );
+    let mut idle = Document::from_bytes(&f290_package_bytes(&idle_package)).unwrap();
+    assert_eq!(
+        idle.mail_merge_package()
+            .expect("idle recipient is not a package"),
+        None
+    );
+    assert!(!idle.remove_mail_merge_package().expect("idle remove"));
+    let idle_before = idle.to_bytes().unwrap();
+    let idle_error = idle
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/idle.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"new", true)],
+        ))
+        .unwrap_err();
+    assert!(idle_error.to_string().contains("recipient"), "{idle_error}");
+    assert_eq!(idle.to_bytes().unwrap(), idle_before);
+
+    let mut broken_ref = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso><w:recipientData r:id="gone"/></w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/broken.csv")],
+    );
+    assert!(
+        broken_ref.mail_merge_package().is_err(),
+        "missing recipient target"
+    );
+    let broken_before = broken_ref.to_bytes().unwrap();
+    let broken_set = broken_ref
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/replaced.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(
+        broken_set.to_string().contains("recipient") || broken_set.to_string().contains("missing"),
+        "{broken_set}"
+    );
+    assert_eq!(broken_ref.to_bytes().unwrap(), broken_before);
+
+    let mut unsafe_clear = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso><u:src xmlns:u="urn:f290:foreign"/><w:src r:id="src"/></w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/shaped.csv")],
+    );
+    assert!(
+        unsafe_clear
+            .mail_merge_package()
+            .expect("qualified source still queries")
+            .is_some()
+    );
+    let shaped_before = unsafe_clear.to_bytes().unwrap();
+    let clear_error = unsafe_clear.remove_mail_merge_package().unwrap_err();
+    assert!(
+        clear_error.to_string().contains("source") || clear_error.to_string().contains("prove"),
+        "{clear_error}"
+    );
+    assert_eq!(unsafe_clear.to_bytes().unwrap(), shaped_before);
+    assert!(
+        unsafe_clear
+            .mail_merge_package()
+            .expect("not falsely cleared")
+            .is_some()
+    );
+
+    let mode_cases = [
+        ("Internal", true, "internal mode stays an owned edge"),
+        ("External", false, "external"),
+        ("OtherMode", false, "mode"),
+    ];
+    for (mode, allowed, needle) in mode_cases {
+        let mut host = Document::new();
+        host.set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/mode.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"mode-tag", true)],
+        ))
+        .expect("mode host");
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(host.to_bytes().unwrap())).unwrap();
+        {
+            let rels = package.get_or_create_part_rels("/word/settings.xml");
+            let rel = rels
+                .items
+                .iter_mut()
+                .find(|item| item.rel_type == F290_RECIPIENT_DATA)
+                .expect("recipient relationship");
+            rel.target_mode = Some(mode.to_owned());
+        }
+        let mut host = Document::from_bytes(&f290_package_bytes(&package)).unwrap();
+        let before = host.to_bytes().unwrap();
+        if allowed {
+            let snapshot = host.mail_merge_package().expect(needle).expect("package");
+            assert_eq!(
+                snapshot.recipients,
+                vec![f290_recipient(0, b"mode-tag", true)]
+            );
+            assert_eq!(host.to_bytes().unwrap(), before, "{needle}");
+        } else {
+            let refused = host
+                .set_mail_merge_package(f290_options(
+                    MailMergePackageSource::External {
+                        uri: "file:///declared/mode-next.csv".to_owned(),
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                ))
+                .unwrap_err();
+            assert!(
+                refused.to_string().contains(needle) || refused.to_string().contains("recipient"),
+                "{mode}: {refused}"
+            );
+            assert_eq!(host.to_bytes().unwrap(), before, "{mode}");
+        }
+    }
+
+    let mut outgoing = Document::new();
+    outgoing
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/outgoing.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"out", true)],
+        ))
+        .expect("outgoing host");
+    let mut outgoing_package =
+        OpcPackage::from_reader(std::io::Cursor::new(outgoing.to_bytes().unwrap())).unwrap();
+    let outgoing_part = outgoing_package
+        .parts
+        .keys()
+        .find(|name| name.contains("recipientData"))
+        .cloned()
+        .expect("outgoing part");
+    outgoing_package
+        .get_or_create_part_rels(&outgoing_part)
+        .add_with_id(
+            "rIdOut",
+            F290_MAIL_MERGE_SOURCE,
+            "file:///declared/outgoing-edge.csv",
+        );
+    let mut outgoing = Document::from_bytes(&f290_package_bytes(&outgoing_package)).unwrap();
+    let outgoing_before = outgoing.to_bytes().unwrap();
+    let outgoing_error = outgoing
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/outgoing.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(
+        outgoing_error.to_string().contains("outgoing"),
+        "{outgoing_error}"
+    );
+    assert_eq!(outgoing.to_bytes().unwrap(), outgoing_before);
+
+    let mut duplicated_refs = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso><w:recipientData r:id="r1"/><w:recipientData r:id="r2"/></w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/dup-ref.csv")],
+    );
+    let duplicated_before = duplicated_refs.to_bytes().unwrap();
+    let duplicated_error = duplicated_refs
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/dup-ref.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(
+        duplicated_error.to_string().contains("duplicated"),
+        "{duplicated_error}"
+    );
+    assert_eq!(duplicated_refs.to_bytes().unwrap(), duplicated_before);
+
+    let mut wrong_type = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/wrong-type.csv")],
+    );
+    {
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(wrong_type.to_bytes().unwrap())).unwrap();
+        let rels = package.get_or_create_part_rels("/word/settings.xml");
+        let rel = rels
+            .items
+            .iter_mut()
+            .find(|item| item.id == "src")
+            .expect("source relationship");
+        rel.rel_type =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+                .to_owned();
+        wrong_type = Document::from_bytes(&f290_package_bytes(&package)).unwrap();
+    }
+    let wrong_before = wrong_type.to_bytes().unwrap();
+    let wrong_error = wrong_type
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/wrong-type.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(
+        wrong_error.to_string().contains("mailMergeSource")
+            || wrong_error.to_string().contains("source"),
+        "{wrong_error}"
+    );
+    assert_eq!(wrong_type.to_bytes().unwrap(), wrong_before);
+
+    let mut braced = Document::new();
+    braced
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["given".to_owned()],
+                records: vec![vec!["Ada".to_owned()]],
+            },
+            vec![f290_mapping(0, "given", "FirstName")],
+            Vec::new(),
+        ))
+        .expect("guid host");
+    let mut braced_package =
+        OpcPackage::from_reader(std::io::Cursor::new(braced.to_bytes().unwrap())).unwrap();
+    let mut settings = String::from_utf8(
+        braced_package
+            .get_part("/word/settings.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let marker = settings
+        .find("rdocx.mailMerge.storeItemId")
+        .expect("store docVar");
+    let val_at =
+        settings[marker..].find("w:val=\"").expect("docVar value") + marker + "w:val=\"".len();
+    let val_end = settings[val_at..].find('"').expect("docVar end") + val_at;
+    let canonical = settings[val_at..val_end].to_owned();
+    let equivalent = format!("{{{}}}", canonical.to_ascii_uppercase());
+    settings.replace_range(val_at..val_end, &equivalent);
+    braced_package.set_part("/word/settings.xml", settings.into_bytes());
+    let braced = Document::from_bytes(&f290_package_bytes(&braced_package)).unwrap();
+    let equivalent_view = braced
+        .mail_merge_package()
+        .expect("brace query")
+        .expect("package");
+    assert_eq!(equivalent_view.mappings[0].source_name, "given");
+    assert_eq!(
+        equivalent_view.source,
+        MailMergePackageSource::Embedded {
+            columns: vec!["given".to_owned()],
+            records: vec![vec!["Ada".to_owned()]],
+        }
+    );
+    let item_part = braced_package
+        .parts
+        .keys()
+        .find(|name| name.contains("customXml/item") && !name.contains("Props"))
+        .cloned()
+        .expect("store item");
+    let props_rel = braced_package
+        .get_part_rels(&item_part)
+        .expect("item rels")
+        .items
+        .iter()
+        .find(|item| item.rel_type.contains("customXmlProps"))
+        .cloned()
+        .expect("props rel");
+    let props_part = OpcPackage::resolve_rel_target(&item_part, &props_rel.target);
+    let item_bytes = braced_package.get_part(&item_part).unwrap().to_vec();
+    let props_bytes = braced_package.get_part(&props_part).unwrap().to_vec();
+    braced_package.set_part("/customXml/item9.xml", item_bytes);
+    braced_package.set_part("/customXml/itemProps9.xml", props_bytes);
+    braced_package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "rIdDupStore",
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+            "../customXml/item9.xml",
+        );
+    braced_package
+        .get_or_create_part_rels("/customXml/item9.xml")
+        .add_with_id("rIdDupProps", &props_rel.rel_type, "itemProps9.xml");
+    let mut duplicated_store = Document::from_bytes(&f290_package_bytes(&braced_package)).unwrap();
+    let store_before = duplicated_store.to_bytes().unwrap();
+    let store_error = duplicated_store
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["given".to_owned()],
+                records: vec![vec!["Grace".to_owned()]],
+            },
+            vec![f290_mapping(0, "given", "FirstName")],
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(store_error.to_string().contains("ambigu"), "{store_error}");
+    assert_eq!(duplicated_store.to_bytes().unwrap(), store_before);
+
+    let mut payload_failures = Vec::new();
+    for (label, item_xml) in [
+        (
+            "foreign root",
+            br#"<foreign xmlns="urn:rdocx:mail-merge-data:v1"/>"#.as_slice(),
+        ),
+        (
+            "producer attribute",
+            br#"<mergeData producer="kept" xmlns="urn:rdocx:mail-merge-data:v1"><columns><column name="given"/></columns><records><record><cell>Ada</cell></record></records></mergeData>"#.as_slice(),
+        ),
+        (
+            "ragged row",
+            br#"<mergeData xmlns="urn:rdocx:mail-merge-data:v1"><columns><column name="given"/></columns><records><record><cell>Ada</cell><cell>extra</cell></record></records></mergeData>"#.as_slice(),
+        ),
+    ] {
+        let mut host = Document::new();
+        host.set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["given".to_owned()],
+                records: vec![vec!["Ada".to_owned()]],
+            },
+            vec![f290_mapping(0, "given", "FirstName")],
+            Vec::new(),
+        ))
+        .expect(label);
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(host.to_bytes().unwrap())).unwrap();
+        let item_part = package
+            .parts
+            .keys()
+            .find(|name| name.contains("customXml/item") && !name.contains("Props"))
+            .cloned()
+            .expect(label);
+        package.set_part(&item_part, item_xml.to_vec());
+        let mut poisoned = Document::from_bytes(&f290_package_bytes(&package)).unwrap();
+        let before = f290_part_inventory(&mut poisoned);
+        match poisoned.mail_merge_package() {
+            Err(_) => {}
+            Ok(value) => payload_failures.push(format!("{label} query returned {value:?}")),
+        }
+        let embedded_set = poisoned.set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["given".to_owned()],
+                records: vec![vec!["Grace".to_owned()]],
+            },
+            vec![f290_mapping(0, "given", "FirstName")],
+            Vec::new(),
+        ));
+        if embedded_set.is_ok() {
+            payload_failures.push(format!("{label} embedded assignment succeeded"));
+        }
+        let external_set = poisoned.set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/replace.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ));
+        if external_set.is_ok() {
+            payload_failures.push(format!("{label} external assignment succeeded"));
+        }
+        if f290_part_inventory(&mut poisoned) != before {
+            payload_failures.push(format!("{label} changed package parts"));
+        }
+    }
+    assert!(
+        payload_failures.is_empty(),
+        "{}",
+        payload_failures.join("\n")
+    );
+}
+
+#[test]
+fn author_mail_merge_mappings_use_word_slots() {
+    let mut document = Document::new();
+    document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/slots.csv".to_owned(),
+            },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("empty mappings");
+    let empty = document
+        .mail_merge_package()
+        .expect("read empty mappings")
+        .expect("package");
+    assert!(empty.mappings.is_empty());
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let settings =
+        String::from_utf8(package.get_part("/word/settings.xml").unwrap().to_vec()).unwrap();
+    assert_eq!(settings.matches("w:val=\"null\"").count(), 30);
+    assert!(!settings.contains("dbColumn"));
+    for role in F290_WORD_ROLES {
+        assert!(
+            !empty.mappings.iter().any(|item| item.mapped_name == role),
+            "{role} must not be returned as padding"
+        );
+    }
+
+    document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::Embedded {
+                columns: vec!["given".to_owned(), "family".to_owned(), "dept".to_owned()],
+                records: vec![vec![
+                    "Ada".to_owned(),
+                    "Lovelace".to_owned(),
+                    "Eng".to_owned(),
+                ]],
+            },
+            vec![
+                f290_mapping(2, "dept", "Department"),
+                f290_mapping(0, "given", "FirstName"),
+                f290_mapping(1, "family", "LastName"),
+            ],
+            Vec::new(),
+        ))
+        .expect("out-of-order roles");
+    let snapshot = document
+        .mail_merge_package()
+        .expect("read slots")
+        .expect("slots");
+    assert_eq!(
+        snapshot
+            .mappings
+            .iter()
+            .map(|item| item.mapped_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["FirstName", "LastName", "Department"]
+    );
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let settings =
+        String::from_utf8(package.get_part("/word/settings.xml").unwrap().to_vec()).unwrap();
+    assert_eq!(settings.matches("dbColumn").count(), 3);
+    assert_eq!(settings.matches("w:val=\"null\"").count(), 27);
+
+    let before = document.to_bytes().unwrap();
+    let invalid = document
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/slots.csv".to_owned(),
+            },
+            vec![f290_mapping(0, "given", "NotARole")],
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(
+        invalid.to_string().contains("NotARole")
+            || invalid.to_string().contains("role")
+            || invalid.to_string().contains("not authored"),
+        "{invalid}"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    let duplicate = document.set_mail_merge_package(f290_options(
+        MailMergePackageSource::Embedded {
+            columns: vec!["given".to_owned(), "family".to_owned()],
+            records: Vec::new(),
+        },
+        vec![
+            f290_mapping(0, "given", "LastName"),
+            f290_mapping(1, "family", "LastName"),
+        ],
+        Vec::new(),
+    ));
+    assert!(duplicate.is_err());
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let mut authored = Document::new();
+    let authored_before = authored.to_bytes().unwrap();
+    authored
+        .set_mail_merge_package(f290_options(
+            MailMergePackageSource::External {
+                uri: "file:///declared/slots.csv".to_owned(),
+            },
+            Vec::new(),
+            vec![f290_recipient(0, b"opaque", true)],
+        ))
+        .expect("standard recipient part");
+    assert_ne!(authored.to_bytes().unwrap(), authored_before);
+    assert_eq!(
+        authored
+            .mail_merge_package()
+            .expect("read recipient")
+            .expect("package")
+            .recipients,
+        vec![f290_recipient(0, b"opaque", true)]
+    );
+
+    let mut exact = f290_declared_settings();
+    exact.connect_string = Some("a\tb\rc\nd".to_owned());
+    exact.query = Some("q\tq".to_owned());
+    exact.address_field_name = Some("n\nn".to_owned());
+    let mut mapping = f290_mapping(0, "a\tb", "FirstName");
+    mapping.language = Some("en\rUS".to_owned());
+    let mut spaced = Document::new();
+    spaced
+        .set_mail_merge_package(MailMergePackageOptions {
+            settings: exact,
+            source: MailMergePackageSource::Embedded {
+                columns: vec!["a\tb".to_owned()],
+                records: Vec::new(),
+            },
+            mappings: vec![mapping],
+            recipients: Vec::new(),
+        })
+        .expect("exact attribute escapes");
+    let spaced_xml = String::from_utf8(f290_settings_xml(&mut spaced)).unwrap();
+    for needle in [
+        "a&#9;b&#13;c&#10;d",
+        "q&#9;q",
+        "n&#10;n",
+        "a&#9;b",
+        "en&#13;US",
+    ] {
+        assert!(
+            spaced_xml.contains(needle),
+            "missing exact attribute {needle} in {spaced_xml}"
+        );
+    }
+    let spaced = f290_reopen(&mut spaced);
+    let spaced_settings = spaced.mail_merge_settings().expect("settings");
+    assert_eq!(
+        spaced_settings.connect_string.as_deref(),
+        Some("a\tb\rc\nd")
+    );
+    assert_eq!(spaced_settings.query.as_deref(), Some("q\tq"));
+    assert_eq!(spaced_settings.address_field_name.as_deref(), Some("n\nn"));
+    let spaced_package = spaced.mail_merge_package().expect("read").expect("package");
+    assert_eq!(spaced_package.mappings[0].source_name, "a\tb");
+    assert_eq!(
+        spaced_package.mappings[0].language.as_deref(),
+        Some("en\rUS")
+    );
+
+    let dynamic = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso>
+      <w:fieldMapData><w:type w:val="dbColumn"/><w:name w:val="Family"/><w:mappedName w:val="LastName"/><w:column w:val="0"/></w:fieldMapData>
+      <w:fieldMapData><w:type w:val="dbColumn"/><w:name w:val="Given"/><w:mappedName w:val="FirstName"/><w:column w:val="1"/><w:dynamicAddress/></w:fieldMapData>
+      <w:fieldMapData><w:type w:val="dbColumn"/><w:name w:val="City"/><w:mappedName w:val="City"/><w:column w:val="2"/><w:dynamicAddress w:val="on"/></w:fieldMapData>
+      <w:fieldMapData><w:type w:val="dbColumn"/><w:name w:val="State"/><w:mappedName w:val="State"/><w:column w:val="3"/><w:dynamicAddress w:val="off"/></w:fieldMapData>
+      <w:fieldMapData><w:type w:val="dbColumn"/><w:name w:val="Zip"/><w:mappedName w:val="PostalCode"/><w:column w:val="4"/><w:dynamicAddress w:val="false"/></w:fieldMapData>
+    </w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/dynamic.csv")],
+    );
+    let dynamic_view = dynamic
+        .mail_merge_package()
+        .expect("dynamic query")
+        .expect("package");
+    assert_eq!(
+        dynamic_view
+            .mappings
+            .iter()
+            .map(|item| item.dynamic_address)
+            .collect::<Vec<_>>(),
+        vec![None, Some(true), Some(true), Some(false), Some(false)]
+    );
+    let mut dynamic = dynamic;
+    let before_narrow = f290_settings_xml(&mut dynamic);
+    let mut narrow = dynamic.mail_merge_settings().unwrap().clone();
+    narrow.active_record = Some(2);
+    dynamic
+        .set_mail_merge_settings(narrow)
+        .expect("narrow edit keeps dynamic spellings");
+    let after_narrow = String::from_utf8(f290_settings_xml(&mut dynamic)).unwrap();
+    let before_narrow = String::from_utf8(before_narrow).unwrap();
+    for needle in [
+        "<w:dynamicAddress/>",
+        "w:val=\"on\"",
+        "w:val=\"off\"",
+        "w:val=\"false\"",
+    ] {
+        assert!(before_narrow.contains(needle), "{needle}");
+        assert!(after_narrow.contains(needle), "narrow edit lost {needle}");
+    }
+    let duplicated = f290_plant_settings(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:mailMerge>
+    <w:mainDocumentType w:val="formLetters"/>
+    <w:dataType w:val="textFile"/>
+    <w:dataSource r:id="src"/>
+    <w:odso><w:fieldMapData>
+      <w:type w:val="dbColumn"/><w:name w:val="Family"/><w:mappedName w:val="LastName"/><w:column w:val="0"/>
+      <w:dynamicAddress/><w:dynamicAddress/>
+    </w:fieldMapData></w:odso>
+  </w:mailMerge>
+</w:settings>"#,
+        &[("src", "file:///declared/duplicate-dynamic.csv")],
+    );
+    assert!(
+        duplicated.mail_merge_package().is_err(),
+        "duplicate empty dynamicAddress is a duplicate"
+    );
+}
+
+fn fx268_document_with_xml(xml: &str) -> Document {
+    let seed = Document::new().to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed)).unwrap();
+    let part = package.main_document_part().unwrap();
+    package.set_part(&part, xml.as_bytes().to_vec());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+#[test]
+fn checked_body_insertions_refuse_unsavable_namespace_owners_atomically() {
+    let mut valid = Document::new();
+    valid.try_add_paragraph("kept").unwrap();
+    valid.try_add_table(0, 0).unwrap();
+    valid.try_insert_paragraph(1, "mid").unwrap();
+    valid.try_insert_table(1, 0, 1).unwrap();
+    assert_eq!(valid.content_count(), 4);
+    assert!(valid.to_bytes().is_ok());
+
+    let before_bad = valid.content_count();
+    match valid.try_insert_paragraph(9, "\u{0001}") {
+        Err(rdocx::Error::Other(message)) => {
+            assert!(message.contains("content index"), "{message}")
+        }
+        Err(error) => panic!("invalid index is Other before XML: {error}"),
+        Ok(_) => panic!("invalid index was accepted"),
+    }
+    match valid.try_add_paragraph("\u{0001}") {
+        Err(rdocx::Error::Oxml(error)) => {
+            let message = error.to_string();
+            assert!(message.contains("paragraph text"), "{message}");
+        }
+        Err(error) => panic!("invalid text is Oxml: {error}"),
+        Ok(_) => panic!("invalid text was accepted"),
+    }
+    match valid.try_insert_table(9, 0, 0) {
+        Err(rdocx::Error::Other(_)) => {}
+        Err(error) => panic!("invalid table index is Other: {error}"),
+        Ok(_) => panic!("invalid table index was accepted"),
+    }
+    assert_eq!(valid.content_count(), before_bad);
+
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut opened = fx268_document_with_xml(&format!(
+        r#"<w:document xmlns:w="{word}" xmlns="urn:producer"><w:body><w:p/><w:p/><w:p/><producer/></w:body></w:document>"#
+    ));
+    let readonly = opened
+        .to_bytes()
+        .expect("read-only save of the shadowed fixture");
+    let mut legacy = opened;
+    legacy.add_paragraph("legacy");
+    assert!(legacy.content_count() > 3);
+    let legacy_save = legacy.to_bytes().unwrap_err().to_string();
+    assert!(
+        legacy_save.contains("shadowed `default` namespace"),
+        "{legacy_save}"
+    );
+    let counts = (
+        legacy.content_count(),
+        legacy.paragraph_count(),
+        legacy.table_count(),
+    );
+    let text = legacy.text();
+    let paragraph_xml = legacy
+        .direct_body_paragraph_xml(0)
+        .unwrap()
+        .expect("direct body paragraph bytes");
+    let refused = [
+        legacy.try_add_paragraph("nope").map(|_| ()),
+        legacy.try_insert_paragraph(0, "nope").map(|_| ()),
+        legacy.try_add_table(1, 1).map(|_| ()),
+        legacy.try_insert_table(0, 1, 1).map(|_| ()),
+    ];
+    for result in refused {
+        let error = result.unwrap_err().to_string();
+        assert_eq!(error, legacy_save);
+    }
+    assert_eq!(
+        (
+            legacy.content_count(),
+            legacy.paragraph_count(),
+            legacy.table_count()
+        ),
+        counts
+    );
+    assert_eq!(legacy.text(), text);
+    assert_eq!(
+        legacy
+            .direct_body_paragraph_xml(0)
+            .unwrap()
+            .expect("direct body paragraph bytes"),
+        paragraph_xml
+    );
+    match legacy.try_insert_paragraph(9, "\u{0001}") {
+        Err(rdocx::Error::Other(message)) => {
+            assert!(message.contains("content index"), "{message}")
+        }
+        Err(error) => panic!("hazard index is Other before XML and namespace: {error}"),
+        Ok(_) => panic!("hazard invalid index was accepted"),
+    }
+    match legacy.try_insert_paragraph(0, "\u{0001}") {
+        Err(rdocx::Error::Oxml(error)) => {
+            let message = error.to_string();
+            assert!(message.contains("paragraph text"), "{message}");
+        }
+        Err(error) => panic!("hazard XML is Oxml before namespace: {error}"),
+        Ok(_) => panic!("hazard invalid text was accepted"),
+    }
+    match legacy.try_insert_table(9, 0, 0) {
+        Err(rdocx::Error::Other(_)) => {}
+        Err(error) => panic!("hazard table index is Other: {error}"),
+        Ok(_) => panic!("hazard table index was accepted"),
+    }
+    assert_eq!(
+        (
+            legacy.content_count(),
+            legacy.paragraph_count(),
+            legacy.table_count()
+        ),
+        counts
+    );
+    assert_eq!(legacy.text(), text);
+    assert_eq!(
+        legacy
+            .direct_body_paragraph_xml(0)
+            .unwrap()
+            .expect("direct body paragraph bytes"),
+        paragraph_xml
+    );
+    assert_eq!(legacy.to_bytes().unwrap_err().to_string(), legacy_save);
+    assert!(!readonly.is_empty());
+
+    let sdt = |text: &str| {
+        format!(
+            r#"<w:sdt xmlns:x="urn:x"><w:sdtPr><x:meta/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+        )
+    };
+    let mut distinct = fx268_document_with_xml(&format!(
+        r#"<w:document xmlns:w="{word}"><w:body><w:p><w:r><w:t>keep</w:t></w:r></w:p>{}{}</w:body></w:document>"#,
+        sdt("left"),
+        sdt("right")
+    ));
+    assert_eq!(
+        distinct.unsavable_body_edit(),
+        None,
+        "distinct sdt text still has a namespace-owner proof"
+    );
+    distinct
+        .paragraph_mut(2)
+        .expect("right paragraph")
+        .set_text("left")
+        .unwrap();
+    let collided = distinct.to_bytes().unwrap_err().to_string();
+    assert!(
+        collided.contains("namespace"),
+        "collided owners must fail save: {collided}"
+    );
+    let collided_counts = (
+        distinct.content_count(),
+        distinct.paragraph_count(),
+        distinct.table_count(),
+    );
+    let collided_text = distinct.text();
+    let collided_paragraph = distinct
+        .direct_body_paragraph_xml(0)
+        .unwrap()
+        .expect("plain keep paragraph");
+    match distinct.try_add_paragraph("blocked") {
+        Err(error) => assert_eq!(error.to_string(), collided),
+        Ok(_) => panic!("stale savable cache accepted a checked paragraph"),
+    }
+    assert_eq!(
+        (
+            distinct.content_count(),
+            distinct.paragraph_count(),
+            distinct.table_count()
+        ),
+        collided_counts
+    );
+    assert_eq!(distinct.text(), collided_text);
+    assert_eq!(
+        distinct
+            .direct_body_paragraph_xml(0)
+            .unwrap()
+            .expect("plain keep paragraph"),
+        collided_paragraph
+    );
+    distinct
+        .paragraph_mut(2)
+        .expect("right paragraph")
+        .set_text("right")
+        .unwrap();
+    distinct.try_add_paragraph("after-restore").unwrap();
+    assert!(distinct.to_bytes().is_ok());
+
+    let mut still_legacy = fx268_document_with_xml(&format!(
+        r#"<w:document xmlns:w="{word}" xmlns="urn:producer"><w:body><w:p/><producer/></w:body></w:document>"#
+    ));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = still_legacy.insert_paragraph(4, "legacy-panic");
+    }));
+    assert!(panicked.is_err(), "legacy insert still panics past the end");
 }

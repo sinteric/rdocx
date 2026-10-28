@@ -1,8 +1,10 @@
 //! Deterministic evaluation of PresentationML timing trees.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use oxml_layout::{Diagnostic, Path, PathCommand, Point, Rect, Transform};
+use oxml_layout::{
+    Color, Diagnostic, Effect, GradientStop, Path, PathCommand, Point, Rect, Transform,
+};
 use rpptx_oxml::timing::{
     CT_SlideTransition, CT_Timing, CommonTimeNode, MediaCommandKind, TimingAnimate,
     TimingCondition, TimingContainer, TimingDuration, TimingEffect, TimingEvent, TimingFill,
@@ -47,6 +49,7 @@ pub struct EvaluatedShapeState {
     pub clip: Option<Rect>,
     animation: EvaluatedAnimationTransform,
     oriented_clips: Vec<[Point; 4]>,
+    wipe: Option<EvaluatedWipe>,
 }
 
 impl Default for EvaluatedShapeState {
@@ -58,8 +61,17 @@ impl Default for EvaluatedShapeState {
             clip: None,
             animation: EvaluatedAnimationTransform::default(),
             oriented_clips: Vec::new(),
+            wipe: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct EvaluatedWipe {
+    direction: String,
+    progress: f64,
+    exiting: bool,
+    authored_clip: Rect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,7 +118,10 @@ impl EvaluatedShapeState {
             y: point.y * size.1,
         };
         let mut paths = Vec::new();
-        if let Some(clip) = self.clip {
+        if let Some(clip) = self
+            .clip
+            .filter(|_| self.local_opacity_mask(size).is_none())
+        {
             paths.push(Path::rect(Rect {
                 x: clip.x * size.0,
                 y: clip.y * size.1,
@@ -127,6 +142,67 @@ impl EvaluatedShapeState {
             });
         }
         paths
+    }
+
+    pub(crate) fn retain_source_wipe(&mut self, source: &Self) {
+        self.wipe = source
+            .wipe
+            .as_ref()
+            .filter(|wipe| {
+                self.clip == Some(wipe.authored_clip) && source.clip == Some(wipe.authored_clip)
+            })
+            .cloned();
+    }
+
+    /// Project an unchanged evaluator-authored soft wipe into child-local paint.
+    /// Editing or clearing the public clip disables the automatic mask. PDF
+    /// ignores group effects under its existing unsupported-effect boundary.
+    pub fn local_opacity_mask(&self, size: (f64, f64)) -> Option<Effect> {
+        let wipe = self.wipe.as_ref()?;
+        if self.clip != Some(wipe.authored_clip) || !(0.0..1.0).contains(&wipe.progress) {
+            return None;
+        }
+        let first = (8.0 * wipe.progress - 1.0) / 7.0;
+        let last = 8.0 * wipe.progress / 7.0;
+        let point = |u: f64| match wipe.direction.as_str() {
+            "right" => Point {
+                x: (1.0 - u) * size.0,
+                y: 0.0,
+            },
+            "up" => Point {
+                x: 0.0,
+                y: u * size.1,
+            },
+            "down" => Point {
+                x: 0.0,
+                y: (1.0 - u) * size.1,
+            },
+            _ => Point {
+                x: u * size.0,
+                y: 0.0,
+            },
+        };
+        let alpha = |a| Color { a, ..Color::WHITE };
+        Some(Effect::LinearOpacityMask {
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: size.0,
+                height: size.1,
+            },
+            start: point(first),
+            end: point(last),
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: alpha(if wipe.exiting { 0.0 } else { 1.0 }),
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: alpha(if wipe.exiting { 1.0 } else { 0.0 }),
+                },
+            ],
+        })
     }
 
     fn rebuild_public_transform(&mut self) {
@@ -255,6 +331,8 @@ pub fn evaluate_timeline(
             position,
             click_schedule: &click_schedule,
             state: &mut state,
+            visibility_writes: HashSet::new(),
+            pending_entrances: HashSet::new(),
         };
         evaluate_nodes(
             timing.nodes(),
@@ -263,6 +341,15 @@ pub fn evaluate_timeline(
             Scheduling::Parallel,
             &mut context,
         );
+        // Pending entrances supply initial hidden state only. A map entry from
+        // opacity or motion is not an applicable visibility operation.
+        for id in &context.pending_entrances {
+            if !context.visibility_writes.contains(id) {
+                let shape = shape_state(context.state, *id);
+                shape.visible = false;
+                shape.opacity = 0.0;
+            }
+        }
     }
     let invalid_targets = state
         .shapes
@@ -719,6 +806,8 @@ struct EvaluationContext<'a> {
     position: TimelinePosition,
     click_schedule: &'a ClickSchedule,
     state: &'a mut EvaluatedFrameState,
+    visibility_writes: HashSet<u32>,
+    pending_entrances: HashSet<u32>,
 }
 
 fn evaluate_nodes(
@@ -1047,6 +1136,7 @@ fn evaluate_set(node: &TimingSet, start: u64, end: u64, context: &mut Evaluation
     let value = node.value.as_deref().unwrap_or_default();
     match node.attribute_name.as_deref().unwrap_or_default() {
         "style.visibility" | "visibility" => {
+            context.visibility_writes.insert(id);
             shape_state(context.state, id).visible = !matches!(value, "hidden" | "false" | "0")
         }
         "style.opacity" | "opacity" => {
@@ -1109,6 +1199,20 @@ fn evaluate_animate(
         "style.opacity" | "opacity" => {
             shape_state(context.state, id).opacity = normalize_fraction(value) as f32
         }
+        "ScaleX" | "ScaleY" => {
+            let state = shape_state(context.state, id);
+            if node.attribute_name.as_deref() == Some("ScaleX") {
+                state.animation.scale_x = value;
+            } else {
+                state.animation.scale_y = value;
+            }
+            state.rebuild_public_transform();
+        }
+        "style.rotation" => {
+            let state = shape_state(context.state, id);
+            state.animation.rotation_deg = value;
+            state.rebuild_public_transform();
+        }
         "scale" => {
             let state = shape_state(context.state, id);
             let value = normalize_percentage(value);
@@ -1157,17 +1261,17 @@ fn evaluate_effect(node: &TimingEffect, start: u64, end: u64, context: &mut Eval
         });
         return;
     };
-    let state = shape_state(context.state, id);
     if phase.before {
         if transition == "in" {
-            state.visible = false;
-            state.opacity = 0.0;
+            context.pending_entrances.insert(id);
         }
         return;
     }
     if !phase.applies {
         return;
     }
+    context.visibility_writes.insert(id);
+    let state = shape_state(context.state, id);
     let progress = if matches!(effect, ShapeEffect::Appear) {
         1.0
     } else {
@@ -1193,7 +1297,19 @@ fn evaluate_effect(node: &TimingEffect, start: u64, end: u64, context: &mut Eval
         (ShapeEffect::Wipe(direction), exiting) => {
             state.visible = !exiting || progress < 1.0;
             state.opacity = 1.0;
-            state.clip = Some(wipe_clip(direction, progress, exiting));
+            let clip = wipe_clip(direction, progress, exiting);
+            state.clip = Some(clip);
+            state.wipe = Some(EvaluatedWipe {
+                direction: direction.to_owned(),
+                progress,
+                exiting,
+                authored_clip: clip,
+            });
+            if progress > 0.0 && progress < 1.0 {
+                context.state.diagnostics.push(Diagnostic {
+                    message: "partial soft wipe uses a linear group opacity mask in raster/SVG; PDF group effects remain unsupported".to_owned(),
+                });
+            }
         }
     }
 }
@@ -1220,43 +1336,43 @@ fn shape_effect(filter: &str) -> Option<ShapeEffect<'_>> {
 fn wipe_clip(direction: &str, progress: f64, exiting: bool) -> Rect {
     let progress = progress.clamp(0.0, 1.0);
     match (direction, exiting) {
-        ("left", false) => Rect {
+        ("right", false) => Rect {
             x: 1.0 - progress,
             y: 0.0,
             width: progress,
             height: 1.0,
         },
-        ("up", false) => Rect {
+        ("down", false) => Rect {
             x: 0.0,
             y: 1.0 - progress,
             width: 1.0,
             height: progress,
         },
-        ("down", false) => Rect {
+        ("up", false) => Rect {
             x: 0.0,
             y: 0.0,
             width: 1.0,
             height: progress,
         },
-        ("right", false) => Rect {
+        ("left", false) => Rect {
             x: 0.0,
             y: 0.0,
             width: progress,
             height: 1.0,
         },
-        ("left", true) => Rect {
+        ("right", true) => Rect {
             x: 0.0,
             y: 0.0,
             width: 1.0 - progress,
             height: 1.0,
         },
-        ("up", true) => Rect {
+        ("down", true) => Rect {
             x: 0.0,
             y: 0.0,
             width: 1.0,
             height: 1.0 - progress,
         },
-        ("down", true) => Rect {
+        ("up", true) => Rect {
             x: 0.0,
             y: progress,
             width: 1.0,
@@ -2022,7 +2138,7 @@ mod tests {
         let centre = at_end.shapes[&11].transform.apply(Point { x: 0.5, y: 0.5 });
         assert!((centre.x - 0.5).abs() < 1.0e-10);
         assert!((centre.y - 0.5).abs() < 1.0e-10);
-        assert_eq!(at_start.shapes[&12].clip.unwrap().x, 0.9);
+        assert_eq!(at_start.shapes[&12].clip.unwrap().x, 0.0);
         assert_eq!(at_end.shapes[&12].clip.unwrap().width, 1.0);
         assert!(!at_end.shapes.contains_key(&13));
         assert_eq!(at_end.shapes[&14].clip.unwrap().height, 0.0);
@@ -2140,5 +2256,166 @@ mod tests {
                 .message
                 .contains("unsupported timing effect wipe(diagonal)")
         }));
+    }
+
+    #[test]
+    fn native_pending_entrance_respects_real_visibility_writes_in_both_orders() {
+        let pending = r#"<p:animEffect transition="in" filter="wipe(left)"><p:cBhvr><p:cTn id="1" dur="500"><p:stCondLst><p:cond delay="500"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:animEffect>"#;
+        for value in ["visible", "hidden"] {
+            let set = format!(
+                r#"<p:set><p:cBhvr><p:cTn id="2" dur="500" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="{value}"/></p:to></p:set>"#
+            );
+            for xml in [format!("{pending}{set}"), format!("{set}{pending}")] {
+                let state = evaluate_timeline(
+                    Some(&timing(&xml)),
+                    None,
+                    TimelinePosition {
+                        elapsed_ms: 330,
+                        click_count: 0,
+                    },
+                )
+                .unwrap();
+                assert_eq!(state.shapes[&7].visible, value == "visible");
+                assert_eq!(state.shapes[&7].opacity, 1.0);
+            }
+        }
+        // Opacity and transforms create real map entries but confer no
+        // visibility authority on a pending entrance, even on the same owner.
+        let opacity = r#"<p:anim from="1" to="0.5"><p:cBhvr><p:cTn id="3" dur="500"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl><p:attrNameLst><p:attrName>style.opacity</p:attrName></p:attrNameLst></p:cBhvr></p:anim>"#;
+        for xml in [format!("{pending}{opacity}"), format!("{opacity}{pending}")] {
+            let state = evaluate_timeline(
+                Some(&timing(&xml)),
+                None,
+                TimelinePosition {
+                    elapsed_ms: 330,
+                    click_count: 0,
+                },
+            )
+            .unwrap();
+            assert!(!state.shapes[&7].visible);
+            assert_eq!(state.shapes[&7].opacity, 0.0);
+        }
+        let other = r#"<p:set><p:cBhvr><p:cTn id="4" dur="500"/><p:tgtEl><p:spTgt spid="8"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set>"#;
+        let state = evaluate_timeline(
+            Some(&timing(&format!("{other}{pending}"))),
+            None,
+            TimelinePosition {
+                elapsed_ms: 330,
+                click_count: 0,
+            },
+        )
+        .unwrap();
+        assert!(!state.shapes[&7].visible);
+    }
+
+    #[test]
+    fn native_numeric_axes_and_rotation_preserve_legacy_values() {
+        for (attribute, to, expected) in [
+            ("ScaleX", "12", (6.5, 1.0, 0.0)),
+            ("ScaleY", "20", (1.0, 10.5, 0.0)),
+            ("style.rotation", "720", (1.0, 1.0, 360.0)),
+            ("ScaleX", "1.5", (1.25, 1.0, 0.0)),
+            ("ScaleY", "2", (1.0, 1.5, 0.0)),
+            ("style.rotation", "90", (1.0, 1.0, 45.0)),
+            ("scale", "150000", (1.25, 1.25, 0.0)),
+            ("spin", "5400000", (1.0, 1.0, 45.0)),
+        ] {
+            let from = if attribute == "spin" || attribute == "style.rotation" {
+                "0"
+            } else if attribute == "scale" {
+                "100000"
+            } else {
+                "1"
+            };
+            let xml = format!(
+                r#"<p:anim from="{from}" to="{to}" calcmode="lin" valueType="num"><p:cBhvr><p:cTn id="1" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl><p:attrNameLst><p:attrName>{attribute}</p:attrName></p:attrNameLst></p:cBhvr></p:anim>"#
+            );
+            let state = evaluate_timeline(
+                Some(&timing(&xml)),
+                None,
+                TimelinePosition {
+                    elapsed_ms: 500,
+                    click_count: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                state.shapes[&7].resolved_shape_geometry(),
+                expected,
+                "{attribute}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_wipe_mask_projects_all_directions_and_respects_public_clip() {
+        use oxml_layout::{Effect, Rect};
+        for direction in ["left", "right", "up", "down"] {
+            for transition in ["in", "out"] {
+                let xml = format!(
+                    r#"<p:animEffect transition="{transition}" filter="wipe({direction})"><p:cBhvr><p:cTn id="1" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:animEffect>"#
+                );
+                let at = |elapsed_ms| {
+                    evaluate_timeline(
+                        Some(&timing(&xml)),
+                        None,
+                        TimelinePosition {
+                            elapsed_ms,
+                            click_count: 0,
+                        },
+                    )
+                    .unwrap()
+                };
+                let mut shape = at(500).shapes.remove(&7).unwrap();
+                let Effect::LinearOpacityMask {
+                    bounds,
+                    start,
+                    end,
+                    stops,
+                } = shape.local_opacity_mask((140.0, 70.0)).unwrap()
+                else {
+                    panic!("mask");
+                };
+                assert_eq!(
+                    bounds,
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 140.0,
+                        height: 70.0
+                    }
+                );
+                assert_eq!(stops[0].color.a, if transition == "in" { 1.0 } else { 0.0 });
+                let axis = if direction == "up" || direction == "down" {
+                    end.y - start.y
+                } else {
+                    end.x - start.x
+                };
+                assert!(
+                    (axis.abs()
+                        - if direction == "up" || direction == "down" {
+                            10.0
+                        } else {
+                            20.0
+                        })
+                    .abs()
+                        < 1e-10
+                );
+                assert_eq!(axis > 0.0, direction == "left" || direction == "up");
+                assert!(shape.local_clip_paths((140.0, 70.0)).is_empty());
+                shape.clip = None;
+                assert!(shape.local_opacity_mask((140.0, 70.0)).is_none());
+                shape.clip = Some(Rect {
+                    x: 0.1,
+                    y: 0.2,
+                    width: 0.3,
+                    height: 0.4,
+                });
+                assert!(shape.local_opacity_mask((140.0, 70.0)).is_none());
+                assert_eq!(shape.local_clip_paths((140.0, 70.0)).len(), 1);
+                let end = at(1000);
+                assert_eq!(end.shapes[&7].visible, transition == "in");
+            }
+        }
     }
 }

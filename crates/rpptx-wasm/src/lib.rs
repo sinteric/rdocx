@@ -456,7 +456,7 @@ mod tests {
             .unwrap();
         let mut package = OpcPackage::from_reader(Cursor::new(author.to_bytes().unwrap())).unwrap();
         let slide = package.parts.get_mut("/ppt/slides/slide1.xml").unwrap();
-        let xml = String::from_utf8(slide.clone()).unwrap();
+        let xml = String::from_utf8(slide.to_vec()).unwrap();
         assert!(xml.contains("<a:lstStyle/>"));
         let mut style =
             String::from("<a:lstStyle xmlns:e='urn:fx225' e:proof='source'><a:defPPr/>");
@@ -466,7 +466,7 @@ mod tests {
             ));
         }
         style.push_str("<e:opaque v='keep&amp;exact'/></a:lstStyle>");
-        *slide = xml.replace("<a:lstStyle/>", &style).into_bytes();
+        *slide = xml.replace("<a:lstStyle/>", &style).into_bytes().into();
         let mut buffer = Cursor::new(Vec::new());
         package.write_to(&mut buffer).unwrap();
         let source = buffer.into_inner();
@@ -526,7 +526,7 @@ mod tests {
         let wasm_manifest = include_str!("../Cargo.toml");
 
         assert!(workspace_manifest.contains(
-            "rpptx = { path = \"crates/rpptx\", version = \"0.14.3\", default-features = false }"
+            "rpptx = { path = \"crates/rpptx\", version = \"0.14.4\", default-features = false }"
         ));
         assert!(
             facade_manifest

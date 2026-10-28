@@ -3955,4 +3955,48 @@ mod tests {
         assert!(pdf.contains("0 0 1 rg"));
         assert!(pdf.contains("/ExtGState"));
     }
+
+    #[test]
+    fn linear_opacity_mask_is_ignored_by_pdf_but_checked_conformance_refuses() {
+        let plain = group(Transform::IDENTITY, vec![alpha_rect(1.0)]);
+        let PositionedElement::Group(mut masked) = plain.clone() else {
+            unreachable!()
+        };
+        masked.effects.push(Effect::LinearOpacityMask {
+            bounds: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            start: Point { x: 0.0, y: 0.0 },
+            end: Point { x: 10.0, y: 0.0 },
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Color::WHITE,
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Color {
+                        a: 0.0,
+                        ..Color::BLACK
+                    },
+                },
+            ],
+        });
+        assert_eq!(
+            content_for(vec![plain]),
+            content_for(vec![PositionedElement::Group(masked.clone())])
+        );
+        let scene = oxml_layout::LayoutResult::new(
+            vec![std::sync::Arc::new(page_with(vec![
+                PositionedElement::Group(masked),
+            ]))],
+            vec![],
+            None,
+            vec![],
+        );
+        assert!(crate::conformance::preflight(&scene).is_err());
+    }
 }

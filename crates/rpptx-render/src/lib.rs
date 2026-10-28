@@ -838,6 +838,11 @@ pub(crate) fn layout_resolved_slide_with_diagnostics(
                     };
                     if let PositionedElement::Group(group) = &mut element {
                         group.opacity *= opacity;
+                        if let Some(mask) =
+                            state.local_opacity_mask((shape.bounds.width, shape.bounds.height))
+                        {
+                            group.effects.push(mask);
+                        }
                         for clip in
                             state.local_clip_paths((shape.bounds.width, shape.bounds.height))
                         {
@@ -5045,7 +5050,7 @@ mod tests {
         ] {
             assert!(!oxml_manifest.contains("rpptx-render"));
         }
-        assert!(manifest.contains("version = \"0.14.3\""));
+        assert!(manifest.contains("version = \"0.14.4\""));
         assert!(manifest.contains("publish = true"));
     }
     #[test]
@@ -5138,5 +5143,63 @@ mod tests {
                 .message
                 .contains("1 unresolved members")
         );
+    }
+
+    #[test]
+    fn native_soft_wipe_lowers_one_mask_without_losing_caller_clip_authority() {
+        let timing=rpptx_oxml::timing::CT_Timing::from_xml(br#"<p:timing xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:tnLst><p:animEffect transition="in" filter="wipe(left)"><p:cBhvr><p:cTn id="1" dur="1000" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:animEffect></p:tnLst></p:timing>"#).unwrap();
+        let mut state = rpptx_layout::timeline::evaluate_timeline(
+            Some(&timing),
+            None,
+            rpptx_layout::timeline::TimelinePosition {
+                elapsed_ms: 500,
+                click_count: 0,
+            },
+        )
+        .unwrap()
+        .shapes
+        .remove(&7)
+        .unwrap();
+        let input = render_input(vec![slide(
+            (100.0, 60.0),
+            vec![shape(
+                Rect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+                ResolvedGeometry::Rectangle,
+                Some(Paint::Solid(Color::BLACK)),
+                None,
+            )],
+        )]);
+        let render = |s| {
+            let mut fonts = FontManager::new_deterministic().unwrap();
+            layout_slide_with_fonts_text_directions_and_states(
+                &input,
+                0,
+                &mut fonts,
+                None,
+                Some(&[s]),
+            )
+            .unwrap()
+        };
+        let page = render(state.clone());
+        let g = only_group(&page.elements[0]);
+        assert_eq!(g.children.len(), 1);
+        assert!(g.clip.is_none());
+        assert_eq!(g.effects.len(), 1);
+        assert!(matches!(g.effects[0], Effect::LinearOpacityMask { .. }));
+        state.clip = Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.25,
+            height: 1.0,
+        });
+        let page = render(state);
+        let g = only_group(&page.elements[0]);
+        assert!(g.effects.is_empty());
+        assert!(g.clip.is_some());
     }
 }
