@@ -477,6 +477,121 @@ pub struct ParagraphBlock {
     /// Vertical space kept clear above the first line, for a drawing this
     /// paragraph must clear rather than flow beside.
     pub content_offset_top: f64,
+    /// The paragraph's style, the default paragraph style when it names
+    /// none: what contextual spacing compares between neighbours.
+    pub style: Option<Arc<str>>,
+    /// `w:contextualSpacing`: this paragraph's own space before and after is
+    /// dropped next to a paragraph of the same style
+    /// ([`collapse_contextual_spacing`]).
+    pub contextual_spacing: bool,
+    /// `w:framePr`: where Word lifts this paragraph out of the text flow.
+    pub frame: Option<TextFrame>,
+}
+
+/// A paragraph Word places in a text frame (`w:framePr`) instead of the flow.
+///
+/// Only header and footer stories place frames today
+/// (`paginator::render_hf_blocks`), which is where Word's page number gallery
+/// puts them. A body paragraph keeps its flow position, a drop cap is not a
+/// frame here, and text beside a frame does not wrap around it: those remain
+/// F-311.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextFrame {
+    /// `w:w`. `None` sizes the frame to its widest line.
+    pub width: Option<f64>,
+    pub horizontal: FramePlacement,
+    pub vertical: FramePlacement,
+    /// `w:wrap="notBeside"`: no text sits beside the frame, so it keeps the
+    /// vertical space of its lines in the flow.
+    pub in_flow: bool,
+}
+
+/// One axis of a frame's position: an alignment within the anchor's box, or
+/// an offset from the box's leading edge when there is none.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FramePlacement {
+    pub anchor: FrameAnchor,
+    pub align: Option<FrameAlign>,
+    pub offset: f64,
+}
+
+/// `w:hAnchor` and `w:vAnchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameAnchor {
+    Page,
+    Margin,
+    /// The column horizontally, the anchoring paragraph vertically.
+    Text,
+}
+
+/// `w:xAlign` and `w:yAlign`, with left and top as `Start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameAlign {
+    Start,
+    Center,
+    End,
+    Inside,
+    Outside,
+}
+
+impl TextFrame {
+    /// The frame a `w:framePr` places, or `None` for a drop cap.
+    ///
+    /// An omitted anchor is the column and the paragraph, which is what Word's
+    /// frame dialog starts from and what LibreOffice assumes on import.
+    pub fn from_ct(frame: &rdocx_oxml::properties::CT_FramePr) -> Option<Self> {
+        if matches!(frame.drop_cap.as_deref(), Some("drop" | "margin")) {
+            return None;
+        }
+        let anchor = |value: Option<&str>| match value {
+            Some("page") => FrameAnchor::Page,
+            Some("margin") => FrameAnchor::Margin,
+            _ => FrameAnchor::Text,
+        };
+        let align = |value: Option<&str>| match value? {
+            "left" | "top" => Some(FrameAlign::Start),
+            "center" => Some(FrameAlign::Center),
+            "right" | "bottom" => Some(FrameAlign::End),
+            "inside" => Some(FrameAlign::Inside),
+            "outside" => Some(FrameAlign::Outside),
+            _ => None,
+        };
+        Some(TextFrame {
+            width: frame
+                .w
+                .map(|width| width.to_pt())
+                .filter(|width| *width > 0.0),
+            horizontal: FramePlacement {
+                anchor: anchor(frame.h_anchor.as_deref()),
+                align: align(frame.x_align.as_deref()),
+                offset: frame.x.map_or(0.0, |x| x.to_pt()),
+            },
+            vertical: FramePlacement {
+                anchor: anchor(frame.v_anchor.as_deref()),
+                align: align(frame.y_align.as_deref()),
+                offset: frame.y.map_or(0.0, |y| y.to_pt()),
+            },
+            in_flow: frame.wrap.as_deref() == Some("notBeside"),
+        })
+    }
+}
+
+impl FramePlacement {
+    /// The frame's leading edge, given the anchor box `(start, length)` and
+    /// the frame's own length along this axis. `odd` says whether the page is
+    /// a right-hand page, which is where inside and outside turn.
+    pub fn resolve(self, (start, length): (f64, f64), size: f64, odd: bool) -> f64 {
+        match self.align {
+            None => start + self.offset,
+            Some(FrameAlign::Start) => start,
+            Some(FrameAlign::Center) => start + (length - size) / 2.0,
+            Some(FrameAlign::End) => start + length - size,
+            Some(FrameAlign::Inside) if odd => start,
+            Some(FrameAlign::Inside) => start + length - size,
+            Some(FrameAlign::Outside) if odd => start + length - size,
+            Some(FrameAlign::Outside) => start,
+        }
+    }
 }
 
 /// Complete painted width of a supported paragraph border edge.
@@ -553,6 +668,83 @@ pub(crate) fn collapse_shared_border_groups(blocks: &mut [SharedLayoutBlock]) {
                 *border_group_before = top;
                 if let LayoutBlock::Paragraph(paragraph) = block.as_mut() {
                     paragraph.remove_group_border_edges(top, bottom);
+                }
+            }
+            SharedLayoutBlock::Table { .. } => {}
+        }
+    }
+}
+
+/// Which facing spacing contextual spacing drops, per paragraph of one flow
+/// (`None` for a table, which separates its neighbours): `(before, after)`.
+///
+/// Word drops a paragraph's own space before when the paragraph above is of
+/// the same style, and its own space after when the paragraph below is, if
+/// the paragraph asks for it (`w:contextualSpacing`, as the List Paragraph
+/// style does). Each paragraph's flag governs only its own spacing.
+pub(crate) fn contextual_spacing_drops(
+    paragraphs: &[Option<&ParagraphBlock>],
+) -> Vec<(bool, bool)> {
+    let same_style = |left: Option<&ParagraphBlock>, right: Option<&ParagraphBlock>| {
+        matches!((left, right), (Some(left), Some(right))
+            if left.style.is_some() && left.style == right.style)
+    };
+    (0..paragraphs.len())
+        .map(|index| {
+            let Some(paragraph) = paragraphs[index] else {
+                return (false, false);
+            };
+            if !paragraph.contextual_spacing {
+                return (false, false);
+            }
+            let previous = index.checked_sub(1).and_then(|i| paragraphs[i]);
+            let next = paragraphs.get(index + 1).copied().flatten();
+            (
+                same_style(previous, Some(paragraph)),
+                same_style(Some(paragraph), next),
+            )
+        })
+        .collect()
+}
+
+impl ParagraphBlock {
+    /// Drops the spacing [`contextual_spacing_drops`] chose.
+    pub(crate) fn drop_contextual_spacing(&mut self, (before, after): (bool, bool)) {
+        if before {
+            self.space_before = 0.0;
+        }
+        if after {
+            self.space_after = 0.0;
+        }
+    }
+}
+
+/// [`contextual_spacing_drops`] over a section's shared blocks. A cached
+/// paragraph is copied before it changes, so the cache keeps its own.
+pub(crate) fn collapse_shared_contextual_spacing(blocks: &mut [SharedLayoutBlock]) {
+    if !blocks.iter().any(|block| {
+        block
+            .paragraph()
+            .is_some_and(|paragraph| paragraph.contextual_spacing)
+    }) {
+        return;
+    }
+    let paragraphs = blocks
+        .iter()
+        .map(|block| block.paragraph().map(|paragraph| paragraph.block))
+        .collect::<Vec<_>>();
+    let drops = contextual_spacing_drops(&paragraphs);
+    for (block, drop) in blocks.iter_mut().zip(drops) {
+        if drop == (false, false) {
+            continue;
+        }
+        match block {
+            SharedLayoutBlock::Paragraph { block, .. } => {
+                Arc::make_mut(block).drop_contextual_spacing(drop)
+            }
+            SharedLayoutBlock::Owned { block, .. } => {
+                if let LayoutBlock::Paragraph(paragraph) = block.as_mut() {
+                    paragraph.drop_contextual_spacing(drop);
                 }
             }
             SharedLayoutBlock::Table { .. } => {}
@@ -654,6 +846,9 @@ pub fn build_paragraph_block(
         structure_id: None,
         reflow: None,
         content_offset_top: 0.0,
+        style: None,
+        contextual_spacing: false,
+        frame: None,
     };
     block.add_border_padding();
     block
@@ -662,6 +857,54 @@ pub fn build_paragraph_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contextual_spacing_drops_only_the_flagged_paragraphs_facing_spacing() {
+        let paragraph = |style: &str, contextual: bool| {
+            let mut block = build_paragraph_block(
+                Vec::new(),
+                6.0,
+                10.0,
+                None,
+                None,
+                0.0,
+                0.0,
+                None,
+                false,
+                false,
+                false,
+                true,
+            );
+            block.style = Some(Arc::from(style));
+            block.contextual_spacing = contextual;
+            block
+        };
+        let normal = paragraph("Normal", false);
+        let item = paragraph("ListParagraph", true);
+        let plain_item = paragraph("ListParagraph", false);
+        let drops = contextual_spacing_drops(&[
+            Some(&normal),
+            Some(&item),
+            Some(&item),
+            Some(&plain_item),
+            None,
+            Some(&item),
+        ]);
+        assert_eq!(
+            drops,
+            [
+                (false, false),
+                // Normal above: its own space before stays.
+                (false, true),
+                (true, true),
+                // Not flagged: keeps its own spacing beside the same style.
+                (false, false),
+                (false, false),
+                // A table above separates it.
+                (false, false),
+            ]
+        );
+    }
 
     #[test]
     fn paragraph_block_height() {
@@ -711,6 +954,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         assert!((block.content_height() - 26.0).abs() < 0.01);
         assert!((block.total_height() - 40.0).abs() < 0.01);

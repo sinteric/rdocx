@@ -1349,13 +1349,28 @@ pub fn render_chart(
     color_map: &ColorMap,
     fonts: &mut FontManager,
 ) -> Result<GroupElement> {
+    render_chart_with_text(chart, None, bounds, theme, color_map, fonts)
+}
+
+/// [`render_chart`] with the chart's text defaults, `chart_text`: the
+/// `c:chartSpace` `c:txPr`, which every label without its own takes.
+fn render_chart_with_text(
+    chart: &CT_Chart,
+    chart_text: Option<&CT_TextBody>,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<GroupElement> {
     let plots = chart.plot_area.plots()?;
     let plot = plots
         .first()
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
     let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
-    let legend_layout = layout_legend_or_omit_category_legend(chart, plot, bounds, fonts)?;
+    let (title, bounds) = layout_title(chart, plot, bounds, fonts, chart_text)?;
+    let legend_layout =
+        layout_legend_or_omit_category_legend(chart, plot, bounds, fonts, chart_text)?;
     let legend_colours = if chart.legend.is_some() {
         legend_entries(plot, &colours)?
             .into_iter()
@@ -1376,8 +1391,17 @@ pub fn render_chart(
         });
     }
 
-    let mut chart_annotations =
-        render_axes_and_labels(plot, &axes, plot_bounds, chart.disp_blanks_as, fonts)?;
+    let mut chart_annotations = render_axes_and_labels(
+        plot,
+        &axes,
+        plot_bounds,
+        chart.disp_blanks_as,
+        fonts,
+        chart_text,
+    )?;
+    chart_annotations
+        .labels
+        .extend(title.map(PositionedElement::Text));
     let mut annotations = Vec::new();
     render_data_labels(
         plot,
@@ -1386,6 +1410,7 @@ pub fn render_chart(
         options,
         fonts,
         &mut chart_annotations.labels,
+        chart_text,
     )?;
     render_legend(
         legend_layout,
@@ -1439,6 +1464,7 @@ pub fn render_chart_placeholder(bounds: Rect, fonts: &mut FontManager) -> Result
             x: 4.0,
             y: (bounds.height / 2.0).max(9.0),
         },
+        None,
     )?;
     Ok(GroupElement {
         transform: Transform::IDENTITY,
@@ -1672,9 +1698,10 @@ fn render_axes_and_labels(
     bounds: Rect,
     blanks: DispBlanksAs,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<ChartAnnotations> {
     if matches!(plot, Plot::Radar { .. }) {
-        return render_radar_axes_and_labels(plot, axes, bounds, blanks, fonts);
+        return render_radar_axes_and_labels(plot, axes, bounds, blanks, fonts, chart_text);
     }
     let mut annotations = ChartAnnotations::default();
     let series = plot_series(plot);
@@ -1729,6 +1756,7 @@ fn render_axes_and_labels(
                             &text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -1794,6 +1822,7 @@ fn render_axes_and_labels(
                             text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -1808,6 +1837,7 @@ fn render_radar_axes_and_labels(
     bounds: Rect,
     blanks: DispBlanksAs,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<ChartAnnotations> {
     let mut annotations = ChartAnnotations::default();
     let series = plot_series(plot);
@@ -1894,6 +1924,7 @@ fn render_radar_axes_and_labels(
                             &text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -1942,6 +1973,7 @@ fn render_radar_axes_and_labels(
                             text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -2254,33 +2286,60 @@ fn format_axis_value(format: Option<&NumberFormat>, value: f64) -> Result<String
     }
 }
 
-fn shape_label(fonts: &mut FontManager, text: &str, origin: Point) -> Result<GlyphRun> {
-    shape_label_with_properties(fonts, text, origin, None)
+fn shape_label(
+    fonts: &mut FontManager,
+    text: &str,
+    origin: Point,
+    chart_text: Option<&CT_TextBody>,
+) -> Result<GlyphRun> {
+    shape_label_with_properties(fonts, text, origin, None, chart_text)
 }
 
+/// Shape one label in the face, size and weight its own `c:txPr` sets, and
+/// where it sets none, in those of the chart's (`chart_text`, the
+/// `c:chartSpace` `c:txPr`).
 fn shape_label_with_properties(
     fonts: &mut FontManager,
     text: &str,
     origin: Point,
     properties: Option<&CT_TextBody>,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<GlyphRun> {
-    const FAMILY: &str = "Carlito";
-    const SIZE: f64 = 9.0;
-    let properties = properties.and_then(chart_text_properties);
-    let family = properties
+    let own = properties.and_then(chart_text_properties);
+    let chart = chart_text.and_then(chart_text_properties);
+    let family = own
         .and_then(|properties| properties.latin.as_ref())
+        .or_else(|| chart.and_then(|properties| properties.latin.as_ref()))
         .map(|font| font.typeface.as_str())
-        .unwrap_or(FAMILY);
-    let size = properties
+        .unwrap_or(LABEL_FAMILY);
+    let size = own
         .and_then(|properties| properties.font_size)
+        .or_else(|| chart.and_then(|properties| properties.font_size))
         .map(|size| f64::from(size) / 100.0)
-        .unwrap_or(SIZE);
-    let bold = properties
+        .unwrap_or(LABEL_SIZE);
+    let bold = own
         .and_then(|properties| properties.bold)
+        .or_else(|| chart.and_then(|properties| properties.bold))
         .unwrap_or(false);
-    let italic = properties
+    let italic = own
         .and_then(|properties| properties.italic)
+        .or_else(|| chart.and_then(|properties| properties.italic))
         .unwrap_or(false);
+    shape_run(fonts, text, origin, (family, size, bold, italic))
+}
+
+/// Label face and size when neither the label nor the chart sets one.
+const LABEL_FAMILY: &str = "Carlito";
+const LABEL_SIZE: f64 = 9.0;
+/// Space above and below a chart title.
+const TITLE_PADDING: f64 = 6.0;
+
+fn shape_run(
+    fonts: &mut FontManager,
+    text: &str,
+    origin: Point,
+    (family, size, bold, italic): (&str, f64, bool, bool),
+) -> Result<GlyphRun> {
     let font_id = fonts
         .resolve_font_for_text(Some(family), bold, italic, text)
         .map_err(|error| ChartError::InvalidValue {
@@ -2419,6 +2478,7 @@ fn render_data_labels(
     options: GeometryOptions,
     fonts: &mut FontManager,
     elements: &mut Vec<PositionedElement>,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<()> {
     let plot_labels = plot_data_labels(plot);
     let anchors = plot_label_anchors(plot, bounds, blanks, options)?;
@@ -2515,7 +2575,9 @@ fn render_data_labels(
             let separator = labels.separator.as_deref().unwrap_or(", ");
             let text = fields.join(separator);
             let origin = anchor.origin(labels.position);
-            elements.push(PositionedElement::Text(shape_label(fonts, &text, origin)?));
+            elements.push(PositionedElement::Text(shape_label(
+                fonts, &text, origin, chart_text,
+            )?));
         }
     }
     Ok(())
@@ -3453,11 +3515,103 @@ struct LegendLayout {
     keys: Vec<Rect>,
 }
 
+/// The text of the title a chart shows, if it shows one.
+///
+/// Its own `c:title` text, or an automatic one: a `c:title` without text, or
+/// no `c:title` while `c:autoTitleDeleted` is off on a chart of one named
+/// series, shows that series' name, which is what PowerPoint and Word draw.
+/// An automatic title over several series shows "Chart Title", as theirs do.
+fn chart_title(chart: &CT_Chart, plot: &Plot) -> Option<String> {
+    let series = plot_series(plot);
+    let only_name = match series {
+        [only] => only
+            .name
+            .as_ref()
+            .and_then(|name| name.values.first())
+            .cloned(),
+        _ => None,
+    };
+    match &chart.title {
+        Some(title) => title
+            .text
+            .as_ref()
+            .map(CT_TextBody::plain_text)
+            .filter(|text| !text.trim().is_empty())
+            .or(only_name)
+            .or_else(|| Some("Chart Title".to_owned())),
+        None if !chart.auto_title_deleted => only_name,
+        None => None,
+    }
+}
+
+/// Shape the chart's title centred along the top of `bounds`, and return it
+/// with the bounds left for the legend and the plot below it.
+///
+/// The title's own text properties win, then the chart's; with neither size
+/// set it is a fifth larger than the chart's labels, and bold. That default is
+/// an approximation: Office's chart styles each set their own title size.
+fn layout_title(
+    chart: &CT_Chart,
+    plot: &Plot,
+    bounds: Rect,
+    fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
+) -> Result<(Option<GlyphRun>, Rect)> {
+    let Some(text) = chart_title(chart, plot) else {
+        return Ok((None, bounds));
+    };
+    let own = chart
+        .title
+        .as_ref()
+        .and_then(|title| title.text.as_ref())
+        .and_then(chart_text_properties);
+    let chart_size = chart_text
+        .and_then(chart_text_properties)
+        .and_then(|properties| properties.font_size)
+        .map_or(LABEL_SIZE, |size| f64::from(size) / 100.0);
+    let size = own
+        .and_then(|properties| properties.font_size)
+        .map_or(chart_size * 1.2, |size| f64::from(size) / 100.0);
+    let bold = own.and_then(|properties| properties.bold).unwrap_or(true);
+    let family = own
+        .and_then(|properties| properties.latin.as_ref())
+        .or_else(|| {
+            chart_text
+                .and_then(chart_text_properties)
+                .and_then(|properties| properties.latin.as_ref())
+        })
+        .map_or(LABEL_FAMILY, |font| font.typeface.as_str());
+    let mut run = shape_run(
+        fonts,
+        &text,
+        Point { x: 0.0, y: 0.0 },
+        (family, size, bold, false),
+    )?;
+    let height = size * 1.2 + TITLE_PADDING * 2.0;
+    if height >= bounds.height / 2.0 {
+        return Ok((None, bounds));
+    }
+    let width: f64 = run.advances.iter().sum();
+    run.origin = Point {
+        x: bounds.x + (bounds.width - width) / 2.0,
+        y: bounds.y + TITLE_PADDING + size,
+    };
+    Ok((
+        Some(run),
+        Rect {
+            y: bounds.y + height,
+            height: bounds.height - height,
+            ..bounds
+        },
+    ))
+}
+
 fn layout_legend(
     chart: &CT_Chart,
     plot: &Plot,
     bounds: Rect,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<LegendLayout> {
     let full_plot = geometry_plot_bounds(bounds)?;
     let Some(legend) = &chart.legend else {
@@ -3478,7 +3632,7 @@ fn layout_legend(
     }
     let mut labels = entries
         .iter()
-        .map(|name| shape_label(fonts, name, Point { x: 0.0, y: 0.0 }))
+        .map(|name| shape_label(fonts, name, Point { x: 0.0, y: 0.0 }, chart_text))
         .collect::<Result<Vec<_>>>()?;
     let available = if settings.overlay { full_plot } else { bounds };
     let capacity = available.width - 12.0;
@@ -3686,10 +3840,41 @@ pub fn render_chart_with_legend_notice(
     color_map: &ColorMap,
     fonts: &mut FontManager,
 ) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
-    let group = render_chart(chart, bounds, theme, color_map, fonts)?;
+    chart_with_legend_notice(chart, None, bounds, theme, color_map, fonts)
+}
+
+/// [`render_chart_with_legend_notice`] for a whole `c:chartSpace`, whose
+/// `c:txPr` sets the face, size and weight of every label that sets none.
+pub fn render_chart_space_with_legend_notice(
+    chart_space: &CT_ChartSpace,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    chart_with_legend_notice(
+        &chart_space.chart,
+        chart_space.tx_pr.as_ref(),
+        bounds,
+        theme,
+        color_map,
+        fonts,
+    )
+}
+
+fn chart_with_legend_notice(
+    chart: &CT_Chart,
+    chart_text: Option<&CT_TextBody>,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    let group = render_chart_with_text(chart, chart_text, bounds, theme, color_map, fonts)?;
     let notice = match chart.plot_area.plots()?.first() {
         Some(plot @ (Plot::Pie { .. } | Plot::Doughnut { .. })) if chart.legend.is_some() => {
-            match layout_legend(chart, plot, bounds, fonts) {
+            let (_, bounds) = layout_title(chart, plot, bounds, fonts, chart_text)?;
+            match layout_legend(chart, plot, bounds, fonts, chart_text) {
                 Err(error) => LegendOmissionReason::from_error(&error)
                     .map(|reason| -> Result<_> {
                         Ok(ChartLegendOmitted {
@@ -3716,8 +3901,9 @@ fn layout_legend_or_omit_category_legend(
     plot: &Plot,
     bounds: Rect,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<LegendLayout> {
-    match layout_legend(chart, plot, bounds, fonts) {
+    match layout_legend(chart, plot, bounds, fonts, chart_text) {
         Err(error)
             if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. })
                 && is_legend_size_limit(&error) =>
@@ -14357,6 +14543,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let text: Vec<_> = rendered
@@ -14687,6 +14874,8 @@ mod tests {
             .find(|axis| axis.kind == AxisKind::Value)
             .unwrap();
         value_axis.scaling.orientation = Orientation::MaxMin;
+        // One named series would show its automatic title above the plot.
+        chart.chart.auto_title_deleted = true;
         let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
         let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
         let plot = group
@@ -14709,6 +14898,69 @@ mod tests {
         assert!((bars[0].y - 12.0).abs() < 1.0e-9);
         assert!((bars[0].height - 25.0).abs() < 1.0e-9);
         assert!((bars[1].height - 75.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn chart_space_text_sizes_labels_and_one_series_shows_its_automatic_title() {
+        let mut chart = labelled_bar_chart();
+        chart.tx_pr = Some(
+            CT_TextBody::from_xml_as(
+                br#"<c:txPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:bodyPr/><a:p><a:pPr><a:defRPr sz="1800"/></a:pPr></a:p></c:txPr>"#,
+                b"txPr",
+            )
+            .unwrap(),
+        );
+        // The fixture's one series is named "Sales".
+        let name = "Sales";
+        let theme = CT_OfficeStyleSheet::office_default();
+        let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+        let (group, _) = super::render_chart_space_with_legend_notice(
+            &chart,
+            chart_bounds(),
+            &theme,
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap();
+        let runs = group
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let title = runs
+            .iter()
+            .find(|run| run.text == name)
+            .expect("the automatic title");
+        assert!(title.bold);
+        assert!((title.font_size - 21.6).abs() < 1.0e-9);
+        // Category and data labels take the chart's size. The value axis's
+        // own `c:txPr` sets 12 points, and that wins.
+        let size = |text: &str| {
+            runs.iter()
+                .filter(|run| run.text == text)
+                .map(|run| run.font_size)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(size("North"), [18.0]);
+        assert_eq!(size("20"), [12.0]);
+        assert_eq!(size("100"), [12.0, 18.0]);
+
+        chart.chart.auto_title_deleted = true;
+        let (group, _) = super::render_chart_space_with_legend_notice(
+            &chart,
+            chart_bounds(),
+            &theme,
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap();
+        // Only the legend's entry is left.
+        assert!(!group.children.iter().any(
+            |element| matches!(element, PositionedElement::Text(run) if run.text == name && run.bold)
+        ));
     }
 
     #[test]
@@ -14802,7 +15054,7 @@ mod tests {
         let center = Point { x: 112.0, y: 62.0 };
         let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
         let annotations =
-            super::render_axes_and_labels(plot, &axes, bounds, DispBlanksAs::Gap, &mut fonts)
+            super::render_axes_and_labels(plot, &axes, bounds, DispBlanksAs::Gap, &mut fonts, None)
                 .unwrap();
         assert_eq!(annotations.axis_lines.len(), 4);
         for spoke in annotations.axis_lines.iter().take(3) {
@@ -14873,9 +15125,15 @@ mod tests {
         ] {
             let mut axis = category_axis.clone();
             axis.tick_label_position = position;
-            let annotations =
-                super::render_axes_and_labels(plot, &[axis], bounds, DispBlanksAs::Gap, &mut fonts)
-                    .unwrap();
+            let annotations = super::render_axes_and_labels(
+                plot,
+                &[axis],
+                bounds,
+                DispBlanksAs::Gap,
+                &mut fonts,
+                None,
+            )
+            .unwrap();
             let north = annotations
                 .labels
                 .iter()
@@ -14894,6 +15152,7 @@ mod tests {
             bounds,
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert!(annotations.labels.is_empty());
@@ -14939,9 +15198,15 @@ mod tests {
         ] {
             let mut axis = value_axis.clone();
             axis.tick_label_position = position;
-            let annotations =
-                super::render_axes_and_labels(plot, &[axis], bounds, DispBlanksAs::Gap, &mut fonts)
-                    .unwrap();
+            let annotations = super::render_axes_and_labels(
+                plot,
+                &[axis],
+                bounds,
+                DispBlanksAs::Gap,
+                &mut fonts,
+                None,
+            )
+            .unwrap();
             let zero = annotations
                 .labels
                 .iter()
@@ -14960,6 +15225,7 @@ mod tests {
             bounds,
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert!(annotations.labels.is_empty());
@@ -15395,6 +15661,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut labels,
+            None,
         )
         .unwrap();
         let text: Vec<_> = labels
@@ -15497,6 +15764,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert_eq!(annotations.gridlines.len(), 2);
@@ -15525,6 +15793,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert_eq!(annotations.gridlines.len(), 3);
@@ -15553,6 +15822,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         );
         let error = match result {
             Err(error) => error,
@@ -15597,6 +15867,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         let text: Vec<_> = annotations
@@ -15616,6 +15887,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         );
         let error = match result {
             Err(error) => error,
@@ -17285,6 +17557,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let labels: Vec<_> = rendered
@@ -17349,6 +17622,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut Vec::new(),
+            None,
         )
         .expect("value-only labels do not need a percentage total");
         let Plot::Bar { data_labels, .. } = plot else {
@@ -17362,6 +17636,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut Vec::new(),
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("data-label percentage total"));
@@ -17386,6 +17661,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut Vec::new(),
+            None,
         )
         .expect("effective point overrides disable percentage aggregation");
     }
@@ -17416,6 +17692,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let text: Vec<_> = rendered
@@ -17444,6 +17721,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let text: Vec<_> = rendered
@@ -19255,7 +19533,8 @@ mod tests {
                 },
                 ..Default::default()
             });
-            let layout = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+            let layout =
+                super::layout_legend(&chart.chart, &plot, bounds, &mut fonts, None).unwrap();
             for (key, label) in layout.keys.iter().zip(&layout.labels) {
                 let right = label.origin.x + label.advances.iter().sum::<f64>();
                 assert!(key.x >= bounds.x && right <= bounds.x + bounds.width);
@@ -19267,7 +19546,8 @@ mod tests {
                 assert!(label.origin.y >= bounds.y && label.origin.y <= bounds.y + bounds.height);
             }
             chart.chart.legend.as_mut().unwrap().settings.overlay = true;
-            let overlay = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+            let overlay =
+                super::layout_legend(&chart.chart, &plot, bounds, &mut fonts, None).unwrap();
             assert_eq!(overlay.plot, full);
             assert!(
                 overlay.keys.iter().any(|key| key.x < full.x + full.width
@@ -19278,7 +19558,7 @@ mod tests {
             );
         }
         chart.chart.legend = None;
-        let absent = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+        let absent = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts, None).unwrap();
         assert_eq!(absent.plot, full);
         assert!(absent.keys.is_empty());
     }
@@ -19379,7 +19659,8 @@ mod tests {
         let chart = labelled_bar_chart();
         let plot = &chart.chart.plot_area.plots().unwrap()[0];
         let mut fonts = FontManager::new_deterministic().unwrap();
-        let layout = super::layout_legend(&chart.chart, plot, chart_bounds(), &mut fonts).unwrap();
+        let layout =
+            super::layout_legend(&chart.chart, plot, chart_bounds(), &mut fonts, None).unwrap();
         // Frozen Word16.113.2 and PowerPoint16.113.4, explicit Aptos9pt
         // legend controls. Absolute position and cropped paint are separately
         // qualified from actual PDFs with the same one-point bound.
@@ -19390,7 +19671,7 @@ mod tests {
         multiple.chart.legend = Some(super::CT_Legend::default());
         let plot = &multiple.chart.plot_area.plots().unwrap()[0];
         let layout =
-            super::layout_legend(&multiple.chart, plot, chart_bounds(), &mut fonts).unwrap();
+            super::layout_legend(&multiple.chart, plot, chart_bounds(), &mut fonts, None).unwrap();
         for pair in layout.keys.windows(2) {
             assert!((pair[1].y - pair[0].y - 16.875).abs() <= 1.0);
         }
