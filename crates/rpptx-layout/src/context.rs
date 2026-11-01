@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 
-use oxml_chart::{render_chart_placeholder, render_chart_with_legend_notice};
+use oxml_chart::{render_chart_placeholder, render_chart_space_with_legend_notice};
 use oxml_drawing::color::{ColorChoice, ColorMap, ColorMapSlot, RgbColor, resolve_color};
 use oxml_drawing::effect::CT_OuterShadowEffect;
 use oxml_drawing::fill::{
@@ -1303,8 +1303,8 @@ impl<'a> ResolveCtx<'a> {
                     width: bounds.width,
                     height: bounds.height,
                 };
-                match render_chart_with_legend_notice(
-                    &chart_space.chart,
+                match render_chart_space_with_legend_notice(
+                    chart_space,
                     local_bounds,
                     self.theme,
                     &self.color_map,
@@ -4394,8 +4394,74 @@ fn placeholder_chain<'a>(
     else {
         return (None, None);
     };
-    let master_shape = find_placeholder(&master.common_slide_data.shape_tree.children, &layout_key);
+    let master_shape =
+        find_master_placeholder(&master.common_slide_data.shape_tree.children, &layout_key);
     (Some(layout_shape), master_shape)
+}
+
+/// The master placeholder type a layout placeholder of `ph_type` inherits
+/// from: a title from the title, the date, footer, slide number and header
+/// from their own, and every content placeholder from the body.
+fn master_type(ph_type: &PhType) -> PhType {
+    match ph_type {
+        PhType::Title | PhType::CenteredTitle | PhType::VerticalTitle => PhType::Title,
+        PhType::DateTime => PhType::DateTime,
+        PhType::Footer => PhType::Footer,
+        PhType::SlideNumber => PhType::SlideNumber,
+        PhType::Header => PhType::Header,
+        _ => PhType::Body,
+    }
+}
+
+/// The master placeholder a layout placeholder keyed `layout_key` inherits
+/// from: one of its master type ([`master_type`]), the one with the same
+/// index if there is one, else the first. The index alone never decides: a
+/// master numbers its date placeholder 2, and the right-hand body of
+/// PowerPoint's own "Two Content" layout is also 2, yet it draws as body
+/// text, not as a date.
+fn find_master_placeholder<'a>(
+    children: &'a [ShapeTreeChild],
+    layout_key: &PlaceholderKey,
+) -> Option<&'a CT_Shape> {
+    let wanted = master_type(&layout_key.ph_type);
+    let mut candidates = Vec::new();
+    collect_master_placeholders(children, &wanted, &mut candidates);
+    candidates
+        .iter()
+        .find(|shape| {
+            layout_key.idx.is_some()
+                && shape.placeholder.as_ref().and_then(|p| p.idx) == layout_key.idx
+        })
+        .or_else(|| candidates.first())
+        .copied()
+}
+
+fn collect_master_placeholders<'a>(
+    children: &'a [ShapeTreeChild],
+    wanted: &PhType,
+    found: &mut Vec<&'a CT_Shape>,
+) {
+    for child in children {
+        match child {
+            ShapeTreeChild::Shape(shape) => {
+                if shape.placeholder.as_ref().is_some_and(|placeholder| {
+                    let own = placeholder.effective_type();
+                    own == *wanted || (*wanted == PhType::Title && own == PhType::CenteredTitle)
+                }) {
+                    found.push(shape);
+                }
+            }
+            ShapeTreeChild::GroupShape(group) => {
+                collect_master_placeholders(&group.children, wanted, found)
+            }
+            ShapeTreeChild::AlternateContent(alternate) => {
+                if let Some(fallback) = alternate.selected_fallback() {
+                    collect_master_placeholders(fallback, wanted, found);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn find_placeholder<'a>(
@@ -5058,11 +5124,19 @@ mod tests {
     }
 
     #[test]
-    fn slide_placeholder_resolves_to_layout_and_master_counterparts() {
+    fn slide_placeholder_resolves_to_layout_by_index_and_master_by_type() {
         let fixture = Fixture::new(
             &shape(Some("title"), Some(7)),
-            &shape(Some("body"), Some(7)),
-            &shape(Some("pic"), Some(7)),
+            &format!(
+                "{}{}",
+                shape(Some("body"), Some(7)),
+                shape(Some("title"), None)
+            ),
+            &format!(
+                "{}{}",
+                shape(Some("pic"), Some(7)),
+                shape(Some("body"), Some(1))
+            ),
         );
 
         let context = fixture.context();
@@ -5072,14 +5146,13 @@ mod tests {
             layout.unwrap().placeholder.as_ref().unwrap().ph_type,
             Some(PhType::Body)
         );
-        assert_eq!(
-            master.unwrap().placeholder.as_ref().unwrap().ph_type,
-            Some(PhType::Picture)
-        );
+        let master = master.unwrap().placeholder.as_ref().unwrap();
+        assert_eq!(master.ph_type, Some(PhType::Body));
+        assert_eq!(master.idx, Some(1));
     }
 
     #[test]
-    fn master_match_uses_the_layout_placeholder_key() {
+    fn master_match_uses_the_layout_placeholder_type() {
         let fixture = Fixture::new(
             &shape(Some("title"), Some(8)),
             &shape(Some("ctrTitle"), None),
@@ -5091,6 +5164,30 @@ mod tests {
 
         assert!(layout.is_some());
         assert_eq!(master.unwrap().placeholder.as_ref().unwrap().idx, Some(5));
+    }
+
+    #[test]
+    fn a_layout_body_never_inherits_the_master_date_of_its_index() {
+        // PowerPoint's "Two Content" layout: its right-hand body is idx 2,
+        // and the master's date placeholder is idx 2 too.
+        let fixture = Fixture::new(
+            &shape(None, Some(2)),
+            &shape(None, Some(2)),
+            &format!(
+                "{}{}",
+                shape(Some("dt"), Some(2)),
+                shape(Some("body"), Some(1))
+            ),
+        );
+
+        let context = fixture.context();
+        let (layout, master) = context.placeholder_chain(fixture.slide_shape(0));
+
+        assert!(layout.is_some());
+        assert_eq!(
+            master.unwrap().placeholder.as_ref().unwrap().ph_type,
+            Some(PhType::Body)
+        );
     }
 
     #[test]

@@ -4307,6 +4307,7 @@ impl Engine {
                                 (Some(content), Some(semantics))
                             });
                         block::collapse_shared_border_groups(&mut current_blocks);
+                        block::collapse_shared_contextual_spacing(&mut current_blocks);
                         sections.push(paginator::SharedSection {
                             continuous: sect_pr.section_type
                                 == Some(rdocx_oxml::shared::ST_SectionType::Continuous),
@@ -4476,6 +4477,7 @@ impl Engine {
                 (Some(content), Some(semantics))
             });
         block::collapse_shared_border_groups(&mut current_blocks);
+        block::collapse_shared_contextual_spacing(&mut current_blocks);
         sections.push(paginator::SharedSection {
             continuous: final_sect_pr.section_type
                 == Some(rdocx_oxml::shared::ST_SectionType::Continuous),
@@ -10968,6 +10970,18 @@ fn layout_paragraph_with_source_and_table(
     result.heading_text = heading_level.map(|_| heading_text);
     result.change_bar = change_bar_color(para, input);
     result.list = list_num_id.map(|num_id| (num_id, list_ilvl.min(8) as u8));
+    result.contextual_spacing = effective_ppr.contextual_spacing.unwrap_or(false);
+    result.frame = effective_ppr
+        .frame
+        .as_deref()
+        .and_then(block::TextFrame::from_ct);
+    result.style = para_style_id
+        .or_else(|| {
+            styles
+                .get_default(rdocx_oxml::styles::StyleType::Paragraph)
+                .map(|style| style.style_id.as_str())
+        })
+        .map(Arc::from);
     result.anchored = collect_anchored_drawings(
         para,
         styles,
@@ -11771,8 +11785,8 @@ fn render_word_chart(
         height,
     };
     let rendered = match input.charts.get(relationship_id) {
-        Some(Ok(chart)) => oxml_chart::render_chart_with_legend_notice(
-            &chart.chart,
+        Some(Ok(chart)) => oxml_chart::render_chart_space_with_legend_notice(
+            chart,
             bounds,
             &input.chart_theme,
             &input.chart_color_map,
@@ -12085,6 +12099,12 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
     }
     if direct.bidi.is_some() {
         effective.bidi = direct.bidi;
+    }
+    if direct.frame.is_some() {
+        effective.frame = direct.frame.clone();
+    }
+    if direct.contextual_spacing.is_some() {
+        effective.contextual_spacing = direct.contextual_spacing;
     }
     if direct.borders.is_some() {
         effective.borders = direct.borders.clone();
@@ -12870,9 +12890,17 @@ fn layout_header_footer_variant_uncached(
                 } else {
                     sources.and_then(|sources| sources.id(&story, &path))
                 };
+                // A frame with its own width breaks its lines at that width. Only
+                // a direct `w:framePr` gives one here, which is where Word writes it.
+                let frame_width = paragraph
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.frame.as_deref())
+                    .and_then(block::TextFrame::from_ct)
+                    .and_then(|frame| frame.width);
                 let (mut block, direction) = layout_paragraph_with_source_and_direction(
                     paragraph,
-                    width,
+                    frame_width.unwrap_or(width),
                     styles,
                     input,
                     &part_media,
@@ -12910,6 +12938,10 @@ fn layout_header_footer_variant_uncached(
                 blocks.extend(rows);
             }
         }
+    }
+    let drops = block::contextual_spacing_drops(&blocks.iter().map(Some).collect::<Vec<_>>());
+    for (paragraph, drop) in blocks.iter_mut().zip(drops) {
+        paragraph.drop_contextual_spacing(drop);
     }
     let groups = block::paragraph_border_groups(&blocks.iter().map(Some).collect::<Vec<_>>());
     for index in 0..blocks.len() {
@@ -16386,6 +16418,28 @@ mod tests {
             ..Default::default()
         });
         input
+    }
+
+    #[test]
+    fn direct_frame_and_contextual_spacing_override_the_style() {
+        let mut effective = CT_PPr {
+            contextual_spacing: Some(true),
+            ..Default::default()
+        };
+        let frame = rdocx_oxml::properties::CT_FramePr {
+            x_align: Some("right".to_owned()),
+            ..Default::default()
+        };
+        merge_direct_ppr(
+            &mut effective,
+            &CT_PPr {
+                contextual_spacing: Some(false),
+                frame: Some(Box::new(frame.clone())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(effective.contextual_spacing, Some(false));
+        assert_eq!(effective.frame.as_deref(), Some(&frame));
     }
 
     #[test]

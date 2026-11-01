@@ -4,8 +4,9 @@
 //! keep-lines-together, and header/footer placement.
 
 use crate::block::{
-    AnchoredContent, AnchoredDrawing, CellBlockSemantics, LayoutBlock, LayoutBlockLike,
-    ParagraphBlock, ParagraphView, RowSemantics, ShapePreset, SharedLayoutBlock, TableView,
+    AnchoredContent, AnchoredDrawing, CellBlockSemantics, FrameAlign, FrameAnchor, LayoutBlock,
+    LayoutBlockLike, ParagraphBlock, ParagraphView, RowSemantics, ShapePreset, SharedLayoutBlock,
+    TableView, TextFrame,
 };
 use crate::table::{CellBlock, FloatingTable, TableRow};
 use oxml_layout::line::{
@@ -4517,6 +4518,9 @@ fn render_para_split<B: LayoutBlockLike>(
             // extraction. `reflow_allowed` below prevents a second break.
             reflow: para.reflow.clone(),
             content_offset_top: 0.0,
+            style: para.style.clone(),
+            contextual_spacing: para.contextual_spacing,
+            frame: para.frame,
         };
         render_para_split(
             ParagraphView {
@@ -5653,19 +5657,165 @@ fn render_change_bar_at(
 }
 
 /// Height of the painted story, including collapsed inter-paragraph spacing.
+///
+/// A paragraph in a positioned frame takes none of it.
 fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f64 {
-    let content: f64 = blocks.iter().map(ParagraphBlock::content_height).sum();
+    let flow = blocks
+        .iter()
+        .filter(|block| in_story_flow(block))
+        .collect::<Vec<_>>();
+    let content: f64 = flow.iter().map(|block| block.content_height()).sum();
     content
-        + blocks
+        + flow
             .windows(2)
-            .map(|pair| {
-                if geometry.do_not_use_html_paragraph_auto_spacing {
-                    pair[0].space_after + pair[1].space_before
-                } else {
-                    pair[0].space_after.max(pair[1].space_before)
-                }
-            })
+            .map(|pair| story_gap(pair[0], pair[1], geometry))
             .sum::<f64>()
+}
+
+/// Whether a story paragraph takes vertical space in the flow: it is not in a
+/// frame, or its frame lets no text beside it.
+fn in_story_flow(block: &ParagraphBlock) -> bool {
+    block.frame.is_none_or(|frame| frame.in_flow)
+}
+
+/// The collapsed space between two story paragraphs that follow each other.
+fn story_gap(previous: &ParagraphBlock, next: &ParagraphBlock, geometry: &PageGeometry) -> f64 {
+    if geometry.do_not_use_html_paragraph_auto_spacing {
+        previous.space_after + next.space_before
+    } else {
+        previous.space_after.max(next.space_before)
+    }
+}
+
+/// A story frame placed on its page.
+struct PlacedFrame {
+    /// The geometry the frame's lines render in: its margins are the frame.
+    geometry: PageGeometry,
+    /// The page-space top of the frame.
+    top: f64,
+    /// Each paragraph's lines, realigned to the frame's own width.
+    lines: Vec<Vec<LayoutLine>>,
+    /// How the frame's text keeps its alignment once page fields take their
+    /// values, as [`align_frame_fields`] takes it.
+    fields: Option<TabAlignedField>,
+}
+
+/// One paragraph of a placed story frame, as `render_hf_blocks` draws it.
+#[derive(Clone)]
+struct FramedParagraph {
+    /// The frame's geometry.
+    geometry: PageGeometry,
+    /// The paragraph's story-relative top inside the frame.
+    top: f64,
+    /// The paragraph's lines, realigned to the frame's width.
+    lines: Vec<LayoutLine>,
+    /// The frame's field alignment.
+    fields: Option<TabAlignedField>,
+}
+
+/// Where the frame of the story paragraphs `group` lands on the page.
+///
+/// The paragraphs share one `w:framePr`, which is how Word joins them into
+/// one frame. A frame with no width is as wide as its widest line, and those
+/// lines are realigned within it. `flow_top` is the page-space top of the
+/// paragraph the frame anchors to, which a text-anchored frame offsets from.
+fn place_story_frame(
+    group: &[ParagraphBlock],
+    frame: TextFrame,
+    geometry: &PageGeometry,
+    flow_top: f64,
+    page_number: usize,
+) -> PlacedFrame {
+    let natural = group
+        .iter()
+        .flat_map(|para| {
+            para.lines
+                .iter()
+                .map(|line| line.indent_left + line.width + para.indent_right)
+        })
+        .fold(0.0, f64::max);
+    let width = frame.width.unwrap_or(natural);
+    let height: f64 = group
+        .iter()
+        .map(ParagraphBlock::content_height)
+        .sum::<f64>()
+        + group
+            .windows(2)
+            .map(|pair| story_gap(&pair[0], &pair[1], geometry))
+            .sum::<f64>();
+    let odd = page_number % 2 == 1;
+    let across = match frame.horizontal.anchor {
+        FrameAnchor::Page => (0.0, geometry.page_width),
+        FrameAnchor::Margin | FrameAnchor::Text => (geometry.margin_left, geometry.content_width()),
+    };
+    let x = frame.horizontal.resolve(across, width, odd);
+    // A frame that hugs its text and sits against the right of its box, or
+    // centred in it, keeps that place when a page field's value is narrower
+    // or wider than the placeholder its width was measured with.
+    let shift = match frame.horizontal.align {
+        _ if frame.width.is_some() => 0.0,
+        Some(FrameAlign::End) => 1.0,
+        Some(FrameAlign::Center) => 0.5,
+        Some(FrameAlign::Inside) if !odd => 1.0,
+        Some(FrameAlign::Outside) if odd => 1.0,
+        _ => 0.0,
+    };
+    let top = match frame.vertical.anchor {
+        FrameAnchor::Page => frame
+            .vertical
+            .resolve((0.0, geometry.page_height), height, odd),
+        FrameAnchor::Margin => frame.vertical.resolve(
+            (geometry.margin_top, geometry.content_height()),
+            height,
+            odd,
+        ),
+        // A frame anchored to its paragraph takes only an offset from it.
+        FrameAnchor::Text => flow_top + frame.vertical.offset,
+    };
+    let lines = group
+        .iter()
+        .map(|para| {
+            let mut lines = para.lines.clone();
+            if frame.width.is_none() {
+                for line in &mut lines {
+                    line.available_width = width - line.indent_left - para.indent_right;
+                }
+            }
+            lines
+        })
+        .collect();
+    PlacedFrame {
+        geometry: PageGeometry {
+            margin_left: x,
+            margin_right: geometry.page_width - x - width,
+            ..geometry.clone()
+        },
+        top,
+        lines,
+        fields: (shift > 0.0).then_some(TabAlignedField {
+            start: x,
+            end: x + width,
+            shift,
+            gap: (x - across.0).max(0.0),
+        }),
+    }
+}
+
+/// Mark the text a story frame drew so `engine::substitute_fields` moves it
+/// by its share of a page field's change in width, the way it moves text
+/// after a right or centre tab.
+fn align_frame_fields(elements: &mut [PositionedElement], fields: TabAlignedField) {
+    for element in elements {
+        match element {
+            PositionedElement::Text(run) if run.tab_aligned.is_none() => {
+                run.tab_aligned = Some(fields);
+            }
+            PositionedElement::MarkedContent { children, .. } => {
+                align_frame_fields(children, fields)
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Prepare a conservative initial measure before selected-story pagination.
@@ -5735,31 +5885,83 @@ fn render_hf_blocks(
 ) {
     let (elements, behind, front) = layers;
     let mut y = start_y - geometry.margin_top; // Convert to relative
+    let mut previous_flow: Option<&ParagraphBlock> = None;
+    // Each paragraph in a frame, filled when its frame's first paragraph is
+    // reached.
+    let mut framed: Vec<Option<FramedParagraph>> = vec![None; blocks.len()];
     for (index, para) in blocks.iter().enumerate() {
         // Grouped border frames join across the paragraph gap. The fork's
         // spacing below already advances `y` by that same gap for every pair.
         let border_gap = directions
             .and_then(|values| values.get(index))
             .map_or(0.0, |value| value.1);
-        if let Some(previous) = index.checked_sub(1).and_then(|i| blocks.get(i)) {
-            y += if geometry.do_not_use_html_paragraph_auto_spacing {
-                previous.space_after + para.space_before
+        let flows = in_story_flow(para);
+        if let Some(frame) = para.frame
+            && framed[index].is_none()
+        {
+            let end = if flows {
+                index + 1
             } else {
-                previous.space_after.max(para.space_before)
+                index
+                    + blocks[index..]
+                        .iter()
+                        .take_while(|next| next.frame == Some(frame))
+                        .count()
             };
+            let anchor = blocks[end..].iter().find(|next| in_story_flow(next));
+            let gap = match (previous_flow, anchor) {
+                (Some(previous), Some(next)) => story_gap(previous, next, geometry),
+                _ => 0.0,
+            };
+            let flow_top = geometry.margin_top + y + if flows { 0.0 } else { gap };
+            let placed =
+                place_story_frame(&blocks[index..end], frame, geometry, flow_top, page_number);
+            let mut inner = placed.top - geometry.margin_top;
+            for (offset, lines) in placed.lines.into_iter().enumerate() {
+                if offset > 0 {
+                    inner += story_gap(
+                        &blocks[index + offset - 1],
+                        &blocks[index + offset],
+                        geometry,
+                    );
+                }
+                framed[index + offset] = Some(FramedParagraph {
+                    geometry: placed.geometry.clone(),
+                    top: inner,
+                    lines,
+                    fields: placed.fields,
+                });
+                inner += blocks[index + offset].content_height();
+            }
         }
+        if flows {
+            if let Some(previous) = previous_flow {
+                y += story_gap(previous, para, geometry);
+            }
+            previous_flow = Some(para);
+        }
+        let (para_geometry, para_y, lines, fields) = match &framed[index] {
+            Some(placed) => (
+                &placed.geometry,
+                if flows { y } else { placed.top },
+                placed.lines.as_slice(),
+                placed.fields,
+            ),
+            None => (geometry, y, para.lines.as_slice(), None),
+        };
+        let first_element = elements.len();
         place_cell_anchored(
             &para.anchored,
             geometry,
             geometry,
-            y,
+            para_y,
             para.indent_left,
             front,
             behind,
             media,
         );
         render_paragraph_lines(
-            &para.lines,
+            lines,
             ParagraphView {
                 border_group_before: false,
                 block: para,
@@ -5770,21 +5972,26 @@ fn render_hf_blocks(
                     .unwrap_or(oxml_layout::TextDirection::Auto),
                 reflow_allowed: true,
             },
-            geometry,
-            y,
+            para_geometry,
+            para_y,
             (true, true, border_gap),
             elements,
             media,
         );
+        if let Some(fields) = fields {
+            align_frame_fields(&mut elements[first_element..], fields);
+        }
         render_change_bar(
             para,
-            y,
+            para_y,
             para.content_height(),
-            geometry,
+            para_geometry,
             page_number,
             elements,
         );
-        y += para.content_height();
+        if flows {
+            y += para.content_height();
+        }
     }
 }
 
@@ -6680,6 +6887,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         }
     }
 
@@ -8048,6 +8258,70 @@ mod tests {
     }
 
     #[test]
+    fn a_framed_page_number_takes_no_header_room_and_lands_at_the_right_margin() {
+        // Word's page number gallery: `<w:framePr w:wrap="none" w:vAnchor="text"
+        // w:hAnchor="margin" w:xAlign="right" w:y="1"/>` ahead of the header text.
+        let frame = crate::block::TextFrame::from_ct(&rdocx_oxml::properties::CT_FramePr {
+            wrap: Some("none".to_owned()),
+            v_anchor: Some("text".to_owned()),
+            h_anchor: Some("margin".to_owned()),
+            x_align: Some("right".to_owned()),
+            y: Some(rdocx_oxml::units::Twips(20)),
+            ..Default::default()
+        })
+        .expect("a positioned frame");
+        let mut number = make_para(1, 14.0);
+        number.lines[0].width = 6.0;
+        number.frame = Some(frame);
+        let mut text = make_para(1, 14.0);
+        text.space_before = 6.0;
+        let geometry = PageGeometry::default();
+        let story = vec![number.clone(), text];
+        assert_eq!(header_footer_height(&story, &geometry), 14.0);
+
+        let placed = place_story_frame(&story[..1], frame, &geometry, 36.0, 1);
+        assert_eq!(placed.geometry.margin_left, 72.0 + 468.0 - 6.0);
+        assert_eq!(placed.geometry.content_width(), 6.0);
+        assert_eq!(placed.top, 37.0);
+        // An auto-width frame realigns its lines to its own width, and its
+        // text moves by a page field's whole change in width.
+        assert_eq!(placed.lines[0][0].available_width, 6.0);
+        assert_eq!(placed.fields.map(|fields| fields.shift), Some(1.0));
+    }
+
+    #[test]
+    fn a_drop_cap_is_not_a_positioned_frame_and_a_page_frame_aligns_to_the_sheet() {
+        assert_eq!(
+            crate::block::TextFrame::from_ct(&rdocx_oxml::properties::CT_FramePr {
+                drop_cap: Some("drop".to_owned()),
+                lines: Some(3),
+                ..Default::default()
+            }),
+            None
+        );
+        let frame = crate::block::TextFrame::from_ct(&rdocx_oxml::properties::CT_FramePr {
+            w: Some(rdocx_oxml::units::Twips(2880)),
+            h_anchor: Some("page".to_owned()),
+            x_align: Some("outside".to_owned()),
+            v_anchor: Some("page".to_owned()),
+            y_align: Some("bottom".to_owned()),
+            wrap: Some("notBeside".to_owned()),
+            ..Default::default()
+        })
+        .expect("a positioned frame");
+        assert!(frame.in_flow);
+        let para = make_para(2, 10.0);
+        let geometry = PageGeometry::default();
+        let odd = place_story_frame(std::slice::from_ref(&para), frame, &geometry, 0.0, 1);
+        let even = place_story_frame(&[para], frame, &geometry, 0.0, 2);
+        assert_eq!(odd.geometry.margin_left, 612.0 - 144.0);
+        assert_eq!(even.geometry.margin_left, 0.0);
+        assert_eq!(odd.top, 792.0 - 20.0);
+        // A frame of its own width has nothing to realign.
+        assert_eq!(odd.fields, None);
+    }
+
+    #[test]
     fn body_room_tracks_selected_header_and_footer_on_each_page() {
         let fm = FontManager::new();
         let media = HashMap::new();
@@ -8357,6 +8631,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8401,6 +8678,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8488,6 +8768,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8550,6 +8833,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8598,6 +8884,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8641,6 +8930,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8779,6 +9071,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -8829,6 +9124,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -8887,6 +9185,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -8950,6 +9251,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];

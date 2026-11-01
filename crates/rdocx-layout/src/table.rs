@@ -1802,7 +1802,13 @@ fn layout_cell_content(
             CellBlock::Table(_) => None,
         })
         .collect::<Vec<_>>();
+    let drops = crate::block::contextual_spacing_drops(&paragraphs);
     let groups = crate::block::paragraph_border_groups(&paragraphs);
+    for (block, drop) in blocks.iter_mut().zip(drops) {
+        if let CellBlock::Paragraph(paragraph) = block {
+            paragraph.drop_contextual_spacing(drop);
+        }
+    }
     for ((block, semantics), (top, bottom)) in blocks.iter_mut().zip(&mut semantics).zip(groups) {
         if let CellBlockSemantics::Paragraph(semantics) = semantics {
             semantics.border_group_before = top;
