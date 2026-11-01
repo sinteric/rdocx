@@ -1740,13 +1740,20 @@ impl<'a> Pager<'a> {
 
     /// The space a paragraph adds above itself at the cursor.
     ///
-    /// Nothing at the top of a page. Word otherwise keeps the larger of the
-    /// previous paragraph's space after and this space before, so only the
-    /// part of `before` that exceeds the space after already below the cursor
-    /// is added, unless the document asks for the two to be summed.
+    /// At the top of a page, all of it in the first column of a section's
+    /// first page, the top of the document included, and nothing on a page or
+    /// in a column the text flowed into, as in Word. Word otherwise keeps the
+    /// larger of the previous paragraph's space after and this space before,
+    /// so only the part of `before` that exceeds the space after already
+    /// below the cursor is added, unless the document asks for the two to be
+    /// summed.
     fn space_before(&self, before: f64) -> f64 {
         if self.cursor_y == 0.0 {
-            0.0
+            if self.is_first_page && self.track_index == 0 {
+                before
+            } else {
+                0.0
+            }
         } else if self.geometry.do_not_use_html_paragraph_auto_spacing {
             before
         } else {
@@ -8226,7 +8233,7 @@ mod tests {
     }
 
     #[test]
-    fn page_top_spacing_and_upstream_paragraph_collapse_remain_unchanged() {
+    fn page_top_spacing_stays_on_a_sections_first_page_and_collapses_between_paragraphs() {
         let fm = FontManager::new();
         let media = HashMap::new();
         let notes = NoteRegistry::default();
@@ -8246,11 +8253,14 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(pager.space_before(24.0), 0.0);
+        // The top of the section's first page keeps it, its second column
+        // and every later page drop it.
+        assert_eq!(pager.space_before(24.0), 24.0);
         pager.track_index = 1;
         assert_eq!(pager.space_before(24.0), 0.0);
         pager.track_index = 0;
         pager.page_number = 2;
+        pager.is_first_page = false;
         assert_eq!(pager.space_before(24.0), 0.0);
         pager.cursor_y = 40.0;
         pager.previous_space_after = 12.0;
