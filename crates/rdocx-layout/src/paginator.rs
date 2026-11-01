@@ -2889,7 +2889,13 @@ fn anchored_elements(
             });
             produced.push(PositionedElement::Group(positioned));
         }
-        AnchoredContent::Shape { preset, fill, text } => {
+        AnchoredContent::Shape {
+            preset,
+            fill,
+            outline,
+            text,
+            insets,
+        } => {
             match (preset, fill) {
                 (ShapePreset::Rect, Some(color)) => {
                     produced.push(PositionedElement::FilledRect {
@@ -2897,24 +2903,47 @@ fn anchored_elements(
                         color: *color,
                     });
                 }
-                (ShapePreset::Line, Some(color)) => {
-                    produced.push(PositionedElement::Line {
-                        start: Point {
-                            x: rect.x,
-                            y: rect.y,
-                        },
-                        end: Point {
-                            x: rect.x + anchor.width,
-                            y: rect.y + anchor.height,
-                        },
-                        width: 1.0,
-                        color: *color,
-                        dash_pattern: None,
-                    });
+                (ShapePreset::Line, _) => {
+                    // A line's colour is its outline's. An older reading of
+                    // the shape took the fill, which is kept where the shape
+                    // names no outline colour.
+                    if let Some((color, width)) = outline.or_else(|| fill.map(|color| (color, 1.0)))
+                    {
+                        produced.push(PositionedElement::Line {
+                            start: Point {
+                                x: rect.x,
+                                y: rect.y,
+                            },
+                            end: Point {
+                                x: rect.x + anchor.width,
+                                y: rect.y + anchor.height,
+                            },
+                            width,
+                            color,
+                            dash_pattern: None,
+                        });
+                    }
                 }
                 _ => {}
             }
-            produced.extend(render_shape_text(text, geometry, rect, media));
+            if let (ShapePreset::Rect, Some((color, width))) = (preset, outline) {
+                produced.push(PositionedElement::Path(oxml_layout::PathElement {
+                    path: Path::rect(rect),
+                    fill: None,
+                    stroke: Some(oxml_layout::Stroke::new(
+                        oxml_layout::Paint::Solid(*color),
+                        *width,
+                    )),
+                }));
+            }
+            let [left, top, right, bottom] = *insets;
+            let inner = Rect {
+                x: rect.x + left,
+                y: rect.y + top,
+                width: (rect.width - left - right).max(0.0),
+                height: (rect.height - top - bottom).max(0.0),
+            };
+            produced.extend(render_shape_text(text, geometry, inner, media));
         }
     }
     if anchor.rotation_degrees != 0.0 {
@@ -9360,6 +9389,79 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_outline_is_stroked_around_its_body_and_a_line_takes_the_outline_colour() {
+        let shape = |preset, fill, outline| AnchoredDrawing {
+            rotation_degrees: 0.0,
+            behind_doc: false,
+            rel_h: ST_RelativeFromH::Page,
+            off_h: 0.0,
+            rel_v: ST_RelativeFromV::Page,
+            off_v: 0.0,
+            width: 100.0,
+            height: 40.0,
+            wrap: WrapType::None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            align_h: None,
+            align_v: None,
+            content: AnchoredContent::Shape {
+                preset,
+                fill,
+                outline,
+                text: Vec::new(),
+                insets: crate::block::DEFAULT_TEXT_INSETS,
+            },
+            alternate_text: None,
+            structure_id: None,
+        };
+        let rect = Rect {
+            x: 50.0,
+            y: 60.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let black = Color::from_hex("000000");
+        let white = Color::from_hex("FFFFFF");
+        let drawn = |anchor: &AnchoredDrawing| {
+            anchored_elements(anchor, rect, &PageGeometry::default(), &HashMap::new())
+                .into_iter()
+                .flat_map(|element| match element {
+                    PositionedElement::MarkedContent { children, .. } => children,
+                    other => vec![other],
+                })
+                .collect::<Vec<_>>()
+        };
+        let boxed = drawn(&shape(ShapePreset::Rect, Some(white), Some((black, 0.5))));
+        assert_eq!(boxed.len(), 2, "{boxed:?}");
+        assert!(matches!(boxed[0], PositionedElement::FilledRect { color, .. } if color == white));
+        let PositionedElement::Path(outline) = &boxed[1] else {
+            panic!("the outline is a stroked path: {boxed:?}");
+        };
+        assert_eq!(outline.path, Path::rect(rect));
+        assert_eq!(outline.fill, None);
+        let stroke = outline.stroke.as_ref().expect("stroke");
+        assert_eq!(stroke.width, 0.5);
+        assert_eq!(stroke.paint, oxml_layout::Paint::Solid(black));
+        // No outline colour, no outline.
+        assert_eq!(drawn(&shape(ShapePreset::Rect, Some(white), None)).len(), 1);
+        // A line is drawn in its outline's colour and width, else its fill's.
+        for (fill, outline, expected) in [
+            (None, Some((black, 2.0)), (black, 2.0)),
+            (Some(white), Some((black, 2.0)), (black, 2.0)),
+            (Some(white), None, (white, 1.0)),
+        ] {
+            let line = drawn(&shape(ShapePreset::Line, fill, outline));
+            assert!(
+                matches!(line[..], [PositionedElement::Line { color, width, .. }]
+                    if (color, width) == expected),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cell_anchors_use_cell_coordinates_and_page_behind_order() {
         let page = PageGeometry::default();
         let cell = PageGeometry {
@@ -9387,7 +9489,9 @@ mod tests {
             content: AnchoredContent::Shape {
                 preset: ShapePreset::Rect,
                 fill: Some(Color::from_hex("CC0000")),
+                outline: None,
                 text: Vec::new(),
+                insets: crate::block::DEFAULT_TEXT_INSETS,
             },
             alternate_text: Some("cell stamp".to_owned()),
             structure_id: None,
