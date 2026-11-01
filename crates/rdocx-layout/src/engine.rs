@@ -11874,7 +11874,16 @@ fn collect_anchored_drawings(
             } else {
                 match shape {
                     Some(shape) => {
-                        // A shape's text box wraps at the shape width.
+                        // A shape's text box wraps at the shape width less its
+                        // left and right insets.
+                        let mut insets = block::DEFAULT_TEXT_INSETS;
+                        for (inset, named) in insets.iter_mut().zip(shape.insets) {
+                            if let Some(named) = named {
+                                *inset = named.to_pt();
+                            }
+                        }
+                        let text_width =
+                            (anchor.extent_cx.to_pt() - insets[0] - insets[2]).max(0.0);
                         let mut text = Vec::new();
                         if let Some(body) = &shape.text_body {
                             let mut local_sources =
@@ -11906,7 +11915,7 @@ fn collect_anchored_drawings(
                                         });
                                         let mut block = layout_paragraph_with_source(
                                             paragraph,
-                                            anchor.extent_cx.to_pt(),
+                                            text_width,
                                             styles,
                                             input,
                                             media,
@@ -11924,7 +11933,7 @@ fn collect_anchored_drawings(
                                         let (table, semantics) =
                                             table::layout_table_with_provenance(
                                                 table,
-                                                anchor.extent_cx.to_pt(),
+                                                text_width,
                                                 styles,
                                                 input,
                                                 media,
@@ -11937,7 +11946,7 @@ fn collect_anchored_drawings(
                                                 None,
                                             )?;
                                         let geometry = PageGeometry {
-                                            page_width: anchor.extent_cx.to_pt(),
+                                            page_width: text_width,
                                             page_height: anchor.extent_cy.to_pt(),
                                             ..PageGeometry::default()
                                         };
@@ -11959,7 +11968,7 @@ fn collect_anchored_drawings(
                             for p in &shape.text {
                                 text.push(layout_paragraph_with_source(
                                     p,
-                                    anchor.extent_cx.to_pt(),
+                                    text_width,
                                     styles,
                                     input,
                                     media,
@@ -11973,7 +11982,16 @@ fn collect_anchored_drawings(
                         block::AnchoredContent::Shape {
                             preset: block::ShapePreset::from_prst(shape.preset.as_deref()),
                             fill: shape.solid_fill.as_deref().map(Color::from_hex),
+                            outline: shape.line_color.as_deref().map(|color| {
+                                (
+                                    Color::from_hex(color),
+                                    shape
+                                        .line_width
+                                        .map_or(block::DEFAULT_OUTLINE_WIDTH, |w| w.to_pt()),
+                                )
+                            }),
                             text,
+                            insets,
                         }
                     }
                     None if anchor.embed_id.is_empty() => continue,

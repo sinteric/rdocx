@@ -73,10 +73,24 @@ pub enum AnchoredContent {
         /// Fill colour, or `None` for `a:noFill` and for fills we cannot
         /// resolve. An unfilled shape draws no body, only its text.
         fill: Option<Color>,
+        /// Outline colour and width in points, or `None` for no outline, one
+        /// left to the shape style, and a colour we cannot resolve.
+        outline: Option<(Color, f64)>,
         /// Laid-out paragraphs of the shape's text box.
         text: Vec<ParagraphBlock>,
+        /// Space between the shape's edges and its text, in points: left,
+        /// top, right, bottom.
+        insets: [f64; 4],
     },
 }
+
+/// DrawingML's text box insets where `bodyPr` names none: 0.1 inch left and
+/// right, 0.05 inch top and bottom (ECMA-376 §21.1.2.1.1).
+pub const DEFAULT_TEXT_INSETS: [f64; 4] = [7.2, 3.6, 7.2, 3.6];
+
+/// An outline's width where `a:ln` names none: Word's default shape outline,
+/// three quarters of a point.
+pub const DEFAULT_OUTLINE_WIDTH: f64 = 0.75;
 
 /// The preset geometries we can draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
