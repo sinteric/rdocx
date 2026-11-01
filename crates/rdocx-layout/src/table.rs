@@ -516,7 +516,8 @@ fn layout_table_inner(
         .and_then(floating_table)
         .map(Box::new);
     // 1. Compute column widths. Content-driven autofit engages only for an
-    //    auto or absent width with an autofit or absent layout mode.
+    //    auto or absent width with an autofit layout mode, or with no layout
+    //    mode and no declared cell width.
     let col_widths = match autofit_column_widths(
         tbl,
         authored_width_type.as_deref(),
@@ -1373,12 +1374,14 @@ const AUTOFIT_MIN_TRIAL_WIDTH: f64 = 1.0;
 /// Compute content-driven column widths, or `None` when autofit does not
 /// engage and the declared grid stands.
 ///
-/// Autofit engages only when the effective `w:tblLayout` is autofit or absent
-/// **and** the effective `w:tblW` type is `auto` or absent. That is narrower
-/// than the literal ECMA default, which applies autofit whenever
-/// `w:tblLayout` is absent. The narrowing is deliberate: it keeps an authored
-/// `dxa` or `pct` table on the declared grid, so adopting the wider predicate
-/// stays a separate reviewed change rather than a side effect of this one.
+/// Autofit engages only when the effective `w:tblW` type is `auto` or absent,
+/// and either the effective `w:tblLayout` is autofit or the table declares no
+/// width at all: no `w:tblLayout`, and no cell with a `w:tcW` other than
+/// `auto`. That is narrower than the literal ECMA default, which applies
+/// autofit whenever `w:tblLayout` is absent. The narrowing is deliberate: it
+/// keeps a table with authored `dxa` or `pct` widths on the declared grid, so
+/// adopting the wider predicate stays a separate reviewed change rather than a
+/// side effect of this one.
 ///
 /// Measurement runs the production cell path twice, once at a wide trial
 /// width for the maximum content width and once at a minimal trial width for
@@ -1397,23 +1400,35 @@ fn autofit_column_widths(
     doc_grid: Option<&CT_DocGrid>,
 ) -> Result<Option<Vec<f64>>> {
     let properties = tbl.properties.as_ref();
-    // ECMA makes autofit the default when `w:tblLayout` is absent, but this
-    // engagement is deliberately narrower and requires the element. An absent
-    // layout is the shape almost every producer writes, 131 of the 141 tables
-    // in the Word corpus, and treating it as autofit changes the reference
-    // page count that `scripts/docx_authoring_conformance.py --private-required`
-    // pins. Adopting the literal default is its own story with its own
-    // reviewed geometry delta.
-    let autofit_layout = matches!(
-        properties.and_then(|properties| properties.layout.as_deref()),
-        Some("autofit")
-    );
     let auto_width = !matches!(authored_width_type, Some(kind) if kind != "auto");
-    if !autofit_layout || !auto_width || available_width <= 0.0 {
+    if !auto_width || available_width <= 0.0 {
+        return Ok(None);
+    }
+    let source_rows = accepted_table_rows(tbl, path, input);
+    // ECMA makes autofit the default when `w:tblLayout` is absent, but this
+    // engagement is deliberately narrower. An absent layout is the shape
+    // almost every producer writes, 131 of the 141 tables in the Word corpus,
+    // and treating every one as autofit changes the reference page count that
+    // `scripts/docx_authoring_conformance.py --private-required` pins. Word
+    // writes a `w:tcW` for every cell of its own tables, so an absent layout
+    // engages here only when no cell declares a width either. Such a table
+    // declares nothing but its grid, which a generator writes as a guess, and
+    // Word sizes its columns to their content.
+    let autofit_layout = match properties.and_then(|properties| properties.layout.as_deref()) {
+        Some(layout) => layout == "autofit",
+        None => source_rows.iter().all(|(row, row_path)| {
+            layout_row_cells(row, row_path).iter().all(|(cell, _)| {
+                cell.properties
+                    .as_ref()
+                    .and_then(|properties| properties.width.as_ref())
+                    .is_none_or(|width| width.width_type == "auto")
+            })
+        }),
+    };
+    if !autofit_layout {
         return Ok(None);
     }
 
-    let source_rows = accepted_table_rows(tbl, path, input);
     let column_count = tbl
         .grid
         .as_ref()
@@ -2559,6 +2574,50 @@ mod tests {
     }
 
     #[test]
+    fn a_table_that_declares_no_width_is_sized_to_its_content() {
+        // A generator's table: a grid, and no layout mode, table width or cell
+        // width. Word sizes its columns to their content.
+        let mut table = CT_Tbl::new();
+        table.grid = Some(CT_TblGrid {
+            columns: vec![CT_TblGridCol { width: Twips(2000) }; 2],
+            ..Default::default()
+        });
+        let mut row = CT_Row::new();
+        for text in ["Region", "Sales"] {
+            let mut cell = CT_Tc::new();
+            cell.paragraphs_mut()[0].add_run(text);
+            row.cells.push(cell);
+        }
+        table.rows.push(row);
+        let declared = 200.0;
+        let content = layout_with_defaults(&table, 468.0);
+        assert!(
+            content.table_width > 0.0 && content.table_width < declared / 2.0,
+            "{}",
+            content.table_width
+        );
+
+        // Any authored width keeps the declared grid: one cell's, the
+        // table's, or a fixed layout.
+        table.rows[0].cells[0].properties = Some(CT_TcPr {
+            width: Some(CT_TblWidth::dxa(2000)),
+            ..Default::default()
+        });
+        assert_eq!(layout_with_defaults(&table, 468.0).table_width, declared);
+        table.rows[0].cells[0].properties = None;
+        table.properties = Some(CT_TblPr {
+            width: Some(CT_TblWidth::dxa(4000)),
+            ..Default::default()
+        });
+        assert_eq!(layout_with_defaults(&table, 468.0).table_width, declared);
+        table.properties = Some(CT_TblPr {
+            layout: Some("fixed".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(layout_with_defaults(&table, 468.0).table_width, declared);
+    }
+
+    #[test]
     fn absent_side_margins_match_zero_in_intrinsic_and_final_layout() {
         let mut table = CT_Tbl::new();
         table.properties = Some(CT_TblPr {
@@ -2842,9 +2901,9 @@ mod tests {
         assert!(matches!(cell.blocks[0], CellBlock::Paragraph(_)));
         assert!(matches!(cell.blocks[1], CellBlock::Table(_)));
 
-        // This table declares neither a width nor a layout mode. Autofit
-        // engagement requires the `w:tblLayout` element, so the width comes
-        // from the declared grid and never exceeds the caller's width.
+        // This table declares no width, no layout mode and no cell width, so
+        // autofit sizes it to its content, which here is the nested table's
+        // declared grid, and it never exceeds the caller's width.
         assert!(block.table_width > 0.0);
         assert!(block.table_width <= 234.0);
     }

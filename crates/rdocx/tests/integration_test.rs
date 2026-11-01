@@ -21288,7 +21288,7 @@ mod advanced_table_authoring_and_geometry {
     };
     use rdocx::{Document, Length};
     use rdocx_oxml::table::{
-        CT_Row, CT_Tbl, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth, CT_Tc,
+        CT_Row, CT_Tbl, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth, CT_Tc, CT_TcPr,
     };
     use rdocx_oxml::units::Twips;
 
@@ -21630,7 +21630,7 @@ mod advanced_table_authoring_and_geometry {
     }
 
     #[test]
-    fn autofit_engages_only_for_an_auto_width_autofit_table() {
+    fn autofit_engages_only_for_an_auto_width_table_that_is_autofit_or_declares_no_widths() {
         let declared = [Twips(1440), Twips(4320)];
         let grid_points = |table: &CT_Tbl| -> Vec<f64> {
             lay_out(table, 360.0)
@@ -21649,12 +21649,23 @@ mod advanced_table_authoring_and_geometry {
             &[&["Region", "Quarterly revenue for the northern region"]],
         );
 
-        // Absent width and absent layout mode keeps the declared grid. ECMA
-        // makes autofit the default here, but engagement deliberately requires
-        // the element, because an absent layout is the shape almost every
-        // producer writes and treating it as autofit moves the pinned private
-        // corpus reference page count.
+        // Absent width, absent layout mode and no cell width: the table
+        // declares nothing but its grid, and Word sizes its columns to their
+        // content.
+        assert_ne!(grid_points(&table), declared_points);
+
+        // An absent layout with one authored cell width keeps the declared
+        // grid. ECMA makes autofit the default whenever the layout is absent,
+        // but engagement is deliberately narrower, because an absent layout is
+        // the shape almost every producer writes, Word writes a w:tcW for every
+        // cell of its own tables, and treating all of them as autofit moves
+        // the pinned private corpus reference page count.
+        table.rows[0].cells[0].properties = Some(CT_TcPr {
+            width: Some(CT_TblWidth::dxa(1440)),
+            ..CT_TcPr::default()
+        });
         assert_eq!(grid_points(&table), declared_points);
+        table.rows[0].cells[0].properties = None;
 
         // An explicit fixed layout keeps the declared grid.
         table.properties = Some(CT_TblPr {
@@ -21696,7 +21707,8 @@ mod advanced_table_authoring_and_geometry {
                 "A considerably longer heading that cannot fit on one line at this width",
             ]],
         );
-        // Engagement requires the element, so this fixture opts in explicitly.
+        // The fixture opts in explicitly, so it does not rest on the rule for
+        // a table that declares no widths.
         table.properties = Some(CT_TblPr {
             layout: Some("autofit".to_owned()),
             ..CT_TblPr::default()
