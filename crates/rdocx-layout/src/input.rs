@@ -139,6 +139,15 @@ impl MediaRegistry {
             .len()
     }
 
+    /// Forget owners recorded after `checkpoint`, for a trial layout whose
+    /// pictures are never drawn.
+    pub(crate) fn truncate_picture_draw_owners(&self, checkpoint: usize) {
+        self.picture_draw_owners
+            .lock()
+            .expect("picture owner lock")
+            .truncate(checkpoint);
+    }
+
     pub(crate) fn picture_draw_owners_since(
         &self,
         checkpoint: usize,

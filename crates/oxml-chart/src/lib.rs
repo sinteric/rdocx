@@ -1443,23 +1443,41 @@ pub fn render_chart(
     color_map: &ColorMap,
     fonts: &mut FontManager,
 ) -> Result<GroupElement> {
+    render_chart_with_text(chart, None, bounds, theme, color_map, fonts)
+}
+
+/// [`render_chart`] with the chart's text defaults, `chart_text`: the
+/// `c:chartSpace` `c:txPr`, which every label without its own takes.
+fn render_chart_with_text(
+    chart: &CT_Chart,
+    chart_text: Option<&CT_TextBody>,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<GroupElement> {
     let plots = chart.plot_area.plots()?;
     let plot = plots
         .first()
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
-    let legend_layout = layout_legend(chart, plot, bounds, fonts)?;
+    let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
+    let (title, bounds) = layout_title(chart, plot, bounds, fonts, chart_text)?;
+    let legend_layout =
+        layout_legend_or_omit_category_legend(chart, plot, bounds, fonts, chart_text)?;
+    let legend_colours = if chart.legend.is_some() {
+        legend_entries(plot, &colours)?
+            .into_iter()
+            .map(|(_, colour)| colour)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let plot_bounds = legend_layout.plot;
-    let series_colours = resolve_series_colours(plot, theme, color_map)?;
     let axes = chart.plot_area.axes()?;
     let options = geometry_options(plot, &axes, chart.disp_blanks_as)?;
-    let plot_children = render_plot_geometry(
-        plot,
-        plot_bounds,
-        chart.disp_blanks_as,
-        options,
-        &series_colours,
-    )?;
+    let plot_children =
+        render_plot_geometry(plot, plot_bounds, chart.disp_blanks_as, options, &colours)?;
     if plot_children.is_empty() && !plot_can_render_without_marks(plot) {
         return Err(ChartError::InvalidValue {
             element: "c:plotArea".to_owned(),
@@ -1467,8 +1485,17 @@ pub fn render_chart(
         });
     }
 
-    let mut chart_annotations =
-        render_axes_and_labels(plot, &axes, plot_bounds, chart.disp_blanks_as, fonts)?;
+    let mut chart_annotations = render_axes_and_labels(
+        plot,
+        &axes,
+        plot_bounds,
+        chart.disp_blanks_as,
+        fonts,
+        chart_text,
+    )?;
+    chart_annotations
+        .labels
+        .extend(title.map(PositionedElement::Text));
     let mut annotations = Vec::new();
     render_data_labels(
         plot,
@@ -1477,10 +1504,11 @@ pub fn render_chart(
         options,
         fonts,
         &mut chart_annotations.labels,
+        chart_text,
     )?;
     render_legend(
         legend_layout,
-        &series_colours,
+        &legend_colours,
         &mut annotations,
         &mut chart_annotations.labels,
     );
@@ -1530,6 +1558,7 @@ pub fn render_chart_placeholder(bounds: Rect, fonts: &mut FontManager) -> Result
             x: 4.0,
             y: (bounds.height / 2.0).max(9.0),
         },
+        None,
     )?;
     Ok(GroupElement {
         transform: Transform::IDENTITY,
@@ -1558,13 +1587,13 @@ pub fn render_geometry(
         .first()
         .ok_or_else(|| ChartError::MissingElement("c:plot".to_owned()))?;
     plot.validate()?;
-    let series_colours = resolve_series_colours(plot, theme, color_map)?;
+    let colours = resolve_plot_colours(chart, plot, theme, color_map)?;
     let children = render_plot_geometry(
         plot,
         plot_bounds,
         chart.disp_blanks_as,
         geometry_options(plot, &[], chart.disp_blanks_as)?,
-        &series_colours,
+        &colours,
     )?;
     if children.is_empty() && !plot_can_render_without_marks(plot) {
         return Err(ChartError::InvalidValue {
@@ -1763,9 +1792,10 @@ fn render_axes_and_labels(
     bounds: Rect,
     blanks: DispBlanksAs,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<ChartAnnotations> {
     if matches!(plot, Plot::Radar { .. }) {
-        return render_radar_axes_and_labels(plot, axes, bounds, blanks, fonts);
+        return render_radar_axes_and_labels(plot, axes, bounds, blanks, fonts, chart_text);
     }
     let mut annotations = ChartAnnotations::default();
     let series = plot_series(plot);
@@ -1820,6 +1850,7 @@ fn render_axes_and_labels(
                             &text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -1885,6 +1916,7 @@ fn render_axes_and_labels(
                             text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -1899,6 +1931,7 @@ fn render_radar_axes_and_labels(
     bounds: Rect,
     blanks: DispBlanksAs,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<ChartAnnotations> {
     let mut annotations = ChartAnnotations::default();
     let series = plot_series(plot);
@@ -1985,6 +2018,7 @@ fn render_radar_axes_and_labels(
                             &text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -2033,6 +2067,7 @@ fn render_radar_axes_and_labels(
                             text,
                             origin,
                             axis.tx_pr.as_ref(),
+                            chart_text,
                         )?));
                 }
             }
@@ -2410,33 +2445,60 @@ pub fn unsupported_number_formats(chart: &CT_Chart) -> Result<Vec<String>> {
     Ok(codes)
 }
 
-fn shape_label(fonts: &mut FontManager, text: &str, origin: Point) -> Result<GlyphRun> {
-    shape_label_with_properties(fonts, text, origin, None)
+fn shape_label(
+    fonts: &mut FontManager,
+    text: &str,
+    origin: Point,
+    chart_text: Option<&CT_TextBody>,
+) -> Result<GlyphRun> {
+    shape_label_with_properties(fonts, text, origin, None, chart_text)
 }
 
+/// Shape one label in the face, size and weight its own `c:txPr` sets, and
+/// where it sets none, in those of the chart's (`chart_text`, the
+/// `c:chartSpace` `c:txPr`).
 fn shape_label_with_properties(
     fonts: &mut FontManager,
     text: &str,
     origin: Point,
     properties: Option<&CT_TextBody>,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<GlyphRun> {
-    const FAMILY: &str = "Carlito";
-    const SIZE: f64 = 9.0;
-    let properties = properties.and_then(chart_text_properties);
-    let family = properties
+    let own = properties.and_then(chart_text_properties);
+    let chart = chart_text.and_then(chart_text_properties);
+    let family = own
         .and_then(|properties| properties.latin.as_ref())
+        .or_else(|| chart.and_then(|properties| properties.latin.as_ref()))
         .map(|font| font.typeface.as_str())
-        .unwrap_or(FAMILY);
-    let size = properties
+        .unwrap_or(LABEL_FAMILY);
+    let size = own
         .and_then(|properties| properties.font_size)
+        .or_else(|| chart.and_then(|properties| properties.font_size))
         .map(|size| f64::from(size) / 100.0)
-        .unwrap_or(SIZE);
-    let bold = properties
+        .unwrap_or(LABEL_SIZE);
+    let bold = own
         .and_then(|properties| properties.bold)
+        .or_else(|| chart.and_then(|properties| properties.bold))
         .unwrap_or(false);
-    let italic = properties
+    let italic = own
         .and_then(|properties| properties.italic)
+        .or_else(|| chart.and_then(|properties| properties.italic))
         .unwrap_or(false);
+    shape_run(fonts, text, origin, (family, size, bold, italic))
+}
+
+/// Label face and size when neither the label nor the chart sets one.
+const LABEL_FAMILY: &str = "Carlito";
+const LABEL_SIZE: f64 = 9.0;
+/// Space above and below a chart title.
+const TITLE_PADDING: f64 = 6.0;
+
+fn shape_run(
+    fonts: &mut FontManager,
+    text: &str,
+    origin: Point,
+    (family, size, bold, italic): (&str, f64, bool, bool),
+) -> Result<GlyphRun> {
     let font_id = fonts
         .resolve_font_for_text(Some(family), bold, italic, text)
         .map_err(|error| ChartError::InvalidValue {
@@ -2575,6 +2637,7 @@ fn render_data_labels(
     options: GeometryOptions,
     fonts: &mut FontManager,
     elements: &mut Vec<PositionedElement>,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<()> {
     let plot_labels = plot_data_labels(plot);
     let anchors = plot_label_anchors(plot, bounds, blanks, options)?;
@@ -2671,7 +2734,9 @@ fn render_data_labels(
             let separator = labels.separator.as_deref().unwrap_or(", ");
             let text = fields.join(separator);
             let origin = anchor.origin(labels.position);
-            elements.push(PositionedElement::Text(shape_label(fonts, &text, origin)?));
+            elements.push(PositionedElement::Text(shape_label(
+                fonts, &text, origin, chart_text,
+            )?));
         }
     }
     Ok(())
@@ -3224,6 +3289,205 @@ fn point_in_rect(point: Point, bounds: Rect) -> bool {
         && point.y <= bounds.y + bounds.height + EPSILON
 }
 
+struct PlotColours {
+    series: Vec<Color>,
+    pie_points: Vec<BTreeMap<usize, Color>>,
+}
+
+impl PlotColours {
+    fn pie_point(&self, series: usize, point: usize) -> Result<Color> {
+        self.pie_points
+            .get(series)
+            .and_then(|points| points.get(&point))
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| series_colour(&self.series, series))
+    }
+}
+
+fn resolve_plot_colours(
+    chart: &CT_Chart,
+    plot: &Plot,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+) -> Result<PlotColours> {
+    let mut colours = PlotColours {
+        series: resolve_series_colours(plot, theme, color_map)?,
+        pie_points: Vec::new(),
+    };
+    if !matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        return Ok(colours);
+    }
+    let mut vary = None;
+    if let Some(markup) = chart.plot_area.plot_markup.first() {
+        let mut root = BytesStart::new("c:plot");
+        push_attributes(&mut root, &markup.raw_attributes);
+        let namespaces = chart_bindings(&chart.plot_area.namespace_bindings, &root)?;
+        for raw in markup.raw_children.at(0) {
+            if chart_root_local(raw, &namespaces)?.as_deref() == Some(b"varyColors") {
+                set_once(
+                    &mut vary,
+                    parse_bool_value(raw, "varyColors")?.0,
+                    "c:varyColors",
+                )?;
+            }
+        }
+    }
+    let lookup = theme_colour_lookup(theme);
+    for (series_index, series) in plot_series(plot).iter().enumerate() {
+        let overrides = point_paint_overrides(series)?;
+        let (_, values) = logical_numeric_values(&series.values)?;
+        let mut points = BTreeMap::new();
+        for (index, _) in values {
+            let colour = if let Some(fill) = overrides
+                .get(&index)
+                .and_then(|properties| properties.as_ref())
+                .and_then(|properties| properties.fill.as_ref())
+            {
+                resolve_series_paint(
+                    fill,
+                    series_index,
+                    &format!("point[{index}] fill"),
+                    theme,
+                    color_map,
+                    &lookup,
+                )?
+            } else if vary.unwrap_or(false)
+                && series
+                    .sp_pr
+                    .as_ref()
+                    .and_then(|properties| properties.fill.as_ref())
+                    .is_none()
+            {
+                resolve_series_accent(index, theme, color_map, &lookup)?
+            } else {
+                series_colour(&colours.series, series_index)?
+            };
+            points.insert(index, colour);
+        }
+        colours.pie_points.push(points);
+    }
+    Ok(colours)
+}
+
+fn point_paint_overrides(series: &Series) -> Result<BTreeMap<usize, Option<CT_ShapeProperties>>> {
+    let mut root = BytesStart::new("c:ser");
+    push_attributes(&mut root, &series.namespace_declarations);
+    let namespaces = chart_bindings(&chart_namespace_defaults(), &root)?;
+    let mut points = BTreeMap::new();
+    for raw in series.raw_children.at(4) {
+        if chart_root_local(raw, &namespaces)?.as_deref() != Some(b"dPt") {
+            continue;
+        }
+        let (index, properties) = parse_point_paint(raw, &namespaces)?;
+        if points.insert(index, properties).is_some() {
+            return Err(ChartError::DuplicateElement(format!(
+                "c:dPt[c:idx={index}]"
+            )));
+        }
+    }
+    for point in &series.authored_data_points {
+        let index = usize::try_from(point.index).map_err(|_| ChartError::InvalidValue {
+            element: "c:dPt/c:idx".to_owned(),
+            value: point.index.to_string(),
+        })?;
+        if points.insert(index, Some(point.sp_pr.clone())).is_some() {
+            return Err(ChartError::DuplicateElement(format!(
+                "c:dPt[c:idx={index}]"
+            )));
+        }
+    }
+    Ok(points)
+}
+
+fn parse_point_paint(
+    xml: &[u8],
+    inherited: &NamespaceBindings,
+) -> Result<(usize, Option<CT_ShapeProperties>)> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut namespaces = None;
+    let mut index = None;
+    let mut properties = None;
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(OxmlError::from)?
+        {
+            Event::Start(element) if namespaces.is_none() => {
+                if !matches_local_name(element.name().as_ref(), b"dPt")
+                    || !element_is_in_namespace(&element, C_NS, inherited)?
+                {
+                    return Err(ChartError::UnexpectedElement(element_name(&element)));
+                }
+                namespaces = Some(chart_bindings(inherited, &element)?);
+            }
+            Event::Start(element) => {
+                let bindings = namespaces
+                    .as_ref()
+                    .ok_or_else(|| ChartError::UnexpectedElement(element_name(&element)))?;
+                let name = chart_child_local(&element, bindings)?;
+                let raw = capture_element(&mut reader, &element)?;
+                parse_point_paint_child(
+                    &mut index,
+                    &mut properties,
+                    name.as_deref(),
+                    &raw,
+                    bindings,
+                )?;
+            }
+            Event::Empty(element) if namespaces.is_some() => {
+                let bindings = namespaces
+                    .as_ref()
+                    .ok_or_else(|| ChartError::UnexpectedElement(element_name(&element)))?;
+                let name = chart_child_local(&element, bindings)?;
+                let raw = capture_empty_element(&element)?;
+                parse_point_paint_child(
+                    &mut index,
+                    &mut properties,
+                    name.as_deref(),
+                    &raw,
+                    bindings,
+                )?;
+            }
+            Event::End(_) | Event::Empty(_) => {
+                let index =
+                    index.ok_or_else(|| ChartError::MissingElement("c:dPt/c:idx".to_owned()))?;
+                let index = usize::try_from(index).map_err(|_| ChartError::InvalidValue {
+                    element: "c:dPt/c:idx".to_owned(),
+                    value: index.to_string(),
+                })?;
+                return Ok((index, properties));
+            }
+            Event::Eof => return Err(missing_end("c:dPt")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn parse_point_paint_child(
+    index: &mut Option<u32>,
+    properties: &mut Option<CT_ShapeProperties>,
+    name: Option<&[u8]>,
+    raw: &[u8],
+    namespaces: &NamespaceBindings,
+) -> Result<()> {
+    match name {
+        Some(b"idx") => set_once(index, parse_u32_scalar(raw, "idx")?.0, "c:dPt/c:idx")?,
+        Some(b"spPr") => {
+            reject_conflicting_prefix_in_xml(raw, b"a", A_NS)?;
+            let parsed = CT_ShapeProperties::from_xml(raw)?;
+            let mut writer = Writer::new(Vec::new());
+            parsed.write_xml_as(&mut writer, "c:spPr")?;
+            reject_rewritten_foreign_elements(raw, &writer.into_inner(), namespaces, b"spPr")?;
+            set_once(properties, parsed, "c:dPt/c:spPr")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn resolve_series_colours(
     plot: &Plot,
     theme: &CT_OfficeStyleSheet,
@@ -3410,11 +3674,103 @@ struct LegendLayout {
     keys: Vec<Rect>,
 }
 
+/// The text of the title a chart shows, if it shows one.
+///
+/// Its own `c:title` text, or an automatic one: a `c:title` without text, or
+/// no `c:title` while `c:autoTitleDeleted` is off on a chart of one named
+/// series, shows that series' name, which is what PowerPoint and Word draw.
+/// An automatic title over several series shows "Chart Title", as theirs do.
+fn chart_title(chart: &CT_Chart, plot: &Plot) -> Option<String> {
+    let series = plot_series(plot);
+    let only_name = match series {
+        [only] => only
+            .name
+            .as_ref()
+            .and_then(|name| name.values.first())
+            .cloned(),
+        _ => None,
+    };
+    match &chart.title {
+        Some(title) => title
+            .text
+            .as_ref()
+            .map(CT_TextBody::plain_text)
+            .filter(|text| !text.trim().is_empty())
+            .or(only_name)
+            .or_else(|| Some("Chart Title".to_owned())),
+        None if !chart.auto_title_deleted => only_name,
+        None => None,
+    }
+}
+
+/// Shape the chart's title centred along the top of `bounds`, and return it
+/// with the bounds left for the legend and the plot below it.
+///
+/// The title's own text properties win, then the chart's; with neither size
+/// set it is a fifth larger than the chart's labels, and bold. That default is
+/// an approximation: Office's chart styles each set their own title size.
+fn layout_title(
+    chart: &CT_Chart,
+    plot: &Plot,
+    bounds: Rect,
+    fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
+) -> Result<(Option<GlyphRun>, Rect)> {
+    let Some(text) = chart_title(chart, plot) else {
+        return Ok((None, bounds));
+    };
+    let own = chart
+        .title
+        .as_ref()
+        .and_then(|title| title.text.as_ref())
+        .and_then(chart_text_properties);
+    let chart_size = chart_text
+        .and_then(chart_text_properties)
+        .and_then(|properties| properties.font_size)
+        .map_or(LABEL_SIZE, |size| f64::from(size) / 100.0);
+    let size = own
+        .and_then(|properties| properties.font_size)
+        .map_or(chart_size * 1.2, |size| f64::from(size) / 100.0);
+    let bold = own.and_then(|properties| properties.bold).unwrap_or(true);
+    let family = own
+        .and_then(|properties| properties.latin.as_ref())
+        .or_else(|| {
+            chart_text
+                .and_then(chart_text_properties)
+                .and_then(|properties| properties.latin.as_ref())
+        })
+        .map_or(LABEL_FAMILY, |font| font.typeface.as_str());
+    let mut run = shape_run(
+        fonts,
+        &text,
+        Point { x: 0.0, y: 0.0 },
+        (family, size, bold, false),
+    )?;
+    let height = size * 1.2 + TITLE_PADDING * 2.0;
+    if height >= bounds.height / 2.0 {
+        return Ok((None, bounds));
+    }
+    let width: f64 = run.advances.iter().sum();
+    run.origin = Point {
+        x: bounds.x + (bounds.width - width) / 2.0,
+        y: bounds.y + TITLE_PADDING + size,
+    };
+    Ok((
+        Some(run),
+        Rect {
+            y: bounds.y + height,
+            height: bounds.height - height,
+            ..bounds
+        },
+    ))
+}
+
 fn layout_legend(
     chart: &CT_Chart,
     plot: &Plot,
     bounds: Rect,
     fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
 ) -> Result<LegendLayout> {
     let full_plot = geometry_plot_bounds(bounds)?;
     let Some(legend) = &chart.legend else {
@@ -3429,15 +3785,13 @@ fn layout_legend(
         settings.position,
         LegendPosition::Top | LegendPosition::Bottom
     );
-    if plot_series(plot).len() > MAX_CATEGORY_ANNOTATIONS {
+    let entries = legend_entry_names(plot)?;
+    if entries.len() > MAX_CATEGORY_ANNOTATIONS {
         return Err(invalid_authoring_value("legend entry limit"));
     }
-    let mut labels = plot_series(plot)
+    let mut labels = entries
         .iter()
-        .enumerate()
-        .map(|(index, series)| {
-            shape_label(fonts, &series_name(series, index), Point { x: 0.0, y: 0.0 })
-        })
+        .map(|name| shape_label(fonts, name, Point { x: 0.0, y: 0.0 }, chart_text))
         .collect::<Result<Vec<_>>>()?;
     let available = if settings.overlay { full_plot } else { bounds };
     let capacity = available.width - 12.0;
@@ -3542,6 +3896,244 @@ fn layout_legend(
     })
 }
 
+/// Diagnostic code carried by [`ChartLegendOmitted`] messages.
+pub const CHART_LEGEND_OMITTED: &str = "chart-legend-omitted";
+
+/// Which measured legend limit caused a pie or doughnut category legend to be
+/// omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegendOmissionReason {
+    /// The legend rows are taller than the chart allows.
+    EntriesExceedHeight,
+    /// One legend label is wider than the chart allows.
+    LabelExceedsWidth,
+    /// Reserving legend space leaves no room for the plot margins.
+    ChartTooSmall,
+}
+
+impl LegendOmissionReason {
+    /// Stable kebab-case token used in diagnostic messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EntriesExceedHeight => "entries-exceed-height",
+            Self::LabelExceedsWidth => "label-exceeds-width",
+            Self::ChartTooSmall => "chart-too-small",
+        }
+    }
+
+    fn from_error(error: &ChartError) -> Option<Self> {
+        match error {
+            ChartError::InvalidValue { value, .. } => match value.as_str() {
+                "legend entries exceed chart height" => Some(Self::EntriesExceedHeight),
+                "legend label exceeds chart width" => Some(Self::LabelExceedsWidth),
+                "chart is too small for the fixed plot margins" => Some(Self::ChartTooSmall),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        [
+            Self::EntriesExceedHeight,
+            Self::LabelExceedsWidth,
+            Self::ChartTooSmall,
+        ]
+        .into_iter()
+        .find(|reason| reason.as_str() == token)
+    }
+}
+
+/// A pie or doughnut category legend that was omitted so the plot could render.
+///
+/// Its [`Display`](fmt::Display) form is the stable diagnostic message prefix
+/// `chart-legend-omitted reason=<reason> width_pt=<w> height_pt=<h> entries=<n>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartLegendOmitted {
+    /// The limit that fired.
+    pub reason: LegendOmissionReason,
+    /// Chart frame width in points.
+    pub width_pt: f64,
+    /// Chart frame height in points.
+    pub height_pt: f64,
+    /// Number of category legend entries that did not fit.
+    pub entry_count: usize,
+}
+
+impl ChartLegendOmitted {
+    /// Recover the notice from a diagnostic message produced by rdocx or rpptx.
+    /// Text after the structured fields (such as the chart source) is ignored.
+    pub fn from_diagnostic_message(message: &str) -> Option<Self> {
+        let mut fields = message
+            .strip_prefix(CHART_LEGEND_OMITTED)?
+            .split_whitespace();
+        let mut value = |key: &str| fields.next()?.strip_prefix(key)?.strip_prefix('=');
+        Some(Self {
+            reason: LegendOmissionReason::parse(value("reason")?)?,
+            width_pt: value("width_pt")?.parse().ok()?,
+            height_pt: value("height_pt")?.parse().ok()?,
+            entry_count: value("entries")?.parse().ok()?,
+        })
+    }
+}
+
+impl fmt::Display for ChartLegendOmitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{CHART_LEGEND_OMITTED} reason={} width_pt={} height_pt={} entries={}",
+            self.reason.as_str(),
+            self.width_pt,
+            self.height_pt,
+            self.entry_count
+        )
+    }
+}
+
+/// [`render_chart`] plus a notice when a pie or doughnut category legend was
+/// omitted because it exceeded the measured legend limits.
+pub fn render_chart_with_legend_notice(
+    chart: &CT_Chart,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    chart_with_legend_notice(chart, None, bounds, theme, color_map, fonts)
+}
+
+/// [`render_chart_with_legend_notice`] for a whole `c:chartSpace`, whose
+/// `c:txPr` sets the face, size and weight of every label that sets none.
+pub fn render_chart_space_with_legend_notice(
+    chart_space: &CT_ChartSpace,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    chart_with_legend_notice(
+        &chart_space.chart,
+        chart_space.tx_pr.as_ref(),
+        bounds,
+        theme,
+        color_map,
+        fonts,
+    )
+}
+
+fn chart_with_legend_notice(
+    chart: &CT_Chart,
+    chart_text: Option<&CT_TextBody>,
+    bounds: Rect,
+    theme: &CT_OfficeStyleSheet,
+    color_map: &ColorMap,
+    fonts: &mut FontManager,
+) -> Result<(GroupElement, Option<ChartLegendOmitted>)> {
+    let group = render_chart_with_text(chart, chart_text, bounds, theme, color_map, fonts)?;
+    let notice = match chart.plot_area.plots()?.first() {
+        Some(plot @ (Plot::Pie { .. } | Plot::Doughnut { .. })) if chart.legend.is_some() => {
+            let (_, bounds) = layout_title(chart, plot, bounds, fonts, chart_text)?;
+            match layout_legend(chart, plot, bounds, fonts, chart_text) {
+                Err(error) => LegendOmissionReason::from_error(&error)
+                    .map(|reason| -> Result<_> {
+                        Ok(ChartLegendOmitted {
+                            reason,
+                            width_pt: bounds.width,
+                            height_pt: bounds.height,
+                            entry_count: legend_entry_names(plot)?.len(),
+                        })
+                    })
+                    .transpose()?,
+                Ok(_) => None,
+            }
+        }
+        _ => None,
+    };
+    Ok((group, notice))
+}
+
+/// Fork policy: a pie or doughnut category legend that cannot fit the
+/// measured legend limits is omitted so the plot still renders. Other plots
+/// keep upstream's errors unchanged.
+fn layout_legend_or_omit_category_legend(
+    chart: &CT_Chart,
+    plot: &Plot,
+    bounds: Rect,
+    fonts: &mut FontManager,
+    chart_text: Option<&CT_TextBody>,
+) -> Result<LegendLayout> {
+    match layout_legend(chart, plot, bounds, fonts, chart_text) {
+        Err(error)
+            if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. })
+                && is_legend_size_limit(&error) =>
+        {
+            Ok(LegendLayout {
+                plot: geometry_plot_bounds(bounds)?,
+                labels: Vec::new(),
+                keys: Vec::new(),
+            })
+        }
+        result => result,
+    }
+}
+
+fn is_legend_size_limit(error: &ChartError) -> bool {
+    LegendOmissionReason::from_error(error).is_some()
+}
+
+/// Legend entries in paint order. Varied pie and doughnut plots list their
+/// categories with per-point colours; other plots list one entry per series.
+fn legend_entries(plot: &Plot, colours: &PlotColours) -> Result<Vec<(String, Color)>> {
+    let names = legend_entry_names(plot)?;
+    if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        let indices = match plot_series(plot).first() {
+            Some(series) => logical_numeric_values(&series.values)?
+                .1
+                .into_iter()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        return names
+            .into_iter()
+            .zip(indices)
+            .map(|(name, index)| Ok((name, colours.pie_point(0, index)?)))
+            .collect();
+    }
+    Ok(names
+        .into_iter()
+        .zip(colours.series.iter().copied())
+        .collect())
+}
+
+/// Legend entry names. Pie and doughnut plots list the first series'
+/// categories (by cached point index); other plots list one entry per series.
+fn legend_entry_names(plot: &Plot) -> Result<Vec<String>> {
+    if matches!(plot, Plot::Pie { .. } | Plot::Doughnut { .. }) {
+        let Some(series) = plot_series(plot).first() else {
+            return Ok(Vec::new());
+        };
+        let categories = series_categories(series, None)?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let (_, values) = logical_numeric_values(&series.values)?;
+        return Ok(values
+            .into_iter()
+            .map(|(index, _)| {
+                categories
+                    .get(&index)
+                    .cloned()
+                    .unwrap_or_else(|| (index + 1).to_string())
+            })
+            .collect());
+    }
+    Ok(plot_series(plot)
+        .iter()
+        .enumerate()
+        .map(|(index, series)| series_name(series, index))
+        .collect())
+}
+
 fn render_legend(
     layout: LegendLayout,
     series_colours: &[Color],
@@ -3592,8 +4184,9 @@ fn render_plot_geometry(
     bounds: Rect,
     blanks: DispBlanksAs,
     options: GeometryOptions,
-    series_colours: &[Color],
+    colours: &PlotColours,
 ) -> Result<Vec<PositionedElement>> {
+    let series_colours = &colours.series;
     match plot {
         Plot::Bar {
             direction,
@@ -3630,7 +4223,7 @@ fn render_plot_geometry(
             first_slice_angle,
             series,
             ..
-        } => render_pie_geometry(*first_slice_angle, None, series, bounds, series_colours),
+        } => render_pie_geometry(*first_slice_angle, None, series, bounds, colours),
         Plot::Doughnut {
             first_slice_angle,
             hole_size,
@@ -3641,7 +4234,7 @@ fn render_plot_geometry(
             Some(*hole_size),
             series,
             bounds,
-            series_colours,
+            colours,
         ),
         Plot::Area {
             grouping, series, ..
@@ -4175,14 +4768,14 @@ fn render_pie_geometry(
     hole_size: Option<u8>,
     series: &[Series],
     bounds: Rect,
-    series_colours: &[Color],
+    colours: &PlotColours,
 ) -> Result<Vec<PositionedElement>> {
     pie_slices(first_slice_angle, hole_size, series, bounds)?
         .into_iter()
         .map(|slice| {
             Ok(filled_path(
                 slice.path,
-                series_colour(series_colours, slice.series_index)?,
+                colours.pie_point(slice.series_index, slice.logical_index)?,
             ))
         })
         .collect()
@@ -13194,6 +13787,439 @@ mod tests {
         }
     }
 
+    fn pie_chart_fixture(kind: &str, vary: &str, series: &str) -> CT_ChartSpace {
+        let hole = if kind == "doughnutChart" {
+            r#"<q:holeSize val="60"/>"#
+        } else {
+            ""
+        };
+        let plot = format!("<q:{kind}>{vary}{series}{hole}</q:{kind}>");
+        let xml = chart_with_optional_axes(&plot, false).replace(
+            "</q:plotArea></q:chart>",
+            "</q:plotArea><q:legend/></q:chart>",
+        );
+        CT_ChartSpace::from_xml(xml.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn pie_and_doughnut_vary_colours_use_category_legends() {
+        for kind in ["pieChart", "doughnutChart"] {
+            for vary in [
+                r#"<q:varyColors val="1"/>"#,
+                r#"<q:varyColors val="true"/>"#,
+                "<q:varyColors/>",
+            ] {
+                let chart = pie_chart_fixture(kind, vary, &plot_series(0));
+                let geometry = render_geometry(&chart.chart, chart_bounds()).unwrap();
+                let expected = vec![Color::from_hex("156082"), Color::from_hex("E97132")];
+                assert_eq!(path_colours(&geometry), expected);
+                let mut fonts = FontManager::new_deterministic().unwrap();
+                let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+                let labels = group
+                    .children
+                    .iter()
+                    .filter_map(|element| match element {
+                        PositionedElement::Text(run) => Some(run.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(labels, vec!["North", "South"]);
+                let swatches = group
+                    .children
+                    .iter()
+                    .filter_map(|element| match element {
+                        PositionedElement::Path(path) => path.fill.as_ref(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    swatches,
+                    expected
+                        .iter()
+                        .map(|colour| Paint::Solid(*colour))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pie_vary_false_or_absent_retains_series_colour() {
+        for vary in [
+            "",
+            r#"<q:varyColors val="0"/>"#,
+            r#"<q:varyColors val="false"/>"#,
+        ] {
+            let chart = pie_chart_fixture("pieChart", vary, &plot_series(0));
+            assert_eq!(
+                path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+                vec![Color::from_hex("156082")]
+            );
+        }
+    }
+
+    fn korean_pie_series(count: usize, long: bool) -> String {
+        let names = [
+            "구독 서비스 매출",
+            "라이선스",
+            "유지보수 및 기술 지원",
+            "교육",
+            "컨설팅 프로젝트",
+            "기타 수익",
+            "하드웨어 판매",
+            "클라우드 호스팅",
+            "광고",
+            "파트너 수수료",
+        ];
+        let mut categories = String::new();
+        let mut values = String::new();
+        for (index, name) in names.iter().take(count).enumerate() {
+            let name = if long {
+                format!("{name} ({}분기 실적 합계)", index + 1)
+            } else {
+                (*name).to_owned()
+            };
+            categories.push_str(&format!(r#"<q:pt idx="{index}"><q:v>{name}</q:v></q:pt>"#));
+            values.push_str(&format!(
+                r#"<q:pt idx="{index}"><q:v>{}</q:v></q:pt>"#,
+                index + 1
+            ));
+        }
+        format!(
+            r#"<q:ser><q:idx val="0"/><q:order val="0"/><q:cat><q:strRef><q:f>S!A1</q:f><q:strCache><q:ptCount val="{count}"/>{categories}</q:strCache></q:strRef></q:cat><q:val><q:numRef><q:f>S!B1</q:f><q:numCache><q:ptCount val="{count}"/>{values}</q:numCache></q:numRef></q:val></q:ser>"#
+        )
+    }
+
+    #[test]
+    fn small_korean_pie_and_doughnut_omit_oversized_category_legends() {
+        for kind in ["pieChart", "doughnutChart"] {
+            for (count, long) in [(8, false), (10, false), (3, true), (10, true)] {
+                let chart = pie_chart_fixture(
+                    kind,
+                    r#"<q:varyColors val="1"/>"#,
+                    &korean_pie_series(count, long),
+                );
+                let mut fonts = FontManager::new_deterministic().unwrap();
+                let group = render_chart(&chart.chart, chart_bounds(), &mut fonts)
+                    .unwrap_or_else(|error| panic!("{kind} {count} {long}: {error}"));
+                assert!(
+                    !group
+                        .children
+                        .iter()
+                        .any(|element| matches!(element, PositionedElement::Text(_))),
+                    "{kind} {count} {long} kept an oversized legend"
+                );
+                assert_eq!(
+                    path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()).len(),
+                    count
+                );
+            }
+        }
+    }
+
+    fn render_with_notice(
+        chart: &CT_ChartSpace,
+        bounds: Rect,
+    ) -> Option<super::ChartLegendOmitted> {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        super::render_chart_with_legend_notice(
+            &chart.chart,
+            bounds,
+            &CT_OfficeStyleSheet::office_default(),
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap()
+        .1
+    }
+
+    #[test]
+    fn omitted_korean_pie_legend_reports_a_structured_notice() {
+        for (count, long, reason) in [
+            (10, false, super::LegendOmissionReason::EntriesExceedHeight),
+            (3, true, super::LegendOmissionReason::ChartTooSmall),
+        ] {
+            let chart = pie_chart_fixture(
+                "pieChart",
+                r#"<q:varyColors val="1"/>"#,
+                &korean_pie_series(count, long),
+            );
+            let notice = render_with_notice(&chart, chart_bounds()).expect("legend notice");
+            assert_eq!(
+                notice,
+                super::ChartLegendOmitted {
+                    reason,
+                    width_pt: 200.0,
+                    height_pt: 140.0,
+                    entry_count: count,
+                }
+            );
+            let message = format!("{notice} source=word:rId4");
+            assert!(message.starts_with(super::CHART_LEGEND_OMITTED));
+            assert_eq!(
+                super::ChartLegendOmitted::from_diagnostic_message(&message),
+                Some(notice)
+            );
+        }
+    }
+
+    #[test]
+    fn fitting_or_legendless_charts_report_no_legend_notice() {
+        let fitting = pie_chart_fixture(
+            "doughnutChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(10, true),
+        );
+        let large = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 432.0,
+            height: 252.0,
+        };
+        assert_eq!(render_with_notice(&fitting, large), None);
+        let small = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(3, false),
+        );
+        assert_eq!(render_with_notice(&small, chart_bounds()), None);
+        assert_eq!(
+            super::ChartLegendOmitted::from_diagnostic_message("Word chart relationship rId1: x"),
+            None
+        );
+    }
+
+    #[test]
+    fn fitting_korean_pie_legend_keeps_every_category() {
+        let chart = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            &korean_pie_series(10, true),
+        );
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 432.0,
+            height: 252.0,
+        };
+        let group = render_chart(&chart.chart, bounds, &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter(|element| matches!(element, PositionedElement::Text(_)))
+            .count();
+        assert_eq!(labels, 10);
+    }
+
+    #[test]
+    fn oversized_series_legends_keep_upstream_errors() {
+        let series = (0..12).map(plot_series).collect::<String>();
+        let plot = format!(
+            r#"<q:barChart><q:barDir val="col"/><q:grouping val="clustered"/>{series}<q:axId val="-1884094432"/><q:axId val="-1884097184"/></q:barChart>"#
+        );
+        let xml = chart_with_optional_axes(&plot, true).replace(
+            "</q:plotArea></q:chart>",
+            "</q:plotArea><q:legend/></q:chart>",
+        );
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let error = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap_err();
+        assert!(super::is_legend_size_limit(&error), "{error}");
+    }
+
+    #[test]
+    fn korean_doughnut_legend_retains_all_three_category_names() {
+        let series = plot_series(0)
+            .replace("North", "구독")
+            .replace("South", "라이선스")
+            .replace("<q:ptCount val=\"2\"/>", "<q:ptCount val=\"3\"/>")
+            .replace(
+                "</q:strCache>",
+                "<q:pt idx=\"2\"><q:v>서비스</q:v></q:pt></q:strCache>",
+            )
+            .replace("<q:v>1</q:v>", "<q:v>55</q:v>")
+            .replace("<q:v>2</q:v>", "<q:v>30</q:v>")
+            .replace(
+                "</q:numCache>",
+                "<q:pt idx=\"2\"><q:v>15</q:v></q:pt></q:numCache>",
+            );
+        let chart = pie_chart_fixture("doughnutChart", r#"<q:varyColors val="1"/>"#, &series);
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["구독", "라이선스", "서비스"]);
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+            vec![
+                Color::from_hex("156082"),
+                Color::from_hex("E97132"),
+                Color::from_hex("196B24")
+            ]
+        );
+    }
+
+    #[test]
+    fn pie_point_fill_overrides_series_fill_and_vary_colours() {
+        for vary in [r#"<q:varyColors val="1"/>"#, r#"<q:varyColors val="0"/>"#] {
+            for fill in [
+                "<a:solidFill><a:srgbClr val=\"ABCDEF\"/></a:solidFill>",
+                "<a:noFill/>",
+            ] {
+                let series = plot_series(0).replace("<q:cat>", &format!("<q:spPr>{fill}</q:spPr><q:dPt><q:idx val=\"1\"/><q:spPr><a:solidFill><a:srgbClr val=\"123456\"/></a:solidFill></q:spPr></q:dPt><q:cat>"));
+                let chart = pie_chart_fixture("doughnutChart", vary, &series);
+                let colours = path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap());
+                assert_eq!(colours[1], Color::from_hex("123456"));
+                if fill.contains("noFill") {
+                    assert_eq!(colours[0].a, 0.0);
+                } else {
+                    assert_eq!(colours[0], Color::from_hex("ABCDEF"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pie_sparse_point_indices_keep_palette_and_legend_alignment() {
+        let chart = pie_chart_fixture(
+            "pieChart",
+            r#"<q:varyColors val="1"/>"#,
+            sparse_category_series(),
+        );
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+            vec![Color::from_hex("156082"), Color::from_hex("196B24")]
+        );
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        let labels = group
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["North", "West"]);
+        let series = sparse_category_series().replace(
+            "<q:cat>",
+            r#"<q:dPt><q:idx val="2"/><q:spPr><a:noFill/></q:spPr></q:dPt><q:cat>"#,
+        );
+        let chart = pie_chart_fixture("pieChart", r#"<q:varyColors val="1"/>"#, &series);
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap())[1].a,
+            0.0
+        );
+    }
+
+    #[test]
+    fn pie_point_scheme_colour_uses_theme_map_and_alpha() {
+        let series = plot_series(0).replace("<q:cat>", r#"<q:dPt><q:idx val="1"/><q:spPr><a:solidFill><a:schemeClr val="accent1"><a:alpha val="50000"/></a:schemeClr></a:solidFill></q:spPr></q:dPt><q:cat>"#);
+        let chart = pie_chart_fixture("pieChart", r#"<q:varyColors val="1"/>"#, &series);
+        let map =
+            ColorMap::default().with_overrides(&[(ColorMapSlot::Accent1, ThemeColorSlot::Accent4)]);
+        let colours = path_colours(
+            &render_geometry_with_theme(
+                &chart.chart,
+                chart_bounds(),
+                &CT_OfficeStyleSheet::office_default(),
+                &map,
+            )
+            .unwrap(),
+        );
+        assert_eq!(colours[0], Color::from_hex("0F9ED5"));
+        let transformed = Color::from_hex("109DD5");
+        assert_eq!(
+            (colours[1].r, colours[1].g, colours[1].b),
+            (transformed.r, transformed.g, transformed.b)
+        );
+        assert_eq!(colours[1].a, 128.0 / 255.0);
+    }
+
+    #[test]
+    fn pie_preserves_raw_point_xml_and_ignores_foreign_namesakes() {
+        let raw = r#"<q:dPt x:keep="point"><q:idx val="1"/><q:spPr><a:solidFill><a:srgbClr val="123456"/></a:solidFill><x:extension/></q:spPr><x:tail/></q:dPt>"#;
+        let series = plot_series(0).replace(
+            "<q:cat>",
+            &format!("{raw}<x:dPt><x:idx val=\"0\"/></x:dPt><q:cat>"),
+        );
+        let mut chart = pie_chart_fixture("pieChart", "<x:varyColors val=\"1\"/>", &series);
+        let before = chart.to_xml().unwrap();
+        assert_eq!(
+            path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap()),
+            vec![Color::from_hex("156082"), Color::from_hex("123456")]
+        );
+        assert_eq!(chart.to_xml().unwrap(), before);
+        assert!(
+            before
+                .windows(raw.len())
+                .any(|window| window == raw.as_bytes())
+        );
+        let Plot::Pie { series, .. } = &mut chart.chart.plot_area.plots_mut().unwrap()[0] else {
+            panic!("expected pie");
+        };
+        series[0].values.values[0] = 3.0;
+        assert!(
+            chart
+                .to_xml()
+                .unwrap()
+                .windows(raw.len())
+                .any(|window| window == raw.as_bytes())
+        );
+    }
+
+    #[test]
+    fn malformed_pie_colour_options_return_contextual_errors() {
+        for vary in [
+            r#"<q:varyColors val="maybe"/>"#,
+            r#"<q:varyColors val="1"/><q:varyColors val="0"/>"#,
+        ] {
+            let chart = pie_chart_fixture("pieChart", vary, &plot_series(0));
+            assert!(render_geometry(&chart.chart, chart_bounds()).is_err());
+        }
+        for point in [
+            "<q:dPt/>",
+            r#"<q:dPt><q:idx val="bad"/></q:dPt>"#,
+            r#"<q:dPt><q:idx val="0"/><q:idx val="1"/></q:dPt>"#,
+            r#"<q:dPt><q:idx val="0"/></q:dPt><q:dPt><q:idx val="0"/></q:dPt>"#,
+            r#"<q:dPt><q:idx val="0"/><q:spPr><a:gradFill/></q:spPr></q:dPt>"#,
+        ] {
+            let series = plot_series(0).replace("<q:cat>", &format!("{point}<q:cat>"));
+            let chart = pie_chart_fixture("pieChart", "", &series);
+            let result = std::panic::catch_unwind(|| render_geometry(&chart.chart, chart_bounds()));
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_err(), "accepted {point}");
+        }
+    }
+
+    #[test]
+    fn authored_pie_point_paints_render_before_and_after_serialization() {
+        let mut chart = pie_chart_fixture("pieChart", "", &plot_series(0));
+        let Plot::Pie { series, .. } = &mut chart.chart.plot_area.plots_mut().unwrap()[0] else {
+            panic!("expected pie");
+        };
+        series[0].authored_data_points.push(super::DataPoint { index: 1, sp_pr: oxml_drawing::shape_props::CT_ShapeProperties::from_xml(br#"<c:spPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:solidFill><a:srgbClr val="123456"/></a:solidFill></c:spPr>"#).unwrap() });
+        let expected = path_colours(&render_geometry(&chart.chart, chart_bounds()).unwrap());
+        assert_eq!(
+            expected,
+            vec![Color::from_hex("156082"), Color::from_hex("123456")]
+        );
+        let parsed = CT_ChartSpace::from_xml(&chart.to_xml().unwrap()).unwrap();
+        assert_eq!(
+            path_colours(&render_geometry(&parsed.chart, chart_bounds()).unwrap()),
+            expected
+        );
+    }
+
     #[test]
     fn series_accent_cycle_repeats_after_six() {
         let chart = seven_series_bar_chart();
@@ -13947,6 +14973,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let text: Vec<_> = rendered
@@ -14277,6 +15304,8 @@ mod tests {
             .find(|axis| axis.kind == AxisKind::Value)
             .unwrap();
         value_axis.scaling.orientation = Orientation::MaxMin;
+        // One named series would show its automatic title above the plot.
+        chart.chart.auto_title_deleted = true;
         let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
         let group = render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
         let plot = group
@@ -14299,6 +15328,69 @@ mod tests {
         assert!((bars[0].y - 12.0).abs() < 1.0e-9);
         assert!((bars[0].height - 25.0).abs() < 1.0e-9);
         assert!((bars[1].height - 75.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn chart_space_text_sizes_labels_and_one_series_shows_its_automatic_title() {
+        let mut chart = labelled_bar_chart();
+        chart.tx_pr = Some(
+            CT_TextBody::from_xml_as(
+                br#"<c:txPr xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:bodyPr/><a:p><a:pPr><a:defRPr sz="1800"/></a:pPr></a:p></c:txPr>"#,
+                b"txPr",
+            )
+            .unwrap(),
+        );
+        // The fixture's one series is named "Sales".
+        let name = "Sales";
+        let theme = CT_OfficeStyleSheet::office_default();
+        let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+        let (group, _) = super::render_chart_space_with_legend_notice(
+            &chart,
+            chart_bounds(),
+            &theme,
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap();
+        let runs = group
+            .children
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let title = runs
+            .iter()
+            .find(|run| run.text == name)
+            .expect("the automatic title");
+        assert!(title.bold);
+        assert!((title.font_size - 21.6).abs() < 1.0e-9);
+        // Category and data labels take the chart's size. The value axis's
+        // own `c:txPr` sets 12 points, and that wins.
+        let size = |text: &str| {
+            runs.iter()
+                .filter(|run| run.text == text)
+                .map(|run| run.font_size)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(size("North"), [18.0]);
+        assert_eq!(size("20"), [12.0]);
+        assert_eq!(size("100"), [12.0, 18.0]);
+
+        chart.chart.auto_title_deleted = true;
+        let (group, _) = super::render_chart_space_with_legend_notice(
+            &chart,
+            chart_bounds(),
+            &theme,
+            &ColorMap::default(),
+            &mut fonts,
+        )
+        .unwrap();
+        // Only the legend's entry is left.
+        assert!(!group.children.iter().any(
+            |element| matches!(element, PositionedElement::Text(run) if run.text == name && run.bold)
+        ));
     }
 
     #[test]
@@ -14392,7 +15484,7 @@ mod tests {
         let center = Point { x: 112.0, y: 62.0 };
         let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
         let annotations =
-            super::render_axes_and_labels(plot, &axes, bounds, DispBlanksAs::Gap, &mut fonts)
+            super::render_axes_and_labels(plot, &axes, bounds, DispBlanksAs::Gap, &mut fonts, None)
                 .unwrap();
         assert_eq!(annotations.axis_lines.len(), 4);
         for spoke in annotations.axis_lines.iter().take(3) {
@@ -14463,9 +15555,15 @@ mod tests {
         ] {
             let mut axis = category_axis.clone();
             axis.tick_label_position = position;
-            let annotations =
-                super::render_axes_and_labels(plot, &[axis], bounds, DispBlanksAs::Gap, &mut fonts)
-                    .unwrap();
+            let annotations = super::render_axes_and_labels(
+                plot,
+                &[axis],
+                bounds,
+                DispBlanksAs::Gap,
+                &mut fonts,
+                None,
+            )
+            .unwrap();
             let north = annotations
                 .labels
                 .iter()
@@ -14484,6 +15582,7 @@ mod tests {
             bounds,
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert!(annotations.labels.is_empty());
@@ -14529,9 +15628,15 @@ mod tests {
         ] {
             let mut axis = value_axis.clone();
             axis.tick_label_position = position;
-            let annotations =
-                super::render_axes_and_labels(plot, &[axis], bounds, DispBlanksAs::Gap, &mut fonts)
-                    .unwrap();
+            let annotations = super::render_axes_and_labels(
+                plot,
+                &[axis],
+                bounds,
+                DispBlanksAs::Gap,
+                &mut fonts,
+                None,
+            )
+            .unwrap();
             let zero = annotations
                 .labels
                 .iter()
@@ -14550,6 +15655,7 @@ mod tests {
             bounds,
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert!(annotations.labels.is_empty());
@@ -14985,6 +16091,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut labels,
+            None,
         )
         .unwrap();
         let text: Vec<_> = labels
@@ -15087,6 +16194,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert_eq!(annotations.gridlines.len(), 2);
@@ -15115,6 +16223,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         assert_eq!(annotations.gridlines.len(), 3);
@@ -15143,6 +16252,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         );
         let error = match result {
             Err(error) => error,
@@ -15187,6 +16297,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         )
         .unwrap();
         let text: Vec<_> = annotations
@@ -15206,6 +16317,7 @@ mod tests {
             chart_bounds(),
             DispBlanksAs::Gap,
             &mut fonts,
+            None,
         );
         let annotations = result.expect("supported grouping must draw the numeric category axis");
         let text = annotations
@@ -16873,6 +17985,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let labels: Vec<_> = rendered
@@ -16937,6 +18050,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut Vec::new(),
+            None,
         )
         .expect("value-only labels do not need a percentage total");
         let Plot::Bar { data_labels, .. } = plot else {
@@ -16950,6 +18064,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut Vec::new(),
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("data-label percentage total"));
@@ -16974,6 +18089,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut Vec::new(),
+            None,
         )
         .expect("effective point overrides disable percentage aggregation");
     }
@@ -17004,6 +18120,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let text: Vec<_> = rendered
@@ -17032,6 +18149,7 @@ mod tests {
             super::GeometryOptions::default(),
             &mut fonts,
             &mut rendered,
+            None,
         )
         .unwrap();
         let text: Vec<_> = rendered
@@ -18843,7 +19961,8 @@ mod tests {
                 },
                 ..Default::default()
             });
-            let layout = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+            let layout =
+                super::layout_legend(&chart.chart, &plot, bounds, &mut fonts, None).unwrap();
             for (key, label) in layout.keys.iter().zip(&layout.labels) {
                 let right = label.origin.x + label.advances.iter().sum::<f64>();
                 assert!(key.x >= bounds.x && right <= bounds.x + bounds.width);
@@ -18855,7 +19974,8 @@ mod tests {
                 assert!(label.origin.y >= bounds.y && label.origin.y <= bounds.y + bounds.height);
             }
             chart.chart.legend.as_mut().unwrap().settings.overlay = true;
-            let overlay = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+            let overlay =
+                super::layout_legend(&chart.chart, &plot, bounds, &mut fonts, None).unwrap();
             assert_eq!(overlay.plot, full);
             assert!(
                 overlay.keys.iter().any(|key| key.x < full.x + full.width
@@ -18866,7 +19986,7 @@ mod tests {
             );
         }
         chart.chart.legend = None;
-        let absent = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts).unwrap();
+        let absent = super::layout_legend(&chart.chart, &plot, bounds, &mut fonts, None).unwrap();
         assert_eq!(absent.plot, full);
         assert!(absent.keys.is_empty());
     }
@@ -18967,7 +20087,8 @@ mod tests {
         let chart = labelled_bar_chart();
         let plot = &chart.chart.plot_area.plots().unwrap()[0];
         let mut fonts = FontManager::new_deterministic().unwrap();
-        let layout = super::layout_legend(&chart.chart, plot, chart_bounds(), &mut fonts).unwrap();
+        let layout =
+            super::layout_legend(&chart.chart, plot, chart_bounds(), &mut fonts, None).unwrap();
         // Frozen Word16.113.2 and PowerPoint16.113.4, explicit Aptos9pt
         // legend controls. Absolute position and cropped paint are separately
         // qualified from actual PDFs with the same one-point bound.
@@ -18978,7 +20099,7 @@ mod tests {
         multiple.chart.legend = Some(super::CT_Legend::default());
         let plot = &multiple.chart.plot_area.plots().unwrap()[0];
         let layout =
-            super::layout_legend(&multiple.chart, plot, chart_bounds(), &mut fonts).unwrap();
+            super::layout_legend(&multiple.chart, plot, chart_bounds(), &mut fonts, None).unwrap();
         for pair in layout.keys.windows(2) {
             assert!((pair[1].y - pair[0].y - 16.875).abs() <= 1.0);
         }

@@ -488,6 +488,16 @@ pub struct CT_Shape {
     /// outline. `None` covers both `a:noFill` and a fill we cannot resolve,
     /// such as a theme colour.
     pub solid_fill: Option<String>,
+    /// Outline colour as RRGGBB, from `a:ln/a:solidFill`. `None` covers
+    /// `a:noFill`, an outline left to the shape style, and a colour we cannot
+    /// resolve, such as a theme colour.
+    pub line_color: Option<String>,
+    /// Outline width from `a:ln@w`, `None` when the outline names none.
+    pub line_width: Option<Emu>,
+    /// Text box insets from `wps:bodyPr`, `lIns`, `tIns`, `rIns` and `bIns`
+    /// in that order, each `None` where the attribute is absent and
+    /// DrawingML's default applies.
+    pub insets: [Option<Emu>; 4],
     /// Paragraphs of the shape's text box, from `wps:txbx/w:txbxContent`.
     pub text: Vec<crate::text::CT_P>,
     /// Authoritative parsed block body, including tables and modeled controls.
@@ -654,19 +664,44 @@ pub(crate) fn parse_alternate_content_admitted(
     None
 }
 
-/// Pull the preset geometry and solid fill out of a captured `wps:spPr`.
+/// What [`parse_shape_props`] reads out of a captured `wps:spPr`.
+#[derive(Debug, Default, PartialEq)]
+struct ShapeProps {
+    preset: Option<String>,
+    fill: Option<String>,
+    line_color: Option<String>,
+    line_width: Option<Emu>,
+}
+
+/// Pull the preset geometry, the solid fill and the outline out of a captured
+/// `wps:spPr`.
 ///
 /// The fill has to be told apart from the outline colour. Both are written as
-/// `a:srgbClr`, and the outline sits inside `a:ln`, so anything at or below an
-/// `a:ln` is skipped.
-fn parse_shape_props(raw: &[u8]) -> (Option<String>, Option<String>) {
+/// `a:srgbClr`, and the outline sits inside `a:ln`, so a colour at or below an
+/// `a:ln` is the outline's and any other is the fill's.
+fn parse_shape_props(raw: &[u8]) -> ShapeProps {
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut preset = None;
     let mut fill = None;
+    let mut line_color = None;
+    let mut line_width = None;
     let mut ln_depth = 0usize;
     let mut in_solid_fill = false;
+    let srgb = |e: &BytesStart| {
+        e.attributes()
+            .flatten()
+            .find(|attr| attr.key.as_ref() == b"val")
+            .and_then(|attr| std::str::from_utf8(&attr.value).ok().map(str::to_string))
+    };
+    let width = |e: &BytesStart| {
+        e.attributes()
+            .flatten()
+            .find(|attr| attr.key.as_ref() == b"w")
+            .and_then(|attr| std::str::from_utf8(&attr.value).ok()?.parse().ok())
+            .map(Emu)
+    };
 
     // Only a Start can open a scope. A self-closing a:ln or a:solidFill has no
     // children, so it must not change the depth or the fill flag.
@@ -677,6 +712,9 @@ fn parse_shape_props(raw: &[u8]) -> (Option<String>, Option<String>) {
                 let name = e.name();
                 let local = name.as_ref();
                 if matches_local_name(local, b"ln") {
+                    if ln_depth == 0 {
+                        line_width = width(e);
+                    }
                     ln_depth += 1;
                 } else if matches_local_name(local, b"solidFill") {
                     in_solid_fill = true;
@@ -686,17 +724,16 @@ fn parse_shape_props(raw: &[u8]) -> (Option<String>, Option<String>) {
                             preset = std::str::from_utf8(&attr.value).ok().map(str::to_string);
                         }
                     }
-                } else if matches_local_name(local, b"srgbClr")
-                    && in_solid_fill
-                    && ln_depth == 0
-                    && fill.is_none()
-                {
+                } else if matches_local_name(local, b"srgbClr") && in_solid_fill {
                     // srgbClr can carry children such as a:alpha, so it turns
                     // up as a Start as well as an Empty.
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"val" {
-                            fill = std::str::from_utf8(&attr.value).ok().map(str::to_string);
-                        }
+                    let slot = if ln_depth == 0 {
+                        &mut fill
+                    } else {
+                        &mut line_color
+                    };
+                    if slot.is_none() {
+                        *slot = srgb(e);
                     }
                 }
             }
@@ -709,15 +746,17 @@ fn parse_shape_props(raw: &[u8]) -> (Option<String>, Option<String>) {
                             preset = std::str::from_utf8(&attr.value).ok().map(str::to_string);
                         }
                     }
-                } else if matches_local_name(local, b"srgbClr")
-                    && in_solid_fill
-                    && ln_depth == 0
-                    && fill.is_none()
-                {
-                    for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"val" {
-                            fill = std::str::from_utf8(&attr.value).ok().map(str::to_string);
-                        }
+                } else if matches_local_name(local, b"ln") && ln_depth == 0 {
+                    // An outline with no fill child is the shape style's.
+                    line_width = width(e);
+                } else if matches_local_name(local, b"srgbClr") && in_solid_fill {
+                    let slot = if ln_depth == 0 {
+                        &mut fill
+                    } else {
+                        &mut line_color
+                    };
+                    if slot.is_none() {
+                        *slot = srgb(e);
                     }
                 }
             }
@@ -737,7 +776,31 @@ fn parse_shape_props(raw: &[u8]) -> (Option<String>, Option<String>) {
         buf.clear();
     }
 
-    (preset, fill)
+    ShapeProps {
+        preset,
+        fill,
+        line_color,
+        line_width,
+    }
+}
+
+/// The text box insets a `wps:bodyPr` names, in `CT_Shape::insets` order.
+fn body_insets(e: &BytesStart) -> [Option<Emu>; 4] {
+    let mut insets = [None; 4];
+    for attr in e.attributes().flatten() {
+        let slot = match attr.key.as_ref() {
+            b"lIns" => 0,
+            b"tIns" => 1,
+            b"rIns" => 2,
+            b"bIns" => 3,
+            _ => continue,
+        };
+        insets[slot] = std::str::from_utf8(&attr.value)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(Emu);
+    }
+    insets
 }
 
 impl CT_Anchor {
@@ -1080,6 +1143,10 @@ impl CT_Anchor {
                         // Ignore simplePos
                     } else if let DrawingChildAction::Wrap(parsed) = action {
                         wrap = parsed;
+                    } else if matches_local_name(ename.as_ref(), b"bodyPr")
+                        && let Some(shape) = &mut shape
+                    {
+                        shape.insets = body_insets(e);
                     }
                 }
                 Ok(Event::Start(ref e)) => {
@@ -1186,10 +1253,16 @@ impl CT_Anchor {
                         // fill out of them separately, so the fill colour is
                         // not confused with the outline colour.
                         let raw = capture_ns_element(reader, e)?;
-                        let (preset, solid_fill) = parse_shape_props(&raw);
+                        let props = parse_shape_props(&raw);
                         let s = shape.get_or_insert_with(CT_Shape::default);
-                        s.preset = preset;
-                        s.solid_fill = solid_fill;
+                        s.preset = props.preset;
+                        s.solid_fill = props.fill;
+                        s.line_color = props.line_color;
+                        s.line_width = props.line_width;
+                    } else if matches_local_name(ename.as_ref(), b"bodyPr") && shape.is_some() {
+                        // Its children (autofit and the like) are not modelled
+                        // and are read past by this loop.
+                        shape.get_or_insert_with(CT_Shape::default).insets = body_insets(e);
                     } else if action == DrawingChildAction::TextBox {
                         let body = text_box_body(reader, e, cursor.as_ref(), event_start)?;
                         let shape = shape.get_or_insert_with(CT_Shape::default);
@@ -3219,6 +3292,58 @@ mod tests {
         assert!(anchor.shape.is_some());
         assert!(anchor.embed_id.is_empty());
         assert!(anchor.link_id.is_none());
+    }
+
+    #[test]
+    fn a_shape_reads_its_outline_apart_from_its_fill_and_its_text_insets() {
+        let parse = |sp_pr: &str, body_pr: &str| {
+            parse_drawing(&format!(
+                concat!(
+                    r#"<w:drawing xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+                    r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" "#,
+                    r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#,
+                    r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+                    r#"<wp:anchor><wps:wsp><wps:spPr>{}</wps:spPr>{}</wps:wsp></wp:anchor></w:drawing>"#,
+                ),
+                sp_pr, body_pr
+            ))
+            .anchor
+            .and_then(|anchor| anchor.shape)
+            .expect("shape")
+        };
+        // The text box LibreOffice writes: white fill, a thin black outline.
+        let shape = parse(
+            concat!(
+                r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+                r#"<a:solidFill><a:srgbClr val="ffffff"/></a:solidFill>"#,
+                r#"<a:ln w="720"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:round/></a:ln>"#,
+            ),
+            r#"<wps:bodyPr><a:noAutofit/></wps:bodyPr>"#,
+        );
+        assert_eq!(shape.solid_fill.as_deref(), Some("ffffff"));
+        assert_eq!(shape.line_color.as_deref(), Some("000000"));
+        assert_eq!(shape.line_width, Some(Emu(720)));
+        assert_eq!(shape.insets, [None; 4]);
+        // An outline before the fill, insets named on an empty bodyPr.
+        let shape = parse(
+            concat!(
+                r#"<a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"><a:alpha val="50000"/></a:srgbClr></a:solidFill></a:ln>"#,
+                r#"<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>"#,
+            ),
+            r#"<wps:bodyPr lIns="0" tIns="12700" rIns="91440"/>"#,
+        );
+        assert_eq!(shape.solid_fill.as_deref(), Some("00FF00"));
+        assert_eq!(shape.line_color.as_deref(), Some("FF0000"));
+        assert_eq!(shape.line_width, Some(Emu(12700)));
+        assert_eq!(
+            shape.insets,
+            [Some(Emu(0)), Some(Emu(12700)), Some(Emu(91440)), None]
+        );
+        // No outline colour: none, a style's, or one hidden by noFill.
+        for ln in ["", r#"<a:ln w="9525"/>"#, r#"<a:ln><a:noFill/></a:ln>"#] {
+            let shape = parse(ln, "");
+            assert_eq!(shape.line_color, None, "{ln}");
+        }
     }
 
     #[test]

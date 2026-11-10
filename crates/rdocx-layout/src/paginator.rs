@@ -10,6 +10,9 @@ use crate::block::{
     WordRowPaint,
 };
 use crate::table::{CellBlock, FloatingTable, TableRow};
+use oxml_layout::line::{
+    break_into_lines_with_consumption_and_opaque_origins, inline_remainder_with_origins,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -201,6 +204,19 @@ impl PageGeometry {
         match self.body_rotation {
             Some(_) => self.content_height(),
             None => self.content_width(),
+        }
+    }
+
+    fn reserve_header_footer_room(&mut self, header: &[ParagraphBlock], footer: &[ParagraphBlock]) {
+        if !header.is_empty() {
+            self.margin_top = self
+                .margin_top
+                .max(self.header_distance + header_footer_height(header, self));
+        }
+        if !footer.is_empty() {
+            self.margin_bottom = self
+                .margin_bottom
+                .max(self.footer_distance + header_footer_height(footer, self));
         }
     }
 
@@ -1712,7 +1728,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 break;
             }
-        } else if let Some(table) = block.table() {
+        } else if let Some(mut table) = block.table_for_measure(pager.table_measure()) {
             let body_index = block.body_index();
 
             // A floating table is positioned rather than flowed, so it never
@@ -1723,7 +1739,9 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                 continue;
             }
 
-            for (row_idx, row) in table.rows.iter().enumerate() {
+            for row_idx in 0..table.rows.len() {
+                table = block.table_for_measure(pager.table_measure()).unwrap();
+                let row = &table.rows[row_idx];
                 // Read per row, because finishing a page may have moved the
                 // body into the next column track.
                 let row_semantics = table
@@ -1738,10 +1756,15 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                     // Word splits a row with a minimum height only when the
                     // part that stays on this page reaches that minimum, and
                     // otherwise moves the row whole.
-                    let split = split_simple_table_row(&pending, pending_semantics.as_ref(), space)
-                        .filter(|(fragment, ..)| {
-                            fragment.height >= pending.min_height || !pager.has_content()
-                        });
+                    let split = split_simple_table_row(
+                        &pending,
+                        pending_semantics.as_ref(),
+                        space,
+                        pager.geometry.body_rotation.is_some().then_some(pager.fm),
+                    )
+                    .filter(|(fragment, ..)| {
+                        fragment.height >= pending.min_height || !pager.has_content()
+                    });
                     if let Some((fragment, rest, fragment_semantics, rest_semantics)) = split {
                         paint_flowed_table_row(
                             &mut pager,
@@ -1756,13 +1779,49 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         pending_semantics = rest_semantics;
                         first_fragment = false;
                         moved_whole = false;
+                        let old_width = pager.geometry.content_width();
                         pager.finish_page();
+                        table = block.table_for_measure(pager.table_measure()).unwrap();
+                        if pager.geometry.body_rotation.is_some()
+                            && old_width != pager.geometry.content_width()
+                        {
+                            if first_fragment {
+                                pending = table.rows[row_idx].clone();
+                                pending_semantics =
+                                    table.semantics.and_then(|s| s.rows.get(row_idx)).cloned();
+                            } else if let Some(refitted) = refit_table_row_fragment(
+                                &pending,
+                                pending_semantics.as_ref(),
+                                &table.rows[row_idx],
+                                pager.fm,
+                            ) {
+                                pending = refitted;
+                            }
+                        }
                         repeat_table_headers(&mut pager, &table, row_idx, body_index);
                         continue;
                     }
                     if pending.height > space && pager.has_content() && !moved_whole {
                         moved_whole = true;
+                        let old_width = pager.geometry.content_width();
                         pager.finish_page();
+                        table = block.table_for_measure(pager.table_measure()).unwrap();
+                        if pager.geometry.body_rotation.is_some()
+                            && old_width != pager.geometry.content_width()
+                        {
+                            if first_fragment {
+                                pending = table.rows[row_idx].clone();
+                                pending_semantics =
+                                    table.semantics.and_then(|s| s.rows.get(row_idx)).cloned();
+                            } else if let Some(refitted) = refit_table_row_fragment(
+                                &pending,
+                                pending_semantics.as_ref(),
+                                &table.rows[row_idx],
+                                pager.fm,
+                            ) {
+                                pending = refitted;
+                            }
+                        }
                         repeat_table_headers(&mut pager, &table, row_idx, body_index);
                         continue;
                     }
@@ -1820,6 +1879,7 @@ fn split_simple_table_row(
     row: &TableRow,
     semantics: Option<&RowSemantics>,
     space: f64,
+    fm: Option<&FontManager>,
 ) -> Option<(
     TableRow,
     TableRow,
@@ -1905,6 +1965,21 @@ fn split_simple_table_row(
             let CellBlock::Paragraph(rest_paragraph) = &mut rest_cell.blocks[0] else {
                 unreachable!("checked paragraph blocks above")
             };
+            if let Some(fm) = fm {
+                let direction = semantics
+                    .and_then(|row| row.cells.get(cell_index))
+                    .and_then(|cell| cell.blocks.get(count))
+                    .and_then(|block| match block {
+                        CellBlockSemantics::Paragraph(semantics) => {
+                            Some(semantics.reflow_direction)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(oxml_layout::TextDirection::Auto);
+                let width = rest_paragraph.reflow.as_ref()?.params.available_width;
+                let (_, consumption) = rebreak_paragraph(rest_paragraph, direction, width, fm)?;
+                consume_paragraph_input(rest_paragraph, *consumption.get(lines - 1)?, fm)?;
+            }
             rest_paragraph.lines.drain(..lines);
             if let Some(borders) = &mut rest_paragraph.borders {
                 borders.top = None;
@@ -1979,6 +2054,60 @@ fn split_simple_table_row(
         cell.merged_height = rest.height;
     }
     Some((first, rest, first_semantics, rest_semantics))
+}
+
+/// Resize only unconsumed plain cell content. The split guard has already
+/// excluded merges, rotations, nested tables, exact clipping and anchors.
+fn refit_table_row_fragment(
+    pending: &TableRow,
+    semantics: Option<&RowSemantics>,
+    template: &TableRow,
+    fm: &FontManager,
+) -> Option<TableRow> {
+    let mut adjusted = pending.clone();
+    adjusted.offset_left = template.offset_left;
+    let mut height = pending.min_height;
+    for (cell_index, cell) in adjusted.cells.iter_mut().enumerate() {
+        let selected = template.cells.get(cell_index)?;
+        cell.width = selected.width;
+        cell.margin_left = selected.margin_left;
+        cell.margin_right = selected.margin_right;
+        // Percentage cell spacing changes these margins with the measure.
+        // The split already removed the top gap and completed cells' bottom.
+        cell.margin_bottom = if cell.blocks.is_empty() {
+            0.0
+        } else {
+            selected.margin_bottom
+        };
+        let width = (cell.width - cell.margin_left - cell.margin_right).max(0.0);
+        for (block_index, block) in cell.blocks.iter_mut().enumerate() {
+            let CellBlock::Paragraph(paragraph) = block else {
+                return None;
+            };
+            let direction = semantics
+                .and_then(|row| row.cells.get(cell_index))
+                .and_then(|cell| cell.blocks.get(block_index))
+                .and_then(|block| match block {
+                    CellBlockSemantics::Paragraph(semantics) => Some(semantics.reflow_direction),
+                    _ => None,
+                })
+                .unwrap_or(oxml_layout::TextDirection::Auto);
+            *paragraph = rebreak_paragraph(paragraph, direction, width, fm)?.0;
+        }
+        height = height.max(
+            cell.blocks.iter().map(CellBlock::total_height).sum::<f64>()
+                + cell.margin_top
+                + cell.margin_bottom
+                + cell.border_band_top
+                + cell.border_band_bottom,
+        );
+    }
+    adjusted.height = height;
+    for cell in &mut adjusted.cells {
+        cell.height = height;
+        cell.merged_height = height;
+    }
+    Some(adjusted)
 }
 
 fn paint_flowed_table_row(
@@ -2278,6 +2407,14 @@ impl<'a> Pager<'a> {
         self.next_repetition_scope = 1;
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
+        // A vertical (rotated) body keeps the selected story's reserved band,
+        // which its retained inputs reflow at. Every other page clears its
+        // header and footer below, once, as upstream does.
+        let vertical_story = self.section_geometry.body_rotation.is_some();
+        if vertical_story && let Some(hf) = self.header_footer {
+            let (header, footer) = self.selected_header_footer(hf);
+            page.reserve_header_footer_room(header, footer);
+        }
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
         }
@@ -2322,7 +2459,9 @@ impl<'a> Pager<'a> {
                 }
             }
         }
-        self.clear_header_and_footer(&mut page);
+        if !vertical_story {
+            self.clear_header_and_footer(&mut page);
+        }
         self.content_height = page.content_height();
         let shift = page.margin_left - self.section_geometry.margin_left;
         self.tracks = self
@@ -2334,6 +2473,7 @@ impl<'a> Pager<'a> {
                 width: track.width,
             })
             .collect();
+        self.content_height = page.content_height().max(0.0);
         self.page_geometry = page;
         if let Some(numbering) = self.section_geometry.line_numbers.as_ref()
             && numbering.restart == ST_LineNumberRestart::NewPage
@@ -2366,6 +2506,29 @@ impl<'a> Pager<'a> {
             && prepared.height > 0.0
         {
             page.margin_bottom = page.margin_bottom.max(page.page_height - prepared.origin);
+        }
+    }
+
+    fn selected_header_footer<'b>(
+        &self,
+        hf: &'b HeaderFooterContent,
+    ) -> (&'b [ParagraphBlock], &'b [ParagraphBlock]) {
+        if self.is_first_page && self.title_pg {
+            (&hf.first_header_blocks, &hf.first_footer_blocks)
+        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
+            (&hf.even_header_blocks, &hf.even_footer_blocks)
+        } else {
+            (&hf.header_blocks, &hf.footer_blocks)
+        }
+    }
+
+    /// Use the prepared story measure before transposition can round it.
+    /// Horizontal pages still select tables at their active column width.
+    fn table_measure(&self) -> f64 {
+        if self.geometry.body_rotation.is_some() {
+            self.page_geometry.body_measure()
+        } else {
+            self.geometry.content_width()
         }
     }
 
@@ -2442,13 +2605,20 @@ impl<'a> Pager<'a> {
 
     /// The space a paragraph adds above itself at the cursor.
     ///
-    /// Nothing at the top of a page. Word otherwise keeps the larger of the
-    /// previous paragraph's space after and this space before, so only the
-    /// part of `before` that exceeds the space after already below the cursor
-    /// is added, unless the document asks for the two to be summed.
+    /// At the top of a page, all of it in the first column of a section's
+    /// first page, the top of the document included, and nothing on a page or
+    /// in a column the text flowed into, as in Word. Word otherwise keeps the
+    /// larger of the previous paragraph's space after and this space before,
+    /// so only the part of `before` that exceeds the space after already
+    /// below the cursor is added, unless the document asks for the two to be
+    /// summed.
     fn space_before(&self, before: f64) -> f64 {
         if self.cursor_y == 0.0 {
-            0.0
+            if self.is_first_page && self.track_index == 0 {
+                before
+            } else {
+                0.0
+            }
         } else if self.geometry.do_not_use_html_paragraph_auto_spacing {
             before
         } else {
@@ -3776,7 +3946,13 @@ fn anchored_elements(
             };
         }
         (
-            AnchoredContent::Shape { preset, fill, text },
+            AnchoredContent::Shape {
+                preset,
+                fill,
+                outline,
+                text,
+                insets,
+            },
             owner @ (AnchorPaintOwner::Neutral
             | AnchorPaintOwner::Word(WordAnchorPaint::Shape { .. })),
         ) => {
@@ -3787,23 +3963,46 @@ fn anchored_elements(
                         color: *color,
                     })?
                 }
-                (ShapePreset::Line, Some(color)) => {
-                    produced.push_non_field(PositionedElement::Line {
-                        start: Point {
-                            x: rect.x,
-                            y: rect.y,
-                        },
-                        end: Point {
-                            x: rect.x + anchor.width,
-                            y: rect.y + anchor.height,
-                        },
-                        width: 1.0,
-                        color: *color,
-                        dash_pattern: None,
-                    })?
+                (ShapePreset::Line, _) => {
+                    // A line's colour is its outline's. An older reading of
+                    // the shape took the fill, which is kept where the shape
+                    // names no outline colour.
+                    if let Some((color, width)) = outline.or_else(|| fill.map(|color| (color, 1.0)))
+                    {
+                        produced.push_non_field(PositionedElement::Line {
+                            start: Point {
+                                x: rect.x,
+                                y: rect.y,
+                            },
+                            end: Point {
+                                x: rect.x + anchor.width,
+                                y: rect.y + anchor.height,
+                            },
+                            width,
+                            color,
+                            dash_pattern: None,
+                        })?
+                    }
                 }
                 _ => {}
             }
+            if let (ShapePreset::Rect, Some((color, width))) = (preset, outline) {
+                produced.push_non_field(PositionedElement::Path(oxml_layout::PathElement {
+                    path: Path::rect(rect),
+                    fill: None,
+                    stroke: Some(oxml_layout::Stroke::new(
+                        oxml_layout::Paint::Solid(*color),
+                        *width,
+                    )),
+                }))?
+            }
+            let [left, top, right, bottom] = *insets;
+            let inner = Rect {
+                x: rect.x + left,
+                y: rect.y + top,
+                width: (rect.width - left - right).max(0.0),
+                height: (rect.height - top - bottom).max(0.0),
+            };
             let paragraphs = match owner {
                 AnchorPaintOwner::Word(WordAnchorPaint::Shape { paragraphs }) => {
                     Some(paragraphs.as_slice())
@@ -3811,7 +4010,7 @@ fn anchored_elements(
                 _ => None,
             };
             produced.append(&mut render_shape_text(
-                text, paragraphs, geometry, rect, media,
+                text, paragraphs, geometry, inner, media,
             )?)?;
         }
         _ => {
@@ -5045,6 +5244,7 @@ fn reflow_around_wraps(
     }
     let mut offset_top = 0.0;
     let mut line_gaps = Vec::new();
+    let mut final_params = reflow.params.clone();
 
     // Furniture has a separate per-paragraph32-rebreak work guard. It is
     // distinct from the outer page's32 candidate preparations and does not
@@ -5069,6 +5269,7 @@ fn reflow_around_wraps(
         let mut params = reflow.params.clone();
         params.line_prefix_widths = required.prefix.clone();
         params.line_suffix_widths = required.suffix.clone();
+        final_params = params.clone();
 
         let rich = word_paint.map_or_else(
             || {
@@ -5142,11 +5343,129 @@ fn reflow_around_wraps(
     // Raw Word metrics stay unchanged. The prepared furniture owner carries
     // proved later gaps separately to both occupied-band paint and pricing.
     adjusted.add_border_padding();
+    if let Some(reflow) = adjusted.reflow.as_mut() {
+        reflow.params = final_params;
+    }
     Ok(Some(WrapReflow {
         paint,
         paragraph: adjusted,
         before_lines: line_gaps,
     }))
+}
+
+/// Rebreak retained logical input without repeating Word style or numbering
+/// resolution. Consumption is recorded before visual bidi ordering.
+fn rebreak_paragraph(
+    para: &ParagraphBlock,
+    direction: oxml_layout::TextDirection,
+    width: f64,
+    fm: &FontManager,
+) -> Option<(ParagraphBlock, Vec<usize>)> {
+    rebreak_paragraph_painted(para, None, direction, width, fm)
+        .map(|(block, consumption, _)| (block, consumption))
+}
+
+/// Rebreak like [`rebreak_paragraph`], and rebind the paragraph's Word paint to
+/// the new lines. A paint decides rich layout as the wrap reflow does, and its
+/// line-bound annotations follow their input occurrences. `None` when the
+/// paint cannot be rebound, so the caller keeps the unbroken paragraph.
+fn rebreak_paragraph_painted(
+    para: &ParagraphBlock,
+    paint: Option<&WordParagraphPaint>,
+    direction: oxml_layout::TextDirection,
+    width: f64,
+    fm: &FontManager,
+) -> Option<(ParagraphBlock, Vec<usize>, Option<WordParagraphPaint>)> {
+    let reflow = para.reflow.as_ref()?;
+    let mut params = reflow.params.clone();
+    if params.available_width != width {
+        params.line_prefix_widths.clear();
+        params.line_suffix_widths.clear();
+    }
+    params.available_width = width;
+    let rich = paint.map_or_else(
+        || {
+            direction != oxml_layout::TextDirection::Auto
+                || reflow.items.iter().any(|item| match item {
+                    oxml_layout::InlineItem::MultilingualText(_) => true,
+                    oxml_layout::InlineItem::Text(segment)
+                    | oxml_layout::InlineItem::HyphenatedText { segment, .. }
+                    | oxml_layout::InlineItem::Marker(segment) => {
+                        segment.direction != oxml_layout::TextDirection::Auto
+                    }
+                    _ => false,
+                })
+        },
+        |paint| paint.rich_layout,
+    );
+    let (mut lines, consumption, origins) = break_into_lines_with_consumption_and_opaque_origins(
+        &reflow.items,
+        &params,
+        fm,
+        rich.then_some(direction),
+    )
+    .ok()?;
+    let paint = match paint {
+        Some(paint) => {
+            let mut paint = paint.clone();
+            paint.bind_annotation_origins(&lines, &origins).ok()?;
+            Some(paint)
+        }
+        None => None,
+    };
+    crate::convert::restore_word_line_heights(
+        &mut lines,
+        params.line_spacing,
+        reflow.grid_line_pitch_pt,
+        fm,
+        reflow.paragraph_mark,
+    );
+    let mut adjusted = para.clone();
+    adjusted.lines = lines;
+    // Fresh line-breaker output has no paragraph border bands.
+    adjusted.add_border_padding();
+    adjusted.reflow.as_mut()?.params = params;
+    Some((adjusted, consumption, paint))
+}
+
+/// Keep only the input after `consumed`. Returns, for each remaining input
+/// item, the index of the original item it came from.
+fn consume_paragraph_input(
+    para: &mut ParagraphBlock,
+    consumed: usize,
+    fm: &FontManager,
+) -> Option<Vec<usize>> {
+    let reflow = para.reflow.as_mut()?;
+    let (items, origins) = inline_remainder_with_origins(&reflow.items, consumed, fm).ok()?;
+    reflow.items = items;
+    reflow.params.ind_first_line = 0.0;
+    reflow.params.ind_hanging = 0.0;
+    reflow.params.line_prefix_widths.clear();
+    reflow.params.line_suffix_widths.clear();
+    Some(origins)
+}
+
+/// The Word paint of a logical continuation: input annotations move to the
+/// remaining input items they belong to, and are bound again when the
+/// continuation is rebroken. Anchors stay with the first fragment.
+fn continuation_paint(paint: &WordParagraphPaint, origins: &[usize]) -> WordParagraphPaint {
+    let mut selected = paint.clone();
+    selected.input_annotations = paint
+        .input_annotations
+        .iter()
+        .filter_map(|annotation| {
+            origins
+                .iter()
+                .position(|origin| *origin == annotation.slot)
+                .map(|slot| crate::block::WordInputAnnotation {
+                    slot,
+                    ..annotation.clone()
+                })
+        })
+        .collect();
+    selected.line_annotations.clear();
+    selected.anchors.clear();
+    selected
 }
 
 fn paginate_paragraph<B: LayoutBlockLike>(
@@ -5156,6 +5475,26 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     blocks: &[B],
     pager: &mut Pager,
 ) {
+    let page_reflow = (pager.geometry.body_rotation.is_some() && para.reflow_allowed)
+        .then(|| {
+            rebreak_paragraph_painted(
+                para.block,
+                para.paint
+                    .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref())),
+                para.reflow_direction,
+                pager.geometry.content_width(),
+                pager.fm,
+            )
+        })
+        .flatten();
+    let mut consumption = page_reflow.as_ref().map(|(_, cursors, _)| cursors.clone());
+    let para = page_reflow
+        .as_ref()
+        .map_or(para, |(block, _, paint)| ParagraphView {
+            block,
+            paint: paint.as_ref().or(para.paint),
+            ..para
+        });
     let para = ParagraphView {
         line_start: 0,
         paint: para.paint,
@@ -5211,6 +5550,17 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         reflow_direction: para.reflow_direction,
         reflow_allowed: false,
     });
+    if reflowed.is_some() && pager.geometry.body_rotation.is_some() {
+        consumption = rebreak_paragraph_painted(
+            para.block,
+            para.paint
+                .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref())),
+            para.reflow_direction,
+            pager.geometry.content_width(),
+            pager.fm,
+        )
+        .map(|(_, cursors, _)| cursors);
+    }
 
     // A page break inside the paragraph ends the page after its line, whatever
     // widow control or keep-lines would decide. When the lines up to the break
@@ -5222,7 +5572,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             pager.cursor_y + space_before + para.content_offset_top,
         ) == split_at
     {
-        render_para_split(para, body_index, split_at, space_before, pager, block_idx);
+        render_para_split(
+            para,
+            body_index,
+            split_at,
+            space_before,
+            pager,
+            block_idx,
+            blocks,
+            consumption.as_deref(),
+        );
         return;
     }
 
@@ -5240,7 +5599,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                 return;
             }
             // Re-call with fresh page
-            paginate_paragraph(para, body_index, block_idx, blocks, pager);
+            paginate_paragraph(
+                ParagraphView {
+                    reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                    ..para
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
             return;
         }
 
@@ -5257,7 +5625,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 return;
             }
-            paginate_paragraph(para, body_index, block_idx, blocks, pager);
+            paginate_paragraph(
+                ParagraphView {
+                    reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                    ..para
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
             return;
         }
 
@@ -5265,7 +5642,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         if para.widow_control && lines_remaining < 2 && lines_that_fit >= 3 {
             // Would leave orphan — move one line to next page
             let split_at = lines_that_fit - 1;
-            render_para_split(para, body_index, split_at, space_before, pager, block_idx);
+            render_para_split(
+                para,
+                body_index,
+                split_at,
+                space_before,
+                pager,
+                block_idx,
+                blocks,
+                consumption.as_deref(),
+            );
             return;
         }
 
@@ -5277,6 +5663,8 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                 space_before,
                 pager,
                 block_idx,
+                blocks,
+                consumption.as_deref(),
             );
             return;
         }
@@ -5286,7 +5674,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         if pager.stopped_at.is_some() {
             return;
         }
-        paginate_paragraph(para, body_index, block_idx, blocks, pager);
+        paginate_paragraph(
+            ParagraphView {
+                reflow_allowed: para.reflow_allowed || pager.geometry.body_rotation.is_some(),
+                ..para
+            },
+            body_index,
+            block_idx,
+            blocks,
+            pager,
+        );
         return;
     }
 
@@ -5297,7 +5694,16 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         let lines_that_fit =
             pager.count_lines_that_fit_with_notes(&para.lines, para.content_offset_top);
         if lines_that_fit > 0 && lines_that_fit < para.lines.len() {
-            render_para_split(para, body_index, lines_that_fit, 0.0, pager, block_idx);
+            render_para_split(
+                para,
+                body_index,
+                lines_that_fit,
+                0.0,
+                pager,
+                block_idx,
+                blocks,
+                consumption.as_deref(),
+            );
             return;
         }
     }
@@ -5314,6 +5720,19 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         let chain = keep_next_chain_height(para.block, block_idx, blocks, pager);
         if pager.cursor_y + space_before + chain > pager.available_height_for(&para.lines) {
             pager.advance_flow_for_chain();
+            if pager.geometry.body_rotation.is_some() {
+                paginate_paragraph(
+                    ParagraphView {
+                        reflow_allowed: true,
+                        ..para
+                    },
+                    body_index,
+                    block_idx,
+                    blocks,
+                    pager,
+                );
+                return;
+            }
         }
     }
 
@@ -5411,11 +5830,27 @@ fn keep_next_chain_height<B: LayoutBlockLike>(
             break;
         }
         let Some(paragraph) = next.paragraph() else {
-            if let Some(table) = next.table() {
+            if let Some(table) = next.table_for_measure(pager.table_measure()) {
                 height += space_after + table.rows.first().map_or(0.0, |row| row.height);
             }
             break;
         };
+        let selected = pager
+            .geometry
+            .body_rotation
+            .is_some()
+            .then(|| {
+                rebreak_paragraph(
+                    paragraph.block,
+                    paragraph.reflow_direction,
+                    pager.geometry.content_width(),
+                    pager.fm,
+                )
+            })
+            .flatten();
+        let paragraph = selected
+            .as_ref()
+            .map_or(paragraph, |(block, _)| ParagraphView { block, ..paragraph });
         height += if pager.geometry.do_not_use_html_paragraph_auto_spacing {
             space_after + paragraph.space_before
         } else {
@@ -5457,13 +5892,16 @@ fn forced_page_split(lines: &[LayoutLine]) -> Option<usize> {
 
 /// Split a paragraph at the given line index, rendering first part on current page
 /// and continuing the rest on a new page (recursively if needed).
-fn render_para_split(
+#[allow(clippy::too_many_arguments)]
+fn render_para_split<B: LayoutBlockLike>(
     para: ParagraphView<'_>,
     body_index: Option<usize>,
     split_at: usize,
     space_before: f64,
     pager: &mut Pager,
     block_idx: usize,
+    blocks: &[B],
+    consumption: Option<&[usize]>,
 ) {
     // Render lines before split on current page.
     let border_gap = if para.border_group_before && pager.cursor_y > 0.0 {
@@ -5542,6 +5980,47 @@ fn render_para_split(
                 })
         });
 
+    // Resume logical input rather than reusing the previous page's line
+    // widths. A trailing run break keeps its empty final line semantics.
+    if !ends_with_run_page_break
+        && let Some(consumed) = consumption.and_then(|cursors| cursors.get(split_at - 1))
+    {
+        let mut continuation = para.block.clone();
+        continuation.lines = remaining_lines.to_vec();
+        continuation.anchored.clear();
+        continuation.space_before = 0.0;
+        continuation.keep_lines = false;
+        continuation.page_break_before = false;
+        continuation.heading_level = None;
+        continuation.heading_text = None;
+        continuation.content_offset_top = 0.0;
+        if let Some(origins) = consume_paragraph_input(&mut continuation, *consumed, pager.fm) {
+            let paint = para
+                .paint
+                .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref()))
+                .map(|paint| continuation_paint(paint, &origins));
+            paginate_paragraph(
+                ParagraphView {
+                    line_start: 0,
+                    paint: paint.as_ref(),
+                    baseline_policy: para.baseline_policy,
+                    line_gaps: &[],
+                    // The continuation starts a fresh page fragment.
+                    border_group_before: false,
+                    block: &continuation,
+                    semantics: para.semantics,
+                    reflow_direction: para.reflow_direction,
+                    reflow_allowed: true,
+                },
+                body_index,
+                block_idx,
+                blocks,
+                pager,
+            );
+            return;
+        }
+    }
+
     // Split again where the remaining lines are still too tall, or at a page
     // break among them, whichever comes first.
     let overflow_split = (remaining_height > pager.available_height_for(remaining_lines))
@@ -5581,6 +6060,9 @@ fn render_para_split(
             // extraction. `reflow_allowed` below prevents a second break.
             reflow: para.reflow.clone(),
             content_offset_top: 0.0,
+            style: para.style.clone(),
+            contextual_spacing: para.contextual_spacing,
+            frame: para.frame,
         };
         let continuation_paint = para
             .paint
@@ -5617,6 +6099,8 @@ fn render_para_split(
             0.0,
             pager,
             block_idx,
+            blocks,
+            None,
         );
         return;
     }
@@ -7002,6 +7486,88 @@ fn render_change_bar_at(
     });
 }
 
+/// Height of the painted story, including collapsed inter-paragraph spacing.
+///
+/// A paragraph in a positioned frame takes none of it.
+fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f64 {
+    let flow = blocks
+        .iter()
+        .filter(|block| in_story_flow(block))
+        .collect::<Vec<_>>();
+    let content: f64 = flow.iter().map(|block| block.content_height()).sum();
+    content
+        + flow
+            .windows(2)
+            .map(|pair| story_gap(pair[0], pair[1], geometry))
+            .sum::<f64>()
+}
+
+/// Whether a story paragraph takes vertical space in the flow: it is not in a
+/// frame, or its frame lets no text beside it.
+fn in_story_flow(block: &ParagraphBlock) -> bool {
+    block.frame.is_none_or(|frame| frame.in_flow)
+}
+
+/// The collapsed space between two story paragraphs that follow each other.
+fn story_gap(previous: &ParagraphBlock, next: &ParagraphBlock, geometry: &PageGeometry) -> f64 {
+    if geometry.do_not_use_html_paragraph_auto_spacing {
+        previous.space_after + next.space_before
+    } else {
+        previous.space_after.max(next.space_before)
+    }
+}
+
+/// Prepare a conservative initial measure before selected-story pagination.
+/// Retained paragraph inputs and table variants can later use a wider band.
+pub(crate) fn reserve_vertical_header_footer_room(
+    mut geometry: PageGeometry,
+    content: Option<&HeaderFooterContent>,
+    title_pg: bool,
+) -> PageGeometry {
+    if geometry.body_rotation.is_some()
+        && let Some(hf) = content
+    {
+        geometry.reserve_header_footer_room(&hf.header_blocks, &hf.footer_blocks);
+        if title_pg {
+            geometry.reserve_header_footer_room(&hf.first_header_blocks, &hf.first_footer_blocks);
+        }
+        if hf.even_headers_active {
+            geometry.reserve_header_footer_room(&hf.even_header_blocks, &hf.even_footer_blocks);
+        }
+    }
+    geometry
+}
+
+/// Distinct raw body measures for stories that can be selected in a section.
+/// Tables are prepared at these finite measures before pagination rotates them.
+pub(crate) fn vertical_story_measures(
+    base: &PageGeometry,
+    content: Option<&HeaderFooterContent>,
+    title_pg: bool,
+) -> Vec<f64> {
+    let mut measures = Vec::new();
+    if let Some(hf) = content {
+        let mut stories = vec![(&hf.header_blocks, &hf.footer_blocks)];
+        if title_pg {
+            stories.push((&hf.first_header_blocks, &hf.first_footer_blocks));
+        }
+        if hf.even_headers_active {
+            stories.push((&hf.even_header_blocks, &hf.even_footer_blocks));
+        }
+        for (header, footer) in stories {
+            let mut selected = base.clone();
+            selected.reserve_header_footer_room(header, footer);
+            let measure = selected.body_measure();
+            if !measures.contains(&measure) {
+                measures.push(measure);
+            }
+        }
+    } else {
+        measures.push(base.body_measure());
+    }
+    measures
+}
+
 fn frame_rect(
     properties: &rdocx_oxml::CT_FramePr,
     blocks: &[ParagraphBlock],
@@ -8310,7 +8876,147 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         }
+    }
+
+    #[test]
+    fn rebreaking_a_bordered_paragraph_keeps_its_border_bands() {
+        use rdocx_oxml::borders::{CT_BorderEdge, CT_PBdr};
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm
+            .resolve_font(Some("Liberation Sans"), false, false)
+            .unwrap();
+        let text = "bordered words ".repeat(40);
+        let mut segment = directional_test_segment(&text, TextDirection::Auto, None, None);
+        let shaped = fm.shape_text(id, &text, 12.0).unwrap();
+        segment.font_id = id;
+        segment.glyph_ids = shaped.glyph_ids;
+        segment.advances = shaped.advances;
+        segment.width = shaped.width;
+        let params = oxml_layout::LineBreakParams {
+            available_width: 408.0,
+            ..Default::default()
+        };
+        let edge = CT_BorderEdge {
+            val: ST_Border::Single,
+            sz: Some(8),
+            space: Some(4),
+            color: Some("000000".to_string()),
+            extra_attributes: Vec::new(),
+            source_xml: None,
+        };
+        let mut para = make_para(1, 14.0);
+        para.borders = Some(CT_PBdr {
+            top: Some(edge.clone()),
+            bottom: Some(edge),
+            ..Default::default()
+        });
+        para.lines = break_into_lines(
+            &[oxml_layout::InlineItem::Text(segment.clone())],
+            &params,
+            &fm,
+        )
+        .unwrap();
+        para.reflow = Some(Box::new(crate::block::ParagraphReflow {
+            items: vec![oxml_layout::InlineItem::Text(segment.clone())],
+            params: params.clone(),
+            grid_line_pitch_pt: None,
+            paragraph_mark: None,
+        }));
+        para.add_border_padding();
+        let bands =
+            crate::block::paragraph_border_padding(para.borders.as_ref().unwrap().top.as_ref())
+                + crate::block::paragraph_border_padding(
+                    para.borders.as_ref().unwrap().bottom.as_ref(),
+                );
+        assert!(bands > 0.0);
+        let mut unbordered = para.clone();
+        unbordered.borders = None;
+        let plain = rebreak_paragraph(&unbordered, TextDirection::Auto, 200.0, &fm)
+            .unwrap()
+            .0;
+        let rebroken = rebreak_paragraph(&para, TextDirection::Auto, 200.0, &fm)
+            .unwrap()
+            .0;
+        assert_eq!(rebroken.lines.len(), plain.lines.len());
+        assert!((rebroken.content_height() - (plain.content_height() + bands)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vertical_keep_next_prices_following_paragraph_at_selected_measure() {
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let id = fm
+            .resolve_font(Some("Liberation Sans"), false, false)
+            .unwrap();
+        let text = "following words ".repeat(80);
+        let mut segment = directional_test_segment(&text, TextDirection::Auto, None, None);
+        let shaped = fm.shape_text(id, &text, 12.0).unwrap();
+        segment.font_id = id;
+        segment.glyph_ids = shaped.glyph_ids;
+        segment.advances = shaped.advances;
+        segment.width = shaped.width;
+        let params = oxml_layout::LineBreakParams {
+            available_width: 408.0,
+            ..Default::default()
+        };
+        let mut following = make_para(1, 14.0);
+        following.keep_lines = true;
+        following.lines = break_into_lines(
+            &[oxml_layout::InlineItem::Text(segment.clone())],
+            &params,
+            &fm,
+        )
+        .unwrap();
+        following.reflow = Some(Box::new(crate::block::ParagraphReflow {
+            items: vec![oxml_layout::InlineItem::Text(segment)],
+            params,
+            grid_line_pitch_pt: None,
+            paragraph_mark: None,
+        }));
+        let first = make_para(1, 14.0);
+        let blocks = vec![
+            LayoutBlock::Paragraph(first.clone()),
+            LayoutBlock::Paragraph(following.clone()),
+        ];
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let empty = ResolvedWraps::new();
+        let pager = Pager::new(
+            PageGeometry {
+                body_rotation: Some(90.0),
+                ..Default::default()
+            },
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            &media,
+            &notes,
+            &fm,
+            &empty,
+            1,
+            1,
+            true,
+            None,
+        );
+        let expected = rebreak_paragraph(
+            &following,
+            TextDirection::Auto,
+            pager.geometry.content_width(),
+            &fm,
+        )
+        .unwrap()
+        .0;
+        assert!(expected.lines.len() < following.lines.len());
+        assert_eq!(
+            keep_next_chain_height(&first, 0, &blocks, &pager),
+            first.content_height() + expected.content_height()
+        );
     }
 
     #[test]
@@ -9619,6 +10325,177 @@ mod tests {
     }
 
     #[test]
+    fn page_top_spacing_stays_on_a_sections_first_page_and_collapses_between_paragraphs() {
+        let fm = FontManager::new();
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let wraps = ResolvedWraps::new();
+        let mut pager = Pager::new(
+            PageGeometry::default(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+            &media,
+            &notes,
+            &fm,
+            &wraps,
+            1,
+            1,
+            true,
+            None,
+        );
+        // The top of the section's first page keeps it, its second column
+        // and every later page drop it.
+        assert_eq!(pager.space_before(24.0), 24.0);
+        pager.track_index = 1;
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.track_index = 0;
+        pager.page_number = 2;
+        pager.is_first_page = false;
+        assert_eq!(pager.space_before(24.0), 0.0);
+        pager.cursor_y = 40.0;
+        pager.previous_space_after = 12.0;
+        assert_eq!(pager.space_before(24.0), 12.0);
+    }
+
+    #[test]
+    fn a_framed_page_number_takes_no_header_room_and_lands_at_the_right_margin() {
+        // Word's page number gallery: `<w:framePr w:wrap="none" w:vAnchor="text"
+        // w:hAnchor="margin" w:xAlign="right" w:y="1"/>` ahead of the header text.
+        // Upstream's furniture frame placement prices and places it.
+        let properties = rdocx_oxml::properties::CT_FramePr {
+            wrap: Some("none".to_owned()),
+            v_anchor: Some("text".to_owned()),
+            h_anchor: Some("margin".to_owned()),
+            x_align: Some("right".to_owned()),
+            y: Some(rdocx_oxml::units::Twips(20)),
+            ..Default::default()
+        };
+        assert!(crate::block::TextFrame::from_ct(&properties).is_some());
+        let mut number = make_para(1, 14.0);
+        number.lines[0].width = 6.0;
+        let text = make_para(1, 14.0);
+        let geometry = PageGeometry::default();
+        let story = vec![number, text];
+        let facts = vec![
+            HeaderFooterBlockSemantics {
+                placement: HeaderFooterPlacement::Frame {
+                    properties: Box::new(properties.clone()),
+                    paragraphs: 1,
+                },
+                ..Default::default()
+            },
+            HeaderFooterBlockSemantics::default(),
+        ];
+        let prepared =
+            prepare_furniture(&story, Some(&facts), &geometry, false, &FontManager::new())
+                .expect("prepared header");
+        // Only the header text takes header room.
+        assert_eq!(prepared.height, 14.0);
+        let rect = prepared.placements[0].expect("placed frame");
+        assert_eq!(rect.x, 72.0 + 468.0 - 6.0);
+        assert_eq!(rect.width, 6.0);
+        assert_eq!(rect.y, 37.0);
+    }
+
+    #[test]
+    fn a_drop_cap_is_not_a_positioned_frame_and_a_page_frame_aligns_to_the_sheet() {
+        assert_eq!(
+            crate::block::TextFrame::from_ct(&rdocx_oxml::properties::CT_FramePr {
+                drop_cap: Some("drop".to_owned()),
+                lines: Some(3),
+                ..Default::default()
+            }),
+            None
+        );
+        let properties = rdocx_oxml::properties::CT_FramePr {
+            w: Some(rdocx_oxml::units::Twips(2880)),
+            h_anchor: Some("page".to_owned()),
+            x_align: Some("outside".to_owned()),
+            v_anchor: Some("page".to_owned()),
+            y_align: Some("bottom".to_owned()),
+            wrap: Some("notBeside".to_owned()),
+            ..Default::default()
+        };
+        assert!(
+            crate::block::TextFrame::from_ct(&properties)
+                .expect("a positioned frame")
+                .in_flow
+        );
+        let para = make_para(2, 10.0);
+        let geometry = PageGeometry::default();
+        let rect = frame_rect(
+            &properties,
+            std::slice::from_ref(&para),
+            &[HeaderFooterBlockSemantics::default()],
+            &geometry,
+            geometry.header_distance,
+        );
+        // Upstream reads inside and outside as on an odd page, facing pages
+        // not being modelled, so an even page lands where an odd one does.
+        assert_eq!(rect.x, 612.0 - 144.0);
+        assert_eq!(rect.width, 144.0);
+        assert_eq!(rect.y, 792.0 - 20.0);
+    }
+
+    #[test]
+    fn body_room_tracks_selected_header_and_footer_on_each_page() {
+        let fm = FontManager::new();
+        let media = HashMap::new();
+        let notes = NoteRegistry::default();
+        let wraps = ResolvedWraps::new();
+        let mut header = make_para(1, 60.0);
+        header.space_after = 12.0;
+        let mut next = make_para(1, 60.0);
+        next.space_before = 24.0;
+        let hf = HeaderFooterContent {
+            header_blocks: vec![header, next],
+            footer_blocks: vec![make_para(1, 90.0)],
+            first_header_blocks: vec![make_para(1, 10.0)],
+            first_footer_blocks: vec![],
+            even_header_blocks: vec![make_para(1, 80.0)],
+            even_footer_blocks: vec![make_para(1, 100.0)],
+            even_headers_active: true,
+            watermark: None,
+            first_watermark: None,
+            even_watermark: None,
+        };
+        let mut pager = Pager::new(
+            PageGeometry::default(),
+            Some(&hf),
+            None,
+            true,
+            false,
+            false,
+            None,
+            &media,
+            &notes,
+            &fm,
+            &wraps,
+            1,
+            1,
+            true,
+            None,
+        );
+        assert_eq!(pager.geometry.margin_top, 72.0);
+        assert_eq!(pager.geometry.margin_bottom, 72.0);
+        pager.is_first_page = false;
+        pager.header_page_number = 2;
+        pager.begin_page();
+        assert_eq!(pager.geometry.margin_top, 116.0);
+        assert_eq!(pager.geometry.margin_bottom, 136.0);
+        assert_eq!(pager.available_height(), 540.0);
+        pager.header_page_number = 3;
+        pager.begin_page();
+        assert_eq!(pager.geometry.margin_top, 180.0);
+        assert_eq!(pager.geometry.margin_bottom, 126.0);
+        assert_eq!(pager.available_height(), 486.0);
+    }
+
+    #[test]
     fn multi_page_overflow() {
         let fm = FontManager::new();
         // 648pt content height / 14pt per line ≈ 46 lines per page
@@ -9876,6 +10753,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -9920,6 +10800,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -10007,6 +10890,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -10069,6 +10955,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -10117,6 +11006,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -10160,6 +11052,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -10298,6 +11193,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(
@@ -10348,6 +11246,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -10406,6 +11307,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -10469,6 +11373,9 @@ mod tests {
             structure_id: None,
             reflow: None,
             content_offset_top: 0.0,
+            style: None,
+            contextual_spacing: false,
+            frame: None,
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -10565,6 +11472,89 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_outline_is_stroked_around_its_body_and_a_line_takes_the_outline_colour() {
+        let shape = |preset, fill, outline| AnchoredDrawing {
+            rotation_degrees: 0.0,
+            behind_doc: false,
+            rel_h: ST_RelativeFromH::Page,
+            off_h: 0.0,
+            rel_v: ST_RelativeFromV::Page,
+            off_v: 0.0,
+            width: 100.0,
+            height: 40.0,
+            wrap: WrapType::None,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 0.0,
+            dist_right: 0.0,
+            align_h: None,
+            align_v: None,
+            content: AnchoredContent::Shape {
+                preset,
+                fill,
+                outline,
+                text: Vec::new(),
+                insets: crate::block::DEFAULT_TEXT_INSETS,
+            },
+            alternate_text: None,
+            structure_id: None,
+        };
+        let rect = Rect {
+            x: 50.0,
+            y: 60.0,
+            width: 100.0,
+            height: 40.0,
+        };
+        let black = Color::from_hex("000000");
+        let white = Color::from_hex("FFFFFF");
+        let drawn = |anchor: &AnchoredDrawing| {
+            anchored_elements(
+                anchor,
+                AnchorPaintOwner::Neutral,
+                rect,
+                &PageGeometry::default(),
+                &HashMap::new(),
+            )
+            .expect("shape paint")
+            .into_parts()
+            .expect("shape elements")
+            .0
+            .into_iter()
+            .flat_map(|element| match element {
+                PositionedElement::MarkedContent { children, .. } => children,
+                other => vec![other],
+            })
+            .collect::<Vec<_>>()
+        };
+        let boxed = drawn(&shape(ShapePreset::Rect, Some(white), Some((black, 0.5))));
+        assert_eq!(boxed.len(), 2, "{boxed:?}");
+        assert!(matches!(boxed[0], PositionedElement::FilledRect { color, .. } if color == white));
+        let PositionedElement::Path(outline) = &boxed[1] else {
+            panic!("the outline is a stroked path: {boxed:?}");
+        };
+        assert_eq!(outline.path, Path::rect(rect));
+        assert_eq!(outline.fill, None);
+        let stroke = outline.stroke.as_ref().expect("stroke");
+        assert_eq!(stroke.width, 0.5);
+        assert_eq!(stroke.paint, oxml_layout::Paint::Solid(black));
+        // No outline colour, no outline.
+        assert_eq!(drawn(&shape(ShapePreset::Rect, Some(white), None)).len(), 1);
+        // A line is drawn in its outline's colour and width, else its fill's.
+        for (fill, outline, expected) in [
+            (None, Some((black, 2.0)), (black, 2.0)),
+            (Some(white), Some((black, 2.0)), (black, 2.0)),
+            (Some(white), None, (white, 1.0)),
+        ] {
+            let line = drawn(&shape(ShapePreset::Line, fill, outline));
+            assert!(
+                matches!(line[..], [PositionedElement::Line { color, width, .. }]
+                    if (color, width) == expected),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cell_anchors_use_cell_coordinates_and_page_behind_order() {
         let page = PageGeometry::default();
         let cell = PageGeometry {
@@ -10592,7 +11582,9 @@ mod tests {
             content: AnchoredContent::Shape {
                 preset: ShapePreset::Rect,
                 fill: Some(Color::from_hex("CC0000")),
+                outline: None,
                 text: Vec::new(),
+                insets: crate::block::DEFAULT_TEXT_INSETS,
             },
             alternate_text: Some("cell stamp".to_owned()),
             structure_id: None,
@@ -11442,7 +12434,9 @@ mod tests {
                 content: AnchoredContent::Shape {
                     preset: ShapePreset::Rect,
                     fill: None,
+                    outline: None,
                     text: Vec::new(),
+                    insets: crate::block::DEFAULT_TEXT_INSETS,
                 },
                 alternate_text: None,
                 structure_id: None,

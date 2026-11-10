@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 
-use oxml_chart::{render_chart, render_chart_placeholder};
+use oxml_chart::{render_chart_placeholder, render_chart_space_with_legend_notice};
 use oxml_drawing::color::{ColorChoice, ColorMap, ColorMapSlot, RgbColor, resolve_color};
 use oxml_drawing::effect::CT_OuterShadowEffect;
 use oxml_drawing::fill::{
@@ -1303,14 +1303,23 @@ impl<'a> ResolveCtx<'a> {
                     width: bounds.width,
                     height: bounds.height,
                 };
-                match render_chart(
-                    &chart_space.chart,
+                match render_chart_space_with_legend_notice(
+                    chart_space,
                     local_bounds,
                     self.theme,
                     &self.color_map,
                     fonts,
                 ) {
-                    Ok(group) => {
+                    Ok((group, notice)) => {
+                        if let Some(notice) = notice {
+                            diagnostics.push(Diagnostic {
+                                message: format!(
+                                    "{notice} source={}:{}",
+                                    flattened_source_name(source),
+                                    relationship_id.unwrap_or_default()
+                                ),
+                            });
+                        }
                         for code in oxml_chart::unsupported_number_formats(&chart_space.chart)
                             .map_err(|error| ResolveError::ConcreteValue {
                                 kind: "chart number format",
@@ -5152,6 +5161,34 @@ mod tests {
     }
 
     #[test]
+    fn slide_placeholder_resolves_to_layout_by_index_and_master_by_type() {
+        let fixture = Fixture::new(
+            &shape(Some("title"), Some(7)),
+            &format!(
+                "{}{}",
+                shape(Some("body"), Some(7)),
+                shape(Some("title"), None)
+            ),
+            &format!(
+                "{}{}",
+                shape(Some("pic"), Some(7)),
+                shape(Some("body"), Some(1))
+            ),
+        );
+
+        let context = fixture.context();
+        let (layout, master) = context.placeholder_chain(fixture.slide_shape(0));
+
+        assert_eq!(
+            layout.unwrap().placeholder.as_ref().unwrap().ph_type,
+            Some(PhType::Body)
+        );
+        let master = master.unwrap().placeholder.as_ref().unwrap();
+        assert_eq!(master.ph_type, Some(PhType::Body));
+        assert_eq!(master.idx, Some(1));
+    }
+
+    #[test]
     fn master_match_uses_the_layout_placeholder_key() {
         let fixture = Fixture::new(
             &shape(Some("title"), Some(8)),
@@ -5164,6 +5201,30 @@ mod tests {
 
         assert!(layout.is_some());
         assert_eq!(master.unwrap().placeholder.as_ref().unwrap().idx, Some(5));
+    }
+
+    #[test]
+    fn a_layout_body_never_inherits_the_master_date_of_its_index() {
+        // PowerPoint's "Two Content" layout: its right-hand body is idx 2,
+        // and the master's date placeholder is idx 2 too.
+        let fixture = Fixture::new(
+            &shape(None, Some(2)),
+            &shape(None, Some(2)),
+            &format!(
+                "{}{}",
+                shape(Some("dt"), Some(2)),
+                shape(Some("body"), Some(1))
+            ),
+        );
+
+        let context = fixture.context();
+        let (layout, master) = context.placeholder_chain(fixture.slide_shape(0));
+
+        assert!(layout.is_some());
+        assert_eq!(
+            master.unwrap().placeholder.as_ref().unwrap().ph_type,
+            Some(PhType::Body)
+        );
     }
 
     #[test]
@@ -7028,6 +7089,72 @@ mod tests {
                 .iter()
                 .any(|diagnostic| { diagnostic.message.contains("unknown guide: missing") })
         );
+    }
+
+    #[test]
+    fn zero_radius_preset_corners_resolve_for_slide_and_layout_shapes() {
+        for name in ["round2SameRect", "round2DiagRect"] {
+            let shape = |adjustments: &str| {
+                shape_with_details(
+                    None,
+                    None,
+                    &format!(
+                        r#"<a:xfrm><a:off x="254000" y="381000"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="{name}"><a:avLst>{adjustments}</a:avLst></a:prstGeom><a:solidFill><a:srgbClr val="EE0000"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="112233"/></a:solidFill></a:ln>"#
+                    ),
+                    Some("<a:bodyPr/><a:lstStyle/>"),
+                )
+                .replace("<a:p/>", "<a:p><a:r><a:t>unchanged label</a:t></a:r></a:p>")
+            };
+            let defaults = shape("");
+            let authored =
+                shape(r#"<a:gd name="adj1" fmla="val 16667"/><a:gd name="adj2" fmla="val 0"/>"#);
+            let fixture = Fixture::new(&authored, &authored, "");
+            let control = Fixture::new(&defaults, &defaults, "");
+            let resolved = fixture.context().resolve_slide((720.0, 540.0)).unwrap();
+            assert_eq!(
+                resolved,
+                control.context().resolve_slide((720.0, 540.0)).unwrap()
+            );
+            assert_eq!(resolved.shapes.len(), 2);
+            assert!(
+                resolved.diagnostics.is_empty(),
+                "{name}: {:?}",
+                resolved.diagnostics
+            );
+            for shape in &resolved.shapes {
+                assert_eq!(shape.unsupported, None, "{name}");
+                assert_eq!(
+                    shape.bounds,
+                    Rect {
+                        x: 20.0,
+                        y: 30.0,
+                        width: 100.0,
+                        height: 100.0
+                    }
+                );
+                assert_eq!(shape.fill, Some(Paint::Solid(Color::from_hex("EE0000"))));
+                assert_eq!(shape.line.as_ref().unwrap().width, 1.0);
+                let ResolvedContent::Text(text) = &shape.content else {
+                    panic!("lost label")
+                };
+                assert!(
+                    matches!(&text.paragraphs[0].runs[0], ResolvedTextRun::Text { text, .. } if text == "unchanged label")
+                );
+                let ResolvedGeometry::Custom { paths, .. } = &shape.geometry else {
+                    panic!("{name} lost its rounded silhouette")
+                };
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0].commands.last(), Some(&PathCommand::Close));
+                assert_eq!(
+                    paths[0]
+                        .commands
+                        .iter()
+                        .filter(|command| matches!(command, PathCommand::CurveTo { .. }))
+                        .count(),
+                    2
+                );
+            }
+        }
     }
 
     #[test]

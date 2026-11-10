@@ -500,6 +500,8 @@ fn layout_table_inner(
     if direct_width {
         resolved_properties.width = None;
     }
+    // Preserve direct w:jc after style resolution. Center/right alignment
+    // takes precedence over tblInd when the final table width is known.
     resolved_table.properties = Some(resolved_properties);
     let tbl = &resolved_table;
     let source_rows = accepted_table_rows(tbl, path, input);
@@ -525,7 +527,8 @@ fn layout_table_inner(
         .and_then(floating_table)
         .map(Box::new);
     // 1. Compute column widths. Content-driven autofit engages only for an
-    //    auto or absent width with an autofit or absent layout mode.
+    //    auto or absent width with an autofit layout mode, or with no layout
+    //    mode and no declared cell width.
     let col_widths = match autofit_column_widths(
         tbl,
         authored_width_type.as_deref(),
@@ -550,10 +553,18 @@ fn layout_table_inner(
         .and_then(|properties| properties.indent.as_ref())
         .filter(|indent| indent.width_type == "dxa")
         .map(|indent| indent.w as f64 / 20.0);
-    let mut table_indent = match tbl.properties.as_ref().and_then(|properties| properties.jc) {
-        Some(ST_Jc::Center) => ((available_width - table_width) / 2.0).max(0.0),
-        Some(ST_Jc::Right | ST_Jc::End) => (available_width - table_width).max(0.0),
+    let remaining_width = (available_width - table_width).max(0.0);
+    let leading_indent = match tbl.properties.as_ref().and_then(|properties| properties.jc) {
+        Some(ST_Jc::Center) => remaining_width / 2.0,
+        Some(ST_Jc::Right | ST_Jc::End) => remaining_width,
         _ => resolved_indent.unwrap_or(0.0),
+    };
+    // Table justification and indentation are relative to the leading
+    // margin. The paginator needs an offset from the physical left margin.
+    let mut table_indent = if bidi_visual {
+        remaining_width - leading_indent
+    } else {
+        leading_indent
     };
 
     // Direct table borders win. Table-style borders are the fallback.
@@ -1378,12 +1389,14 @@ const AUTOFIT_MIN_TRIAL_WIDTH: f64 = 1.0;
 /// Compute content-driven column widths, or `None` when autofit does not
 /// engage and the declared grid stands.
 ///
-/// Autofit engages only when the effective `w:tblLayout` is autofit or absent
-/// **and** the effective `w:tblW` type is `auto` or absent. That is narrower
-/// than the literal ECMA default, which applies autofit whenever
-/// `w:tblLayout` is absent. The narrowing is deliberate: it keeps an authored
-/// `dxa` or `pct` table on the declared grid, so adopting the wider predicate
-/// stays a separate reviewed change rather than a side effect of this one.
+/// Autofit engages only when the effective `w:tblW` type is `auto` or absent,
+/// and either the effective `w:tblLayout` is autofit or the table declares no
+/// width at all: no `w:tblLayout`, and no cell with a `w:tcW` other than
+/// `auto`. That is narrower than the literal ECMA default, which applies
+/// autofit whenever `w:tblLayout` is absent. The narrowing is deliberate: it
+/// keeps a table with authored `dxa` or `pct` widths on the declared grid, so
+/// adopting the wider predicate stays a separate reviewed change rather than a
+/// side effect of this one.
 ///
 /// Measurement runs the production cell path twice, once at a wide trial
 /// width for the maximum content width and once at a minimal trial width for
@@ -1402,23 +1415,35 @@ fn autofit_column_widths(
     doc_grid: Option<&CT_DocGrid>,
 ) -> Result<Option<Vec<f64>>> {
     let properties = tbl.properties.as_ref();
-    // ECMA makes autofit the default when `w:tblLayout` is absent, but this
-    // engagement is deliberately narrower and requires the element. An absent
-    // layout is the shape almost every producer writes, 131 of the 141 tables
-    // in the Word corpus, and treating it as autofit changes the reference
-    // page count that `scripts/docx_authoring_conformance.py --private-required`
-    // pins. Adopting the literal default is its own story with its own
-    // reviewed geometry delta.
-    let autofit_layout = matches!(
-        properties.and_then(|properties| properties.layout.as_deref()),
-        Some("autofit")
-    );
     let auto_width = !matches!(authored_width_type, Some(kind) if kind != "auto");
-    if !autofit_layout || !auto_width || available_width <= 0.0 {
+    if !auto_width || available_width <= 0.0 {
+        return Ok(None);
+    }
+    let source_rows = accepted_table_rows(tbl, path, input);
+    // ECMA makes autofit the default when `w:tblLayout` is absent, but this
+    // engagement is deliberately narrower. An absent layout is the shape
+    // almost every producer writes, 131 of the 141 tables in the Word corpus,
+    // and treating every one as autofit changes the reference page count that
+    // `scripts/docx_authoring_conformance.py --private-required` pins. Word
+    // writes a `w:tcW` for every cell of its own tables, so an absent layout
+    // engages here only when no cell declares a width either. Such a table
+    // declares nothing but its grid, which a generator writes as a guess, and
+    // Word sizes its columns to their content.
+    let autofit_layout = match properties.and_then(|properties| properties.layout.as_deref()) {
+        Some(layout) => layout == "autofit",
+        None => source_rows.iter().all(|(row, row_path)| {
+            layout_row_cells(row, row_path).iter().all(|(cell, _)| {
+                cell.properties
+                    .as_ref()
+                    .and_then(|properties| properties.width.as_ref())
+                    .is_none_or(|width| width.width_type == "auto")
+            })
+        }),
+    };
+    if !autofit_layout {
         return Ok(None);
     }
 
-    let source_rows = accepted_table_rows(tbl, path, input);
     let column_count = tbl
         .grid
         .as_ref()
@@ -1508,7 +1533,10 @@ fn autofit_column_widths(
                     let mut measure = |trial_width: f64| -> Result<f64> {
                         let mut measurement_state = num_state.clone();
                         let mut measurement_diagnostics = Vec::new();
-                        let (blocks, _) = layout_cell_content(
+                        // A trial width draws nothing, so the pictures it lays
+                        // out keep no draw owner.
+                        let owners = media.picture_draw_owner_checkpoint();
+                        let laid_out = layout_cell_content(
                             &cell.content,
                             trial_width,
                             styles,
@@ -1525,7 +1553,9 @@ fn autofit_column_widths(
                             // Text colour does not change a measured width.
                             None,
                             doc_grid,
-                        )?;
+                        );
+                        media.truncate_picture_draw_owners(owners);
+                        let (blocks, _) = laid_out?;
                         Ok(if rotated {
                             blocks.iter().map(CellBlock::total_height).sum::<f64>()
                         } else {
@@ -1819,7 +1849,13 @@ fn layout_cell_content(
             CellBlock::Table(_) => None,
         })
         .collect::<Vec<_>>();
+    let drops = crate::block::contextual_spacing_drops(&paragraphs);
     let groups = crate::block::paragraph_border_groups(&paragraphs);
+    for (block, drop) in blocks.iter_mut().zip(drops) {
+        if let CellBlock::Paragraph(paragraph) = block {
+            paragraph.drop_contextual_spacing(drop);
+        }
+    }
     for ((block, semantics), (top, bottom)) in blocks.iter_mut().zip(&mut semantics).zip(groups) {
         if let CellBlockSemantics::Paragraph(semantics) = semantics {
             semantics.border_group_before = top;
@@ -2470,6 +2506,157 @@ mod tests {
         .unwrap()
     }
 
+    fn aligned_table(width: i32, alignment: Option<ST_Jc>, indent: i32) -> CT_Tbl {
+        let mut table = CT_Tbl::new();
+        table.properties = Some(CT_TblPr {
+            width: Some(CT_TblWidth::dxa(width)),
+            jc: alignment,
+            indent: Some(CT_TblWidth::dxa(indent)),
+            layout: Some("fixed".into()),
+            ..CT_TblPr::default()
+        });
+        table.grid = Some(CT_TblGrid {
+            columns: vec![CT_TblGridCol {
+                width: Twips(width),
+            }],
+            ..CT_TblGrid::default()
+        });
+        let mut row = CT_Row::new();
+        row.cells.push(CT_Tc::new());
+        table.rows.push(row);
+        table
+    }
+
+    #[test]
+    fn direct_table_alignment_uses_the_laid_out_width_instead_of_indent() {
+        // (grid twips, available points, alignment, indent twips,
+        //  expected laid-out width, expected offset from the text margin).
+        for (width, available, alignment, indent, expected_width, expected_indent) in [
+            (2400, 360.0, Some(ST_Jc::Left), 240, 120.0, 12.0),
+            (2400, 360.0, Some(ST_Jc::Left), -240, 120.0, -12.0),
+            (2400, 360.0, None, 240, 120.0, 12.0),
+            (2400, 360.0, Some(ST_Jc::Center), 240, 120.0, 120.0),
+            (2400, 360.0, Some(ST_Jc::Right), 240, 120.0, 240.0),
+            (2400, 360.0, Some(ST_Jc::Center), -240, 120.0, 120.0),
+            (2400, 360.0, Some(ST_Jc::Right), -240, 120.0, 240.0),
+            (2400, 360.0, Some(ST_Jc::Start), 240, 120.0, 12.0),
+            (2400, 360.0, Some(ST_Jc::End), 240, 120.0, 240.0),
+            (1200, 240.0, Some(ST_Jc::Center), 0, 60.0, 90.0),
+            (1200, 240.0, Some(ST_Jc::Right), 0, 60.0, 180.0),
+            (7200, 360.0, Some(ST_Jc::Center), 240, 360.0, 0.0),
+            (9600, 360.0, Some(ST_Jc::Right), 240, 360.0, 0.0),
+        ] {
+            let table = aligned_table(width, alignment, indent);
+            let block = layout_with_defaults(&table, available);
+            assert!((block.table_width - expected_width).abs() < 0.01);
+            assert!(
+                (block.table_indent - expected_indent).abs() < 0.01,
+                "{alignment:?}, grid {width}, available {available}, indent {indent}: got {} instead of {expected_indent}",
+                block.table_indent,
+            );
+        }
+    }
+
+    #[test]
+    fn direct_table_alignment_overrides_inherited_style_alignment() {
+        let styles = CT_Styles::from_xml(
+            format!(
+                r#"<w:styles xmlns:w="{}"><w:style w:type="table" w:styleId="Base"><w:tblPr><w:jc w:val="center"/></w:tblPr></w:style><w:style w:type="table" w:styleId="Derived" w:default="1"><w:basedOn w:val="Base"/></w:style></w:styles>"#,
+                rdocx_oxml::namespace::W_NS
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        for (bidi_visual, alignment, expected_indent) in [
+            (false, None, 120.0),
+            (false, Some(ST_Jc::Left), 12.0),
+            (false, Some(ST_Jc::Center), 120.0),
+            (false, Some(ST_Jc::Right), 240.0),
+            (true, None, 120.0),
+            (true, Some(ST_Jc::Left), 228.0),
+            (true, Some(ST_Jc::Center), 120.0),
+            (true, Some(ST_Jc::Right), 0.0),
+        ] {
+            let mut table = aligned_table(2400, alignment, 240);
+            table.properties.as_mut().unwrap().bidi_visual = Some(bidi_visual);
+            let block = layout_with_styles(&table, 360.0, &styles);
+            assert_eq!(block.table_width, 120.0);
+            assert_eq!(
+                block.table_indent, expected_indent,
+                "{alignment:?}, RTL {bidi_visual}"
+            );
+        }
+    }
+
+    #[test]
+    fn rtl_table_alignment_and_signed_indent_use_the_leading_margin() {
+        for (alignment, indent, expected_indent) in [
+            (None, 240, 228.0),
+            (Some(ST_Jc::Left), 240, 228.0),
+            (Some(ST_Jc::Left), -240, 252.0),
+            (Some(ST_Jc::Center), 240, 120.0),
+            (Some(ST_Jc::Center), -240, 120.0),
+            (Some(ST_Jc::Right), 0, 0.0),
+            (Some(ST_Jc::Right), 240, 0.0),
+            (Some(ST_Jc::Right), -240, 0.0),
+            (Some(ST_Jc::Start), 240, 228.0),
+            (Some(ST_Jc::End), 240, 0.0),
+        ] {
+            let mut table = aligned_table(2400, alignment, indent);
+            table.properties.as_mut().unwrap().bidi_visual = Some(true);
+            let block = layout_with_defaults(&table, 360.0);
+            assert_eq!(block.table_width, 120.0);
+            assert_eq!(
+                block.table_indent, expected_indent,
+                "{alignment:?}, indent {indent}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_table_that_declares_no_width_is_sized_to_its_content() {
+        // A generator's table: a grid, and no layout mode, table width or cell
+        // width. Word sizes its columns to their content.
+        let mut table = CT_Tbl::new();
+        table.grid = Some(CT_TblGrid {
+            columns: vec![CT_TblGridCol { width: Twips(2000) }; 2],
+            ..Default::default()
+        });
+        let mut row = CT_Row::new();
+        for text in ["Region", "Sales"] {
+            let mut cell = CT_Tc::new();
+            cell.paragraphs_mut()[0].add_run(text);
+            row.cells.push(cell);
+        }
+        table.rows.push(row);
+        let declared = 200.0;
+        let content = layout_with_defaults(&table, 468.0);
+        assert!(
+            content.table_width > 0.0 && content.table_width < declared / 2.0,
+            "{}",
+            content.table_width
+        );
+
+        // Any authored width keeps the declared grid: one cell's, the
+        // table's, or a fixed layout.
+        table.rows[0].cells[0].properties = Some(CT_TcPr {
+            width: Some(CT_TblWidth::dxa(2000)),
+            ..Default::default()
+        });
+        assert_eq!(layout_with_defaults(&table, 468.0).table_width, declared);
+        table.rows[0].cells[0].properties = None;
+        table.properties = Some(CT_TblPr {
+            width: Some(CT_TblWidth::dxa(4000)),
+            ..Default::default()
+        });
+        assert_eq!(layout_with_defaults(&table, 468.0).table_width, declared);
+        table.properties = Some(CT_TblPr {
+            layout: Some("fixed".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(layout_with_defaults(&table, 468.0).table_width, declared);
+    }
+
     #[test]
     fn absent_side_margins_match_zero_in_intrinsic_and_final_layout() {
         let mut table = CT_Tbl::new();
@@ -2754,9 +2941,9 @@ mod tests {
         assert!(matches!(cell.blocks[0], CellBlock::Paragraph(_)));
         assert!(matches!(cell.blocks[1], CellBlock::Table(_)));
 
-        // This table declares neither a width nor a layout mode. Autofit
-        // engagement requires the `w:tblLayout` element, so the width comes
-        // from the declared grid and never exceeds the caller's width.
+        // This table declares no width, no layout mode and no cell width, so
+        // autofit sizes it to its content, which here is the nested table's
+        // declared grid, and it never exceeds the caller's width.
         assert!(block.table_width > 0.0);
         assert!(block.table_width <= 234.0);
     }
