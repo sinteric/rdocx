@@ -8130,6 +8130,9 @@ pub struct Document {
     deterministic_layout_cache: Mutex<Option<Arc<rdocx_layout::WordLayoutResult>>>,
     /// Reusable bundled-font engine with caller faces at highest priority.
     bundled_fallback_layout_engine: Mutex<Option<rdocx_layout::engine::Engine>>,
+    /// Layout option [`rdocx_layout::LayoutInput::vertical_story_clearance`],
+    /// set with [`Document::set_vertical_story_clearance`].
+    vertical_story_clearance: bool,
 }
 
 /// The actual source authority of a consumed staged document. No model copy.
@@ -25031,6 +25034,7 @@ impl Document {
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
             bundled_fallback_layout_engine: Mutex::new(None),
+            vertical_story_clearance: false,
             parsed: None,
             main_body_scans: Arc::new(Mutex::new(MainBodyScans::default())),
             main_part_blocks: None,
@@ -25195,6 +25199,7 @@ impl Document {
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
             bundled_fallback_layout_engine: Mutex::new(None),
+            vertical_story_clearance: self.vertical_story_clearance,
         }
     }
 
@@ -27683,6 +27688,7 @@ impl Document {
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
             bundled_fallback_layout_engine: Mutex::new(None),
+            vertical_story_clearance: false,
             parsed,
             main_body_scans: Arc::new(Mutex::new(MainBodyScans {
                 serialized: serialized_blocks,
@@ -27690,6 +27696,33 @@ impl Document {
             })),
             main_part_blocks: None,
         })
+    }
+
+    /// Whether vertical body sections keep clear of their header and footer.
+    ///
+    /// See [`Document::set_vertical_story_clearance`]. The default is `false`.
+    pub fn vertical_story_clearance(&self) -> bool {
+        self.vertical_story_clearance
+    }
+
+    /// Select how a vertical (`w:textDirection` rotated) body section treats
+    /// a tall header or footer in every layout, PDF and raster render.
+    ///
+    /// `false`, the default, follows Word: a `tbRl` body fills its whole
+    /// written band (it may overlap the stories), and other sections clear
+    /// their header and footer as horizontal pages do. `true` keeps the
+    /// fork's Hanji reservation: the body margins grow below the tallest
+    /// selectable header and above the tallest footer, and tables are
+    /// prepared at each selectable story's measure. Callers that relied on
+    /// the reservation before this option existed must pass `true`.
+    ///
+    /// Changing the option drops cached layouts. It is a render setting and
+    /// is not saved with the document.
+    pub fn set_vertical_story_clearance(&mut self, enabled: bool) {
+        if self.vertical_story_clearance != enabled {
+            self.vertical_story_clearance = enabled;
+            self.invalidate_layout();
+        }
     }
 
     /// Clear layouts derived from the current document state.
@@ -28443,6 +28476,7 @@ impl Document {
     }
 
     fn reopen_staged(self, in_memory: bool, limits: PackageReadLimits) -> Result<Self> {
+        let vertical_story_clearance = self.vertical_story_clearance;
         let carried_scans = self
             .main_body_scans
             .lock()
@@ -28491,6 +28525,7 @@ impl Document {
             &provenance,
         )?;
         reopened.custom_properties_owned = custom_properties_owned;
+        reopened.vertical_story_clearance = vertical_story_clearance;
         reopened.settings_owned = settings_owned;
         if let Some(settings) = owned_settings {
             reopened.settings = settings;
@@ -52316,6 +52351,7 @@ impl Document {
                 .as_ref()
                 .and_then(CT_Settings::gutter_at_top)
                 .unwrap_or(false),
+            vertical_story_clearance: self.vertical_story_clearance,
             do_not_use_html_paragraph_auto_spacing: self
                 .settings
                 .as_ref()

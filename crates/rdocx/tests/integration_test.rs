@@ -21520,6 +21520,7 @@ mod advanced_table_authoring_and_geometry {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -40590,4 +40591,68 @@ fn issue435_review_d1_authored_shape_extent_is_checked() {
         ),
         "{report:?}"
     );
+}
+
+#[test]
+fn vertical_story_clearance_is_an_opt_in_document_render_setting() {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let mut seed = Document::new();
+    let bytes = seed.to_bytes().expect("serialize seed document");
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<w:document xmlns:w="{W}" xmlns:r="{R}"><w:body><w:p><w:r><w:t>Vertical body text</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="tallHeader"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id("tallHeader", rel_types::HEADER, "header-tall.xml");
+    package.set_part(
+        "/word/header-tall.xml",
+        format!(
+            r#"<w:hdr xmlns:w="{W}"><w:p><w:pPr><w:spacing w:line="2400" w:lineRule="exact"/></w:pPr><w:r><w:t>Tall header</w:t></w:r></w:p></w:hdr>"#
+        )
+        .into_bytes(),
+    );
+    package.content_types.add_override(
+        "/word/header-tall.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut document = Document::from_bytes(&bytes.into_inner()).expect("open tbRl fixture");
+
+    let body_top = |layout: &rdocx_layout::WordLayoutResult| {
+        let mut top = f64::INFINITY;
+        for page in &layout.layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let oxml_layout::PositionedElement::Text(run) = element
+                    && transform.b.abs() >= 0.9
+                {
+                    top = top.min(transform.apply(run.origin).y);
+                }
+            });
+        }
+        assert!(top.is_finite(), "the rotated body paints");
+        top
+    };
+
+    assert!(!document.vertical_story_clearance());
+    let written = document.layout_deterministic().unwrap();
+    document.set_vertical_story_clearance(false);
+    assert!(
+        std::sync::Arc::ptr_eq(&written, &document.layout_deterministic().unwrap()),
+        "an unchanged setting keeps the cached layout"
+    );
+    document.set_vertical_story_clearance(true);
+    assert!(document.vertical_story_clearance());
+    let reserved = document.layout_deterministic().unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&written, &reserved));
+    // The 120pt header ends at 156pt. Word's default keeps the written band
+    // and the opt-in reservation starts the body below the header.
+    assert!(body_top(&reserved) >= 156.0 - 0.01);
+    assert!(body_top(&written) < body_top(&reserved) - 1.0);
 }

@@ -3157,6 +3157,7 @@ struct ReusableEngineContext {
     mirror_margins: bool,
     gutter_at_top: bool,
     do_not_use_html_paragraph_auto_spacing: bool,
+    vertical_story_clearance: bool,
     default_tab_stop: Option<rdocx_oxml::units::Twips>,
     clamp_tabs_past_margin: bool,
     legacy_table_positioning: bool,
@@ -3255,6 +3256,7 @@ impl ReusableEngineContext {
             mirror_margins: input.mirror_margins,
             gutter_at_top: input.gutter_at_top,
             do_not_use_html_paragraph_auto_spacing: input.do_not_use_html_paragraph_auto_spacing,
+            vertical_story_clearance: input.vertical_story_clearance,
             default_tab_stop: input.default_tab_stop,
             clamp_tabs_past_margin: input.clamp_tabs_past_margin,
             legacy_table_positioning: input.legacy_table_positioning,
@@ -3350,6 +3352,7 @@ impl ReusableEngineContext {
             && self.gutter_at_top == input.gutter_at_top
             && self.do_not_use_html_paragraph_auto_spacing
                 == input.do_not_use_html_paragraph_auto_spacing
+            && self.vertical_story_clearance == input.vertical_story_clearance
             && self.default_tab_stop == input.default_tab_stop
             && self.clamp_tabs_past_margin == input.clamp_tabs_past_margin
             && self.legacy_table_positioning == input.legacy_table_positioning
@@ -4748,7 +4751,11 @@ impl Engine {
                 MainStoryLayoutItem::Table(_, _) => None,
             }
         })) {
-            if sect_pr_to_geometry(sect_pr).body_rotation.is_none()
+            // Only the opt-in Hanji reservation prepares vertical bodies against
+            // their stories up front. Word's default leaves the vertical body band
+            // as written, so every section takes the ordinary path below.
+            if !input.vertical_story_clearance
+                || sect_pr_to_geometry(sect_pr).body_rotation.is_none()
                 || (sect_pr.header_refs.is_empty() && sect_pr.footer_refs.is_empty())
             {
                 continue;
@@ -5233,7 +5240,9 @@ impl Engine {
             .iter()
             .flat_map(|section| {
                 let mut widths = vec![section.geometry.content_width()];
-                if section.geometry.body_rotation.is_some() {
+                if section.geometry.body_rotation.is_some()
+                    && section.geometry.vertical_story_clearance
+                {
                     widths.extend(paginator::vertical_story_measures(
                         &section.geometry,
                         section.header_footer.as_ref(),
@@ -14941,6 +14950,7 @@ pub(crate) fn sect_pr_to_geometry(sect_pr: &CT_SectPr) -> PageGeometry {
         do_not_use_html_paragraph_auto_spacing: false,
         // F-269 authors and preserves `w:sectPr/w:textDirection`. This is the
         // render projection over it, and it writes nothing back.
+        vertical_story_clearance: false,
         body_rotation: sect_pr
             .text_direction
             .as_deref()
@@ -15134,6 +15144,7 @@ fn section_page_geometry(
         geometry = resolve_column_tracks(sect_pr, geometry);
     }
     geometry.do_not_use_html_paragraph_auto_spacing = input.do_not_use_html_paragraph_auto_spacing;
+    geometry.vertical_story_clearance = input.vertical_story_clearance;
     if let Some(line_numbers) = geometry.line_numbers.as_mut() {
         line_numbers.font_id = line_number_style.and_then(|style| style.font_id);
     }
@@ -19404,6 +19415,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -20557,6 +20569,7 @@ mod tests {
         for alignment in ["left", "center", "right"] {
             for vertical_alignment in ["top", "center", "bottom"] {
                 let mut input = make_input_with_text("");
+                input.vertical_story_clearance = true;
                 input.document = CT_Document::from_xml(format!(
                     r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr><w:r><w:t>Body paragraph aligned against the reserved vertical measure</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t>Body table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/><w:textDirection w:val="tbRl"/><w:vAlign w:val="{vertical_alignment}"/></w:sectPr></w:body></w:document>"#,
                     rdocx_oxml::namespace::W_NS,
@@ -20622,12 +20635,64 @@ mod tests {
     }
 
     #[test]
+    fn vertical_story_clearance_is_opt_in_and_default_keeps_the_written_band() {
+        use rdocx_oxml::header_footer::CT_HdrFtr;
+
+        let body_top = |clearance: bool| {
+            let mut input = make_input_with_text("");
+            input.vertical_story_clearance = clearance;
+            input.document = CT_Document::from_xml(format!(
+                r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Vertical body text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#,
+                rdocx_oxml::namespace::W_NS,
+            ).as_bytes()).expect("vertical document parses");
+            input.headers.insert("header".to_owned(), CT_HdrFtr::from_xml(format!(
+                r#"<w:hdr xmlns:w="{}"><w:p><w:pPr><w:spacing w:line="2400" w:lineRule="exact"/></w:pPr><w:r><w:t>Tall header</w:t></w:r></w:p></w:hdr>"#,
+                rdocx_oxml::namespace::W_NS,
+            ).as_bytes()).expect("story parses"));
+            let result = deterministic_layout(&input);
+            let mut top = f64::INFINITY;
+            for page in &result.pages {
+                oxml_layout::walk(&page.elements, &mut |element, transform| {
+                    if transform.b.abs() < 0.9 {
+                        return;
+                    }
+                    if let PositionedElement::Text(run) = element {
+                        let end = Point {
+                            x: run.origin.x + run.advances.iter().sum::<f64>(),
+                            y: run.origin.y,
+                        };
+                        for point in [run.origin, end] {
+                            top = top.min(transform.apply(point).y);
+                        }
+                    }
+                });
+            }
+            assert!(top.is_finite(), "the rotated body paints");
+            top
+        };
+
+        // The 120pt header ends at 156pt. The opt-in reservation keeps the
+        // body below it, and Word's default lays the body in its written band.
+        let reserved = body_top(true);
+        let written = body_top(false);
+        assert!(
+            reserved >= 156.0 - 0.01,
+            "reserved body starts at {reserved}"
+        );
+        assert!(
+            written < 156.0 - 1.0 && written < reserved,
+            "default body starts at {written}, reserved at {reserved}"
+        );
+    }
+
+    #[test]
     fn vertical_first_even_and_default_stories_use_selected_body_measures() {
         use rdocx_oxml::units::Twips;
 
         // The words are chosen so a line ends with a space past the band at
         // the bundled metrics.
         let mut input = cacheable_header_footer_input(&"Body lines ".repeat(1600));
+        input.vertical_story_clearance = true;
         input.images.clear();
         input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
         for (suffix, header_height, footer_height) in
@@ -20716,6 +20781,7 @@ mod tests {
         use rdocx_oxml::{numbering::CT_Numbering, units::Twips};
 
         let mut input = cacheable_header_footer_input("");
+        input.vertical_story_clearance = true;
         input.images.clear();
         let section = input.document.body.sect_pr.as_mut().unwrap();
         section.text_direction = Some("tbRl".to_owned());
@@ -20819,6 +20885,7 @@ mod tests {
             .map(|n| format!("W{n:04} café "))
             .collect::<String>();
         let mut input = cacheable_header_footer_input("");
+        input.vertical_story_clearance = true;
         input.images.clear();
         input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
         for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
@@ -20975,6 +21042,7 @@ mod tests {
             .map(|n| format!("W{n:04} café "))
             .collect::<String>();
         let mut input = cacheable_header_footer_input("");
+        input.vertical_story_clearance = true;
         input.images.clear();
         input.footers.clear();
         let section = input.document.body.sect_pr.as_mut().unwrap();
@@ -21041,6 +21109,7 @@ mod tests {
     fn fractional_landscape_stories_select_exact_table_measures() {
         use rdocx_oxml::units::Twips;
         let mut input = cacheable_header_footer_input("");
+        input.vertical_story_clearance = true;
         input.images.clear();
         let section = input.document.body.sect_pr.as_mut().unwrap();
         section.page_width = Some(Twips(15840));
@@ -21141,6 +21210,7 @@ mod tests {
             units::Twips,
         };
         let mut input = cacheable_header_footer_input("");
+        input.vertical_story_clearance = true;
         input.images.clear();
         input.footers.clear();
         let section = input.document.body.sect_pr.as_mut().unwrap();
@@ -21205,6 +21275,7 @@ mod tests {
     #[test]
     fn vertical_story_room_does_not_leak_across_section_boundaries() {
         let mut input = cacheable_header_footer_input("Vertical body");
+        input.vertical_story_clearance = true;
         input.images.clear();
         input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
         let mut horizontal = CT_P::new();
@@ -21257,6 +21328,7 @@ mod tests {
         use rdocx_oxml::header_footer::CT_HdrFtr;
 
         let mut input = make_input_with_text("");
+        input.vertical_story_clearance = true;
         input.revision_view = RevisionView::Accepted;
         input.document = CT_Document::from_xml(format!(
             r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:rPr><w:del w:id="1" w:author="Ada"/></w:rPr></w:pPr><w:r><w:t>Prefix</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#,
@@ -28978,6 +29050,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -29708,6 +29781,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -29785,6 +29859,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -29894,6 +29969,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -30088,6 +30164,7 @@ mod tests {
                 automatic_hyphenation: false,
                 mirror_margins: false,
                 gutter_at_top: false,
+                vertical_story_clearance: false,
                 do_not_use_html_paragraph_auto_spacing: false,
                 default_tab_stop: None,
                 clamp_tabs_past_margin: false,
@@ -30234,6 +30311,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -30641,6 +30719,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -30905,6 +30984,7 @@ mod tests {
                 automatic_hyphenation: false,
                 mirror_margins: false,
                 gutter_at_top: false,
+                vertical_story_clearance: false,
                 do_not_use_html_paragraph_auto_spacing: false,
                 default_tab_stop: None,
                 clamp_tabs_past_margin: false,
@@ -31057,6 +31137,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31426,6 +31507,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31524,6 +31606,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31654,6 +31737,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31877,6 +31961,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,

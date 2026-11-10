@@ -171,6 +171,13 @@ pub struct PageGeometry {
     /// arithmetic it always had. F-269 authors and preserves the property, and
     /// this is the render projection over it.
     pub body_rotation: Option<f64>,
+    /// [`crate::LayoutInput::vertical_story_clearance`], carried with the
+    /// geometry like `do_not_use_html_paragraph_auto_spacing`.
+    ///
+    /// When set, a section with `body_rotation` grows its margins clear of the
+    /// selected header and footer (the Hanji reservation). When unset, the
+    /// body band follows Word and upstream.
+    pub vertical_story_clearance: bool,
 }
 
 impl PageGeometry {
@@ -250,6 +257,7 @@ impl Default for PageGeometry {
             mirror_margins: false,
             do_not_use_html_paragraph_auto_spacing: false,
             body_rotation: None,
+            vertical_story_clearance: false,
         }
     }
 }
@@ -2407,10 +2415,12 @@ impl<'a> Pager<'a> {
         self.next_repetition_scope = 1;
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
-        // A vertical (rotated) body keeps the selected story's reserved band,
-        // which its retained inputs reflow at. Every other page clears its
-        // header and footer below, once, as upstream does.
-        let vertical_story = self.section_geometry.body_rotation.is_some();
+        // With `vertical_story_clearance` a vertical (rotated) body keeps the
+        // selected story's reserved band, which its retained inputs reflow at.
+        // Every other page clears its header and footer below, once, as
+        // upstream does (a written `tbRl` band is then left as authored).
+        let vertical_story = self.section_geometry.body_rotation.is_some()
+            && self.section_geometry.vertical_story_clearance;
         if vertical_story && let Some(hf) = self.header_footer {
             let (header, footer) = self.selected_header_footer(hf);
             page.reserve_header_footer_room(header, footer);
@@ -8986,6 +8996,7 @@ mod tests {
         let empty = ResolvedWraps::new();
         let pager = Pager::new(
             PageGeometry {
+                vertical_story_clearance: false,
                 body_rotation: Some(90.0),
                 ..Default::default()
             },
@@ -11901,6 +11912,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
