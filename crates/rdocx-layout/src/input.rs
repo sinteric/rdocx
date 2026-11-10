@@ -249,6 +249,16 @@ pub struct LayoutInput {
     /// Word add one paragraph's space after to the next one's space before.
     /// Word otherwise keeps only the larger of the two.
     pub do_not_use_html_paragraph_auto_spacing: bool,
+    /// Whether a vertical (`w:textDirection` rotated) body section keeps its
+    /// flow clear of the selected header and footer by growing its margins.
+    ///
+    /// `false`, the default, follows Word: a `tbRl` body fills the whole
+    /// written band and may overlap tall stories, while other sections clear
+    /// their header and footer exactly as horizontal pages do. `true` restores
+    /// the fork's Hanji reservation, where every vertical body section is
+    /// shrunk below its tallest selectable header and above its tallest
+    /// footer, and tables are prepared at each selectable story measure.
+    pub vertical_story_clearance: bool,
     /// Document-wide OfficeMath defaults from the settings part.
     pub math_properties: Option<MathProperties>,
     /// Document-wide note policies from the settings part, footnotes then endnotes.
