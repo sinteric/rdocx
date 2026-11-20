@@ -1,0 +1,55 @@
+name: Hanji fork checks
+
+# The quick checks for this fork's Hanji patches. sinteric/hanji keeps the same
+# list in scripts/sync-forks.py (FORKS) and runs it before every upstream sync
+# PR. Hanji's own CI on the pin bump is the full gate (docs/fork-sync.md there).
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hanji-fork-checks-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Hanji fork checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      # As in ci.yml: some debug-build tests need the larger stack.
+      RUST_MIN_STACK: "8388608"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo fmt --all --check
+      # The rdocx and rpptx facades are compiled, not tested: their unit tests
+      # need ci.yml's pinned Poppler and HarfBuzz tools and take most of an
+      # hour. ci.yml runs them in full. Tests that read the pinned corpus are
+      # skipped here for the same reason.
+      - name: Tests of the layout crates Hanji links
+        run: cargo test --locked -p oxml-layout -p rdocx-layout -p rpptx-layout -p rpptx-render -- --skip corpus
+      - name: Build the rdocx and rpptx facades
+        run: cargo check --locked -p rdocx -p rpptx --all-targets
+      # The fork's patches change the feature_showcase PDF against upstream's
+      # baseline (FORKS["rdocx"]["harness_deltas"] in sinteric/hanji). Any
+      # other delta, or a harness that fails without reporting one, fails.
+      - name: Output stability (known fork deltas allowed)
+        run: |
+          status=0
+          python3 scripts/hash_harness.py --check 2> harness.err || status=$?
+          cat harness.err
+          if [ "$status" -ne 0 ]; then
+            grep -q "output delta detected" harness.err || exit "$status"
+            unknown=$(grep -E '^  - ' harness.err | grep -v -E '^  - changed: feature_showcase:pdf/(bytes|pages) ' || true)
+            if [ -n "$unknown" ]; then echo "new output deltas:"; echo "$unknown"; exit 1; fi
+          fi
