@@ -2369,36 +2369,21 @@ same type from the preceding section. No selected first or even variant borrows
 default header, footer, or watermark content.
 
 The selected header and footer reserve body room on each page when their
-painted height reaches beyond the authored margins. Measurement and painting
-use the same inter-paragraph spacing, collapsed by default and summed under
-`doNotUseHTMLParagraphAutoSpacing`. Horizontal sections recompute capacity for
-each selected variant, so a tall default story does not displace a blank
-first-page story.
+painted height reaches beyond the authored margins. Horizontal sections
+recompute capacity for each selected variant, so a tall default story does not
+displace a blank first-page story.
 
-Vertical sections shape initial paragraphs against the largest active story
-band before rotating the body. Pagination starts from authored margins and
-reserves the selected first, even or default story on each page. Retained
-logical input is rebroken to that page's vertical measure, including paragraph
-continuations. A cursor recorded before visual bidi ordering consumes Unicode
-scalars in plain text and atomic markers, rich spans, tabs, objects and breaks.
-Generated hyphens consume no extra input. Continuations reset first-line
-indentation and do not replay list markers or anchors.
+A vertical (`tbRl`) body keeps its written margin band, as Word 16.114 does,
+so a tall header or footer does not move it. Retained logical input is rebroken
+to the page's vertical measure, including paragraph continuations. A cursor
+recorded before visual bidi ordering consumes Unicode scalars in plain text and
+atomic markers, rich spans, tabs, objects and breaks. Generated hyphens consume
+no extra input. Continuations reset first-line indentation and do not replay
+list markers or anchors.
 
-Tables use the existing width-aware layout cache to prepare the finite distinct
-active story measures. Alternative measurements clone the numbering state from
-before the primary table, so counters advance once. Shared source and structure
-identities remain the same. Pagination selects unconsumed rows at the current
-measure, and rebreaks only the remaining plain cell content after a row split.
-Variant selection uses the page's selected measure before transposition can
-round it. Width comparison and cache identity remain exact, with no tolerance
-that can alias distinct measures. Horizontal pages use their active column width.
-Selected-template side and remaining bottom margins carry percentage cell
-spacing to the new measure. Removed fragment-top and completed-cell bottom
-gaps stay removed.
-Repeated header rows use the selected measure. Notes are registered at every
-selected vertical measure, preserving the registry's single numbering advance
-and the raw width used by endnote pages. Existing whole-row guards for
-merges, rotations, nested tables, exact clipping and anchors remain in force.
+After a table row splits, pagination rebreaks only the remaining plain cell
+content. Existing whole-row guards for merges, rotations, nested tables, exact
+clipping and anchors remain in force.
 
 The native authoring facade preserves that selection contract. Creating a
 first-page story enables the section title-page state. Creating an even-page
