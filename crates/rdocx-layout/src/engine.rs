@@ -3137,8 +3137,6 @@ pub struct Engine {
     #[cfg(test)]
     last_shared_block_counts: (usize, usize),
     #[cfg(test)]
-    last_table_variant_counts: Vec<usize>,
-    #[cfg(test)]
     page_layout_invocations: usize,
     #[cfg(test)]
     last_restart_identity_computations: usize,
@@ -3157,7 +3155,6 @@ struct ReusableEngineContext {
     mirror_margins: bool,
     gutter_at_top: bool,
     do_not_use_html_paragraph_auto_spacing: bool,
-    vertical_story_clearance: bool,
     default_tab_stop: Option<rdocx_oxml::units::Twips>,
     clamp_tabs_past_margin: bool,
     legacy_table_positioning: bool,
@@ -3256,7 +3253,6 @@ impl ReusableEngineContext {
             mirror_margins: input.mirror_margins,
             gutter_at_top: input.gutter_at_top,
             do_not_use_html_paragraph_auto_spacing: input.do_not_use_html_paragraph_auto_spacing,
-            vertical_story_clearance: input.vertical_story_clearance,
             default_tab_stop: input.default_tab_stop,
             clamp_tabs_past_margin: input.clamp_tabs_past_margin,
             legacy_table_positioning: input.legacy_table_positioning,
@@ -3352,7 +3348,6 @@ impl ReusableEngineContext {
             && self.gutter_at_top == input.gutter_at_top
             && self.do_not_use_html_paragraph_auto_spacing
                 == input.do_not_use_html_paragraph_auto_spacing
-            && self.vertical_story_clearance == input.vertical_story_clearance
             && self.default_tab_stop == input.default_tab_stop
             && self.clamp_tabs_past_margin == input.clamp_tabs_past_margin
             && self.legacy_table_positioning == input.legacy_table_positioning
@@ -4200,8 +4195,6 @@ impl Engine {
             #[cfg(test)]
             last_shared_block_counts: (0, 0),
             #[cfg(test)]
-            last_table_variant_counts: Vec::new(),
-            #[cfg(test)]
             page_layout_invocations: 0,
             #[cfg(test)]
             last_restart_identity_computations: 0,
@@ -4741,45 +4734,6 @@ impl Engine {
         let items = body_layout_items(&input.document.body);
         let item_sections = main_story_item_sections(&items, &final_sect_pr);
 
-        let mut vertical_sections = Vec::new();
-        for sect_pr in std::iter::once(&final_sect_pr).chain(items.iter().filter_map(|item| {
-            match item {
-                MainStoryLayoutItem::Paragraph(paragraph, _) => paragraph
-                    .properties
-                    .as_ref()
-                    .and_then(|properties| properties.sect_pr.as_ref()),
-                MainStoryLayoutItem::Table(_, _) => None,
-            }
-        })) {
-            // Only the opt-in Hanji reservation prepares vertical bodies against
-            // their stories up front. Word's default leaves the vertical body band
-            // as written, so every section takes the ordinary path below.
-            if !input.vertical_story_clearance
-                || sect_pr_to_geometry(sect_pr).body_rotation.is_none()
-                || (sect_pr.header_refs.is_empty() && sect_pr.footer_refs.is_empty())
-            {
-                continue;
-            }
-            let geometry =
-                section_page_geometry(sect_pr, input, line_number_context.0, &mut diagnostics);
-            let content = layout_header_footer(
-                self,
-                sect_pr,
-                input,
-                styles,
-                &media,
-                &mut diagnostics,
-                sources,
-                &mut num_state,
-            )?;
-            let reserved = paginator::reserve_vertical_header_footer_room(
-                geometry.clone(),
-                content.as_ref().map(|(content, _)| content),
-                sect_pr.title_pg.unwrap_or(false),
-            );
-            vertical_sections.push((sect_pr.clone(), geometry, reserved, content));
-        }
-
         let mut carried: Option<CT_P> = None;
         for (content, sect_pr_for_layout) in items.into_iter().zip(item_sections) {
             match content {
@@ -4808,13 +4762,7 @@ impl Engine {
                     let para = joined.as_ref().unwrap_or(para);
                     // Check if this paragraph ends a section (has sect_pr)
                     let para_sect_pr = para.properties.as_ref().and_then(|p| p.sect_pr.as_ref());
-                    let geometry = vertical_sections
-                        .iter()
-                        .find(|(section, _, _, _)| section == sect_pr_for_layout)
-                        .map_or_else(
-                            || sect_pr_to_geometry(sect_pr_for_layout),
-                            |(_, _, reserved, _)| reserved.clone(),
-                        );
+                    let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
                     let source = sources.and_then(|sources| {
                         if path.len() == 1 {
@@ -4959,32 +4907,22 @@ impl Engine {
 
                     // If this paragraph has sect_pr, it ends a section
                     if let Some(sect_pr) = para_sect_pr {
-                        let (geometry, header_footer) = if let Some((_, geometry, _, content)) =
-                            vertical_sections
-                                .iter_mut()
-                                .find(|(section, _, _, content)| {
-                                    section == sect_pr && content.is_some()
-                                }) {
-                            (geometry.clone(), content.take())
-                        } else {
-                            let geometry = section_page_geometry(
-                                sect_pr,
-                                input,
-                                line_number_context.0,
-                                &mut diagnostics,
-                            );
-                            let content = layout_header_footer(
-                                self,
-                                sect_pr,
-                                input,
-                                styles,
-                                &media,
-                                &mut diagnostics,
-                                sources,
-                                &mut num_state,
-                            )?;
-                            (geometry, content)
-                        };
+                        let geometry = section_page_geometry(
+                            sect_pr,
+                            input,
+                            line_number_context.0,
+                            &mut diagnostics,
+                        );
+                        let header_footer = layout_header_footer(
+                            self,
+                            sect_pr,
+                            input,
+                            styles,
+                            &media,
+                            &mut diagnostics,
+                            sources,
+                            &mut num_state,
+                        )?;
                         let title_pg = sect_pr.title_pg.unwrap_or(false);
                         let (header_footer, header_footer_semantics) = header_footer
                             .map_or((None, None), |(content, semantics)| {
@@ -5042,29 +4980,8 @@ impl Engine {
                     }
                 }
                 MainStoryLayoutItem::Table(tbl, path) => {
-                    let geometry = vertical_sections
-                        .iter()
-                        .find(|(section, _, _, _)| section == sect_pr_for_layout)
-                        .map_or_else(
-                            || sect_pr_to_geometry(sect_pr_for_layout),
-                            |(_, _, reserved, _)| reserved.clone(),
-                        );
+                    let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
-                    let variant_widths = vertical_sections
-                        .iter()
-                        .find(|(section, _, _, _)| section == sect_pr_for_layout)
-                        .map(|(_, base, _, content)| {
-                            paginator::vertical_story_measures(
-                                base,
-                                content.as_ref().map(|(content, _)| content),
-                                sect_pr_for_layout.title_pg.unwrap_or(false),
-                            )
-                        })
-                        .unwrap_or_default();
-                    let numbering_before = variant_widths
-                        .iter()
-                        .any(|width| *width != geometry.body_measure())
-                        .then(|| num_state.clone());
                     let mut table_block = self.layout_body_table(
                         tbl,
                         geometry.body_measure(),
@@ -5087,48 +5004,6 @@ impl Engine {
                     {
                         record_table_navigation(block, semantics, registry, &mut num_state);
                     }
-                    for width in variant_widths {
-                        let variant = if width == geometry.body_measure() {
-                            if let SharedLayoutBlock::Table { block, .. } = &table_block {
-                                Arc::clone(block)
-                            } else {
-                                unreachable!("body tables use shared layout")
-                            }
-                        } else {
-                            // Only font/width caches are shared. Source bindings are immutable,
-                            // and list, bookmark and navigation mutations stay in this clone.
-                            let mut numbering = numbering_before
-                                .as_ref()
-                                .expect("alternative measures retain preceding numbering")
-                                .clone();
-                            let mut variant_diagnostics = Vec::new();
-                            let SharedLayoutBlock::Table { block, .. } = self.layout_body_table(
-                                tbl,
-                                width,
-                                styles,
-                                input,
-                                &media,
-                                &mut numbering,
-                                &mut variant_diagnostics,
-                                sources,
-                                &WordStory::Document,
-                                &path,
-                                sect_pr_for_layout.doc_grid.as_deref(),
-                            )?
-                            else {
-                                unreachable!("body tables use shared layout")
-                            };
-                            for diagnostic in variant_diagnostics {
-                                if !diagnostics.contains(&diagnostic) {
-                                    diagnostics.push(diagnostic);
-                                }
-                            }
-                            block
-                        };
-                        if let SharedLayoutBlock::Table { variants, .. } = &mut table_block {
-                            variants.push((width, variant));
-                        }
-                    }
                     if sources.is_some() {
                         table_block.set_body_index(path[0]);
                     }
@@ -5138,30 +5013,22 @@ impl Engine {
         }
 
         // Remaining blocks belong to the final section
-        let (final_geometry, final_hf) = if let Some((_, geometry, _, content)) = vertical_sections
-            .iter_mut()
-            .find(|(section, _, _, content)| section == &final_sect_pr && content.is_some())
-        {
-            (geometry.clone(), content.take())
-        } else {
-            let geometry = section_page_geometry(
-                &final_sect_pr,
-                input,
-                line_number_context.0,
-                &mut diagnostics,
-            );
-            let content = layout_header_footer(
-                self,
-                &final_sect_pr,
-                input,
-                styles,
-                &media,
-                &mut diagnostics,
-                sources,
-                &mut num_state,
-            )?;
-            (geometry, content)
-        };
+        let final_geometry = section_page_geometry(
+            &final_sect_pr,
+            input,
+            line_number_context.0,
+            &mut diagnostics,
+        );
+        let final_hf = layout_header_footer(
+            self,
+            &final_sect_pr,
+            input,
+            styles,
+            &media,
+            &mut diagnostics,
+            sources,
+            &mut num_state,
+        )?;
         let final_title_pg = final_sect_pr.title_pg.unwrap_or(false);
         let (final_hf, final_hf_semantics) = final_hf
             .map_or((None, None), |(content, semantics)| {
@@ -5206,14 +5073,6 @@ impl Engine {
         let structure = assign_shared_document_structure(&mut sections);
         #[cfg(test)]
         {
-            self.last_table_variant_counts = sections
-                .iter()
-                .flat_map(|section| &section.blocks)
-                .filter_map(|block| match block {
-                    SharedLayoutBlock::Table { variants, .. } => Some(variants.len()),
-                    _ => None,
-                })
-                .collect();
             self.last_shared_block_counts = sections
                 .iter()
                 .flat_map(|section| &section.blocks)
@@ -5238,19 +5097,7 @@ impl Engine {
         // pushed just above and is therefore already in this list.
         let content_widths: Vec<f64> = sections
             .iter()
-            .flat_map(|section| {
-                let mut widths = vec![section.geometry.content_width()];
-                if section.geometry.body_rotation.is_some()
-                    && section.geometry.vertical_story_clearance
-                {
-                    widths.extend(paginator::vertical_story_measures(
-                        &section.geometry,
-                        section.header_footer.as_ref(),
-                        section.title_pg,
-                    ));
-                }
-                widths
-            })
+            .map(|section| section.geometry.content_width())
             .collect();
         let notes = NoteRegistry::build(
             input,
@@ -6737,7 +6584,6 @@ impl Engine {
             .map(|(block, semantics)| SharedLayoutBlock::Table {
                 block: Arc::new(block),
                 semantics,
-                variants: Vec::new(),
                 body_index: None,
             });
         }
@@ -6772,7 +6618,6 @@ impl Engine {
                     story,
                     path,
                 ),
-                variants: Vec::new(),
                 body_index: None,
             });
         }
@@ -6828,14 +6673,12 @@ impl Engine {
             return Ok(SharedLayoutBlock::Table {
                 block,
                 semantics,
-                variants: Vec::new(),
                 body_index: None,
             });
         }
         Ok(SharedLayoutBlock::Table {
             block: Arc::new(block),
             semantics,
-            variants: Vec::new(),
             body_index: None,
         })
     }
@@ -14950,7 +14793,6 @@ pub(crate) fn sect_pr_to_geometry(sect_pr: &CT_SectPr) -> PageGeometry {
         do_not_use_html_paragraph_auto_spacing: false,
         // F-269 authors and preserves `w:sectPr/w:textDirection`. This is the
         // render projection over it, and it writes nothing back.
-        vertical_story_clearance: false,
         body_rotation: sect_pr
             .text_direction
             .as_deref()
@@ -15144,7 +14986,6 @@ fn section_page_geometry(
         geometry = resolve_column_tracks(sect_pr, geometry);
     }
     geometry.do_not_use_html_paragraph_auto_spacing = input.do_not_use_html_paragraph_auto_spacing;
-    geometry.vertical_story_clearance = input.vertical_story_clearance;
     if let Some(line_numbers) = geometry.line_numbers.as_mut() {
         line_numbers.font_id = line_number_style.and_then(|style| style.font_id);
     }
@@ -19415,7 +19256,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -20560,820 +20400,6 @@ mod tests {
         );
         input.document.body.sect_pr = Some(section);
         input
-    }
-
-    #[test]
-    fn vertical_body_paragraphs_and_tables_fit_between_tall_stories() {
-        use rdocx_oxml::header_footer::CT_HdrFtr;
-
-        for alignment in ["left", "center", "right"] {
-            for vertical_alignment in ["top", "center", "bottom"] {
-                let mut input = make_input_with_text("");
-                input.vertical_story_clearance = true;
-                input.document = CT_Document::from_xml(format!(
-                    r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:jc w:val="{alignment}"/></w:pPr><w:r><w:t>Body paragraph aligned against the reserved vertical measure</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t>Body table</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/><w:textDirection w:val="tbRl"/><w:vAlign w:val="{vertical_alignment}"/></w:sectPr></w:body></w:document>"#,
-                    rdocx_oxml::namespace::W_NS,
-                ).as_bytes()).expect("vertical document parses");
-                for (parts, id, line, text) in [
-                    (&mut input.headers, "header", 2400, "Tall header"),
-                    (&mut input.footers, "footer", 1920, "Tall footer"),
-                ] {
-                    parts.insert(id.to_owned(), CT_HdrFtr::from_xml(format!(
-                        r#"<w:hdr xmlns:w="{}"><w:p><w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p></w:hdr>"#,
-                        rdocx_oxml::namespace::W_NS,
-                    ).as_bytes()).expect("story parses"));
-                }
-                let result = deterministic_layout(&input);
-                let mut body_runs = 0;
-                let mut table_backgrounds = 0;
-                for page in &result.pages {
-                    oxml_layout::walk(&page.elements, &mut |element, transform| {
-                        if transform.b.abs() < 0.9 {
-                            return;
-                        }
-                        let points = match element {
-                            PositionedElement::Text(run) => {
-                                body_runs += 1;
-                                vec![
-                                    run.origin,
-                                    Point {
-                                        x: run.origin.x + run.advances.iter().sum::<f64>(),
-                                        y: run.origin.y,
-                                    },
-                                ]
-                            }
-                            PositionedElement::FilledRect { rect, .. } => {
-                                table_backgrounds += 1;
-                                vec![
-                                    Point {
-                                        x: rect.x,
-                                        y: rect.y,
-                                    },
-                                    Point {
-                                        x: rect.x + rect.width,
-                                        y: rect.y + rect.height,
-                                    },
-                                ]
-                            }
-                            _ => return,
-                        };
-                        for point in points {
-                            let point = transform.apply(point);
-                            assert!(
-                                (156.0 - 0.01..=660.0 + 0.01).contains(&point.y),
-                                "{alignment}/{vertical_alignment}: body reaches {point:?} outside header/footer band"
-                            );
-                        }
-                    });
-                }
-                assert!(
-                    body_runs >= 2 && table_backgrounds > 0,
-                    "paragraph and table both paint"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn vertical_story_clearance_is_opt_in_and_default_keeps_the_written_band() {
-        use rdocx_oxml::header_footer::CT_HdrFtr;
-
-        let body_top = |clearance: bool| {
-            let mut input = make_input_with_text("");
-            input.vertical_story_clearance = clearance;
-            input.document = CT_Document::from_xml(format!(
-                r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Vertical body text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#,
-                rdocx_oxml::namespace::W_NS,
-            ).as_bytes()).expect("vertical document parses");
-            input.headers.insert("header".to_owned(), CT_HdrFtr::from_xml(format!(
-                r#"<w:hdr xmlns:w="{}"><w:p><w:pPr><w:spacing w:line="2400" w:lineRule="exact"/></w:pPr><w:r><w:t>Tall header</w:t></w:r></w:p></w:hdr>"#,
-                rdocx_oxml::namespace::W_NS,
-            ).as_bytes()).expect("story parses"));
-            let result = deterministic_layout(&input);
-            let mut top = f64::INFINITY;
-            for page in &result.pages {
-                oxml_layout::walk(&page.elements, &mut |element, transform| {
-                    if transform.b.abs() < 0.9 {
-                        return;
-                    }
-                    if let PositionedElement::Text(run) = element {
-                        let end = Point {
-                            x: run.origin.x + run.advances.iter().sum::<f64>(),
-                            y: run.origin.y,
-                        };
-                        for point in [run.origin, end] {
-                            top = top.min(transform.apply(point).y);
-                        }
-                    }
-                });
-            }
-            assert!(top.is_finite(), "the rotated body paints");
-            top
-        };
-
-        // The 120pt header ends at 156pt. The opt-in reservation keeps the
-        // body below it, and Word's default lays the body in its written band.
-        let reserved = body_top(true);
-        let written = body_top(false);
-        assert!(
-            reserved >= 156.0 - 0.01,
-            "reserved body starts at {reserved}"
-        );
-        assert!(
-            written < 156.0 - 1.0 && written < reserved,
-            "default body starts at {written}, reserved at {reserved}"
-        );
-    }
-
-    #[test]
-    fn vertical_first_even_and_default_stories_use_selected_body_measures() {
-        use rdocx_oxml::units::Twips;
-
-        // The words are chosen so a line ends with a space past the band at
-        // the bundled metrics.
-        let mut input = cacheable_header_footer_input(&"Body lines ".repeat(1600));
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
-        for (suffix, header_height, footer_height) in
-            [("default", 120, 96), ("first", 12, 12), ("even", 168, 144)]
-        {
-            for (parts, kind, height) in [
-                (&mut input.headers, "header", header_height),
-                (&mut input.footers, "footer", footer_height),
-            ] {
-                let mut part = header_footer_part(&format!("{suffix} {kind}"));
-                part.paragraphs[0].properties = Some(CT_PPr {
-                    line_spacing: Some(Twips(height * 20)),
-                    line_rule: Some("exact".to_owned()),
-                    ..Default::default()
-                });
-                parts.insert(format!("rId-{suffix}-{kind}"), part);
-            }
-        }
-        let mut engine = Engine::new_deterministic().expect("bundled fonts");
-        let result = engine.layout(&input).expect("vertical variant layout");
-        assert!(result.pages.len() >= 3, "every story variant is selected");
-        for (page, expected) in result.pages.iter().zip(["first", "even", "default"]) {
-            assert!(header_footer_page_text(page).contains(&format!("{expected} header")));
-        }
-        let mut painted_body = String::new();
-        let mut hanging_ends = 0;
-        for page in &result.pages {
-            let (top, bottom) = if page.page_number == 1 {
-                (72.0, 720.0)
-            } else if page.page_number.is_multiple_of(2) {
-                (204.0, 612.0)
-            } else {
-                (156.0, 660.0)
-            };
-            let mut body_runs = 0;
-            oxml_layout::walk(&page.elements, &mut |element, transform| {
-                if let PositionedElement::Text(run) = element
-                    && transform.b.abs() > 0.9
-                {
-                    body_runs += 1;
-                    painted_body.push_str(&run.text);
-                    let width = run.advances.iter().sum::<f64>();
-                    // Plain line fitting retains terminal U+0020 runs beyond
-                    // the ink measure. Their start and every non-space run
-                    // must still fit the same reserved body band.
-                    let hanging = !run.text.is_empty() && run.text.chars().all(|ch| ch == ' ');
-                    for (end, x) in [(false, run.origin.x), (true, run.origin.x + width)] {
-                        let point = transform.apply(Point { x, y: run.origin.y });
-                        let allowance = if end && hanging { width } else { 0.0 };
-                        assert!(
-                            (top - 0.01..=bottom + allowance + 0.01).contains(&point.y),
-                            "page {}: {point:?}, run {:?}, origin {:?}, advances {:?}",
-                            page.page_number,
-                            run.text,
-                            run.origin,
-                            run.advances
-                        );
-                        if point.y > bottom + 0.01 {
-                            assert!(end && hanging, "only terminal spaces may pass the band");
-                            hanging_ends += 1;
-                        }
-                    }
-                }
-            });
-            assert!(body_runs > 0);
-        }
-        assert_eq!(painted_body, "Body lines ".repeat(1600));
-        assert!(
-            hanging_ends > 0,
-            "the fixture exercises retained hanging spaces"
-        );
-        let warm = engine.layout(&input).expect("retained vertical layout");
-        assert_eq!(format!("{:?}", result.pages), format!("{:?}", warm.pages));
-        input.headers.get_mut("rId-even-header").unwrap().paragraphs[0]
-            .properties
-            .as_mut()
-            .unwrap()
-            .line_spacing = Some(Twips(3600));
-        let changed = engine.layout(&input).expect("changed story geometry");
-        let fresh = deterministic_layout(&input);
-        assert_eq!(format!("{:?}", changed.pages), format!("{:?}", fresh.pages));
-    }
-
-    #[test]
-    fn vertical_table_width_variants_preserve_base_heading_navigation_and_numbering() {
-        use rdocx_oxml::{numbering::CT_Numbering, units::Twips};
-
-        let mut input = cacheable_header_footer_input("");
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        let section = input.document.body.sect_pr.as_mut().unwrap();
-        section.text_direction = Some("tbRl".to_owned());
-        section.footer_refs.clear();
-        input.footers.clear();
-        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
-            let mut part = header_footer_part(&format!("{suffix} header"));
-            part.paragraphs[0].properties = Some(CT_PPr {
-                line_spacing: Some(Twips(height * 20)),
-                line_rule: Some("exact".to_owned()),
-                ..Default::default()
-            });
-            input.headers.insert(format!("rId-{suffix}-header"), part);
-        }
-        let parsed = CT_Document::from_xml(format!(
-            r#"<w:document xmlns:w="{}"><w:body><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>First cell heading</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Second cell heading</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
-            rdocx_oxml::namespace::W_NS,
-        ).as_bytes()).unwrap();
-        input.document.body.content = parsed.body.content;
-        let mut numbering = CT_Numbering::new();
-        let num_id = numbering.add_numbered_list();
-        input.numbering = Some(numbering);
-        let BodyContent::Table(table) = &mut input.document.body.content[0] else {
-            unreachable!()
-        };
-        for (cell, outline_lvl) in table.rows[0].cells.iter_mut().zip([0, 2]) {
-            cell.paragraphs_mut()[0].properties = Some(CT_PPr {
-                num_id: Some(num_id),
-                num_ilvl: Some(0),
-                outline_lvl: Some(outline_lvl),
-                ..Default::default()
-            });
-        }
-        let mut after = CT_P::new();
-        after.add_run("After table");
-        after.properties = Some(CT_PPr {
-            num_id: Some(num_id),
-            num_ilvl: Some(0),
-            ..Default::default()
-        });
-        input.document.body.add_paragraph(after);
-
-        let mut engine = Engine::new_deterministic().unwrap();
-        for _ in 0..2 {
-            let (layout, sources) = engine.layout_with_provenance(&input).unwrap();
-            assert_eq!(engine.last_table_variant_counts.len(), 1);
-            assert!(
-                engine.last_table_variant_counts[0] > 1,
-                "the table must have alternative story widths"
-            );
-            let navigation = sources
-                .iter()
-                .enumerate()
-                .filter_map(|(index, path)| {
-                    let node = SourceNodeId::new((index + 1) as u32).unwrap();
-                    let facts = engine.navigation_by_source.get(&node)?;
-                    (path.story == WordStory::Document).then_some((
-                        path.children.clone(),
-                        facts.level?,
-                        facts.text.as_str(),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                navigation,
-                [
-                    (vec![0, 0, 0, 0], 1, "First cell heading"),
-                    (vec![0, 0, 1, 0], 3, "Second cell heading"),
-                ]
-            );
-            assert_eq!(
-                sources
-                    .iter()
-                    .zip(engine.numbering_by_source(sources.len()))
-                    .filter(|(path, _)| path.story == WordStory::Document)
-                    .filter_map(|(path, number)| {
-                        number.map(|number| (path.children.clone(), number.marker_text))
-                    })
-                    .collect::<Vec<_>>(),
-                [
-                    (vec![0, 0, 0, 0], "1.".to_owned()),
-                    (vec![0, 0, 1, 0], "2.".to_owned()),
-                    (vec![1], "3.".to_owned()),
-                ]
-            );
-            assert_eq!(
-                layout
-                    .outlines
-                    .iter()
-                    .map(|entry| (entry.level, entry.title.as_str()))
-                    .collect::<Vec<_>>(),
-                [(1, "1. First cell heading"), (3, "2. Second cell heading")]
-            );
-        }
-    }
-
-    #[test]
-    fn vertical_split_table_cells_resume_source_and_numbering_at_selected_widths() {
-        use rdocx_oxml::{numbering::CT_Numbering, units::Twips};
-        let text = (0..1800)
-            .map(|n| format!("W{n:04} café "))
-            .collect::<String>();
-        let mut input = cacheable_header_footer_input("");
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
-        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
-            let mut part = header_footer_part(&format!("{suffix} header"));
-            part.paragraphs[0].properties = Some(CT_PPr {
-                line_spacing: Some(Twips(height * 20)),
-                line_rule: Some("exact".to_owned()),
-                ..Default::default()
-            });
-            input.headers.insert(format!("rId-{suffix}-header"), part);
-        }
-        input.footers.clear();
-        input
-            .document
-            .body
-            .sect_pr
-            .as_mut()
-            .unwrap()
-            .footer_refs
-            .clear();
-        let parsed = CT_Document::from_xml(format!(
-            r#"<w:document xmlns:w="{}"><w:body><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="5000"/><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Short cell once</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
-            rdocx_oxml::namespace::W_NS,
-        ).as_bytes()).unwrap();
-        input.document.body.content = parsed.body.content;
-        let mut numbering = CT_Numbering::new();
-        let num_id = numbering.add_numbered_list();
-        input.numbering = Some(numbering);
-        let BodyContent::Table(table) = &mut input.document.body.content[0] else {
-            unreachable!()
-        };
-        table.rows[0].cells[0].paragraphs_mut()[0].properties = Some(CT_PPr {
-            num_id: Some(num_id),
-            num_ilvl: Some(0),
-            ..Default::default()
-        });
-        let mut after = CT_P::new();
-        after.add_run("After table");
-        after.properties = Some(CT_PPr {
-            num_id: Some(num_id),
-            num_ilvl: Some(0),
-            ..Default::default()
-        });
-        input.document.body.add_paragraph(after);
-        let mut engine = Engine::new_deterministic().unwrap();
-        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
-        let numbers = engine.numbering_by_source(sources.len());
-        assert_eq!(
-            numbers
-                .iter()
-                .flatten()
-                .map(|n| n.marker_text.as_str())
-                .collect::<Vec<_>>(),
-            ["1.", "2."]
-        );
-        assert!(cold.pages.len() >= 3);
-        let mut by_source = std::collections::BTreeMap::<u32, String>::new();
-        let mut markers = Vec::new();
-        for page in &cold.pages {
-            let top = if page.page_number == 1 {
-                156.0
-            } else if page.page_number.is_multiple_of(2) {
-                204.0
-            } else {
-                72.0
-            };
-            oxml_layout::walk(&page.elements, &mut |element, transform| {
-                let PositionedElement::Text(run) = element else {
-                    return;
-                };
-                if transform.b.abs() < 0.9 {
-                    return;
-                }
-                if run.text == "1." || run.text == "2." {
-                    markers.push(run.text.clone());
-                    return;
-                }
-                if let Some(span) = run.source {
-                    assert_eq!(
-                        sources[span.node.get() as usize - 1].story,
-                        WordStory::Document
-                    );
-                    assert_eq!(
-                        span.char_end - span.char_start,
-                        run.text.chars().count() as u32
-                    );
-                    let prior = by_source.entry(span.node.get()).or_default();
-                    assert_eq!(span.char_start, prior.chars().count() as u32);
-                    prior.push_str(&run.text);
-                }
-                let point = transform.apply(run.origin);
-                assert!(
-                    (top - 0.01..=720.01).contains(&point.y),
-                    "page {}: {point:?}",
-                    page.page_number
-                );
-            });
-        }
-        assert_eq!(markers, ["1.", "2."]);
-        assert_eq!(
-            by_source.values().collect::<Vec<_>>(),
-            [
-                &text,
-                &"Short cell once".to_owned(),
-                &"After table".to_owned()
-            ]
-        );
-        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
-        assert_eq!(sources, warm_sources);
-        assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
-        assert_eq!(
-            format!("{numbers:?}"),
-            format!("{:?}", engine.numbering_by_source(warm_sources.len()))
-        );
-        // Removing numbering makes the same multi-measure table cacheable.
-        let BodyContent::Table(table) = &mut input.document.body.content[0] else {
-            unreachable!()
-        };
-        let paragraph = &mut table.rows[0].cells[0].paragraphs_mut()[0];
-        **paragraph = CT_P::new();
-        // Word paint is part of each cached table entry's byte account, so
-        // the three story-width variants must fit the table cache together.
-        paragraph.add_run(&"Cached cell words ".repeat(60));
-        input.numbering = None;
-        let BodyContent::Paragraph(after) = &mut input.document.body.content[1] else {
-            unreachable!()
-        };
-        after.properties = None;
-        let mut cached = Engine::new_deterministic().unwrap();
-        let (cold, sources) = cached.layout_with_provenance(&input).unwrap();
-        assert_eq!(cached.table_cache_counts(), (0, 3));
-        let (warm, warm_sources) = cached.layout_with_provenance(&input).unwrap();
-        assert_eq!(cached.table_cache_counts(), (3, 3));
-        assert_eq!(sources, warm_sources);
-        assert_layout_results_equal(&cold, &warm);
-        input.headers.get_mut("rId-even-header").unwrap().paragraphs[0]
-            .properties
-            .as_mut()
-            .unwrap()
-            .line_spacing = Some(Twips(3600));
-        let (changed, changed_sources) = cached.layout_with_provenance(&input).unwrap();
-        let (fresh, fresh_sources) = Engine::new_deterministic()
-            .unwrap()
-            .layout_with_provenance(&input)
-            .unwrap();
-        assert_eq!(changed_sources, fresh_sources);
-        assert_layout_results_equal(&changed, &fresh);
-    }
-
-    #[test]
-    fn vertical_split_table_cells_update_percentage_spacing_with_story_widths() {
-        use rdocx_oxml::units::Twips;
-        let text = (0..1800)
-            .map(|n| format!("W{n:04} café "))
-            .collect::<String>();
-        let mut input = cacheable_header_footer_input("");
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        input.footers.clear();
-        let section = input.document.body.sect_pr.as_mut().unwrap();
-        section.text_direction = Some("tbRl".to_owned());
-        section.footer_refs.clear();
-        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
-            let mut part = header_footer_part(&format!("{suffix} header"));
-            part.paragraphs[0].properties = Some(CT_PPr {
-                line_spacing: Some(Twips(height * 20)),
-                line_rule: Some("exact".to_owned()),
-                ..Default::default()
-            });
-            input.headers.insert(format!("rId-{suffix}-header"), part);
-        }
-        let parsed = CT_Document::from_xml(format!(
-            r#"<w:document xmlns:w="{}"><w:body><w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblCellSpacing w:w="500" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:tcMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar></w:tcPr><w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
-            rdocx_oxml::namespace::W_NS,
-        ).as_bytes()).unwrap();
-        input.document.body.content = parsed.body.content;
-        let mut engine = Engine::new_deterministic().unwrap();
-        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
-        assert!(cold.pages.len() >= 3);
-        let mut painted = String::new();
-        for page in &cold.pages {
-            let top = if page.page_number == 1 {
-                156.0
-            } else if page.page_number.is_multiple_of(2) {
-                204.0
-            } else {
-                72.0
-            };
-            let mut first_origin = f64::INFINITY;
-            oxml_layout::walk(&page.elements, &mut |element, transform| {
-                if let PositionedElement::Text(run) = element
-                    && let Some(span) = run.source
-                    && sources[span.node.get() as usize - 1].story == WordStory::Document
-                {
-                    assert_eq!(span.char_start, painted.chars().count() as u32);
-                    assert_eq!(
-                        span.char_end - span.char_start,
-                        run.text.chars().count() as u32
-                    );
-                    painted.push_str(&run.text);
-                    let origin = transform.apply(run.origin);
-                    assert!((top - 0.01..=720.01).contains(&origin.y));
-                    first_origin = first_origin.min(origin.y);
-                }
-            });
-            let half_gap = (720.0 - top) * 0.10 / 2.0;
-            assert!(
-                (first_origin - top - half_gap).abs() < 0.01,
-                "page {}: origin {first_origin}, active top {top}, half-gap {half_gap}",
-                page.page_number
-            );
-        }
-        assert_eq!(painted, text);
-        assert_eq!(engine.table_cache_counts(), (0, 3));
-        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
-        assert_eq!(sources, warm_sources);
-        assert_layout_results_equal(&cold, &warm);
-    }
-
-    #[test]
-    fn fractional_landscape_stories_select_exact_table_measures() {
-        use rdocx_oxml::units::Twips;
-        let mut input = cacheable_header_footer_input("");
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        let section = input.document.body.sect_pr.as_mut().unwrap();
-        section.page_width = Some(Twips(15840));
-        section.page_height = Some(Twips(12240));
-        section.text_direction = Some("tbRl".to_owned());
-        section
-            .header_refs
-            .retain(|r| r.hdr_ftr_type != HdrFtrType::Even);
-        section
-            .footer_refs
-            .retain(|r| r.hdr_ftr_type != HdrFtrType::Even);
-        for (suffix, height) in [("first", 6001), ("default", 8001)] {
-            for (parts, kind, line) in [
-                (&mut input.headers, "header", height),
-                (&mut input.footers, "footer", 2002),
-            ] {
-                let mut part = header_footer_part(&format!("{suffix} {kind}"));
-                part.paragraphs[0].properties = Some(CT_PPr {
-                    line_spacing: Some(Twips(line)),
-                    line_rule: Some("exact".to_owned()),
-                    ..Default::default()
-                });
-                parts.insert(format!("rId-{suffix}-{kind}"), part);
-            }
-        }
-        let table = |text: &str| {
-            format!(
-                r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:tcPr><w:shd w:fill="CCEEFF"/></w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
-            )
-        };
-        let parsed = CT_Document::from_xml(format!(
-            r#"<w:document xmlns:w="{}"><w:body>{}<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>{}</w:body></w:document>"#,
-            rdocx_oxml::namespace::W_NS, table("Cell one"), table("Cell two"),
-        ).as_bytes()).unwrap();
-        input.document.body.content = parsed.body.content;
-        let mut engine = Engine::new_deterministic().unwrap();
-        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
-        assert_eq!(cold.pages.len(), 2);
-        let mut by_source = std::collections::BTreeMap::<u32, String>::new();
-        for (index, page) in cold.pages.iter().enumerate() {
-            let top = if index == 0 { 336.05 } else { 436.05 };
-            let mut tables = 0;
-            oxml_layout::walk(&page.elements, &mut |element, transform| {
-                if transform.b.abs() < 0.9 {
-                    return;
-                }
-                match element {
-                    PositionedElement::FilledRect { rect, .. } => {
-                        let start = transform.apply(Point {
-                            x: rect.x,
-                            y: rect.y,
-                        });
-                        let end = transform.apply(Point {
-                            x: rect.x + rect.width,
-                            y: rect.y + rect.height,
-                        });
-                        assert!((start.y.min(end.y) - top).abs() < 0.01);
-                        assert!((start.y.max(end.y) - 475.9).abs() < 0.01);
-                        tables += 1;
-                    }
-                    PositionedElement::Text(run) => {
-                        if let Some(span) = run.source {
-                            assert_eq!(
-                                sources[span.node.get() as usize - 1].story,
-                                WordStory::Document
-                            );
-                            let prior = by_source.entry(span.node.get()).or_default();
-                            assert_eq!(span.char_start, prior.chars().count() as u32);
-                            assert_eq!(
-                                span.char_end - span.char_start,
-                                run.text.chars().count() as u32
-                            );
-                            prior.push_str(&run.text);
-                            assert!((top - 0.01..=475.91).contains(&transform.apply(run.origin).y));
-                        }
-                    }
-                    _ => {}
-                }
-            });
-            assert_eq!(tables, 1);
-        }
-        assert_eq!(
-            by_source.values().map(String::as_str).collect::<Vec<_>>(),
-            ["Cell one", "", "Cell two"]
-        );
-        assert_eq!(engine.table_cache_counts(), (0, 4));
-        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
-        assert_eq!(engine.table_cache_counts(), (4, 4));
-        assert_eq!(sources, warm_sources);
-        assert_layout_results_equal(&cold, &warm);
-    }
-
-    #[test]
-    fn vertical_notes_follow_references_at_distinct_selected_story_measures() {
-        use rdocx_oxml::{
-            footnotes::{CT_Footnote, CT_Footnotes, NoteType},
-            text::CT_R,
-            units::Twips,
-        };
-        let mut input = cacheable_header_footer_input("");
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        input.footers.clear();
-        let section = input.document.body.sect_pr.as_mut().unwrap();
-        section.text_direction = Some("tbRl".to_owned());
-        section.footer_refs.clear();
-        for (suffix, height) in [("first", 120), ("default", 12), ("even", 168)] {
-            let mut part = header_footer_part(&format!("{suffix} header"));
-            part.paragraphs[0].properties = Some(CT_PPr {
-                line_spacing: Some(Twips(height * 20)),
-                line_rule: Some("exact".to_owned()),
-                ..Default::default()
-            });
-            input.headers.insert(format!("rId-{suffix}-header"), part);
-        }
-        input.document.body.content.clear();
-        let mut notes = Vec::new();
-        for id in 1..=3 {
-            let mut paragraph = CT_P::new();
-            paragraph.add_run(&format!("Body reference {id}"));
-            paragraph.properties = Some(CT_PPr {
-                page_break_before: (id > 1).then_some(true),
-                ..Default::default()
-            });
-            let mut reference = CT_R::new("");
-            reference.content = vec![RunContent::FootnoteRef {
-                id,
-                custom_mark: None,
-            }];
-            paragraph.runs.push(reference);
-            input.document.body.add_paragraph(paragraph);
-            let mut note = CT_P::new();
-            note.add_run(&format!("Selected note {id}"));
-            notes.push(CT_Footnote {
-                id,
-                note_type: NoteType::Normal,
-                paragraphs: vec![note],
-            });
-        }
-        input.footnotes = Some(CT_Footnotes { footnotes: notes });
-        let mut engine = Engine::new_deterministic().unwrap();
-        let (cold, sources) = engine.layout_with_provenance(&input).unwrap();
-        assert_eq!(cold.pages.len(), 3);
-        for (index, page) in cold.pages.iter().enumerate() {
-            let mut text = String::new();
-            oxml_layout::walk(&page.elements, &mut |element, _| {
-                if let PositionedElement::Text(run) = element {
-                    text.push_str(&run.text);
-                }
-            });
-            for id in 1..=3 {
-                assert_eq!(
-                    text.contains(&format!("Selected note {id}")),
-                    id == index + 1
-                );
-            }
-        }
-        let (warm, warm_sources) = engine.layout_with_provenance(&input).unwrap();
-        assert_eq!(sources, warm_sources);
-        assert_layout_results_equal(&cold, &warm);
-    }
-
-    #[test]
-    fn vertical_story_room_does_not_leak_across_section_boundaries() {
-        let mut input = cacheable_header_footer_input("Vertical body");
-        input.vertical_story_clearance = true;
-        input.images.clear();
-        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".to_owned());
-        let mut horizontal = CT_P::new();
-        horizontal.add_run("Horizontal body");
-        horizontal.properties = Some(CT_PPr {
-            jc: Some(rdocx_oxml::shared::ST_Jc::Right),
-            ..Default::default()
-        });
-        let mut section_end = CT_P::new();
-        section_end.properties = Some(CT_PPr {
-            sect_pr: Some(CT_SectPr::default_letter()),
-            ..Default::default()
-        });
-        input
-            .document
-            .body
-            .content
-            .insert(0, BodyContent::Paragraph(Box::new(horizontal)));
-        input
-            .document
-            .body
-            .content
-            .insert(1, BodyContent::Paragraph(Box::new(section_end)));
-        for part in input.headers.values_mut() {
-            part.paragraphs[0].properties = Some(CT_PPr {
-                line_spacing: Some(rdocx_oxml::units::Twips(2400)),
-                line_rule: Some("exact".to_owned()),
-                ..Default::default()
-            });
-        }
-        let result = deterministic_layout(&input);
-        let mut text = String::new();
-        let mut line_end: f64 = 0.0;
-        oxml_layout::walk(&result.pages[0].elements, &mut |element, transform| {
-            if let PositionedElement::Text(run) = element {
-                assert!(transform.is_identity());
-                text.push_str(&run.text);
-                line_end = line_end.max(run.origin.x + run.advances.iter().sum::<f64>());
-            }
-        });
-        assert!(text.contains("Horizontal body"), "{text}");
-        assert!(
-            (line_end - 540.0).abs() < 0.01,
-            "horizontal line ends at {line_end}"
-        );
-    }
-
-    #[test]
-    fn vertical_story_room_keeps_accepted_paragraph_marks_joined() {
-        use rdocx_oxml::header_footer::CT_HdrFtr;
-
-        let mut input = make_input_with_text("");
-        input.vertical_story_clearance = true;
-        input.revision_view = RevisionView::Accepted;
-        input.document = CT_Document::from_xml(format!(
-            r#"<w:document xmlns:w="{}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:rPr><w:del w:id="1" w:author="Ada"/></w:rPr></w:pPr><w:r><w:t>Prefix</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>"#,
-            rdocx_oxml::namespace::W_NS,
-        ).as_bytes()).expect("vertical revision document parses");
-        for (parts, id, line) in [
-            (&mut input.headers, "header", 2400),
-            (&mut input.footers, "footer", 1920),
-        ] {
-            parts.insert(id.to_owned(), CT_HdrFtr::from_xml(format!(
-                r#"<w:hdr xmlns:w="{}"><w:p><w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr><w:r><w:t>Tall story</w:t></w:r></w:p></w:hdr>"#,
-                rdocx_oxml::namespace::W_NS,
-            ).as_bytes()).expect("story parses"));
-        }
-        let mut engine = Engine::new_deterministic().expect("bundled engine");
-        let result = engine.layout(&input).expect("joined vertical layout");
-        let mut text = String::new();
-        let mut baseline = None;
-        oxml_layout::walk(&result.pages[0].elements, &mut |element, transform| {
-            if transform.b.abs() < 0.9 {
-                return;
-            }
-            if let PositionedElement::Text(run) = element {
-                text.push_str(&run.text);
-                if let Some(y) = baseline {
-                    assert_eq!(run.origin.y, y, "accepted marks join one body line");
-                } else {
-                    baseline = Some(run.origin.y);
-                }
-                for point in [
-                    run.origin,
-                    Point {
-                        x: run.origin.x + run.advances.iter().sum::<f64>(),
-                        y: run.origin.y,
-                    },
-                ] {
-                    let point = transform.apply(point);
-                    assert!((156.0 - 0.01..=660.0 + 0.01).contains(&point.y));
-                }
-            }
-        });
-        assert_eq!(text, "PrefixTail");
-        assert!(baseline.is_some());
-        let warm = engine.layout(&input).expect("retained joined layout");
-        assert_eq!(format!("{:?}", result.pages), format!("{:?}", warm.pages));
     }
 
     fn header_footer_page_text(page: &PageFrame) -> String {
@@ -29050,7 +28076,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -29781,7 +28806,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -29859,7 +28883,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -29969,7 +28992,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -30164,7 +29186,6 @@ mod tests {
                 automatic_hyphenation: false,
                 mirror_margins: false,
                 gutter_at_top: false,
-                vertical_story_clearance: false,
                 do_not_use_html_paragraph_auto_spacing: false,
                 default_tab_stop: None,
                 clamp_tabs_past_margin: false,
@@ -30311,7 +29332,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -30719,7 +29739,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -30984,7 +30003,6 @@ mod tests {
                 automatic_hyphenation: false,
                 mirror_margins: false,
                 gutter_at_top: false,
-                vertical_story_clearance: false,
                 do_not_use_html_paragraph_auto_spacing: false,
                 default_tab_stop: None,
                 clamp_tabs_past_margin: false,
@@ -31137,7 +30155,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31507,7 +30524,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31606,7 +30622,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31737,7 +30752,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
@@ -31961,7 +30975,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,

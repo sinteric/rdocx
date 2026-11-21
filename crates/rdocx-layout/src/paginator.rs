@@ -171,13 +171,6 @@ pub struct PageGeometry {
     /// arithmetic it always had. F-269 authors and preserves the property, and
     /// this is the render projection over it.
     pub body_rotation: Option<f64>,
-    /// [`crate::LayoutInput::vertical_story_clearance`], carried with the
-    /// geometry like `do_not_use_html_paragraph_auto_spacing`.
-    ///
-    /// When set, a section with `body_rotation` grows its margins clear of the
-    /// selected header and footer (the Hanji reservation). When unset, the
-    /// body band follows Word and upstream.
-    pub vertical_story_clearance: bool,
 }
 
 impl PageGeometry {
@@ -214,19 +207,6 @@ impl PageGeometry {
         }
     }
 
-    fn reserve_header_footer_room(&mut self, header: &[ParagraphBlock], footer: &[ParagraphBlock]) {
-        if !header.is_empty() {
-            self.margin_top = self
-                .margin_top
-                .max(self.header_distance + header_footer_height(header, self));
-        }
-        if !footer.is_empty() {
-            self.margin_bottom = self
-                .margin_bottom
-                .max(self.footer_distance + header_footer_height(footer, self));
-        }
-    }
-
     /// The same page with its column tracks removed.
     fn without_columns(&self) -> PageGeometry {
         PageGeometry {
@@ -257,7 +237,6 @@ impl Default for PageGeometry {
             mirror_margins: false,
             do_not_use_html_paragraph_auto_spacing: false,
             body_rotation: None,
-            vertical_story_clearance: false,
         }
     }
 }
@@ -1736,7 +1715,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             if pager.stopped_at.is_some() {
                 break;
             }
-        } else if let Some(mut table) = block.table_for_measure(pager.table_measure()) {
+        } else if let Some(mut table) = block.table() {
             let body_index = block.body_index();
 
             // A floating table is positioned rather than flowed, so it never
@@ -1748,7 +1727,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
             }
 
             for row_idx in 0..table.rows.len() {
-                table = block.table_for_measure(pager.table_measure()).unwrap();
+                table = block.table().unwrap();
                 let row = &table.rows[row_idx];
                 // Read per row, because finishing a page may have moved the
                 // body into the next column track.
@@ -1789,7 +1768,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         moved_whole = false;
                         let old_width = pager.geometry.content_width();
                         pager.finish_page();
-                        table = block.table_for_measure(pager.table_measure()).unwrap();
+                        table = block.table().unwrap();
                         if pager.geometry.body_rotation.is_some()
                             && old_width != pager.geometry.content_width()
                         {
@@ -1813,7 +1792,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                         moved_whole = true;
                         let old_width = pager.geometry.content_width();
                         pager.finish_page();
-                        table = block.table_for_measure(pager.table_measure()).unwrap();
+                        table = block.table().unwrap();
                         if pager.geometry.body_rotation.is_some()
                             && old_width != pager.geometry.content_width()
                         {
@@ -2415,16 +2394,6 @@ impl<'a> Pager<'a> {
         self.next_repetition_scope = 1;
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
-        // With `vertical_story_clearance` a vertical (rotated) body keeps the
-        // selected story's reserved band, which its retained inputs reflow at.
-        // Every other page clears its header and footer below, once, as
-        // upstream does (a written `tbRl` band is then left as authored).
-        let vertical_story = self.section_geometry.body_rotation.is_some()
-            && self.section_geometry.vertical_story_clearance;
-        if vertical_story && let Some(hf) = self.header_footer {
-            let (header, footer) = self.selected_header_footer(hf);
-            page.reserve_header_footer_room(header, footer);
-        }
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
         }
@@ -2469,9 +2438,7 @@ impl<'a> Pager<'a> {
                 }
             }
         }
-        if !vertical_story {
-            self.clear_header_and_footer(&mut page);
-        }
+        self.clear_header_and_footer(&mut page);
         self.content_height = page.content_height();
         let shift = page.margin_left - self.section_geometry.margin_left;
         self.tracks = self
@@ -2516,29 +2483,6 @@ impl<'a> Pager<'a> {
             && prepared.height > 0.0
         {
             page.margin_bottom = page.margin_bottom.max(page.page_height - prepared.origin);
-        }
-    }
-
-    fn selected_header_footer<'b>(
-        &self,
-        hf: &'b HeaderFooterContent,
-    ) -> (&'b [ParagraphBlock], &'b [ParagraphBlock]) {
-        if self.is_first_page && self.title_pg {
-            (&hf.first_header_blocks, &hf.first_footer_blocks)
-        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-            (&hf.even_header_blocks, &hf.even_footer_blocks)
-        } else {
-            (&hf.header_blocks, &hf.footer_blocks)
-        }
-    }
-
-    /// Use the prepared story measure before transposition can round it.
-    /// Horizontal pages still select tables at their active column width.
-    fn table_measure(&self) -> f64 {
-        if self.geometry.body_rotation.is_some() {
-            self.page_geometry.body_measure()
-        } else {
-            self.geometry.content_width()
         }
     }
 
@@ -5840,7 +5784,7 @@ fn keep_next_chain_height<B: LayoutBlockLike>(
             break;
         }
         let Some(paragraph) = next.paragraph() else {
-            if let Some(table) = next.table_for_measure(pager.table_measure()) {
+            if let Some(table) = next.table() {
                 height += space_after + table.rows.first().map_or(0.0, |row| row.height);
             }
             break;
@@ -7496,88 +7440,6 @@ fn render_change_bar_at(
     });
 }
 
-/// Height of the painted story, including collapsed inter-paragraph spacing.
-///
-/// A paragraph in a positioned frame takes none of it.
-fn header_footer_height(blocks: &[ParagraphBlock], geometry: &PageGeometry) -> f64 {
-    let flow = blocks
-        .iter()
-        .filter(|block| in_story_flow(block))
-        .collect::<Vec<_>>();
-    let content: f64 = flow.iter().map(|block| block.content_height()).sum();
-    content
-        + flow
-            .windows(2)
-            .map(|pair| story_gap(pair[0], pair[1], geometry))
-            .sum::<f64>()
-}
-
-/// Whether a story paragraph takes vertical space in the flow: it is not in a
-/// frame, or its frame lets no text beside it.
-fn in_story_flow(block: &ParagraphBlock) -> bool {
-    block.frame.is_none_or(|frame| frame.in_flow)
-}
-
-/// The collapsed space between two story paragraphs that follow each other.
-fn story_gap(previous: &ParagraphBlock, next: &ParagraphBlock, geometry: &PageGeometry) -> f64 {
-    if geometry.do_not_use_html_paragraph_auto_spacing {
-        previous.space_after + next.space_before
-    } else {
-        previous.space_after.max(next.space_before)
-    }
-}
-
-/// Prepare a conservative initial measure before selected-story pagination.
-/// Retained paragraph inputs and table variants can later use a wider band.
-pub(crate) fn reserve_vertical_header_footer_room(
-    mut geometry: PageGeometry,
-    content: Option<&HeaderFooterContent>,
-    title_pg: bool,
-) -> PageGeometry {
-    if geometry.body_rotation.is_some()
-        && let Some(hf) = content
-    {
-        geometry.reserve_header_footer_room(&hf.header_blocks, &hf.footer_blocks);
-        if title_pg {
-            geometry.reserve_header_footer_room(&hf.first_header_blocks, &hf.first_footer_blocks);
-        }
-        if hf.even_headers_active {
-            geometry.reserve_header_footer_room(&hf.even_header_blocks, &hf.even_footer_blocks);
-        }
-    }
-    geometry
-}
-
-/// Distinct raw body measures for stories that can be selected in a section.
-/// Tables are prepared at these finite measures before pagination rotates them.
-pub(crate) fn vertical_story_measures(
-    base: &PageGeometry,
-    content: Option<&HeaderFooterContent>,
-    title_pg: bool,
-) -> Vec<f64> {
-    let mut measures = Vec::new();
-    if let Some(hf) = content {
-        let mut stories = vec![(&hf.header_blocks, &hf.footer_blocks)];
-        if title_pg {
-            stories.push((&hf.first_header_blocks, &hf.first_footer_blocks));
-        }
-        if hf.even_headers_active {
-            stories.push((&hf.even_header_blocks, &hf.even_footer_blocks));
-        }
-        for (header, footer) in stories {
-            let mut selected = base.clone();
-            selected.reserve_header_footer_room(header, footer);
-            let measure = selected.body_measure();
-            if !measures.contains(&measure) {
-                measures.push(measure);
-            }
-        }
-    } else {
-        measures.push(base.body_measure());
-    }
-    measures
-}
-
 fn frame_rect(
     properties: &rdocx_oxml::CT_FramePr,
     blocks: &[ParagraphBlock],
@@ -8996,7 +8858,6 @@ mod tests {
         let empty = ResolvedWraps::new();
         let pager = Pager::new(
             PageGeometry {
-                vertical_story_clearance: false,
                 body_rotation: Some(90.0),
                 ..Default::default()
             },
@@ -11912,7 +11773,6 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
-            vertical_story_clearance: false,
             do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             clamp_tabs_past_margin: false,
